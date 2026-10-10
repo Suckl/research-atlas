@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeWorldModel 架构拆解</title>
+<meta name="description" content="LeWorldModel（LeWM）：只用“下一嵌入预测 + SIGReg”两个损失项、从像素端到端训练的 15M 参数 JEPA 世界模型。含 LeJEPA / SIGReg 前置讲解。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/sigreg.js"></script>
+<script defer src="../../assets/js/widgets/attnmask.js"></script>
+<script defer src="../../assets/js/widgets/cem.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="jepa" data-node="le-world-model">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram (keep in sync with templates/model-page.html) -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：能不能从像素开始，稳定地端到端训练一个小世界模型？</h2>
+<p>到 2026 年初，潜空间世界模型大致有三种做法，各有痛点：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>路线</th><th>代表</th><th>编码器</th><th>痛点</th></tr></thead>
+  <tbody>
+    <tr><td>冻结的基础模型特征</td><td>DINO-WM</td><td>冻结 DINOv2（约 1.24 亿张图预训练）</td><td>每帧用全部 patch 特征（约 200 个 token），规划慢（每次约 47 s）；表征不针对控制优化</td></tr>
+    <tr><td>冻结的自监督视频编码器</td><td>V-JEPA 2-AC</td><td>冻结 ViT-g（1B）</td><td>每帧 256 个 1408 维 token，规划一步约 16 s；依赖百万小时预训练</td></tr>
+    <tr><td>端到端 + 方差/协方差正则</td><td>PLDM</td><td>与预测器联合训练</td><td>VICReg 式的 7 项损失、6 个需要调的权重，训练脆弱</td></tr>
+  </tbody>
+</table></div>
+<p>端到端训练的根本难题仍然是<b>坍塌</b>：编码器和预测器一起训练时，把所有观测映射成同一个向量就能让预测损失为 0。LeWM 的回答是：<b>不用 EMA、不用 stop-gradient、不用预训练编码器</b>，只加一个有理论依据的分布正则——来自 LeJEPA 的 SIGReg。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  预测损失负责“让下一帧可预测”，SIGReg 负责“让嵌入分布保持为各向同性高斯（因此不可能坍塌）”。两项损失、一个超参 λ。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="lejepa">2. 前置：LeJEPA 与 SIGReg</h2>
+<p><a href="https://arxiv.org/abs/2511.08544">LeJEPA</a>（Balestriero &amp; LeCun, 2025-11）从理论上回答了两个问题：</p>
+<ol>
+  <li><b>嵌入应该服从什么分布？</b> 论文证明：为了让下游预测任务的风险最小，JEPA 的嵌入应服从<b>各向同性高斯</b>分布。</li>
+  <li><b>怎么高效地把嵌入推向这个分布？</b> 提出 SIGReg（Sketched Isotropic Gaussian Regularization）。</li>
+</ol>
+<p>有了它，LeJEPA 去掉了 stop-gradient、teacher-student（EMA）结构与各种超参调度，只留一个权衡系数；实现约 50 行代码，在 ImageNet-1K 上用 ViT-H/14 冻结线性探测达到 79%。</p>
+
+<h3 id="sigreg-idea">2.1 SIGReg 的三步思路</h3>
+<div class="diff">
+  <div><h4>① 高维检验太难 → 降到一维</h4><p><b>Cramér–Wold 定理</b>：一个分布由它在所有方向上的一维投影唯一决定。所以“Z 是各向同性高斯”⇔“对任意单位向量 u，⟨Z, u⟩ ~ N(0,1)”。</p></div>
+  <div><h4>② 方向无穷多 → 随机采样（sketch）</h4><p>每步随机采 M 个单位方向（LeWM 用 M = 1024），只检验这些投影。不同步采到不同方向，长期看覆盖所有方向。</p></div>
+</div>
+<div class="diff">
+  <div><h4>③ 一维检验 → Epps–Pulley 统计量</h4><p>比较投影样本的<b>经验特征函数</b>与 N(0,1) 的特征函数 \(e^{-t^2/2}\)，在加权的 t 上积分误差。cos/sin 有界，所以统计量及其梯度都有界、平滑。</p></div>
+  <div><h4>为什么不只约束均值和协方差？</h4><p>VICReg 一类方法约束一二阶矩：方差够大、协方差对角化。但满足这些的分布未必是高斯（例如均匀分布）。SIGReg 比较的是<b>整个分布</b>；基于特征函数也避免了高阶矩带来的梯度爆炸。</p></div>
+</div>
+
+<h3 id="sigreg-math">2.2 公式</h3>
+<p>设一批嵌入 \(Z\in\mathbb R^{N\times d}\)，随机方向 \(u^{(m)}\sim\text{Unif}(\mathbb S^{d-1})\)，投影 \(h^{(m)} = Z u^{(m)}\in\mathbb R^N\)：</p>
+<div class="formula">$$\hat\varphi_N(t;\,h) = \frac1N\sum_{n=1}^{N} e^{\,i t h_n},\qquad \varphi_0(t) = e^{-t^2/2}$$</div>
+<div class="formula">$$T\big(h\big) = N\int_{-\infty}^{\infty} w(t)\,\big|\hat\varphi_N(t;h) - \varphi_0(t)\big|^2\,dt,\qquad w(t) = e^{-t^2/2}$$</div>
+<div class="formula">$$\mathrm{SIGReg}(Z) = \frac1M\sum_{m=1}^{M} T\big(Z u^{(m)}\big)$$</div>
+<p>其中 \(|\hat\varphi_N - \varphi_0|^2 = \big(\tfrac1N\sum\cos(th_n) - e^{-t^2/2}\big)^2 + \big(\tfrac1N\sum\sin(th_n)\big)^2\)。被积函数关于 t 是偶函数，实现上只在 \(t\ge0\) 上用梯形法则积分再乘 2。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码</span>
+  LeWM 论文写积分节点均匀分布在 [0.2, 4]；官方 <code>module.py::SIGReg</code> 的默认值是 <code>knots=17</code>、<code>t = linspace(0, 3, 17)</code>、<code>num_proj=1024</code>。下方交互演示按代码实现。
+</div>
+
+<h3 id="sigreg-demo">2.3 动手看：SIGReg 怎样“撑开”坍塌的嵌入</h3>
+<p>选一个初始分布，点「用 SIGReg 梯度下降」——这里直接对点做梯度下降（真实训练中梯度会流进编码器参数）。注意观察：完全坍塌的点云会被撑开，各向异性的会被“揉圆”，均匀方块会被“磨成”高斯。</p>
+<div data-widget="sigreg"></div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">3. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测</span><span><i class="sw enc"></i>编码器（端到端训练）</span>
+  <span><i class="sw act"></i>动作</span><span><i class="sw pred"></i>预测器</span>
+  <span><i class="sw reg"></i>SIGReg</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 540" role="img" aria-label="LeWorldModel 架构图">
+    <!-- frames -->
+    <g data-part="frames" data-step="1">
+      <rect class="box data" x="145" y="16" width="70" height="52" rx="4"/><text class="t-c t-sm" x="180" y="42">o<tspan font-size="9" dy="3">t−2</tspan></text>
+      <rect class="box data" x="285" y="16" width="70" height="52" rx="4"/><text class="t-c t-sm" x="320" y="42">o<tspan font-size="9" dy="3">t−1</tspan></text>
+      <rect class="box data" x="425" y="16" width="70" height="52" rx="4"/><text class="t-c t-sm" x="460" y="42">o<tspan font-size="9" dy="3">t</tspan></text>
+      <rect class="box data" x="565" y="16" width="70" height="52" rx="4"/><text class="t-c t-sm" x="600" y="42">o<tspan font-size="9" dy="3">t+1</tspan></text>
+      <text class="t-sm" x="16" y="34">像素观测</text><text class="t-xs" x="16" y="52">224²，frameskip 5</text>
+    </g>
+    <g data-step="1"><path class="edge" d="M180,68 V84"/><path class="edge" d="M320,68 V84"/><path class="edge" d="M460,68 V84"/><path class="edge" d="M600,68 V84"/></g>
+    <!-- encoder -->
+    <g class="enc" data-part="encoder" data-step="1">
+      <rect class="box" x="130" y="88" width="520" height="44" rx="8"/>
+      <text class="t-c t-b" x="390" y="110">编码器 ViT-Tiny（patch 14 · 12 层 · 宽 192）· 所有帧共享 · 端到端训练</text>
+    </g>
+    <g class="enc" data-part="projector" data-step="1">
+      <rect class="box" x="130" y="144" width="520" height="34" rx="8" style="fill:var(--surface)"/>
+      <text class="t-c t-sm" x="390" y="161">取 [CLS] → Projector（MLP + BatchNorm）</text>
+    </g>
+    <g data-step="1"><path class="edge" d="M180,132 V140" style="stroke:var(--c-enc)"/><path class="edge" d="M320,132 V140" style="stroke:var(--c-enc)"/><path class="edge" d="M460,132 V140" style="stroke:var(--c-enc)"/><path class="edge" d="M600,132 V140" style="stroke:var(--c-enc)"/></g>
+    <!-- embeddings z -->
+    <g data-part="emb" data-step="1">
+      <rect class="tk enc" x="168" y="194" width="24" height="24" rx="3"/><text class="t-sm" x="198" y="207">z<tspan font-size="9" dy="3">t−2</tspan></text>
+      <rect class="tk enc" x="308" y="194" width="24" height="24" rx="3"/><text class="t-sm" x="338" y="207">z<tspan font-size="9" dy="3">t−1</tspan></text>
+      <rect class="tk enc" x="448" y="194" width="24" height="24" rx="3"/><text class="t-sm" x="478" y="207">z<tspan font-size="9" dy="3">t</tspan></text>
+      <rect class="tk enc" x="588" y="194" width="24" height="24" rx="3"/><text class="t-sm" x="618" y="207">z<tspan font-size="9" dy="3">t+1</tspan></text>
+      <text class="t-xs" x="16" y="206">每帧 1 个 192 维</text>
+    </g>
+    <g data-step="1"><path class="edge" d="M180,178 V190" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/><path class="edge" d="M320,178 V190" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/><path class="edge" d="M460,178 V190" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/><path class="edge" d="M600,178 V190" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/></g>
+
+    <!-- SIGReg -->
+    <g class="reg" data-part="sigreg" data-step="5">
+      <rect class="box" x="700" y="170" width="245" height="84" rx="10"/>
+      <text class="t-c t-b" x="822" y="192">SIGReg(Z)</text>
+      <text class="t-c t-sm" x="822" y="213">每个时间步：B 个嵌入 × 1024 个随机方向</text>
+      <text class="t-c t-sm" x="822" y="232">Epps–Pulley 检验 → 推向 N(0, I)</text>
+    </g>
+    <path class="edge reg" d="M180,222 V232 H680 V214 H696" data-step="5"/>
+    <path class="no-head" d="M320,222 V232 M460,222 V232 M600,222 V232" style="stroke:var(--c-reg);stroke-width:1.6;fill:none" data-step="5"/>
+
+    <!-- action encoder -->
+    <g class="act" data-part="actions" data-step="2">
+      <rect class="box" x="10" y="262" width="104" height="92" rx="8"/>
+      <text class="t-c t-b" x="62" y="284">动作编码器</text>
+      <text class="t-c t-xs" x="62" y="303">5 个原始动作拼成</text>
+      <text class="t-c t-xs" x="62" y="318">一个动作块 aₖ</text>
+      <text class="t-c t-xs" x="62" y="336">Conv1d(k=1)+MLP</text>
+    </g>
+    <!-- predictor -->
+    <g class="pred" data-part="predictor" data-step="3">
+      <rect class="box" x="130" y="262" width="400" height="80" rx="10"/>
+      <text class="t-c t-b" x="330" y="284">预测器：6 层因果 Transformer · 16 头 · dropout 0.1</text>
+      <text class="t-c t-sm" x="330" y="305">输入 z<tspan font-size="9" dy="3">t−2..t</tspan><tspan dy="-3"> + 可学习时间位置编码；</tspan></text>
+      <text class="t-c t-sm" x="330" y="325">每层 AdaLN-zero：由 aₖ 生成 shift / scale / gate</text>
+    </g>
+    <path class="edge act" d="M114,308 H126" data-step="2"/>
+    <g data-step="3"><path class="edge" d="M180,234 V258"/><path class="edge" d="M320,234 V258"/><path class="edge" d="M460,234 V258"/></g>
+    <g class="pred" data-part="pred-proj" data-step="3">
+      <rect class="box" x="130" y="354" width="400" height="30" rx="8" style="fill:var(--surface)"/>
+      <text class="t-c t-sm" x="330" y="369">Projector（与编码器侧相同的设计）</text>
+    </g>
+    <!-- predictions -->
+    <g data-part="preds" data-step="3">
+      <rect class="tk pred" x="308" y="408" width="24" height="24" rx="3"/><text class="t-sm" x="338" y="421">ẑ<tspan font-size="9" dy="3">t−1</tspan></text>
+      <rect class="tk pred" x="448" y="408" width="24" height="24" rx="3"/><text class="t-sm" x="478" y="421">ẑ<tspan font-size="9" dy="3">t</tspan></text>
+      <rect class="tk pred" x="588" y="408" width="24" height="24" rx="3"/><text class="t-sm" x="618" y="421">ẑ<tspan font-size="9" dy="3">t+1</tspan></text>
+      <text class="t-xs" x="140" y="418">第 k 个位置的输出</text><text class="t-xs" x="140" y="432">= 对 z<tspan dy="3" font-size="8">k+1</tspan><tspan dy="-3"> 的预测</tspan></text>
+    </g>
+    <g data-step="3"><path class="edge pred" d="M200,384 C220,400 300,400 314,406"/><path class="edge pred" d="M340,384 C360,400 440,400 454,406"/><path class="edge pred" d="M480,384 C500,400 580,400 594,406"/></g>
+
+    <!-- prediction loss -->
+    <g class="loss" data-part="pred-loss" data-step="4">
+      <rect class="box" x="300" y="456" width="350" height="52" rx="10"/>
+      <text class="t-c t-b" x="475" y="476">L<tspan font-size="10" dy="3">pred</tspan><tspan dy="-3"> = ‖ẑ</tspan><tspan font-size="10" dy="3">k+1</tspan><tspan dy="-3"> − z</tspan><tspan font-size="10" dy="3">k+1</tspan><tspan dy="-3">‖²（teacher forcing）</tspan></text>
+      <text class="t-c t-sm" x="475" y="496">目标 z 不 detach：梯度同时流进两侧的编码器</text>
+    </g>
+    <g data-step="4"><path class="edge" d="M320,432 V452" style="stroke:var(--c-pred)"/><path class="edge" d="M460,432 V452" style="stroke:var(--c-pred)"/><path class="edge" d="M600,432 V452" style="stroke:var(--c-pred)"/>
+      <path class="edge" d="M624,218 C680,250 680,420 652,470" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/>
+      <text class="t-xs" x="676" y="330" style="fill:var(--c-enc)">目标 z（无 sg）</text>
+    </g>
+    <!-- total -->
+    <g class="loss" data-part="total" data-step="6">
+      <rect class="box" x="700" y="440" width="245" height="72" rx="10"/>
+      <text class="t-c t-b" x="822" y="463">L = L<tspan font-size="10" dy="3">pred</tspan><tspan dy="-3"> + λ · SIGReg</tspan></text>
+      <text class="t-c t-sm" x="822" y="485">λ = 0.1 · 唯一需要调的超参</text>
+      <text class="t-c t-sm" x="822" y="502">无 EMA · 无 stop-grad · 无预训练</text>
+    </g>
+    <path class="edge loss" d="M650,482 H696" data-step="6"/>
+    <path class="edge reg" d="M822,254 V436" data-step="6"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="frames"><h4>像素观测</h4><p>离线、无奖励的轨迹。帧 224²；frameskip 5（每隔 5 个环境步取一帧）。训练时取 4 帧的子轨迹：历史 3 帧（PushT、OGBench-Cube；TwoRoom 为 1 帧）+ 要预测的下一帧。</p></div>
+    <div data-note="encoder"><h4>编码器：ViT-Tiny</h4><p>patch 14、12 层、3 头、宽 192，约 5M 参数。所有帧共用同一个编码器，<b>与预测器一起端到端训练</b>——这是与 DINO-WM、V-JEPA 2-AC 的根本区别。</p></div>
+    <div data-note="projector"><h4>[CLS] + 投影头</h4><p>每帧只取最后一层的 [CLS] token，再过一个带 BatchNorm 的 1 层 MLP。论文指出：ViT 末层的 LayerNorm 会妨碍 SIGReg 的优化，所以需要这个投影头。结果是每帧压缩成<b>一个 192 维向量</b>（比 DINO-WM 少约 200× 个 token）。</p></div>
+    <div data-note="emb"><h4>嵌入 z</h4><p>这些嵌入同时扮演三个角色：预测器的输入（历史）、预测的目标（下一帧）、SIGReg 的检验对象。没有单独的“目标编码器”。</p></div>
+    <div data-note="sigreg"><h4>SIGReg</h4><p>把嵌入张量转置成 [T, B, 192]，<b>对每个时间步</b>的 B 个嵌入做 SIGReg（1024 个随机方向的 Epps–Pulley 统计量），再对时间步取平均。它保证批内的嵌入分布接近各向同性高斯，从而不可能坍塌。见 <a href="#lejepa">§2</a>。</p></div>
+    <div data-note="actions"><h4>动作编码器</h4><p>frameskip = 5，所以两帧之间有 5 个原始动作，拼成一个动作块（例如 PushT 为 5 × 2 = 10 维）。先过一个 kernel = 1 的 Conv1d（逐时间步线性层），再过 SiLU-MLP 得到动作嵌入。</p></div>
+    <div data-note="predictor"><h4>预测器</h4><p>6 层、16 头、dropout 0.1 的 Transformer（约 10M 参数，论文附录称其为 ViT-S 骨干）。输入序列只有历史帧的嵌入（每帧 1 个 token）+ 可学习的时间位置编码；<b>动作不占序列位置</b>，而是通过 AdaLN-zero 调制每一层。注意力为因果掩码。见 <a href="#c-adaln">§4.3</a>。</p></div>
+    <div data-note="pred-proj"><h4>预测器投影头</h4><p>预测器输出后也接一个与编码器侧同样设计的投影头，使预测与目标处在同一空间。</p></div>
+    <div data-note="preds"><h4>预测 ẑ</h4><p>因果 Transformer 第 k 个位置的输出预测 z<sub>k+1</sub>。一次前向同时得到 3 个“下一步”预测（teacher forcing）。</p></div>
+    <div data-note="pred-loss"><h4>预测损失</h4><p>MSE：<code>(pred_emb - tgt_emb).pow(2).mean()</code>，其中 <code>tgt_emb = emb[:, 1:]</code> <b>没有 detach</b>。没有 SIGReg 时这会迅速坍塌；有了 SIGReg，就可以放心让梯度流过两侧。</p></div>
+    <div data-note="total"><h4>总损失</h4><p>\(\mathcal L = \mathcal L_\text{pred} + \lambda\,\mathrm{SIGReg}(Z)\)，λ 默认 0.1。论文称 λ 是唯一有效的超参，可用二分搜索在 O(log n) 次尝试内调好（对比 PLDM 的 6 个损失权重）。</p></div>
+    <div data-step-note="1"><h4>① 编码每一帧</h4><p>4 帧（3 帧历史 + 1 帧目标）各自过同一个 ViT-Tiny，取 [CLS]，经投影头得到 z（每帧 192 维）。</p></div>
+    <div data-step-note="2"><h4>② 编码动作</h4><p>每 5 个原始动作拼成一个动作块，经动作编码器得到动作嵌入 aₖ。</p></div>
+    <div data-step-note="3"><h4>③ 因果预测</h4><p>历史嵌入 + 时间位置编码进入 6 层因果 Transformer；每层由 aₖ 通过 AdaLN-zero 调制；输出经投影头得到 ẑ。</p></div>
+    <div data-step-note="4"><h4>④ 预测损失</h4><p>‖ẑₖ₊₁ − zₖ₊₁‖²。目标不 detach，梯度流进编码器的两次使用。</p></div>
+    <div data-step-note="5"><h4>⑤ SIGReg</h4><p>对每个时间步的批内嵌入施加 SIGReg，防止坍塌。</p></div>
+    <div data-step-note="6"><h4>⑥ 一个损失、一个优化器</h4><p>L = L_pred + 0.1·SIGReg，编码器、动作编码器、预测器、投影头全部一起更新。</p></div>
+  </div>
+  <figcaption>图 1　LeWM 训练流程（以 PushT 的历史长度 3 为例）。依据论文 §3、附录 D 与官方 <code>train.py</code>、<code>jepa.py</code>、<code>module.py</code>。</figcaption>
+</figure>
+
+<div class="callout info">
+  <span class="callout-title">和前作的“同构”对照</span>
+  JEPA 通用框架下：x = 历史观测，y = 下一帧观测，条件变量 z = 动作，\(s_x = s_y\) 的编码器是同一个（没有 EMA 副本），预测器 \(\hat s_y = g_\phi(s_x, a)\)，能量 \(E = \lVert \hat s_y - s_y\rVert^2\)。防坍塌从“结构不对称”（EMA + sg）换成了“分布约束”（SIGReg）。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="components">4. 组件拆解</h2>
+
+<h3 id="c-encoder">4.1 编码器：一帧一个向量</h3>
+<p>LeWM 刻意让表征<b>极度紧凑</b>：每帧只保留 [CLS] → 投影头后的一个 192 维向量。对比：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>每帧 token 数 × 维度</th><th>编码器</th></tr></thead>
+  <tbody>
+    <tr><td>V-JEPA 2-AC</td><td>256 × 1408</td><td>冻结 ViT-g（≈1B）</td></tr>
+    <tr><td>DINO-WM</td><td>约 200 个 patch token</td><td>冻结 DINOv2</td></tr>
+    <tr class="hl"><td>LeWM</td><td>1 × 192</td><td>ViT-Tiny（≈5M），端到端训练</td></tr>
+  </tbody>
+</table></div>
+<p>token 少直接带来两个好处：预测器的序列极短（历史 3 帧 = 3 个 token），以及规划时每次 rollout 的计算量很小——这是“规划快 48×”的主要来源。</p>
+
+<h3 id="c-projector">4.2 投影头与 BatchNorm</h3>
+<p>ViT 的最后一层是 LayerNorm：它把每个样本的特征各自归一化到固定的均值/方差，会和“让整个批次的分布变成标准高斯”的 SIGReg 目标互相掣肘。LeWM 在 [CLS] 之后加了一个 1 层 MLP + BatchNorm 的投影头，让 SIGReg 有自由度去塑造批内分布。预测器之后也接了同样设计的投影头。</p>
+
+<h3 id="c-adaln">4.3 预测器：因果 Transformer + AdaLN-zero</h3>
+<p>V-JEPA 2-AC 把动作和状态当作序列里的 token；LeWM 则把动作当作<b>调制信号</b>（与 DiT 中注入扩散时间步/类别的方式相同）：</p>
+<div class="formula">$$[\beta_1,\gamma_1,\alpha_1,\beta_2,\gamma_2,\alpha_2] = \mathrm{Linear}\big(\mathrm{SiLU}(a_k)\big)$$</div>
+<div class="formula">$$x \leftarrow x + \alpha_1\odot\mathrm{Attn}_\text{causal}\big(\mathrm{LN}(x)\odot(1+\gamma_1)+\beta_1\big),\qquad x \leftarrow x + \alpha_2\odot\mathrm{MLP}\big(\mathrm{LN}(x)\odot(1+\gamma_2)+\beta_2\big)$$</div>
+<p>生成调制参数的线性层<b>零初始化</b>（“-zero”）：训练开始时门控 α = 0，每个 block 都是恒等映射，网络从“什么都不做”平滑地开始学，训练更稳定。调制是<b>逐位置</b>的：第 k 个位置用动作 aₖ 调制。</p>
+<div data-widget="attn-mask" data-mode="lewm" data-steps="3"></div>
+
+<h3 id="c-sigreg-usage">4.4 SIGReg 在 LeWM 里怎么用</h3>
+<ul>
+  <li><b>作用对象</b>：编码器侧的嵌入 emb（形状 [B, T, 192]），转置成 [T, B, 192]，对<b>每个时间步</b>的批内样本分别检验，再对时间步平均（step-wise SIGReg）。</li>
+  <li><b>随机方向</b>：每次前向重新采 1024 个方向（不是固定参数）。</li>
+  <li><b>尺度</b>：统计量乘以批大小 N（Epps–Pulley 的标准形式：在“确实是高斯”的原假设下，其分布不随 N 变化）；默认 batch 128、λ = 0.1。</li>
+</ul>
+
+<h3 id="c-planning">4.5 规划：在 192 维空间里跑 CEM</h3>
+<div class="formula">$$a^\star_{1:H} = \arg\min_{a_{1:H}}\ \big\lVert \hat z_H(a_{1:H}) - z_g\big\rVert_2^2,\qquad z_g = \mathrm{enc}_\theta(o_g)$$</div>
+<p>其中 \(\hat z_H\) 是从当前历史出发、用预测器自回归 rollout H 步的结果。论文设置：CEM 每轮 300 个样本、保留前 30 个 elite、初始方差 1；PushT 迭代 30 轮，其他环境 10 轮；规划视野 H = 5（= 25 个环境步）；以 MPC 方式滚动执行。完整一次规划不到 1 秒。</p>
+<div data-widget="cem" data-samples="300" data-elites="30" data-horizon="5" data-caption="与 LeWM 的 CEM 设置一致：300 个样本、30 个 elite、视野 5。区别只在于这里的“动力学”是已知的玩具物理，而 LeWM 用的是学到的预测器、代价是 192 维嵌入之间的平方距离。"></div>
+<figure>
+  <svg class="dg" viewBox="0 0 880 150" role="img" aria-label="规划耗时对比">
+    <text class="t-b" x="10" y="20">每次规划耗时（项目主页，50 次平均）</text>
+    <text class="t-r t-sm" x="140" y="58">DINO-WM</text>
+    <rect x="150" y="46" width="700" height="24" rx="4" style="fill:var(--c-data)"/>
+    <text class="t-r" x="842" y="58" style="fill:#fff;font-weight:650">≈ 47 s</text>
+    <text class="t-r t-sm" x="140" y="100">LeWM</text>
+    <rect x="150" y="88" width="15" height="24" rx="4" style="fill:var(--c-pred)"/>
+    <text class="t-sm" x="174" y="100" style="font-weight:650">≈ 1 s（最高约快 48×）</text>
+    <text class="t-xs" x="150" y="138">参考：V-JEPA 2-AC 每个动作约 16 s（不同任务与硬件，不可直接比较）</text>
+  </svg>
+</figure>
+
+<h3 id="c-diagnostics">4.6 诊断工具：探测、惊讶度、解码器</h3>
+<ul>
+  <li><b>探测（probing）</b>：在冻结的嵌入上训练线性/MLP 探针回归物理量（智能体位置、方块位置与角度），检验潜空间是否编码了物理状态。</li>
+  <li><b>违背预期（surprise）</b>：用“预测的未来嵌入”与“实际观测嵌入”的差距作为惊讶度。让物体<b>瞬移</b>时惊讶度显著升高（配对 t 检验 p &lt; 0.01）；只改变<b>颜色</b>时效果较弱且不显著——说明嵌入更关注物理状态而非外观。</li>
+  <li><b>解码器</b>：只用于可视化“嵌入里保留了什么”，训练中从不使用重建损失。</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="shapes">5. 张量形状追踪</h2>
+<p>以 PushT 为例：batch B = 128，子轨迹 T = 4 帧（历史 3 + 预测 1），动作维度 2，frameskip 5。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>像素</td><td>[B, 4, 3, 224, 224]</td><td></td></tr>
+    <tr><td>合并 batch 与时间</td><td>[B·4, 3, 224, 224]</td><td><code>rearrange("b t ... -> (b t) ...")</code></td></tr>
+    <tr><td>ViT-Tiny（patch 14）</td><td>[B·4, 1+256, 192]</td><td>16×16 patch + [CLS]</td></tr>
+    <tr><td>取 [CLS] → projector → 还原时间维</td><td>[B, 4, 192]</td><td><code>emb</code></td></tr>
+    <tr><td>动作块 → 动作编码器</td><td>[B, 4, 10] → [B, 4, 192]</td><td>5 个动作 × 2 维</td></tr>
+    <tr><td>上下文：<code>emb[:, :3]</code>、<code>act[:, :3]</code></td><td>[B, 3, 192]</td><td>历史 3 帧</td></tr>
+    <tr><td>预测器（6 层，因果，AdaLN）→ projector</td><td>[B, 3, 192]</td><td><code>pred_emb</code></td></tr>
+    <tr><td>目标：<code>emb[:, 1:]</code></td><td>[B, 3, 192]</td><td>不 detach</td></tr>
+    <tr><td>SIGReg 输入：<code>emb.transpose(0, 1)</code></td><td>[4, B, 192]</td><td>逐时间步</td></tr>
+    <tr><td>× 随机方向 A</td><td>[4, B, 1024]</td><td>A: [192, 1024]，列归一化</td></tr>
+    <tr><td>× 17 个 t 节点</td><td>[4, B, 1024, 17]</td><td>取 cos / sin 后对 B 求均值 → [4, 1024, 17]</td></tr>
+    <tr><td>积分 × N → 平均</td><td>标量</td><td>SIGReg</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">6. 训练目标与防坍塌</h2>
+<div class="formula">$$\mathcal L_\text{LeWM}(\theta,\phi) = \underbrace{\frac{1}{|\mathcal K|}\sum_{k\in\mathcal K}\big\lVert g_\phi(z_{\le k}, a_{\le k}) - z_{k+1}\big\rVert_2^2}_{\mathcal L_\text{pred}} + \lambda\cdot\underbrace{\frac1T\sum_{t=1}^{T}\mathrm{SIGReg}\big(\{z_t^{(b)}\}_{b=1}^{B}\big)}_{\text{step-wise SIGReg}},\qquad z = \mathrm{proj}(\mathrm{enc}_\theta(o))$$</div>
+<p>与本路线前作的防坍塌机制对照：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th>防坍塌机制</th><th>类型</th></tr></thead>
+  <tbody>
+    <tr><td>I-JEPA / V-JEPA / V-JEPA 2（阶段一）</td><td>EMA 目标编码器 + stop-gradient + 预测器</td><td>结构性启发式</td></tr>
+    <tr><td>V-JEPA 2-AC（阶段二）</td><td>编码器冻结</td><td>回避问题</td></tr>
+    <tr><td>PLDM</td><td>VICReg 式方差/协方差等多项正则</td><td>矩约束，6 个权重</td></tr>
+    <tr class="hl"><td>LeWM</td><td>SIGReg：嵌入分布 → 各向同性高斯</td><td>分布约束，1 个权重，有理论依据</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">7. 伪代码</h2>
+<div class="code-title">sigreg.py（按 le-wm/module.py 整理）</div>
+<pre><code class="lang-py">class SIGReg(nn.Module):
+    def __init__(self, knots=17, num_proj=1024):
+        super().__init__()
+        self.num_proj = num_proj
+        t = torch.linspace(0, 3, knots)
+        dt = 3 / (knots - 1)
+        weights = torch.full((knots,), 2 * dt)          # 梯形法则，×2 是因为被积函数关于 t 偶对称
+        weights[[0, -1]] = dt
+        window = torch.exp(-t.square() / 2.0)           # N(0,1) 的特征函数 φ(t)，同时也是权重 w(t)
+        self.register_buffer("t", t)
+        self.register_buffer("phi", window)
+        self.register_buffer("weights", weights * window)
+
+    def forward(self, proj):                            # proj: [T, B, D]
+        A = torch.randn(proj.size(-1), self.num_proj, device=proj.device)
+        A = A.div_(A.norm(p=2, dim=0))                  # 每次重新采 M 个单位方向
+        x_t = (proj @ A).unsqueeze(-1) * self.t         # [T, B, M, K]
+        err = (x_t.cos().mean(-3) - self.phi).square() \
+            + x_t.sin().mean(-3).square()               # |ECF − φ|²，对批维 B 求均值
+        statistic = (err @ self.weights) * proj.size(-2)    # 积分 × N → [T, M]
+        return statistic.mean()</code></pre>
+<div class="code-title">lewm_forward.py（按 le-wm/train.py 整理）</div>
+<pre><code class="lang-py">def lewm_forward(batch, model, sigreg, ctx_len=3, n_preds=1, lambd=0.1):
+    emb = model.encode(batch["pixels"])                 # [B, T, 192]：ViT-Tiny → [CLS] → projector
+    act = model.action_encoder(batch["action"])         # [B, T, 192]：5 个原始动作拼成一块
+
+    ctx_emb, ctx_act = emb[:, :ctx_len], act[:, :ctx_len]
+    tgt_emb = emb[:, n_preds:]                          # 下一步嵌入 —— 注意：没有 detach
+    pred_emb = model.predict(ctx_emb, ctx_act)          # 因果 Transformer + AdaLN → projector
+
+    pred_loss = (pred_emb - tgt_emb).pow(2).mean()
+    sigreg_loss = sigreg(emb.transpose(0, 1))           # [T, B, D]：逐时间步
+    return pred_loss + lambd * sigreg_loss              # 没有 EMA、没有 stop-grad</code></pre>
+<div class="code-title">adaln_block.py（结构示意）</div>
+<pre><code class="lang-py">class ConditionalBlock(nn.Module):
+    def __init__(self, dim, heads):
+        super().__init__()
+        self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.attn, self.mlp = Attention(dim, heads), MLP(dim)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim, 6 * dim))
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)    # zero-init → 初始为恒等映射
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+
+    def forward(self, x, c):                            # x: [B, T, dim] 帧嵌入；c: [B, T, dim] 动作嵌入
+        s1, g1, a1, s2, g2, a2 = self.adaLN_modulation(c).chunk(6, dim=-1)
+        x = x + a1 * self.attn(self.norm1(x) * (1 + g1) + s1, causal=True)
+        x = x + a2 * self.mlp(self.norm2(x) * (1 + g2) + s2)
+        return x</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">8. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td>编码器</td><td>ViT-Tiny：patch 14、12 层、3 头、宽 192（≈5M）；输入 224²</td></tr>
+    <tr><td>嵌入</td><td>[CLS] → 1 层 MLP + BatchNorm 投影头 → 192 维</td></tr>
+    <tr><td>预测器</td><td>6 层、16 头、dropout 0.1，AdaLN-zero 动作条件，因果注意力（≈10M）；后接投影头</td></tr>
+    <tr><td>历史 / frameskip</td><td>历史 3（PushT、Cube）或 1（TwoRoom）；frameskip 5</td></tr>
+    <tr><td>损失</td><td>MSE + λ·SIGReg，λ = 0.1；1024 个随机方向；代码默认 17 个积分节点、t ∈ [0, 3]</td></tr>
+    <tr><td>训练</td><td>batch 128；4 帧子轨迹；10 epoch；单 GPU 数小时；总参数 ≈15M</td></tr>
+    <tr><td>数据</td><td>TwoRoom 1 万条（平均 92 步）；PushT 2 万条专家轨迹（平均 196 步）；OGBench-Cube 1 万条 × 200 步；Reacher 1 万条 × 200 步</td></tr>
+    <tr><td>规划</td><td>CEM：300 样本、top-30、初始方差 1；PushT 30 轮、其余 10 轮；视野 5（25 个环境步）；MPC</td></tr>
+    <tr><td>不使用</td><td>EMA、stop-gradient、预训练编码器、重建损失、奖励</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">9. 关键结果</h2>
+<h3 id="r-planning">规划</h3>
+<ul>
+  <li><b>PushT</b>：成功率比 PLDM 高 18%，且超过 DINO-WM（即使 DINO-WM 使用了本体感知输入）。</li>
+  <li><b>Reacher</b>：超过 DINO-WM。<b>OGBench-Cube</b>（3D）：DINO-WM 更好。</li>
+  <li><b>TwoRoom</b>：LeWM 较弱。作者归因于该任务的<b>内在维度很低</b>——在 192 维里强行要求各向同性高斯，与只有二维位置的真实状态不匹配。</li>
+  <li><b>速度</b>：每次规划约 1 s，DINO-WM 约 47 s（最高快 48×），与 PLDM 相当；token 数约为 DINO-WM 的 1/200。</li>
+</ul>
+<p class="muted">具体成功率见论文 Fig. 6（正文未给出数值表）。</p>
+<h3 id="r-probing">物理量探测（PushT，MSE ↓ / r ↑）</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>物理量</th><th>探针</th><th class="num">LeWM</th><th class="num">PLDM</th><th class="num">DINO-WM</th></tr></thead>
+  <tbody>
+    <tr><td>智能体位置</td><td>线性</td><td class="num">0.052 / 0.974</td><td class="num">0.090 / 0.955</td><td class="num">1.888 / 0.977</td></tr>
+    <tr><td>方块角度</td><td>线性</td><td class="num">0.187 / 0.902</td><td class="num">0.446 / 0.745</td><td class="num">0.050 / 0.979</td></tr>
+    <tr><td>智能体位置</td><td>MLP</td><td class="num">0.004 / 0.998</td><td class="num">—</td><td class="num">0.003 / 0.999</td></tr>
+    <tr><td>方块位置</td><td>MLP</td><td class="num">0.001 / 0.999</td><td class="num">—</td><td class="num">0.002 / 0.999</td></tr>
+    <tr><td>方块角度</td><td>MLP</td><td class="num">0.021 / 0.990</td><td class="num">—</td><td class="num">0.009 / 0.995</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">出处：论文与项目主页的探测表。DINO-WM 的编码器在约 1.24 亿张图像上预训练，数据量约为 LeWM 的两个数量级以上。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">10. 承上启下：整条路线回看</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>V-JEPA 2-AC</th><th>LeWM</th></tr></thead>
+  <tbody>
+    <tr><td>编码器</td><td>冻结 ViT-g（≈1B），需百万小时视频预训练</td><td>ViT-Tiny（≈5M），从像素端到端训练</td></tr>
+    <tr><td>每帧表征</td><td>256 × 1408</td><td>1 × 192</td></tr>
+    <tr><td>动作注入</td><td>动作/状态作为 token，块因果注意力</td><td>AdaLN-zero 调制，标准因果注意力</td></tr>
+    <tr><td>防坍塌</td><td>冻结编码器（阶段一用 EMA）</td><td>SIGReg</td></tr>
+    <tr><td>损失</td><td>L1 teacher-forcing + rollout</td><td>MSE teacher-forcing + λ·SIGReg</td></tr>
+    <tr><td>规划</td><td>CEM 800 样本、视野 1；约 16 s/动作</td><td>CEM 300 样本、视野 5；约 1 s/次</td></tr>
+    <tr><td>场景</td><td>真实机械臂、开放环境</td><td>仿真 2D/3D 控制任务</td></tr>
+  </tbody>
+</table></div>
+<div class="diff">
+  <div class="was"><h4>LeWM 说明了</h4><ul><li>JEPA 世界模型可以不靠任何结构性启发式，从像素稳定地端到端训练；</li><li>极紧凑的潜空间（每帧 1 个向量）足以支撑规划，并让规划快一个数量级以上；</li><li>潜空间编码了物理状态，可用于检测“不合物理”的事件。</li></ul></div>
+  <div class="now"><h4>开放问题（可作为后续研究方向）</h4><ul><li><b>真实世界与复杂视觉</b>：目前在仿真环境验证；后续工作（如 arXiv:2607.16314）开始在真实户外机器人数据上探索 LeWM 式训练；</li><li><b>低内在维度任务</b>：各向同性高斯先验与低维状态的错配（TwoRoom）；</li><li><b>长视野</b>：单层 CEM + 短视野，长程任务可能需要分层（H-JEPA）规划；</li><li><b>规模化</b>：SIGReg 端到端训练能否像 V-JEPA 2 那样扩展到大模型与海量视频。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Maes, Le Lidec, Scieur, LeCun, Balestriero. <i>LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels.</i> 2026. <a href="https://arxiv.org/abs/2603.19312">arXiv:2603.19312</a> · <a href="https://le-wm.github.io/">项目主页</a></li>
+  <li>官方实现：<a href="https://github.com/lucas-maes/le-wm">lucas-maes/le-wm</a>（<code>train.py</code>、<code>jepa.py</code>、<code>module.py</code>）</li>
+  <li>Balestriero, LeCun. <i>LeJEPA: Provable and Scalable Self-Supervised Learning Without the Heuristics.</i> 2025. <a href="https://arxiv.org/abs/2511.08544">arXiv:2511.08544</a></li>
+  <li>Zhou et al. <i>DINO-WM: World Models on Pre-trained Visual Features enable Zero-shot Planning.</i> 2024.</li>
+  <li>Sobal et al. <i>Learning from Reward-Free Offline Data: A Case for Planning with Latent Dynamics Models</i>（PLDM）. 2025.</li>
+  <li>Peebles, Xie. <i>Scalable Diffusion Models with Transformers</i>（DiT，AdaLN-zero 的来源）. ICCV 2023.</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

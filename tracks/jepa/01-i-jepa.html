@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I-JEPA 架构拆解</title>
+<meta name="description" content="I-JEPA：在图像上预测被遮挡目标块的表征。完整拆解多块掩码、上下文/目标编码器、预测器、损失与 EMA。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/mask2d.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="jepa" data-node="i-jepa">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram (keep in sync with templates/model-page.html) -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：在表征空间里“补全”图像</h2>
+<p>2022 年前后，图像自监督学习主要有两条路：</p>
+<div class="diff">
+  <div class="was">
+    <h4>不变性方法（invariance-based）</h4>
+    <p>SimCLR、BYOL、DINO、iBOT……让同一图像的两个<b>增强视角</b>编码后相同。语义强、线性探测好，但依赖手工设计的数据增强（裁剪、颜色抖动等），这些先验偏向图像分类，换任务、换模态就未必合适。</p>
+  </div>
+  <div class="now">
+    <h4>生成式方法（generative）</h4>
+    <p>MAE、BEiT……遮住一部分 patch 并<b>重建像素</b>。先验少、易扩展到其他模态，但模型要把容量花在纹理、噪声等不可预测的细节上，得到的特征偏底层，线性探测差，通常要微调。</p>
+  </div>
+</div>
+<p>I-JEPA 的回答：<b>保留“遮挡-补全”的任务形式，但补全的不是像素，而是目标区域在另一个编码器里的表征</b>。这样既不需要手工增强，又能让模型自由丢弃不可预测的细节，只预测抽象的、语义层面的内容。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  给你一张图的大部分区域（上下文），让你“想象”几块被挡住的区域<em>在概念上</em>是什么——不需要画出来，只需要给出它的表征。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>数据 / 索引</span><span><i class="sw enc"></i>上下文编码器（可训练）</span>
+  <span><i class="sw tgt"></i>目标编码器（EMA）</span><span><i class="sw pred"></i>预测器</span>
+  <span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>mask token</span>
+  <span><i class="ln sg"></i>stop-gradient</span><span><i class="ln ema"></i>EMA 权重更新</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 490" role="img" aria-label="I-JEPA 架构图">
+    <!-- input image -->
+    <g data-part="input" data-step="1">
+      <rect class="box data" x="20" y="180" width="120" height="120" rx="6"/>
+      <rect x="26" y="186" width="108" height="60" rx="2" style="fill:#9cc8ee"/>
+      <rect x="26" y="246" width="108" height="48" rx="2" style="fill:#74ae5f"/>
+      <circle cx="112" cy="206" r="10" style="fill:#f6c443"/>
+      <path d="M40,252 L62,232 L84,252 Z" style="fill:#c4553b"/><rect x="44" y="252" width="36" height="24" style="fill:#ead9b8"/>
+      <g style="stroke:var(--surface);stroke-width:1;opacity:.8"><line x1="53" y1="186" x2="53" y2="294"/><line x1="80" y1="186" x2="80" y2="294"/><line x1="107" y1="186" x2="107" y2="294"/><line x1="26" y1="213" x2="134" y2="213"/><line x1="26" y1="240" x2="134" y2="240"/><line x1="26" y1="267" x2="134" y2="267"/></g>
+      <text class="t-c t-b" x="80" y="316">输入图像 x</text>
+      <text class="t-c t-sm" x="80" y="333">224² → 16×16 patch</text>
+    </g>
+    <!-- input -> target encoder / context select -->
+    <path class="edge" d="M80,180 V86 H186" data-step="2"/>
+    <text class="t-sm" x="92" y="74" data-step="2">全部 256 个 patch</text>
+    <path class="edge" d="M80,342 V381 H186" data-step="1"/>
+
+    <!-- mask sampler -->
+    <g data-part="masking" data-step="1">
+      <rect class="box data" x="190" y="200" width="150" height="66" rx="10"/>
+      <text class="t-c t-b" x="265" y="222">多块掩码采样</text>
+      <text class="t-c t-sm" x="265" y="244">1 个上下文块 + M=4 目标块</text>
+    </g>
+    <path class="edge idx" d="M265,266 V341" data-step="1"/>
+    <path class="edge idx" d="M340,218 C430,218 470,190 470,126" data-step="3"/>
+    <path class="edge idx" d="M190,246 H172 V453 H582" data-step="4"/>
+    <text class="t-xs" x="300" y="467" data-step="4">目标位置 Bᵢ（决定 mask token 的位置编码）</text>
+    <text class="t-xs" x="408" y="196" data-step="3">目标索引</text>
+
+    <!-- target path -->
+    <g class="tgt" data-part="tgt-enc" data-step="2">
+      <rect class="box" x="190" y="50" width="170" height="72" rx="10"/>
+      <text class="t-c t-b" x="275" y="74">目标编码器 f<tspan font-size="10" dy="3">θ̄</tspan></text>
+      <text class="t-c t-sm" x="275" y="99">ViT · EMA 权重 · 看全图</text>
+    </g>
+    <path class="edge tgt" d="M360,86 H406" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="3"/>
+    <g class="tgt" data-part="tgt-select" data-step="3">
+      <rect class="box" x="410" y="50" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="485" y="74">LayerNorm</text>
+      <text class="t-c t-sm" x="485" y="99">在<tspan font-weight="700">输出</tspan>上取目标块</text>
+    </g>
+    <path class="edge" d="M560,86 H612" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="3"/>
+    <g data-part="tgt-select" data-step="3">
+      <g transform="translate(618,46)">
+        <rect class="tk tgt" x="0" y="0" width="12" height="12"/><rect class="tk tgt" x="12" y="0" width="12" height="12"/><rect class="tk tgt" x="24" y="0" width="12" height="12"/><rect class="tk tgt" x="36" y="0" width="12" height="12"/><rect class="tk tgt" x="48" y="0" width="12" height="12"/>
+        <rect class="tk tgt" x="0" y="18" width="12" height="12"/><rect class="tk tgt" x="12" y="18" width="12" height="12"/><rect class="tk tgt" x="24" y="18" width="12" height="12"/><rect class="tk tgt" x="36" y="18" width="12" height="12"/><rect class="tk tgt" x="48" y="18" width="12" height="12"/>
+        <rect class="tk tgt" x="0" y="36" width="12" height="12"/><rect class="tk tgt" x="12" y="36" width="12" height="12"/><rect class="tk tgt" x="24" y="36" width="12" height="12"/><rect class="tk tgt" x="36" y="36" width="12" height="12"/><rect class="tk tgt" x="48" y="36" width="12" height="12"/>
+        <rect class="tk tgt" x="0" y="54" width="12" height="12"/><rect class="tk tgt" x="12" y="54" width="12" height="12"/><rect class="tk tgt" x="24" y="54" width="12" height="12"/><rect class="tk tgt" x="36" y="54" width="12" height="12"/><rect class="tk tgt" x="48" y="54" width="12" height="12"/>
+      </g>
+      <text class="t-sm" x="686" y="58">s<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">(1)</tspan></text>
+      <text class="t-sm" x="686" y="76">s<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">(2)</tspan></text>
+      <text class="t-sm" x="686" y="94">s<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">(3)</tspan></text>
+      <text class="t-sm" x="686" y="112">s<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">(4)</tspan></text>
+      <text class="t-c t-sm" x="648" y="132">目标表征（|Bᵢ| 个 token / 块）</text>
+    </g>
+    <!-- s_y -> loss with stop-grad -->
+    <path class="edge sg" d="M705,140 V202" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="5"/>
+    <g class="sg-badge" data-step="5"><rect x="712" y="160" width="26" height="18" rx="4"/><text class="t-c" x="725" y="169.5">sg</text></g>
+
+    <!-- loss -->
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="630" y="206" width="160" height="64" rx="10"/>
+      <text class="t-c t-b" x="710" y="228">损失 D</text>
+      <text class="t-c t-sm" x="710" y="250">‖ŝ − s‖² · 对 4 个块平均</text>
+    </g>
+
+    <!-- context path -->
+    <g data-part="ctx-select" data-step="1">
+      <rect class="box data" x="190" y="345" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="265" y="369">取上下文 patch</text>
+      <text class="t-c t-sm" x="265" y="394">上下文块 − 目标块</text>
+    </g>
+    <path class="edge" d="M340,381 H376" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="2"/>
+    <g class="enc" data-part="ctx-enc" data-step="2">
+      <rect class="box" x="380" y="345" width="160" height="72" rx="10"/>
+      <text class="t-c t-b" x="460" y="369">上下文编码器 f<tspan font-size="10" dy="3">θ</tspan></text>
+      <text class="t-c t-sm" x="460" y="394">ViT · 只看可见 patch</text>
+    </g>
+    <path class="edge" d="M540,381 H586" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="4"/>
+    <text class="t-c t-sm" x="563" y="368" data-step="4">s<tspan font-size="9" dy="3">x</tspan></text>
+    <g class="pred" data-part="predictor" data-step="4">
+      <rect class="box" x="590" y="345" width="170" height="72" rx="10"/>
+      <text class="t-c t-b" x="675" y="369">预测器 g<tspan font-size="10" dy="3">φ</tspan></text>
+      <text class="t-c t-sm" x="675" y="394">窄 ViT · 12 层 · 宽 384</text>
+    </g>
+    <g data-part="mask-tokens" data-step="4">
+      <g transform="translate(586,446)">
+        <rect class="tk mask" x="0" y="0" width="14" height="14"/><rect class="tk mask" x="16" y="0" width="14" height="14"/><rect class="tk mask" x="32" y="0" width="14" height="14"/><rect class="tk mask" x="48" y="0" width="14" height="14"/><rect class="tk mask" x="64" y="0" width="14" height="14"/>
+      </g>
+      <text class="t-sm" x="674" y="453">mask token = 共享向量 + pos(Bᵢ)</text>
+    </g>
+    <path class="edge" d="M640,444 V421" data-step="4"/>
+    <path class="edge" d="M760,381 H796" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="4"/>
+    <g data-part="predictor" data-step="4">
+      <g transform="translate(800,350)">
+        <rect class="tk pred" x="0" y="0" width="12" height="12"/><rect class="tk pred" x="12" y="0" width="12" height="12"/><rect class="tk pred" x="24" y="0" width="12" height="12"/><rect class="tk pred" x="36" y="0" width="12" height="12"/><rect class="tk pred" x="48" y="0" width="12" height="12"/>
+        <rect class="tk pred" x="0" y="18" width="12" height="12"/><rect class="tk pred" x="12" y="18" width="12" height="12"/><rect class="tk pred" x="24" y="18" width="12" height="12"/><rect class="tk pred" x="36" y="18" width="12" height="12"/><rect class="tk pred" x="48" y="18" width="12" height="12"/>
+        <rect class="tk pred" x="0" y="36" width="12" height="12"/><rect class="tk pred" x="12" y="36" width="12" height="12"/><rect class="tk pred" x="24" y="36" width="12" height="12"/><rect class="tk pred" x="36" y="36" width="12" height="12"/><rect class="tk pred" x="48" y="36" width="12" height="12"/>
+        <rect class="tk pred" x="0" y="54" width="12" height="12"/><rect class="tk pred" x="12" y="54" width="12" height="12"/><rect class="tk pred" x="24" y="54" width="12" height="12"/><rect class="tk pred" x="36" y="54" width="12" height="12"/><rect class="tk pred" x="48" y="54" width="12" height="12"/>
+      </g>
+      <text class="t-sm" x="866" y="384">ŝ<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">(1..4)</tspan></text>
+      <text class="t-c t-sm" x="830" y="434">每个目标块跑一次</text>
+    </g>
+    <path class="edge" d="M830,346 V238 H794" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="5"/>
+    <!-- gradient hint -->
+    <path class="edge grad" d="M650,272 C600,300 560,320 540,343" data-step="5"/>
+    <text class="t-xs" x="560" y="300" data-step="5" style="fill:var(--c-loss)">∇ 只回传到这一侧</text>
+
+    <!-- EMA -->
+    <g data-part="ema" data-step="6">
+      <path class="edge ema" d="M398,343 C398,250 345,200 345,126"/>
+      <rect class="note-bg" x="356" y="270" width="150" height="38" rx="6"/>
+      <text class="t-sm" x="364" y="282" style="fill:var(--c-tgt);font-weight:650">EMA 更新（不回传梯度）</text>
+      <text class="t-mono" x="364" y="299">θ̄ ← m·θ̄ + (1−m)·θ</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot">
+    <div class="arch-panel"></div>
+    <div class="controls"></div>
+  </div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>输入图像</h4><p>224×224 的单张图像，按 14×14（ViT-H/14）切成 16×16 = 256 个 patch，每个 patch 经线性投影成 token，并加上 2D sin-cos 位置编码（官方代码中固定、不训练）。<b>不做任何视角增强</b>。</p></div>
+    <div data-note="masking"><h4>多块掩码采样</h4><p>在 dataloader 里生成索引：M=4 个目标块（面积占比 0.15–0.2、长宽比 0.75–1.5，可互相重叠）+ 1 个上下文块（占比 0.85–1.0、正方形），再从上下文块里删去与任何目标块重叠的 patch。见下方 <a href="#c-masking">§3.1 交互采样器</a>。</p></div>
+    <div data-note="ctx-select"><h4>取上下文 patch</h4><p>只把“上下文块 − 目标块”中的 patch token 交给上下文编码器（通常 100 个左右，随采样变化）。和 MAE 一样，编码器里<b>不放 mask token</b>，计算量只随可见 patch 数增长。</p></div>
+    <div data-note="ctx-enc"><h4>上下文编码器 f<sub>θ</sub></h4><p>标准 ViT（最大 ViT-H/14：32 层、宽 1280），只处理可见 patch，输出上下文表征 \(s_x\)。它是唯一接收梯度的编码器。注意：下游评估时论文用的是它的 EMA 版本——目标编码器（输出做平均池化）。</p></div>
+    <div data-note="tgt-enc"><h4>目标编码器 f<sub>θ̄</sub></h4><p>与上下文编码器结构相同，权重是其指数滑动平均（EMA）。它看<b>完整图像</b>，在 <code>torch.no_grad()</code> 下运行，不接收梯度。</p></div>
+    <div data-note="tgt-select"><h4>在输出上取目标</h4><p>先对目标编码器输出做 LayerNorm（官方代码），再按 4 个目标块的索引取出对应 token，得到 \(s_y(i)\)。关键：掩码作用在<b>输出</b>而不是输入上——每个目标 token 都融合了全图信息，因此是语义层面的“答案”。</p></div>
+    <div data-note="predictor"><h4>预测器 g<sub>φ</sub></h4><p>一个窄 ViT（12 层、宽 384）。输入 = 上下文表征（线性投影到 384 维）+ 一组 mask token；输出取 mask token 位置，再投影回编码器维度，即 \(\hat s_y(i)\)。对 4 个目标块各跑一次（实现上沿 batch 维并行）。</p></div>
+    <div data-note="mask-tokens"><h4>mask token：预测器的“条件变量 z”</h4><p>所有 mask token 共用一个可学习向量，再加上<b>要预测的那个位置</b>的位置编码。它告诉预测器“请预测这里的内容”——这正是 JEPA 框架里的条件变量 z。</p></div>
+    <div data-note="loss"><h4>损失 D</h4><p>论文：预测与目标的 L2 距离，对目标块内 patch、再对 4 个块平均。官方实现：<code>F.smooth_l1_loss</code>，且目标先做了 LayerNorm。梯度只流向预测器和上下文编码器。</p></div>
+    <div data-note="ema"><h4>EMA 更新</h4><p>每个优化步后，目标编码器权重 \(\bar\theta \leftarrow m\bar\theta + (1-m)\theta\)，m 从 0.996 线性增至 1.0。它让目标“慢慢变化”，配合 stop-gradient 和预测器的非对称结构，避免所有表征坍塌成常数。</p></div>
+    <div data-step-note="1"><h4>① 输入与掩码</h4><p>图像切成 256 个 patch；采样器给出 1 个上下文块与 4 个目标块的<b>索引</b>，并取出上下文 patch。</p></div>
+    <div data-step-note="2"><h4>② 两路编码</h4><p>目标编码器（EMA）编码<b>全部</b> 256 个 patch；上下文编码器只编码可见的上下文 patch，得到 \(s_x\)。</p></div>
+    <div data-step-note="3"><h4>③ 构造目标</h4><p>对目标编码器输出做 LayerNorm，再按目标索引取出 4 组 token：\(s_y(1),\dots,s_y(4)\)。整条路径不求梯度。</p></div>
+    <div data-step-note="4"><h4>④ 预测</h4><p>对每个目标块 i：把 \(s_x\) 与 |Bᵢ| 个 mask token（共享向量 + 目标位置编码）拼起来送进预测器，取 mask token 位置的输出得到 \(\hat s_y(i)\)。</p></div>
+    <div data-step-note="5"><h4>⑤ 损失与反传</h4><p>\(D(\hat s_y(i), s_y(i))\) 对 4 个块平均。目标侧 stop-gradient，梯度只更新预测器 φ 和上下文编码器 θ。</p></div>
+    <div data-step-note="6"><h4>⑥ EMA 更新目标编码器</h4><p>优化器更新 θ 之后，目标编码器参数向 θ 靠近一小步：\(\bar\theta \leftarrow m\bar\theta + (1-m)\theta\)。</p></div>
+  </div>
+  <figcaption>图 1　I-JEPA 训练时的一次前向/反向。点击组件查看说明，或点「逐步讲解」。根据论文 §3 与官方实现 <code>src/train.py</code> 绘制。</figcaption>
+</figure>
+
+<div class="callout info">
+  <span class="callout-title">和 JEPA 通用框架的对应</span>
+  x = 上下文块，y = 目标块，z = 目标块的位置（通过 mask token 的位置编码给出），\(s_x=f_\theta(x)\)，\(s_y=f_{\bar\theta}(y)\)，预测器 \(\hat s_y = g_\phi(s_x, z)\)，能量 \(E = D(\hat s_y, s_y)\)。见 <a href="00-foundations.html#jepa-def">从头讲起 §2</a>。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+
+<h3 id="c-masking">3.1 多块掩码：最关键的设计</h3>
+<p>掩码策略决定了“预测任务”到底在考什么。I-JEPA 给出的经验法则是：</p>
+<ul>
+  <li><b>目标块要足够大</b>（占图像 15–20%），这样被预测的是“一个物体的一部分”这种语义单位，而不是能靠邻域插值猜出来的纹理。</li>
+  <li><b>上下文要足够有信息量且空间分散</b>（一个占 85–100% 的大块，去掉目标后仍覆盖大部分图像）。</li>
+  <li>上下文与目标<b>不重叠</b>，否则直接抄答案。</li>
+</ul>
+<div data-widget="mask-2d" data-grid="16" data-targets="4"></div>
+<p>论文的消融（ViT-B/16，300 epoch，1% ImageNet 线性探测）<span class="src">论文 Tab. 6</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>掩码策略</th><th>做法（概括）</th><th class="num">Top-1</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>multi-block（I-JEPA）</td><td>大上下文块 + 4 个中等目标块</td><td class="num">54.2</td></tr>
+    <tr><td>block</td><td>单个大目标块，上下文为其补集</td><td class="num">20.2</td></tr>
+    <tr><td>random</td><td>随机 patch 作为目标</td><td class="num">17.6</td></tr>
+    <tr><td>rasterized</td><td>图像四等分，一象限为上下文、其余为目标</td><td class="num">15.5</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="c-encoders">3.2 上下文编码器与目标编码器</h3>
+<p>两者是<b>同一种 ViT</b>，区别只在输入和权重来源：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>上下文编码器 f<sub>θ</sub></th><th>目标编码器 f<sub>θ̄</sub></th></tr></thead>
+  <tbody>
+    <tr><td>输入</td><td>只有上下文 patch（不含 mask token）</td><td>整张图的全部 patch</td></tr>
+    <tr><td>权重</td><td>由梯度下降更新</td><td>上下文编码器权重的 EMA</td></tr>
+    <tr><td>梯度</td><td>有</td><td>无（<code>no_grad</code> / stop-gradient）</td></tr>
+    <tr><td>输出用途</td><td>喂给预测器</td><td>LayerNorm 后在目标位置取出，作为回归目标</td></tr>
+    <tr><td>下游评估</td><td>—</td><td>论文用它（输出平均池化）做下游评估</td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight">
+  <span class="callout-title">为什么掩码加在目标编码器的“输出”上？</span>
+  如果目标编码器只看目标块本身（掩码加在输入上），它的输出只包含局部信息；加在输出上，每个目标 token 都经过了全图自注意力，携带的是“在整张图语境下这块是什么”。论文指出这对学到语义表征至关重要。
+</div>
+
+<h3 id="c-predictor">3.3 预测器与 mask token</h3>
+<p>预测器是一个比编码器窄得多的 ViT（ViT-H/14 时为 12 层、宽 384）。它的输入序列 = 上下文 token（投影到 384 维并加上其位置编码）+ |Bᵢ| 个 mask token：</p>
+<div class="formula">$$\text{mask token}_j = \mathbf{m} + \mathrm{pos}(j),\quad j \in B_i \qquad(\mathbf{m}\text{ 为所有位置共享的可学习向量})$$</div>
+<p>序列内是<b>全注意力</b>；输出只取 mask token 位置，经 LayerNorm 和线性层投回编码器维度。对 M=4 个目标块，预测器运行 4 次（实现上把上下文复制 4 份沿 batch 维拼接）。</p>
+<div class="callout info">
+  <span class="callout-title">预测器的瓶颈作用</span>
+  预测器窄（384 维）且只在训练时使用。下游任务只用编码器。直觉上，把“如何从上下文推断目标”的负担交给一个单独的小网络，编码器就能专注于产生好用的表征——这也是 BYOL/SimSiam 以来“非对称结构防坍塌”的关键部件。
+</div>
+
+<h3 id="c-ema">3.4 EMA 目标编码器</h3>
+<div class="formula">$$\bar\theta \leftarrow m\,\bar\theta + (1-m)\,\theta,\qquad m: 0.996 \xrightarrow{\text{线性}} 1.0$$</div>
+<p>m 越接近 1，目标编码器变化越慢。训练末期 m→1，目标编码器几乎冻结。EMA + stop-gradient + 预测器三者共同构成 I-JEPA 的防坍塌机制——但这是一套<b>经验上有效、缺乏理论保证</b>的启发式，这一点会在 <a href="04-le-world-model.html#lejepa">LeJEPA / LeWM</a> 被重新审视。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪</h2>
+<p>以 ViT-H/14（宽 1280、32 层）、输入 224²、batch B 为例。\(K_\text{ctx}\) 与 \(K_\text{pred}\) 随采样变化，同一 batch 内会截断到最小值以便拼成矩形张量（官方 <code>MaskCollator</code>）。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>输入图像</td><td>[B, 3, 224, 224]</td><td></td></tr>
+    <tr><td>Patch embedding（Conv 14×14, stride 14）</td><td>[B, 256, 1280]</td><td>16×16 个 patch，加 2D sin-cos 位置编码</td></tr>
+    <tr><td>目标编码器（全图）</td><td>[B, 256, 1280]</td><td><code>no_grad</code></td></tr>
+    <tr><td>LayerNorm → 取 4 个目标块</td><td>[4B, K_pred, 1280]</td><td>K_pred ≈ 0.15–0.2 × 256 ≈ 38–51</td></tr>
+    <tr><td>取上下文 patch</td><td>[B, K_ctx, 1280]</td><td>K_ctx 通常在 100 左右</td></tr>
+    <tr><td>上下文编码器</td><td>[B, K_ctx, 1280]</td><td>32 层 ViT，只处理可见 token</td></tr>
+    <tr><td>predictor_embed（Linear 1280→384）</td><td>[B, K_ctx, 384]</td><td>+ 上下文位置编码</td></tr>
+    <tr><td>复制 4 份 + 拼接 mask token</td><td>[4B, K_ctx+K_pred, 384]</td><td>mask token = 共享向量 + 目标位置编码</td></tr>
+    <tr><td>预测器 12 层 → 取 mask 位 → Linear 384→1280</td><td>[4B, K_pred, 1280]</td><td>即 ŝ<sub>y</sub></td></tr>
+    <tr><td>损失</td><td>标量</td><td>对所有目标 token 与 4 个块平均</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与防坍塌</h2>
+<p>论文中的目标函数（对 M 个目标块、块内每个 patch 求平均 L2 距离）：</p>
+<div class="formula">$$\mathcal{L}(\theta,\phi) = \frac{1}{M}\sum_{i=1}^{M}\sum_{j\in B_i}\big\lVert \hat s_{y_j} - s_{y_j}\big\rVert_2^2,
+\qquad \hat s_{y}(i) = g_\phi\big(f_\theta(x),\ \{\mathbf m + \mathrm{pos}(j)\}_{j\in B_i}\big),\qquad s_y = \mathrm{sg}\big(f_{\bar\theta}(\text{image})\big)_{B_i}$$</div>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码</span>
+  官方 <code>ijepa/src/train.py</code> 中：目标特征先经过 <code>F.layer_norm(h, (h.size(-1),))</code>，损失为 <code>F.smooth_l1_loss(z, h)</code>（而非论文所写的 L2）。复现时以代码为准。
+</div>
+<p><b>为什么不会坍塌？</b> 如果编码器把所有图像都映射成同一个常向量，损失就是 0——这是 JEPA 类方法的天敌（见 <a href="00-foundations.html#collapse">从头讲起 §4</a>）。I-JEPA 没有负样本，也没有显式的方差/协方差正则，它依赖的是：</p>
+<ol>
+  <li><b>stop-gradient</b>：损失不能通过“改变目标”来变小；</li>
+  <li><b>EMA 目标编码器</b>：目标缓慢跟随在线编码器，打断“两边一起塌”的捷径；</li>
+  <li><b>预测器</b>：非对称结构，让在线分支有额外的自由度去拟合目标。</li>
+</ol>
+<p>这套组合来自 BYOL 一脉，实践中稳定，但对 EMA 系数、学习率调度等很敏感，且缺少保证。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<p>按官方实现结构整理（省略了分布式、混合精度和学习率调度）：</p>
+<div class="code-title">train_step.py</div>
+<pre><code class="lang-py"># imgs: [B, 3, 224, 224]
+# masks_enc:  1 组上下文索引  [B, K_ctx]   （由 MaskCollator 在 dataloader 中生成）
+# masks_pred: M=4 组目标索引 [B, K_pred] × 4
+
+def train_step(imgs, masks_enc, masks_pred):
+    # ---- 目标路径：看全图、不求梯度 ----
+    with torch.no_grad():
+        h = target_encoder(imgs)                  # [B, 256, D]
+        h = F.layer_norm(h, (h.size(-1),))        # 对特征维做 LayerNorm
+        h = apply_masks(h, masks_pred)            # [4B, K_pred, D]  在“输出”上取目标块
+        h = repeat_interleave_batch(h, B, repeat=len(masks_enc))
+
+    # ---- 上下文路径 ----
+    z = encoder(imgs, masks_enc)                  # 只编码可见 patch: [B, K_ctx, D]
+    z = predictor(z, masks_enc, masks_pred)       # [4B, K_pred, D]
+
+    loss = F.smooth_l1_loss(z, h)                 # 论文写 L2
+    loss.backward(); optimizer.step(); optimizer.zero_grad()
+
+    # ---- EMA 更新目标编码器 ----
+    m = next(momentum_scheduler)                  # 0.996 → 1.0
+    with torch.no_grad():
+        for p, p_tgt in zip(encoder.parameters(), target_encoder.parameters()):
+            p_tgt.mul_(m).add_((1 - m) * p.detach())</code></pre>
+<div class="code-title">predictor.py（结构示意）</div>
+<pre><code class="lang-py">class Predictor(nn.Module):
+    def forward(self, x, masks_x, masks):
+        B = x.size(0)
+        x = self.predictor_embed(x)                          # Linear D → 384
+        x = x + apply_masks(self.pos_embed.repeat(B, 1, 1), masks_x)
+
+        # 每个目标块一组 mask token：共享向量 + 目标位置编码
+        pos = apply_masks(self.pos_embed.repeat(B, 1, 1), masks)   # [4B, K_pred, 384]
+        pred_tokens = self.mask_token.expand_as(pos) + pos
+
+        x = x.repeat(len(masks), 1, 1)                       # 上下文复制 M 份
+        x = torch.cat([x, pred_tokens], dim=1)               # [4B, K_ctx + K_pred, 384]
+        for blk in self.blocks:                              # 12 层，全注意力
+            x = blk(x)
+        x = self.norm(x)[:, -pred_tokens.size(1):]           # 只取 mask token 位置
+        return self.predictor_proj(x)                        # Linear 384 → D</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>编码器</td><td>ViT-H/14（32 层、宽 1280、≈632M）；另有 ViT-L/16、ViT-H/16、ViT-G/16</td><td>论文 §5</td></tr>
+    <tr><td>预测器</td><td>宽 384；ViT-L/16、ViT-H/16、ViT-H/14 时深度 12</td><td>论文附录 A</td></tr>
+    <tr><td>目标块</td><td>M = 4；面积占比 (0.15, 0.2)；长宽比 (0.75, 1.5)</td><td>论文 §3</td></tr>
+    <tr><td>上下文块</td><td>面积占比 (0.85, 1.0)；长宽比 1；去掉与目标的重叠</td><td>论文 §3</td></tr>
+    <tr><td>EMA 动量</td><td>0.996 → 1.0（线性）</td><td>论文附录 A</td></tr>
+    <tr><td>优化器</td><td>AdamW；weight decay 0.04 → 0.4</td><td>论文附录 A</td></tr>
+    <tr><td>Batch / Epoch</td><td>2048 / 300（ImageNet-1K）；学习率前 15 epoch 线性预热后余弦衰减</td><td>论文附录 A</td></tr>
+    <tr><td>数据增强</td><td>不使用任何视角增强</td><td>论文 §1</td></tr>
+    <tr><td>算力</td><td>ViT-H/14：16×A100 不到 72 小时（&lt;1200 GPU·h）</td><td>论文摘要 / §5</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>骨干</th><th class="num">IN-1K 线性探测</th><th class="num">1% IN-1K</th><th class="num">Clevr/Count</th><th class="num">Clevr/Dist</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>I-JEPA</td><td>ViT-H/14（300 ep）</td><td class="num">79.3</td><td class="num">73.3</td><td class="num">86.7</td><td class="num">72.4</td></tr>
+    <tr class="hl"><td>I-JEPA</td><td>ViT-H/16@448（300 ep）</td><td class="num">81.1</td><td class="num">77.3</td><td class="num">—</td><td class="num">—</td></tr>
+    <tr><td>MAE</td><td>ViT-H/14（1600 ep）</td><td class="num">77.2</td><td class="num">71.5</td><td class="num">90.5</td><td class="num">72.4</td></tr>
+    <tr><td>iBOT（用视角增强）</td><td>ViT-L/16</td><td class="num">81.0</td><td class="num">—</td><td class="num">85.7</td><td class="num">62.8</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">出处：论文 Tab. 1、2、4。I-JEPA 在不使用增强的情况下接近依赖增强的 iBOT，同时在计数/深度等底层任务上明显好于 iBOT；比 MAE 收敛快得多（约 5× 更少迭代）。</p>
+<p><b>预测表征 vs 预测像素</b><span class="src">论文 Tab. 7</span>：同为 ViT-L/16，1% ImageNet 线性探测——预测目标编码器输出 66.9，预测像素 40.7。这直接支持了“在表征空间里预测”的核心主张。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was">
+    <h4>I-JEPA 解决了什么</h4>
+    <ul>
+      <li>第一次把 LeCun 的 JEPA 构想在大规模视觉任务上跑通；</li>
+      <li>证明“表征空间里的遮挡预测”无需手工增强也能学到语义特征；</li>
+      <li>多块掩码 + 只编码可见 patch，训练效率高。</li>
+    </ul>
+  </div>
+  <div class="now">
+    <h4>留下的问题 → 下一步</h4>
+    <ul>
+      <li>只有<b>静态图像</b>：没有时间、运动与因果 → <a href="02-v-jepa.html">V-JEPA</a> 把同样的思路搬到视频；</li>
+      <li>条件变量 z 只是“位置”，还不是“动作” → <a href="03-v-jepa-2.html">V-JEPA 2-AC</a>；</li>
+      <li>防坍塌依赖 EMA/stop-grad 启发式 → <a href="04-le-world-model.html">LeJEPA / LeWM</a> 用 SIGReg 替代。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Assran et al. <i>Self-Supervised Learning from Images with a Joint-Embedding Predictive Architecture.</i> CVPR 2023. <a href="https://arxiv.org/abs/2301.08243">arXiv:2301.08243</a></li>
+  <li>官方实现：<a href="https://github.com/facebookresearch/ijepa">facebookresearch/ijepa</a>（<code>src/train.py</code>、<code>src/masks/multiblock.py</code>、<code>src/models/vision_transformer.py</code>）</li>
+  <li>He et al. <i>Masked Autoencoders Are Scalable Vision Learners.</i> CVPR 2022.（MAE，生成式对照）</li>
+  <li>Grill et al. <i>Bootstrap Your Own Latent (BYOL).</i> NeurIPS 2020.（EMA + predictor 的来源）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>
