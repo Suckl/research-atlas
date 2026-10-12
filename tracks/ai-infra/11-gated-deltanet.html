@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gated DeltaNet 拆解</title>
+<meta name="description" content="Gated DeltaNet（ICLR 2025）：门控 + delta 规则的线性注意力递归、分块并行训练，以及 Qwen3-Next / Qwen3.5 的 3:1 混合架构与位置编码的取舍。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="ai-infra" data-node="gated-deltanet">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：线性注意力的状态是一块固定大小的“记忆矩阵”</h2>
+<p>softmax 注意力的 KV cache 随序列线性增长，decode 每步要读完整个 cache。线性注意力把 \(\sum_j \phi(q_t)^\top\phi(k_j) v_j\) 改写成 \(\phi(q_t)^\top S_t\)，其中 \(S_t = \sum_{j\le t} k_j v_j^\top\) 是一个 d_k × d_v 的矩阵——<b>状态大小与序列长度无关</b>，decode 每步只读写这块矩阵。问题是怎么往这块固定大小的矩阵里“写”：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>更新规则</th><th>公式</th><th>能做什么</th><th>缺什么</th></tr></thead>
+  <tbody>
+    <tr><td>线性注意力（累加）</td><td>S_t = S_{t−1} + v_t k_tᵀ</td><td>记</td><td>永远不忘，旧键值互相干扰</td></tr>
+    <tr><td>Mamba2 / 门控线性注意力</td><td>S_t = α_t S_{t−1} + v_t k_tᵀ</td><td>整体遗忘（标量门 α_t ∈ (0,1)）</td><td>只能“均匀衰减”，不能定点改某个键的值</td></tr>
+    <tr><td>DeltaNet（delta 规则）</td><td>S_t = S_{t−1}(I − β_t k_t k_tᵀ) + β_t v_t k_tᵀ</td><td>定点改写：先擦掉键 k_t 上的旧值，再写新值</td><td>不会整体遗忘，过期信息清不掉</td></tr>
+    <tr class="hl"><td>Gated DeltaNet</td><td>S_t = S_{t−1}(α_t(I − β_t k_t k_tᵀ)) + β_t v_t k_tᵀ</td><td>两者兼有</td><td>固定大小状态的精细检索上限 → 需要混合全注意力</td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  delta 规则是“按键查找并覆盖”的联想记忆更新（在线梯度下降一步），门控是“随时间整体淡忘”。Gated DeltaNet 把两个乘起来，并给出一个把这种递归写成分块矩阵乘的训练算法，速度接近 Mamba2。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 一个 Gated DeltaNet 层（Qwen3-Next / Qwen3.5 版本）</h2>
+<div class="legend">
+  <span><i class="sw data"></i>输入 / 输出</span><span><i class="sw enc"></i>线性投影</span><span><i class="sw pred"></i>递归状态更新</span><span><i class="sw act"></i>门控参数</span><span><i class="sw tgt"></i>状态矩阵 S</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="Gated DeltaNet 层">
+    <g data-part="x" data-step="1"><rect class="box data" x="20" y="200" width="110" height="60" rx="10"/><text class="t-c t-b" x="75" y="224">x_t</text><text class="t-c t-xs" x="75" y="244">[hidden 4096]</text></g>
+    <g class="enc" data-part="proj" data-step="1"><rect class="box" x="160" y="140" width="170" height="180" rx="10"/><text class="t-c t-b" x="245" y="164">线性投影</text><text class="t-c t-xs" x="245" y="186">q, k：16 头 × 128</text><text class="t-c t-xs" x="245" y="202">v, z：32 头 × 128</text><text class="t-c t-xs" x="245" y="218">a, b：每头 1 个标量</text><text class="t-c t-xs" x="245" y="242">（k 头重复 2 次匹配 v 头）</text><text class="t-c t-xs" x="245" y="266">qkv 过深度可分离</text><text class="t-c t-xs" x="245" y="282">因果 Conv1d（核 4）+ SiLU</text><text class="t-c t-xs" x="245" y="306">q, k 做 L2 归一化</text></g>
+    <path class="edge" d="M130,230 H156" data-step="1"/>
+    <g class="act" data-part="gates" data-step="2"><rect class="box" x="370" y="40" width="250" height="90" rx="10"/><text class="t-c t-b" x="495" y="62">门控与写入强度</text><text class="t-c t-xs" x="495" y="82">α_t = exp(−exp(A_log)·softplus(a_t + dt_bias)) ∈ (0,1]</text><text class="t-c t-xs" x="495" y="98">β_t = sigmoid(b_t) ∈ (0,1)</text><text class="t-c t-xs" x="495" y="118">A_log 初始化 U[0,16]，dt_bias 初始 1（Mamba2 式）</text></g>
+    <path class="edge" d="M330,170 C350,170 350,85 366,85" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="2"/>
+    <g class="tgt" data-part="state" data-step="3"><rect class="box" x="370" y="160" width="250" height="70" rx="10"/><text class="t-c t-b" x="495" y="184">状态 S_{t−1}</text><text class="t-c t-xs" x="495" y="204">每头 128 × 128；每层共 32 × 128 × 128 个数</text><text class="t-c t-xs" x="495" y="220">与序列长度无关</text></g>
+    <g class="pred" data-part="update" data-step="3"><rect class="box" x="370" y="260" width="250" height="90" rx="10"/><text class="t-c t-b" x="495" y="284">gated delta 更新</text><text class="t-c t-xs" x="495" y="304">S_t = α_t S_{t−1} + β_t (v_t − α_t S_{t−1}ᵀ k_t) k_tᵀ</text><text class="t-c t-xs" x="495" y="322">= S_{t−1}·α_t(I − β_t k_t k_tᵀ) + β_t v_t k_tᵀ</text><text class="t-c t-xs" x="495" y="340">“先按 k_t 读旧值，用 v_t 减去它，再写回”</text></g>
+    <path class="edge" d="M495,230 V256" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="3"/>
+    <path class="edge" d="M330,250 C350,250 350,300 366,300" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="3"/>
+    <path class="edge" d="M495,130 V156" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="3"/>
+    <path class="edge" d="M620,305 C650,305 650,195 624,195" style="stroke:var(--c-tgt);stroke-dasharray:4 4;marker-end:url(#ah-tgt)" data-step="3"/>
+    <text class="t-xs" x="636" y="250" data-step="3">S_t → 下一步</text>
+    <g class="pred" data-part="read" data-step="4"><rect class="box" x="370" y="380" width="250" height="60" rx="10"/><text class="t-c t-b" x="495" y="402">读出 o_t = S_tᵀ q_t / √d_k</text><text class="t-c t-xs" x="495" y="422">每头一个 128 维向量</text></g>
+    <path class="edge" d="M495,350 V376" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="4"/>
+    <g class="enc" data-part="outgate" data-step="5"><rect class="box" x="680" y="380" width="160" height="60" rx="10"/><text class="t-c t-b" x="760" y="402">RMSNorm(o_t) ⊙ SiLU(z_t)</text><text class="t-c t-xs" x="760" y="422">输出门控 → 输出投影</text></g>
+    <path class="edge" d="M620,410 H676" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="5"/>
+    <g data-part="y" data-step="5"><rect class="box data" x="860" y="380" width="80" height="60" rx="10"/><text class="t-c t-b" x="900" y="410">y_t</text></g>
+    <path class="edge" d="M840,410 H856" data-step="5"/>
+    <!-- hybrid note -->
+    <g data-part="hybrid" data-step="5">
+      <rect class="note-bg" x="680" y="40" width="260" height="130" rx="8"/>
+      <text class="t-sm" x="690" y="60" style="font-weight:650">Qwen3-Next / Qwen3.5 的堆叠</text>
+      <text class="t-xs" x="690" y="80">[GDN, GDN, GDN, 门控全注意力] × N</text>
+      <text class="t-xs" x="690" y="96">全注意力层：GQA + RoPE（部分旋转）+ 输出门</text>
+      <text class="t-xs" x="690" y="112">GDN 层：无 RoPE，Conv1d 提供局部位置</text>
+      <text class="t-xs" x="690" y="128">每层之后：MoE 或稠密 MLP</text>
+      <text class="t-xs" x="690" y="150">9B 稠密：24 GDN + 8 全注意力；397B-A17B：512 专家</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="x"><h4>输入</h4><p>与普通 Transformer 层相同的隐状态；GDN 层直接替换注意力子层，MLP / MoE 子层不变（论文称沿用 Llama 的宏观架构）。</p></div>
+    <div data-note="proj"><h4>投影</h4><p>一次投影产出 q、k、v、z（输出门）和两个标量 a、b。q、k 的头数（16）少于 v 的头数（32），k 头重复以匹配——类似 GQA。q、k、v 先过一个核大小 4 的深度可分离因果卷积 + SiLU（短程混合，也是 GDN 层唯一的“位置”来源），再对 q、k 做 L2 归一化（让 β_t k_t k_tᵀ 的擦除是良定的投影）。</p></div>
+    <div data-note="gates"><h4>门控 α 与写入强度 β</h4><p>α_t 用 Mamba2 的参数化：一个可学习的 A_log 与 softplus 后的数据相关项相乘再取 exp，落在 (0, 1]；接近 1 表示“这一步几乎不忘”。β_t 是 sigmoid，控制 delta 规则的学习率：β = 1 完全覆盖键 k_t 上的旧值，β = 0 不写。</p></div>
+    <div data-note="state"><h4>状态矩阵</h4><p>每头 d_k × d_v = 128 × 128 的矩阵，可看作一个联想记忆：用 k 查询得到 v。整层 32 头共 524K 个数——不管上下文 1K 还是 1M。这就是线性注意力“KV cache 恒定”的含义，也是它在精细检索（大海捞针、长 RepoQA）上不如全注意力的根源：容量有限。</p></div>
+    <div data-note="update"><h4>Gated delta 更新</h4><p>括号里的 v_t − α_t S_{t−1}ᵀ k_t 是“目标值减去当前记忆中键 k_t 对应的值”，即预测误差；按 β_t 的步长沿 k_t 方向写入——正是对 ‖S k − v‖² 做一步在线梯度下降，故名 delta 规则。前面的 α_t 先把整个状态衰减一下。两个操作合起来：既能“整体淡忘”，又能“定点纠正”。</p></div>
+    <div data-note="read"><h4>读出</h4><p>用 q_t 查询状态：o_t = S_tᵀ q_t。因为 q、k 已归一化，除以 √d_k 做尺度。</p></div>
+    <div data-note="outgate"><h4>输出门与归一化</h4><p>RMSNorm 后乘以 SiLU(z_t)（与 Mamba / GLA 类似的输出门），再线性投影回隐维。</p></div>
+    <div data-note="y"><h4>输出</h4><p>进入残差连接与 MLP / MoE 子层。</p></div>
+    <div data-note="hybrid"><h4>混合堆叠</h4><p>Qwen3-Next 和 Qwen3.5 都用 3 层 GDN + 1 层门控全注意力的周期（HF 文档：“3:1 hybrid attention stack”）。全注意力层保留 RoPE（Qwen3-Next 为部分旋转）与 GQA，负责精细检索；GDN 层负责大部分序列混合，KV 恒定。论文自己的混合实验（GatedDeltaNet-H1：GDN + 滑窗注意力；H2：再加 Mamba2）显示混合在检索任务上超过纯注意力。</p></div>
+    <div data-step-note="1"><h4>① 投影 + 短卷积 + 归一化</h4><p>得到 q、k、v、z、a、b。</p></div>
+    <div data-step-note="2"><h4>② 算门控</h4><p>α_t（遗忘）与 β_t（写入强度）。</p></div>
+    <div data-step-note="3"><h4>③ 更新状态</h4><p>先衰减，再在键 k_t 上做一步误差修正写入。</p></div>
+    <div data-step-note="4"><h4>④ 读出</h4><p>q_t 查询状态得到 o_t。</p></div>
+    <div data-step-note="5"><h4>⑤ 输出门与投影</h4><p>RMSNorm ⊙ SiLU(z) → 输出投影 → 残差。</p></div>
+  </div>
+  <figcaption>图 1　Qwen3-Next / Qwen3.5 形态的 Gated DeltaNet 层（解码视角，逐 token 递归）。依据 GDN 论文 §3 与 HF Qwen3.5 文档 / 配置默认值。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-chunk">3.1 训练：分块并行（chunkwise）</h3>
+<p>逐 token 递归在训练时太慢（串行）。DeltaNet 的关键是把 T 步的 (I − β k kᵀ) 连乘写成 WY 表示（Householder 乘积的紧凑形式），从而一个 chunk（如 64 token）内部可以用矩阵乘并行计算，chunk 之间再串行传递状态。Gated DeltaNet 把门控 α 的累积乘积并入这套 WY / UT 变换，“只带来边际开销”。实测 GDN 与 DeltaNet 的训练吞吐比 Mamba2 低 2–3K token/s，换来更强的表达力。推理（decode）就是上图的逐 token 递归，每步 O(d²) 而不是 O(L·d)。</p>
+<h3 id="c-results">3.2 结果</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>任务</th><th class="num">Mamba2</th><th class="num">DeltaNet</th><th class="num">Gated DeltaNet</th></tr></thead>
+  <tbody>
+    <tr><td>Wikitext 困惑度（1.3B）</td><td class="num">16.56</td><td class="num">17.71</td><td class="num">16.42</td></tr>
+    <tr><td>S-NIAH-1 @ 8K（单针检索）</td><td class="num">30.4</td><td class="num">98.8</td><td class="num">91.8</td></tr>
+    <tr><td>S-NIAH-2 @ 8K（带干扰）</td><td class="num">17.0</td><td class="num">14.4</td><td class="num">29.6</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">读法：delta 规则给记忆能力（S-NIAH-1 上 DeltaNet 远超 Mamba2），门控给清理干扰的能力（S-NIAH-2 上 GDN 最好）；但三者在 8K 带干扰检索上都远不及全注意力——所以要混合。</p>
+<h3 id="c-glm">3.3 另一条路：GLM-5 为什么没选线性注意力</h3>
+<p>GLM-5 报告在 GLM-9B（GQA，40 层）上比较了交错滑窗注意力、搜索得到的滑窗模式、Gated DeltaNet 与去掉 Conv1d 和门控的 SimpleGDN：滑窗交错在 128K 的 RULER 上掉约 30 分；GDN 质量更好但加参数；SimpleGDN 折中最好但“所有这些方法在细粒度检索任务上都有固有的精度差距”（RULER@128K 最多掉 5.69 分，RepoQA@128K 掉 7.33）。他们最终选择 MLA + DeepSeek 的 DSA（token 级稀疏，“构造上无损”）。这是 2026 年两条主流路线的分野：<b>Qwen 用混合线性注意力换 KV 恒定，DeepSeek / GLM 用稀疏注意力保留精确检索</b>。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">gated_deltanet_decode.py（单头，逐 token）</div>
+<pre><code class="lang-py">def gdn_layer_step(x_t, S, conv_state, params):
+    qkv, z, a, b = project(x_t, params)                 # 线性投影
+    qkv, conv_state = causal_conv1d_step(qkv, conv_state, k=4)   # 短卷积（唯一的局部位置信息）
+    q, k, v = silu(qkv).split(...)
+    q, k = l2_normalize(q), l2_normalize(k)
+    alpha = exp(-exp(params.A_log) * softplus(a + params.dt_bias))   # 遗忘门 ∈ (0,1]
+    beta = sigmoid(b)                                                 # 写入强度
+
+    S = alpha * S                                       # 1) 整体衰减
+    err = v - S.T @ k                                   # 2) 键 k 处的预测误差
+    S = S + beta * outer(k, err)                        # 3) delta 规则：沿 k 写入修正
+    o = S.T @ q / sqrt(d_k)                             # 读出
+    y = out_proj(rmsnorm(o) * silu(z))                  # 输出门
+    return y, S, conv_state                             # 状态大小固定，与 t 无关</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="questions">5. 简答题</h2>
+<div class="qa">
+  <h3 id="q23"><span class="qid">Q23</span>线性注意力混合路线（Qwen3.5）与稀疏注意力路线（DeepSeek / GLM）各自的取舍是什么？</h3>
+  <div class="ans">
+    <p class="short">两条路线在回答同一个问题——长上下文下 KV 的内存与带宽——但选了相反的取舍：<b>线性注意力混合（Qwen3-Next / 3.5）</b>把大部分层换成状态恒定的递归层，KV 与上下文长度无关、decode 每步成本固定；<b>DeepSeek 系列</b>保留 softmax 注意力的精确检索，用 MLA 压 KV、DSA 稀疏化计算、V4 再压缩 KV 序列。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th></th><th>Qwen3-Next / 3.5（GDN 3:1 混合）</th><th>DeepSeek V3 → V3.2 → V4（MLA + DSA）</th></tr></thead>
+      <tbody>
+        <tr><td>长上下文内存</td><td>3/4 的层 KV 恒定（每头 128×128 状态）；1/4 全注意力层仍有 KV</td><td>MLA 每 token 576 个数；V4 再按 m 倍压缩序列，1M 上下文 KV 仅为 V3.2 的 10%</td></tr>
+        <tr><td>长上下文计算</td><td>GDN 层 O(L·d²)；全注意力层 O(L²)</td><td>DSA：索引器 O(L²) 但极轻，核心注意力 O(L·k)，k = 2048</td></tr>
+        <tr><td>检索精度</td><td>固定状态有容量上限，靠全注意力层兜底；GLM-5 的实验显示纯线性变体在 128K 细粒度检索上有固有差距</td><td>top-k 选择保留精确 token 级注意力，GLM-5 称“构造上无损”；V3.2 与 V3.1 质量持平</td></tr>
+        <tr><td>训练</td><td>分块并行算法，吞吐接近 Mamba2；需 FLA 类专用内核</td><td>需 DSA 索引器的 KL 对齐预热 + 稀疏训练；FP8 细粒度训练框架</td></tr>
+        <tr><td>推理工程</td><td>递归状态 + 少量 KV，适合极长输出；需要混合层的调度</td><td>需 top-k / 稀疏内核（FlashMLA、TileLang），KV 仍随长度增长但很小</td></tr>
+        <tr><td>位置编码</td><td>GDN 层无 RoPE；全注意力层 RoPE</td><td>解耦 RoPE 维度（64）单独缓存</td></tr>
+      </tbody>
+    </table></div>
+    <p>一句话：Qwen 路线的优势是<b>常数级的 decode 成本与极简的 KV</b>，DeepSeek 路线的优势是<b>不牺牲精确检索的长上下文</b>。两家都用 MoE；差别在序列混合层。</p>
+    <p class="cite">依据：GDN 论文 §4–5；Qwen3.5 HF 文档；DeepSeek-V3 §2.1、V3.2 §2、V4 §2；GLM-5 报告 §2.1.2。</p>
+  </div>
+  <h3 id="q24"><span class="qid">Q24</span>RoPE 怎样用绝对位置的旋转得到相对位置的效果？递归式的线性注意力层还需要位置编码吗？</h3>
+  <div class="ans">
+    <p class="short">对 GDN 层不是：递归按顺序扫描，α_t 的衰减就是随距离减弱的相对位置先验，再加上核 4 的因果卷积提供局部顺序；Qwen3.5 的实现里 GDN 层<b>不加 RoPE</b>。对每 4 层一次的全注意力层仍然加 RoPE。完整讨论见 <a href="10-rope.html#q24">RoPE 页 Q24</a>。</p>
+  </div>
+  <h3 id="q25"><span class="qid">Q25</span>Qwen3.5 的混合架构长什么样？GLM-5 为什么没有选线性注意力？GDN 层能否去掉位置编码？</h3>
+  <div class="ans">
+    <p class="short">Qwen3.5 系列（含 Flash 这类小 / 快版本）沿用 Qwen3-Next 的解码器：3 层 Gated DeltaNet + 1 层门控全注意力（GQA + RoPE + 输出门）周期堆叠，MLP 为 MoE（旗舰 397B-A17B：512 专家、60 层、262K 上下文）或稠密（9B / 27B）。<b>GLM-5 不是 GDN 架构</b>：它是 744B-A40B 的 MoE，注意力用 MLA 并采用了 DeepSeek 的 DSA 稀疏注意力；GDN / SimpleGDN 只出现在它的对比实验里并被放弃（细粒度检索有差距）。</p>
+    <ul>
+      <li><b>GDN 层可以去掉位置编码</b>：原论文与 FLA / HF 实现都不在 GDN 层用 RoPE；位置信息来自递归顺序 + 因果卷积 + 门控衰减。</li>
+      <li><b>全注意力层不建议去掉</b>：softmax 注意力需要显式位置（或依赖因果掩码的隐式泄露，即 NoPE，实践中长上下文检索更弱）；Qwen3-Next 的做法是只旋转部分维度（<span class="unverified">partial_rotary_factor 0.25</span>），留一部分“无位置”通道。</li>
+      <li><b>注意“Qwen3.5-Flash”的具体层数 / 专家配置以官方模型卡为准</b>——本页能核实的是 Qwen3.5 家族的共同架构（HF 文档），Flash 变体的细节未逐一核对。</li>
+    </ul>
+    <p class="cite">依据：Qwen3.5 HF 文档（3:1 混合、conv 核 4、线性层头配置）；GDN 论文；GLM-5 技术报告 §2（MLA + DSA；效率注意力对比实验）。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Yang, Kautz, Hatamizadeh. <i>Gated Delta Networks: Improving Mamba2 with Delta Rule.</i> ICLR 2025. <a href="https://arxiv.org/abs/2412.06464">arXiv:2412.06464</a></li>
+  <li>Yang et al. <i>Parallelizing Linear Transformers with the Delta Rule over Sequence Length.</i> NeurIPS 2024.（DeltaNet 的分块算法）</li>
+  <li>Dao, Gu. <i>Transformers are SSMs（Mamba2）.</i> ICML 2024.</li>
+  <li>Qwen 团队. <i>Qwen3-Next</i> 博客（2025-09）；HF Transformers <code>qwen3_5</code> 文档。</li>
+  <li>GLM-5 Team. <i>GLM-5: from Vibe Coding to Agentic Engineering.</i> 2026. <a href="https://arxiv.org/abs/2602.15763">arXiv:2602.15763</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

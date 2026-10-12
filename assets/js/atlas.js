@@ -112,8 +112,14 @@
       const n = Atlas.node(host.dataset.hero || body().dataset.node);
       if (!n) { host.textContent = "⚠ registry 中找不到该节点：" + (host.dataset.hero || body().dataset.node); return; }
       const t = Atlas.track(n.track);
-      const kindLabel = { model: "模型", concept: "概念", bridge: "前置" }[n.kind] || n.kind;
+      const kindLabel = KIND_LABEL[n.kind] || n.kind;
       const authors = (n.authors || []).join(", ");
+      // review questions this page answers (from track.questions), linked to local anchors
+      const covers = ((t && t.questions) || [])
+        .map((q) => ({ q, ref: (q.nodes || []).find((r) => r.node === n.id) }))
+        .filter((x) => x.ref)
+        .map(({ q, ref }) => `<a href="#${Atlas.esc(ref.anchor || "questions")}" title="${Atlas.esc(q.text)}">${Atlas.esc(q.id)}</a>`)
+        .join("");
       const links = (n.links || []).map((l) => `<a class="pill" href="${Atlas.esc(l.url)}" target="_blank" rel="noopener">${Atlas.esc(l.label)} ↗</a>`).join("");
       const tags = (n.tags || []).map((x) => `<span class="tag">${Atlas.esc(x)}</span>`).join("");
       host.classList.add("hero");
@@ -128,9 +134,11 @@
         </div>
         ${links ? `<div class="links">${links}</div>` : ""}
         ${tags ? `<div class="tags">${tags}</div>` : ""}
+        ${covers ? `<div class="covers" aria-label="本页简答题"><span class="tag">本页简答题</span>${covers}</div>` : ""}
         ${n.tldr ? `<div class="tldr" id="tldr"><span class="label">TL;DR</span><p>${Atlas.esc(n.tldr)}</p></div>` : ""}`;
     });
   }
+  const KIND_LABEL = { model: "模型", concept: "概念", bridge: "前置", paper: "论文" };
 
   /* ---------- table of contents + scrollspy ---------- */
   function renderTOC() {
@@ -140,7 +148,7 @@
     if (!heads.length) { toc.remove(); document.querySelector(".layout")?.classList.add("no-toc"); return; }
     const ol = Atlas.h("ol");
     heads.forEach((hd) => {
-      const a = Atlas.h("a", { href: "#" + hd.id, text: hd.dataset.toc || hd.textContent.replace(/\s+/g, " ").trim() });
+      const a = Atlas.h("a", { href: "#" + hd.id, text: hd.dataset.toc || [...hd.childNodes].map((c) => c.textContent.trim()).filter(Boolean).join(" ") });
       ol.append(Atlas.h("li", { class: "lvl-" + hd.tagName[1] }, a));
     });
     toc.replaceChildren(Atlas.h("div", { class: "toc-title", text: "本页目录" }), ol);
@@ -173,7 +181,7 @@
 
   /* ---------- track-level renderers ---------- */
   function nodeCard(n) {
-    const kindLabel = { model: "模型", concept: "概念", bridge: "前置" }[n.kind] || n.kind;
+    const kindLabel = KIND_LABEL[n.kind] || n.kind;
     return `<a class="card kind-${n.kind}" href="${href(n.page)}">
       <div class="card-kicker">${Atlas.esc(n.date || "")} · ${kindLabel}${n.venue ? " · " + Atlas.esc(n.venue) : ""}</div>
       <h3>${Atlas.esc(n.title)}</h3><p>${Atlas.esc(n.tldr || "")}</p></a>`;
@@ -246,6 +254,26 @@
       });
       host.classList.add("lineage-wrap");
       host.replaceChildren(svg);
+      // Wide tracks (many date columns) would scale text illegibly: keep natural size and scroll instead.
+      const cw = host.clientWidth || 900;
+      if (W > cw * 1.35) svg.style.width = W + "px";
+    },
+    questions(host) {
+      const t = Atlas.track(host.dataset.track || body().dataset.track);
+      if (!t) return;
+      const qs = t.questions || [];
+      if (!qs.length) { host.textContent = "（该路线没有简答题）"; return; }
+      const rows = qs.map((q) => {
+        const where = (q.nodes || []).map((ref) => {
+          const n = Atlas.node(ref.node);
+          if (!n) return "";
+          const url = href(n.page.split("#")[0]) + (ref.anchor ? "#" + ref.anchor : "");
+          return `<a class="q-node" href="${Atlas.esc(url)}">${Atlas.esc(n.title)}</a>`;
+        }).join("");
+        return `<tr><td>${Atlas.esc(q.id)}</td><td>${Atlas.esc(q.text)}</td><td>${where}</td></tr>`;
+      }).join("");
+      host.classList.add("table-wrap");
+      host.innerHTML = `<table class="qindex"><thead><tr><th>#</th><th>简答题</th><th>讲解位置</th></tr></thead><tbody>${rows}</tbody></table>`;
     },
     compare(host) {
       const t = Atlas.track(host.dataset.track || body().dataset.track);
@@ -413,7 +441,9 @@
     mountWidgets();
     typeset(document.body);
     renderTOC();
-    if (location.hash) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); }
+    const jump = () => { if (location.hash) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); } };
+    jump();
+    window.addEventListener("load", jump, { once: true });   // again after fonts/KaTeX settle the layout
   }
   // Deferred scripts run while readyState === "interactive" but BEFORE DOMContentLoaded,
   // so always wait for DCL — that guarantees widget scripts (loaded after us) have registered.

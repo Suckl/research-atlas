@@ -3,7 +3,11 @@
 把研究方法的演化路线拆开来看：可交互的架构图、张量形状、目标函数、设计取舍。
 纯静态 HTML，无构建步骤；为人阅读，也为 agent 扩展（见 [AGENTS.md](AGENTS.md)）。
 
-**当前路线：JEPA** — [从头讲起](tracks/jepa/00-foundations.html) → [I-JEPA](tracks/jepa/01-i-jepa.html) → [V-JEPA](tracks/jepa/02-v-jepa.html) → [V-JEPA 2 / V-JEPA 2-AC](tracks/jepa/03-v-jepa-2.html) → [LeWorldModel](tracks/jepa/04-le-world-model.html)。总览：[tracks/jepa/index.html](tracks/jepa/index.html)。
+在线阅读：https://suckl.github.io/research-atlas/
+
+**路线一：JEPA** — [从头讲起](tracks/jepa/00-foundations.html) → [I-JEPA](tracks/jepa/01-i-jepa.html) → [V-JEPA](tracks/jepa/02-v-jepa.html) → [V-JEPA 2 / V-JEPA 2-AC](tracks/jepa/03-v-jepa-2.html) → [LeWorldModel](tracks/jepa/04-le-world-model.html)。总览：[tracks/jepa/index.html](tracks/jepa/index.html)。
+
+**路线二：AI Infra（LLM 推理与训练系统）** — 15 个节点，以论文为单位：[推理计算特征](tracks/ai-infra/00-inference-basics.html)、FlashAttention、FlashInfer、vLLM、SGLang、投机解码、PD 分离、Megatron 并行、FP8、DeepSeek-V3、RoPE、Gated DeltaNet、DSA 稀疏注意力、批不变性与训推一致、AMD/ROCm。每页末尾附简答题，用论文作答；总览页有[简答题汇总](tracks/ai-infra/index.html#questions)。
 
 ## 打开
 

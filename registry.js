@@ -49,6 +49,74 @@ window.ATLAS_REGISTRY = {
         { "key": "use", "label": "用途 / 评估方式" },
         { "key": "key_result", "label": "代表性结果" }
       ]
+    },
+    {
+      "id": "ai-infra",
+      "title": "AI Infra：LLM 推理与训练系统",
+      "short": "AI Infra",
+      "status": "active",
+      "page": "tracks/ai-infra/index.html",
+      "summary": "以论文为单位讲 LLM 系统：注意力内核（FlashAttention / FlashInfer）、推理引擎（vLLM / SGLang / 投机解码 / PD 分离）、训练系统与数值（Megatron 并行 / FP8 / DeepSeek-V3 / 批不变性）、模型架构（RoPE / Gated DeltaNet / DSA）与 AMD 硬件。每页末尾附简答题，用论文作答。",
+      "reading_order": ["infra-basics", "flash-attention", "flashinfer", "vllm", "sglang", "speculative-decoding", "pd-disaggregation", "megatron", "fp8-formats", "deepseek-v3", "rope", "gated-deltanet", "deepseek-sparse-attention", "batch-invariance", "amd-rocm"],
+      "lanes": [
+        { "id": "basics", "label": "基础与硬件" },
+        { "id": "kernels", "label": "注意力内核" },
+        { "id": "serving", "label": "推理系统" },
+        { "id": "training", "label": "训练系统与数值" },
+        { "id": "arch", "label": "模型架构" }
+      ],
+      "milestones": [
+        { "date": "2019-09", "label": "Megatron-LM：张量并行（列/行切分 + 2 次 all-reduce）", "node": "megatron" },
+        { "date": "2021-04", "label": "RoFormer：旋转位置编码 RoPE", "node": "rope" },
+        { "date": "2022-05", "label": "FlashAttention：IO 感知的精确注意力", "node": "flash-attention" },
+        { "date": "2022-09", "label": "NVIDIA/Arm/Intel 提出 FP8 的 E4M3 / E5M2 格式", "node": "fp8-formats" },
+        { "date": "2022-11", "label": "投机解码：用小模型打草稿、大模型并行验证", "node": "speculative-decoding" },
+        { "date": "2023-09", "label": "vLLM：PagedAttention 把分页虚拟内存搬进 KV cache", "node": "vllm" },
+        { "date": "2023-12", "label": "SGLang：RadixAttention 前缀缓存；AMD MI300X 发布", "node": "sglang" },
+        { "date": "2024-01", "label": "DistServe：Prefill / Decode 分离优化 goodput", "node": "pd-disaggregation" },
+        { "date": "2024-12", "label": "DeepSeek-V3：FP8 训练 + 64 路 EP + MLA；Gated DeltaNet", "node": "deepseek-v3" },
+        { "date": "2025-01", "label": "FlashInfer：块稀疏 KV + JIT 注意力模板（MLSys 2025）", "node": "flashinfer" },
+        { "date": "2025-09", "label": "DeepSeek-V3.2 DSA 稀疏注意力；Thinking Machines 批不变内核", "node": "deepseek-sparse-attention" }
+      ],
+      "compare_fields": [
+        { "key": "problem", "label": "解决的问题" },
+        { "key": "level", "label": "所在层级" },
+        { "key": "mechanism", "label": "核心机制" },
+        { "key": "tradeoff", "label": "代价 / 适用条件" },
+        { "key": "key_number", "label": "关键数字" },
+        { "key": "systems", "label": "落地系统" }
+      ],
+      "questions": [
+        { "id": "Q1", "text": "为什么 prefill 是算力受限、decode 是带宽受限？用算术强度说明 batch 大小如何改变 decode 的瓶颈。", "nodes": [{ "node": "infra-basics", "anchor": "q1" }] },
+        { "id": "Q2", "text": "给定模型配置，一条 S 个 token 的请求的 KV cache 有多大？这个数字如何同时决定能装多少请求、decode 每步读多少、PD 分离要传多少？", "nodes": [{ "node": "infra-basics", "anchor": "q2" }] },
+        { "id": "Q3", "text": "FlashAttention 为什么能在不写出 N×N 矩阵的前提下得到精确的 softmax 注意力？FA2 与 FA3 各自改进了什么？", "nodes": [{ "node": "flash-attention", "anchor": "q3" }] },
+        { "id": "Q4", "text": "FlashInfer 与 FlashAttention 分别解决什么层面的问题？FlashInfer 用什么抽象统一了分页、基数树、树状等 KV 布局？", "nodes": [{ "node": "flashinfer", "anchor": "q4" }, { "node": "flash-attention", "anchor": "q4" }] },
+        { "id": "Q5", "text": "PagedAttention 借用了操作系统的哪个机制？块表、引用计数、写时复制各起什么作用？", "nodes": [{ "node": "vllm", "anchor": "q5" }] },
+        { "id": "Q6", "text": "KV 块通常多大？把块调大或调小，分别牺牲什么、换来什么？", "nodes": [{ "node": "vllm", "anchor": "q6" }] },
+        { "id": "Q7", "text": "vLLM 与 SGLang 的设计出发点有何不同？两者前缀缓存的粒度差异从何而来？", "nodes": [{ "node": "sglang", "anchor": "q7" }, { "node": "vllm", "anchor": "q7" }] },
+        { "id": "Q8", "text": "投机解码的草稿被拒绝后，KV cache 需要怎样“回退”？分页 KV 下为什么不需要搬数据？", "nodes": [{ "node": "speculative-decoding", "anchor": "q8" }, { "node": "vllm", "anchor": "q8" }] },
+        { "id": "Q9", "text": "投机解码的加速来自哪里？为什么说它是用算力换延迟？", "nodes": [{ "node": "speculative-decoding", "anchor": "q9" }] },
+        { "id": "Q10", "text": "论文报告的加速比是在什么条件下测得的？在高并发服务中还成立吗？", "nodes": [{ "node": "speculative-decoding", "anchor": "q10" }] },
+        { "id": "Q11", "text": "接受率 α 由什么决定？哪些任务受益最多？", "nodes": [{ "node": "speculative-decoding", "anchor": "q11" }] },
+        { "id": "Q12", "text": "草稿被拒绝后为什么必须从残差分布 norm(max(0, p−q)) 补采？证明最终输出严格服从 p。", "nodes": [{ "node": "speculative-decoding", "anchor": "q12" }] },
+        { "id": "Q13", "text": "PD 分离的整体数据流是怎样的？", "nodes": [{ "node": "pd-disaggregation", "anchor": "q13" }] },
+        { "id": "Q14", "text": "PD 分离优化的指标是什么？为什么它不等于“更快”？", "nodes": [{ "node": "pd-disaggregation", "anchor": "q14" }] },
+        { "id": "Q15", "text": "若 prefill 与 decode 运行在不同厂商的 GPU 上，最大的困难是什么？", "nodes": [{ "node": "pd-disaggregation", "anchor": "q15" }] },
+        { "id": "Q16", "text": "决定 PD 之间 KV 传输量的核心因素是什么？", "nodes": [{ "node": "pd-disaggregation", "anchor": "q16" }, { "node": "infra-basics", "anchor": "kv-size" }] },
+        { "id": "Q17", "text": "除数据并行与张量并行之外还有哪些并行维度？它们在训练与推理中的角色有何不同？", "nodes": [{ "node": "megatron", "anchor": "q17" }] },
+        { "id": "Q18", "text": "单机 8 卡张量并行时，一层 Transformer 的计算如何拆分、在哪里聚合？", "nodes": [{ "node": "megatron", "anchor": "q18" }] },
+        { "id": "Q19", "text": "All-Reduce 与 All-Gather 有什么区别？它们与 Reduce-Scatter 是什么关系？", "nodes": [{ "node": "megatron", "anchor": "q19" }] },
+        { "id": "Q20", "text": "E4M3 与 E5M2 的差别是什么？为什么前向路径选 E4M3，而 DeepSeek-V3 连梯度也用 E4M3？", "nodes": [{ "node": "fp8-formats", "anchor": "q20" }, { "node": "deepseek-v3", "anchor": "q20" }] },
+        { "id": "Q21", "text": "FP8 训练到底节省了什么、没有节省什么？前提是什么？", "nodes": [{ "node": "fp8-formats", "anchor": "q21" }, { "node": "deepseek-v3", "anchor": "q21" }] },
+        { "id": "Q22", "text": "专家并行的通信原语是什么？DeepSeek-V3 用哪些办法压低 all-to-all 的代价？", "nodes": [{ "node": "deepseek-v3", "anchor": "q22" }] },
+        { "id": "Q23", "text": "线性注意力混合路线（Qwen3.5）与稀疏注意力路线（DeepSeek / GLM）各自的取舍是什么？", "nodes": [{ "node": "gated-deltanet", "anchor": "q23" }, { "node": "deepseek-sparse-attention", "anchor": "q23" }, { "node": "deepseek-v3", "anchor": "q23" }] },
+        { "id": "Q24", "text": "RoPE 怎样用绝对位置的旋转得到相对位置的效果？递归式的线性注意力层还需要位置编码吗？", "nodes": [{ "node": "rope", "anchor": "q24" }, { "node": "gated-deltanet", "anchor": "q24" }] },
+        { "id": "Q25", "text": "Qwen3.5 的混合架构长什么样？GLM-5 为什么没有选线性注意力？GDN 层能否去掉位置编码？", "nodes": [{ "node": "gated-deltanet", "anchor": "q25" }] },
+        { "id": "Q26", "text": "DSA 如何把注意力从 O(L²) 降到 O(Lk) 而不损失质量？它与 NSA、DeepSeek-V4 的关系是什么？", "nodes": [{ "node": "deepseek-sparse-attention", "anchor": "q26" }] },
+        { "id": "Q27", "text": "温度为 0 时，同一个 prompt 为什么仍可能得到不同输出？", "nodes": [{ "node": "batch-invariance", "anchor": "q27" }] },
+        { "id": "Q28", "text": "RL 训练中采样器与训练器的概率不一致从何而来？有哪两类处理办法？", "nodes": [{ "node": "batch-invariance", "anchor": "q28" }] },
+        { "id": "Q29", "text": "AMD Instinct / ROCm 与 NVIDIA / CUDA 在硬件形态和软件栈上有哪些差异？迁移时要注意什么？", "nodes": [{ "node": "amd-rocm", "anchor": "q29" }] }
+      ]
     }
   ],
   "nodes": [
@@ -223,6 +291,408 @@ window.ATLAS_REGISTRY = {
         "use": "潜空间 CEM 规划（MPC）、物理量探测、违背预期（surprise）检测",
         "key_result": "PushT 成功率比 PLDM 高 18%；每次规划 ≈1 s（DINO-WM ≈47 s）"
       }
+    },
+    {
+      "id": "infra-basics",
+      "track": "ai-infra",
+      "kind": "concept",
+      "lane": "basics",
+      "title": "从头讲起：LLM 推理的计算特征",
+      "full_title": "Prefill vs Decode、算术强度与 Roofline、KV cache 的大小与形状",
+      "date": "2017-06",
+      "venue": "概念页（以 Transformer 解码为起点）",
+      "links": [
+        { "label": "Attention Is All You Need", "url": "https://arxiv.org/abs/1706.03762" }
+      ],
+      "page": "tracks/ai-infra/00-inference-basics.html",
+      "tldr": "推理分两阶段：prefill 是算力受限的大矩阵乘，decode 是带宽受限的“每步读一遍权重 + KV”。用 Roofline 和 KV cache 公式把这条路线上几乎所有问题（投机解码、PagedAttention、PD 分离、通信量）的来源讲清楚。",
+      "tags": ["概念", "Roofline", "KV cache", "prefill / decode"]
+    },
+    {
+      "id": "flash-attention",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "kernels",
+      "title": "FlashAttention 1 / 2 / 3",
+      "full_title": "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness（及 FA2、FA3）",
+      "authors": ["Tri Dao", "Daniel Y. Fu", "Stefano Ermon", "Atri Rudra", "Christopher Ré"],
+      "org": "Stanford / Princeton / Together / Colfax / NVIDIA",
+      "date": "2022-05",
+      "venue": "NeurIPS 2022；FA2 arXiv 2023-07；FA3 NeurIPS 2024",
+      "arxiv": "2205.14135",
+      "links": [
+        { "label": "FA1", "url": "https://arxiv.org/abs/2205.14135" },
+        { "label": "FA2", "url": "https://arxiv.org/abs/2307.08691" },
+        { "label": "FA3", "url": "https://arxiv.org/abs/2407.08608" },
+        { "label": "Code", "url": "https://github.com/Dao-AILab/flash-attention" }
+      ],
+      "page": "tracks/ai-infra/01-flash-attention.html",
+      "tldr": "精确注意力不必把 N×N 矩阵写进 HBM：分块 + 在线 softmax + 反向重算，把 IO 从 O(N²) 降到 O(N²d²/M)。FA2 重排并行与 warp 分工（A100 上 50–73% 峰值），FA3 用 Hopper 的异步与 FP8（H100 上 75%）。",
+      "tags": ["内核", "在线 softmax", "分块", "Hopper"],
+      "facts": {
+        "problem": "标准注意力把 N×N 分数矩阵读写 HBM，带宽成为瓶颈",
+        "level": "单算子 CUDA 内核",
+        "mechanism": "分块载入 SRAM + 在线 softmax 重标定 + 反向重算，不物化注意力矩阵",
+        "tradeoff": "多做约 N²d 的重算 FLOPs；对变长 / 分页 KV 的支持靠后续版本与 FlashInfer",
+        "key_number": "FA1：GPT-2 3×；FA2：A100 50–73% 峰值；FA3：H100 FP16 740 TFLOPS（75%）、FP8 ≈1.2 PFLOPS",
+        "systems": "几乎所有训练与推理框架（PyTorch SDPA、vLLM、SGLang、Megatron）"
+      }
+    },
+    {
+      "id": "flashinfer",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "kernels",
+      "title": "FlashInfer",
+      "full_title": "FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving",
+      "authors": ["Zihao Ye", "Lequn Chen", "Ruihang Lai", "Wuwei Lin", "Yineng Zhang", "…", "Luis Ceze"],
+      "org": "University of Washington / CMU / NVIDIA 等",
+      "date": "2025-01",
+      "venue": "MLSys 2025（最佳论文）",
+      "arxiv": "2501.01005",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2501.01005" },
+        { "label": "Code", "url": "https://github.com/flashinfer-ai/flashinfer" }
+      ],
+      "page": "tracks/ai-infra/02-flashinfer.html",
+      "tldr": "面向“服务”的注意力引擎：把分页 / 基数树 / 树状等各种 KV 布局统一成块稀疏矩阵，用 JIT 模板生成注意力变体，用 plan/run 两阶段做负载均衡调度并兼容 CUDAGraph。相对 FlashAttention 的区别不在数学，而在批处理、布局与调度。",
+      "tags": ["内核", "块稀疏 KV", "JIT", "调度"],
+      "facts": {
+        "problem": "推理服务中 KV 布局多样、序列长度参差、小 batch 解码难以打满 GPU",
+        "level": "注意力内核库 + 调度器",
+        "mechanism": "块稀疏 KV 统一格式 + 可组合块大小 + JIT 注意力模板 + 负载均衡的 plan/run",
+        "tradeoff": "plan 阶段在 CPU 上做；稀疏 gather 在 FA3 的 TMA 下略慢于稠密（约 10%）",
+        "key_number": "ITL 降低 29–69%（vs SGLang Triton 后端）；长上下文 28–30%；并行生成 13–17%",
+        "systems": "SGLang、vLLM、MLC-Engine"
+      }
+    },
+    {
+      "id": "vllm",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "vLLM / PagedAttention",
+      "full_title": "Efficient Memory Management for Large Language Model Serving with PagedAttention",
+      "authors": ["Woosuk Kwon", "Zhuohan Li", "Siyuan Zhuang", "Ying Sheng", "Lianmin Zheng", "Cody Hao Yu", "Joseph E. Gonzalez", "Hao Zhang", "Ion Stoica"],
+      "org": "UC Berkeley 等",
+      "date": "2023-09",
+      "venue": "SOSP 2023",
+      "arxiv": "2309.06180",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2309.06180" },
+        { "label": "Code", "url": "https://github.com/vllm-project/vllm" }
+      ],
+      "page": "tracks/ai-infra/03-vllm.html",
+      "tldr": "把操作系统的分页虚拟内存搬到 KV cache：按 16 token 的块分配、块表做逻辑→物理映射、引用计数 + 写时复制实现共享。现有系统只有 20–38% 的 KV 显存装的是真实 token，vLLM 把浪费限制在每请求最后一块之内，吞吐提升 2–4×。",
+      "tags": ["推理引擎", "分页", "块表", "写时复制"],
+      "facts": {
+        "problem": "按最大长度预分配 KV 造成 60–80% 显存浪费，限制 batch",
+        "level": "推理引擎（内存管理 + 调度 + 内核）",
+        "mechanism": "固定大小 KV 块 + 块表 + 引用计数 / 写时复制 + 抢占（交换或重算）",
+        "tradeoff": "块内部碎片随块变大而增；块表间接寻址带来内核开销",
+        "key_number": "默认 block_size 16；OPT-13B 每 token KV 800 KB；吞吐 2–4×，最高 22× vs FasterTransformer",
+        "systems": "vLLM 本身；思想被 TensorRT-LLM、SGLang、FlashInfer 吸收"
+      }
+    },
+    {
+      "id": "sglang",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "SGLang / RadixAttention",
+      "full_title": "SGLang: Efficient Execution of Structured Language Model Programs",
+      "authors": ["Lianmin Zheng", "Liangsheng Yin", "Zhiqiang Xie", "Chuyue Sun", "Jeff Huang", "Cody Hao Yu", "…", "Ying Sheng"],
+      "org": "UC Berkeley / Stanford 等",
+      "date": "2023-12",
+      "venue": "NeurIPS 2024",
+      "arxiv": "2312.07104",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2312.07104" },
+        { "label": "Code", "url": "https://github.com/sgl-project/sglang" }
+      ],
+      "page": "tracks/ai-infra/04-sglang.html",
+      "tldr": "把“LM 程序”当作一等公民：前端 DSL（gen / select / fork）+ 运行时三件套——RadixAttention（基数树管理 KV 前缀，LRU 淘汰，缓存感知调度）、压缩有限状态机（约束解码一次跳多 token）、API 投机执行。吞吐最高 6.4×。",
+      "tags": ["推理引擎", "基数树", "前缀缓存", "约束解码"],
+      "facts": {
+        "problem": "多轮对话、few-shot、树状搜索等场景下大量共享前缀被重复计算；结构化输出逐 token 慢",
+        "level": "推理引擎（运行时 + 前端语言）",
+        "mechanism": "RadixAttention：基数树索引 KV 前缀 + LRU + 按匹配长度排序调度；压缩 FSM 跳跃解码",
+        "tradeoff": "树维护开销（<0.3%）；早期与 vLLM 比较基于旧版本，二者此后互相吸收",
+        "key_number": "吞吐最高 6.4×、延迟最低 3.7×（vs vLLM / Guidance / LMQL）；生产缓存命中 52–74%",
+        "systems": "SGLang；RadixAttention 思想进入 vLLM 的前缀缓存"
+      }
+    },
+    {
+      "id": "speculative-decoding",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "投机解码",
+      "full_title": "Fast Inference from Transformers via Speculative Decoding（及 DeepMind 的 Speculative Sampling）",
+      "authors": ["Yaniv Leviathan", "Matan Kalman", "Yossi Matias"],
+      "org": "Google Research；DeepMind（Chen et al.）",
+      "date": "2022-11",
+      "venue": "ICML 2023 Oral；Chen et al. arXiv 2302.01318",
+      "arxiv": "2211.17192",
+      "links": [
+        { "label": "Leviathan et al.", "url": "https://arxiv.org/abs/2211.17192" },
+        { "label": "Chen et al.", "url": "https://arxiv.org/abs/2302.01318" }
+      ],
+      "page": "tracks/ai-infra/05-speculative-decoding.html",
+      "tldr": "解码是带宽受限的：读一遍权重只算 1 个 token 太亏。让小模型先猜 γ 个 token，大模型一次前向并行验证，用“接受概率 min(1, p/q) + 残差分布重采样”保证输出分布与大模型逐 token 完全一致。T5-XXL 上 2–3.4×（batch 1）。",
+      "tags": ["解码", "拒绝采样", "延迟", "草稿模型"],
+      "facts": {
+        "problem": "自回归解码每步只产出 1 个 token，GPU 算力大量闲置",
+        "level": "解码算法（引擎内实现）",
+        "mechanism": "草稿模型提议 γ 个 token → 目标模型并行打分 → 修正拒绝采样 → 残差分布补采一个",
+        "tradeoff": "多花算力换延迟；大 batch / 算力受限时收益消失甚至为负；需要草稿与目标分布接近（α 高）",
+        "key_number": "期望每步 token 数 (1−α^(γ+1))/(1−α)；T5-XXL 翻译 α=0.75、γ=7 → 3.4×；Chinchilla 70B 1.9–2.5×",
+        "systems": "vLLM / SGLang / TensorRT-LLM 的 draft、EAGLE、MTP、n-gram 等"
+      }
+    },
+    {
+      "id": "pd-disaggregation",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "PD 分离",
+      "full_title": "DistServe: Disaggregating Prefill and Decoding（及 Splitwise、Mooncake）",
+      "authors": ["Yinmin Zhong", "Shengyu Liu", "Junda Chen", "Jianbo Hu", "Yibo Zhu", "Xuanzhe Liu", "Xin Jin", "Hao Zhang"],
+      "org": "PKU / UCSD / StepFun；Splitwise：Microsoft；Mooncake：Moonshot / Tsinghua",
+      "date": "2024-01",
+      "venue": "OSDI 2024；Splitwise ISCA 2024；Mooncake FAST 2025",
+      "arxiv": "2401.09670",
+      "links": [
+        { "label": "DistServe", "url": "https://arxiv.org/abs/2401.09670" },
+        { "label": "Splitwise", "url": "https://arxiv.org/abs/2311.18677" },
+        { "label": "Mooncake", "url": "https://arxiv.org/abs/2407.00079" }
+      ],
+      "page": "tracks/ai-infra/06-pd-disaggregation.html",
+      "tldr": "prefill（算力受限、长任务）和 decode（带宽受限、延迟敏感）混在一张卡上互相拖慢。把两者拆到不同 GPU 池，各自选并行度与 batch 策略，用 KV cache 传输把它们接起来：优化的不是“更快”，而是在 TTFT / TPOT SLO 约束下的 goodput。",
+      "tags": ["推理系统", "goodput", "KV 传输", "异构"],
+      "facts": {
+        "problem": "prefill 与 decode 同卡执行互相干扰，无法同时满足 TTFT 与 TPOT SLO",
+        "level": "集群级推理架构",
+        "mechanism": "prefill / decode 分池 + 各自并行策略 + 逐层异步 KV 传输 + 全局调度（Splitwise 混合池、Mooncake KVCache 中心化）",
+        "tradeoff": "多一次 KV 传输（需 NVLink / RDMA）；离线吞吐场景不一定占优；异构时格式与数值一致性难",
+        "key_number": "DistServe：goodput 2.0–4.6×（vs vLLM），SLO 紧 12.6×；KV 传输 <0.1% 延迟；Splitwise 同成本吞吐 2.35×；Mooncake 多 75% 请求",
+        "systems": "DistServe、Splitwise、Mooncake / Kimi、vLLM & SGLang 的 PD 模式（NIXL / Mooncake 传输后端）、NVIDIA Dynamo"
+      }
+    },
+    {
+      "id": "megatron",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "Megatron-LM 并行",
+      "full_title": "Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism（及 PTD-P、序列并行）",
+      "authors": ["Mohammad Shoeybi", "Mostofa Patwary", "Raul Puri", "Patrick LeGresley", "Jared Casper", "Bryan Catanzaro"],
+      "org": "NVIDIA",
+      "date": "2019-09",
+      "venue": "arXiv 2019；PTD-P SC 2021；序列并行 MLSys 2023",
+      "arxiv": "1909.08053",
+      "links": [
+        { "label": "Megatron-LM", "url": "https://arxiv.org/abs/1909.08053" },
+        { "label": "PTD-P", "url": "https://arxiv.org/abs/2104.04473" },
+        { "label": "Sequence Parallel", "url": "https://arxiv.org/abs/2205.05198" },
+        { "label": "Code", "url": "https://github.com/NVIDIA/Megatron-LM" }
+      ],
+      "page": "tracks/ai-infra/07-megatron.html",
+      "tldr": "把每个 Transformer 层按“先列切后行切”拆到多卡，每层前向只需 2 次 all-reduce（MLP 一次、注意力一次），不改编译器。张量并行留在 NVLink 节点内，跨节点用流水并行（1F1B / 交错调度），再叠数据并行：3072 张 A100 上 1T 模型达 52% 峰值。",
+      "tags": ["训练", "张量并行", "流水并行", "集合通信"],
+      "facts": {
+        "problem": "单卡装不下模型；朴素切分通信过多",
+        "level": "训练框架（并行策略）",
+        "mechanism": "TP：MLP 列切→行切、注意力按头切，f/g 共轭算子；PP：1F1B 与交错 1F1B；SP：LayerNorm/dropout 按序列切，all-reduce → reduce-scatter + all-gather",
+        "tradeoff": "TP 通信量大只适合 NVLink 内；PP 有气泡 (p−1)/m；要调 TP×PP×DP 组合",
+        "key_number": "8.3B 模型 512 GPU 76% 扩展效率；1T 模型 3072 A100 达 502 PFLOP/s（52%）；SP 省 5× 激活显存",
+        "systems": "Megatron-LM / Megatron-Core、NeMo；推理侧 TP 被 vLLM / TensorRT-LLM 沿用"
+      }
+    },
+    {
+      "id": "fp8-formats",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "FP8 格式",
+      "full_title": "FP8 Formats for Deep Learning",
+      "authors": ["Paulius Micikevicius", "Dusan Stosic", "Neil Burgess", "Marius Cornea", "Pradeep Dubey", "…"],
+      "org": "NVIDIA / Arm / Intel",
+      "date": "2022-09",
+      "venue": "arXiv 2209.05433",
+      "arxiv": "2209.05433",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2209.05433" }
+      ],
+      "page": "tracks/ai-infra/08-fp8-formats.html",
+      "tldr": "两种 8 位浮点：E4M3（精度高，最大 448，没有 inf，只保留一个 NaN 编码）和 E5M2（范围大，最大 57344，IEEE 风格）。推荐前向的权重 / 激活用 E4M3、梯度用 E5M2，配合逐张量缩放因子；GPT-3 175B 的 FP8 训练困惑度与 bf16 相差 0.03。",
+      "tags": ["数值", "E4M3", "E5M2", "缩放因子"],
+      "facts": {
+        "problem": "int8 对 LLM 激活中的离群值不鲁棒；16 位算力 / 带宽不够用",
+        "level": "数值格式（硬件 + 训练配方）",
+        "mechanism": "E4M3 / E5M2 两种编码 + 逐张量缩放 + 饱和处理",
+        "tradeoff": "E4M3 只有 ~18 个 binade 的动态范围，必须靠缩放；累加仍需高精度",
+        "key_number": "E4M3 max 448 / min subnormal 2⁻⁹；E5M2 max 57344 / 2⁻¹⁶；GPT-3 175B ppl 6.65 (bf16) vs 6.68 (FP8)",
+        "systems": "Hopper / Ada Tensor Core、Transformer Engine、DeepSeek-V3 训练、vLLM / TensorRT-LLM 的 FP8 推理"
+      }
+    },
+    {
+      "id": "deepseek-v3",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "DeepSeek-V3",
+      "full_title": "DeepSeek-V3 Technical Report（MoE + 专家并行 + FP8 训练 + MLA）",
+      "authors": ["DeepSeek-AI"],
+      "org": "DeepSeek",
+      "date": "2024-12",
+      "venue": "arXiv 2412.19437",
+      "arxiv": "2412.19437",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2412.19437" },
+        { "label": "DeepEP", "url": "https://github.com/deepseek-ai/DeepEP" }
+      ],
+      "page": "tracks/ai-infra/09-deepseek-v3.html",
+      "tldr": "671B 总参 / 37B 激活的 MoE，在 2048 张 H800 上用 2.788M GPU 小时训完：64 路专家并行（all-to-all 经 IB + NVLink，节点受限路由）、DualPipe 把通信藏进计算、细粒度 FP8（全部 E4M3，1×128 / 128×128 分块缩放，每 128 元素提升到 FP32 累加）、MLA 把每 token KV 压到 576 个数。",
+      "tags": ["训练", "MoE", "专家并行", "FP8", "MLA"],
+      "facts": {
+        "problem": "超大 MoE 的跨节点 all-to-all 通信与训练成本",
+        "level": "模型架构 + 训练系统协同设计",
+        "mechanism": "EP 64 + 节点受限路由（≤4 节点）+ DualPipe 重叠；FP8 细粒度缩放 + 高精度累加；MLA 低秩 KV",
+        "tradeoff": "20 个 SM 专门跑通信；FP8 需自研 GEMM；无 TP 使单卡需装下的激活更大",
+        "key_number": "2.788M H800 小时；FP8 相对损失误差 <0.25%；每 token KV = 512 + 64 维；NVLink 160 GB/s vs IB 50 GB/s",
+        "systems": "DeepSeek-V3 / R1 / V3.2 / V4；DeepEP、DeepGEMM、FlashMLA"
+      }
+    },
+    {
+      "id": "rope",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "RoPE",
+      "full_title": "RoFormer: Enhanced Transformer with Rotary Position Embedding",
+      "authors": ["Jianlin Su", "Yu Lu", "Shengfeng Pan", "Ahmed Murtadha", "Bo Wen", "Yunfeng Liu"],
+      "org": "追一科技",
+      "date": "2021-04",
+      "venue": "arXiv 2104.09864（Neurocomputing 2024）",
+      "arxiv": "2104.09864",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2104.09864" }
+      ],
+      "page": "tracks/ai-infra/10-rope.html",
+      "tldr": "把 q、k 按二维一组旋转 mθᵢ 角，点积自然只依赖相对位置 m−n：用绝对位置的操作得到相对位置的效果，不加参数、随距离衰减、可用于线性注意力。LLaMA 以来几乎所有主流 LLM 的默认选择，也是 NTK / YaRN 等长度外推方法的基础。",
+      "tags": ["位置编码", "旋转", "相对位置", "长度外推"],
+      "facts": {
+        "problem": "绝对位置编码不表达相对关系、难以外推；相对位置偏置又不适合高效内核",
+        "level": "模型架构（注意力层）",
+        "mechanism": "q、k 乘以位置相关的分块旋转矩阵，⟨R_m q, R_n k⟩ = q^T R_{n−m} k",
+        "tradeoff": "外推到训练长度之外退化，需 NTK-aware / YaRN 等缩放；在线性注意力中只有“旋转”没有“softmax 归一化”",
+        "key_number": "无额外参数；θᵢ = base^(−2i/d)，LLaMA base 10000，长上下文模型常用 5×10⁵–10⁷",
+        "systems": "LLaMA / Qwen / DeepSeek 等；DeepSeek 的 MLA 用解耦 RoPE 维度（64）"
+      }
+    },
+    {
+      "id": "gated-deltanet",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "Gated DeltaNet 与混合架构",
+      "full_title": "Gated Delta Networks: Improving Mamba2 with Delta Rule（及 Qwen3-Next / Qwen3.5 的 3:1 混合）",
+      "authors": ["Songlin Yang", "Jan Kautz", "Ali Hatamizadeh"],
+      "org": "MIT / NVIDIA",
+      "date": "2024-12",
+      "venue": "ICLR 2025",
+      "arxiv": "2412.06464",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2412.06464" },
+        { "label": "Code (FLA)", "url": "https://github.com/fla-org/flash-linear-attention" },
+        { "label": "Qwen3.5 docs", "url": "https://huggingface.co/docs/transformers/en/model_doc/qwen3_5" }
+      ],
+      "page": "tracks/ai-infra/11-gated-deltanet.html",
+      "tldr": "线性注意力的状态是一个 d×d 矩阵：Mamba2 式的门控 α 负责“整体遗忘”，DeltaNet 的 delta 规则 β 负责“定点改写”，二者相加得到 Gated DeltaNet；分块并行算法让训练接近 Mamba2 速度。Qwen3-Next / Qwen3.5 以 3 层 GDN : 1 层门控全注意力混合，线性层不用 RoPE。",
+      "tags": ["线性注意力", "delta 规则", "混合架构", "位置编码"],
+      "facts": {
+        "problem": "线性注意力 / SSM 要么记不住（无定点改写），要么忘不掉（无门控）；全注意力 KV 随长度线性增长",
+        "level": "模型架构（序列混合层）",
+        "mechanism": "S_t = S_{t−1}(α_t(I − β_t k_t k_tᵀ)) + β_t v_t k_tᵀ；chunkwise WY 并行；短因果卷积提供局部位置信息",
+        "tradeoff": "固定大小状态在精细检索上仍逊于全注意力 → 需要混合；比 Mamba2 慢 2–3K tok/s",
+        "key_number": "S-NIAH-2@8K：GDN 29.6 vs Mamba2 17.0 vs DeltaNet 14.4；Qwen3.5：3:1 混合，conv 核 4，K/V 头 16/32×128",
+        "systems": "Qwen3-Next、Qwen3.5 / 3.6、NVIDIA Nemotron-H 类混合模型；FLA 内核库"
+      }
+    },
+    {
+      "id": "deepseek-sparse-attention",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "DeepSeek 稀疏注意力 DSA",
+      "full_title": "DeepSeek-V3.2: DeepSeek Sparse Attention（及 NSA、DeepSeek-V4 的 CSA / HCA）",
+      "authors": ["DeepSeek-AI"],
+      "org": "DeepSeek",
+      "date": "2025-09",
+      "venue": "V3.2-Exp 2025-09；V3.2 arXiv 2512.02556；V4 arXiv 2606.19348",
+      "arxiv": "2512.02556",
+      "links": [
+        { "label": "V3.2", "url": "https://arxiv.org/abs/2512.02556" },
+        { "label": "NSA", "url": "https://arxiv.org/abs/2502.11089" },
+        { "label": "V4", "url": "https://arxiv.org/abs/2606.19348" }
+      ],
+      "page": "tracks/ai-infra/12-deepseek-sparse-attention.html",
+      "tldr": "用一个极轻的“闪电索引器”（少头、ReLU、FP8）给每个 query 对所有历史 token 打分，只对 top-k = 2048 个 MLA 潜向量做注意力，核心注意力从 O(L²) 降到 O(Lk)；先用 KL 把索引器对齐到稠密注意力再稀疏训练。V4 进一步在压缩后的 KV 上做 DSA（CSA）并与重压缩的稠密分支（HCA）交错。",
+      "tags": ["稀疏注意力", "索引器", "长上下文", "MLA"],
+      "facts": {
+        "problem": "长上下文下注意力与 KV 读取随 L² / L 增长",
+        "level": "模型架构（注意力层）+ 内核",
+        "mechanism": "闪电索引器打分 → top-k 选 KV（MQA 模式的 MLA 潜向量共享给所有头）→ 稀疏核心注意力；两阶段训练（稠密预热对齐索引器 → 稀疏训练）",
+        "tradeoff": "索引器本身仍是 O(L²) 但很便宜；需要专用 top-k / 稀疏内核；k 是新的超参",
+        "key_number": "k = 2048；稠密预热 2.1B token、稀疏训练 943.7B token；V4-Pro 在 1M 上下文仅需 V3.2 的 27% FLOPs、10% KV",
+        "systems": "DeepSeek-V3.2 / V4、GLM-5（采用 DSA）；vLLM / SGLang 的 DSA 支持"
+      }
+    },
+    {
+      "id": "batch-invariance",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "批不变性与训推一致",
+      "full_title": "Defeating Nondeterminism in LLM Inference（及 On the Rollout-Training Mismatch / TIS）",
+      "authors": ["Horace He", "Thinking Machines Lab"],
+      "org": "Thinking Machines Lab；Yao et al.（UCSD / Microsoft）",
+      "date": "2025-09",
+      "venue": "Thinking Machines 博客 2025-09；TIS NeurIPS 2025",
+      "links": [
+        { "label": "Blog", "url": "https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" },
+        { "label": "TIS", "url": "https://fengyao.notion.site/off-policy-rl" }
+      ],
+      "page": "tracks/ai-infra/13-batch-invariance.html",
+      "tldr": "温度 0 也不确定，根源不是“并发 + 浮点”而是内核缺乏批不变性：归约顺序随 batch 大小变化，于是你的结果取决于同批里还有谁。把 RMSNorm / matmul / attention 改成固定归约策略后 1000 次采样完全一致；由此可做“逐位一致”的 on-policy RL，否则需用截断重要性采样修正训推偏差。",
+      "tags": ["数值", "确定性", "RL", "重要性采样"],
+      "facts": {
+        "problem": "同一请求的输出随同批请求数变化；RL 中采样器与训练器概率不一致导致训练崩溃",
+        "level": "内核数值语义 + RL 训练配方",
+        "mechanism": "批不变内核：固定 split 策略与 tile 配置、注意力用固定 split-size；RL 侧用 TIS 把隐式 off-policy 校正回来",
+        "tradeoff": "确定性内核更慢（26 s → 42–55 s / 1000 序列）；TIS 引入有界偏差",
+        "key_number": "Qwen3-235B 温度 0：1000 次采样 80 种不同输出 → 1 种；逐位一致训练 KL 恒为 0",
+        "systems": "vLLM 的 batch-invariant 模式、Thinking Machines Tinker；VeRL / slime / OAT 集成 TIS"
+      }
+    },
+    {
+      "id": "amd-rocm",
+      "track": "ai-infra",
+      "kind": "concept",
+      "lane": "basics",
+      "title": "AMD Instinct 与 ROCm",
+      "full_title": "CDNA 3 / CDNA 4 加速器与 ROCm 软件栈（相对 CUDA 的差异）",
+      "org": "AMD",
+      "date": "2023-12",
+      "venue": "概念页（MI300X 2023-12 发布；MI355X 2025-06）",
+      "links": [
+        { "label": "ROCm docs", "url": "https://rocm.docs.amd.com/" },
+        { "label": "MI300X", "url": "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html" }
+      ],
+      "page": "tracks/ai-infra/14-amd-rocm.html",
+      "tldr": "MI300X：8 个 XCD 小芯片、304 CU、192 GB HBM3 / 5.3 TB/s；MI355X（CDNA 4）：288 GB HBM3E / 8 TB/s，FP8 约 5 PFLOPS、原生 FP4/FP6。软件上 HIP ≈ CUDA 的方言（hipify 直译），RCCL ≈ NCCL，wavefront 64 而非 warp 32，LDS 对应 shared memory；vLLM / SGLang / FlashAttention 均有 ROCm 后端。",
+      "tags": ["硬件", "ROCm", "HIP", "MI300"]
     }
   ],
   "edges": [
@@ -230,6 +700,14 @@ window.ATLAS_REGISTRY = {
     { "from": "i-jepa", "to": "v-jepa", "label": "空间 → 时空；L2 → L1" },
     { "from": "v-jepa", "to": "v-jepa-2", "label": "规模化 + 动作条件预测器" },
     { "from": "lejepa", "to": "le-world-model", "label": "SIGReg 取代 EMA / stop-grad" },
-    { "from": "v-jepa-2", "to": "le-world-model", "label": "潜空间规划：冻结大模型 → 端到端小模型" }
+    { "from": "v-jepa-2", "to": "le-world-model", "label": "潜空间规划：冻结大模型 → 端到端小模型" },
+    { "from": "flash-attention", "to": "flashinfer", "label": "从单算子到服务引擎" },
+    { "from": "vllm", "to": "sglang", "label": "块级前缀共享 → 基数树" },
+    { "from": "vllm", "to": "pd-disaggregation", "label": "单引擎 → 分池集群" },
+    { "from": "megatron", "to": "deepseek-v3", "label": "TP/PP → EP + DualPipe" },
+    { "from": "fp8-formats", "to": "deepseek-v3", "label": "逐张量缩放 → 细粒度缩放" },
+    { "from": "deepseek-v3", "to": "deepseek-sparse-attention", "label": "MLA → DSA" },
+    { "from": "rope", "to": "gated-deltanet", "label": "混合架构中只有全注意力层用 RoPE" },
+    { "from": "infra-basics", "to": "speculative-decoding", "label": "带宽受限 → 用算力换延迟" }
   ]
 };

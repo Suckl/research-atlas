@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashAttention 拆解</title>
+<meta name="description" content="FlashAttention 1/2/3：分块 + 在线 softmax + 反向重算如何把精确注意力的 HBM 访问降到 O(N²d²/M)；FA2 的并行重排与 FA3 的 Hopper 异步 / FP8。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="ai-infra" data-node="flash-attention">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：注意力慢，不是因为算得多，而是因为搬得多</h2>
+<p>标准实现把 \(S = QK^\top\)（N×N）写进 HBM，再读出来做 softmax，再写回 P，再读出来乘 V。对 N = 4K、d = 64，S 和 P 各 32M 个数——而 Q、K、V 本身只有 256K 个数。注意力的 FLOPs 是 O(N²d)，但 HBM 访问也是 O(N²)，而 GPU 的 SRAM（A100 每 SM 192 KB，总共 ~20 MB，带宽 ~19 TB/s）比 HBM（40–80 GB，1.5–2 TB/s）快一个数量级：这个算子是<b>内存受限</b>的。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  FlashAttention 不改变注意力的数学，只改变“什么时候把什么搬到哪里”：把 Q 的一块留在 SRAM，流式地读 K、V 块，在片上完成 softmax 与加权求和，<b>从不把 N×N 矩阵写回 HBM</b>。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 核心算法：分块 + 在线 softmax</h2>
+<div class="legend">
+  <span><i class="sw data"></i>HBM 中的张量</span><span><i class="sw enc"></i>SRAM 中的块</span><span><i class="sw pred"></i>片上计算</span><span><i class="sw reg"></i>运行统计量 (m, ℓ)</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 420" role="img" aria-label="FlashAttention 前向分块流程">
+    <!-- HBM column -->
+    <rect class="panel" x="10" y="10" width="200" height="400" rx="12"/>
+    <text class="t-lg" x="24" y="36">HBM</text>
+    <g data-part="hbm-q" data-step="1"><rect class="box data" x="24" y="56" width="170" height="60" rx="6"/><text class="t-c t-b" x="109" y="80">Q  [N × d]</text><text class="t-c t-sm" x="109" y="100">按 B_r 行切成块 Q_i</text>
+      <rect x="30" y="60" width="158" height="12" style="fill:var(--c-enc);opacity:.6"/></g>
+    <g data-part="hbm-kv" data-step="2"><rect class="box data" x="24" y="130" width="170" height="80" rx="6"/><text class="t-c t-b" x="109" y="154">K, V  [N × d]</text><text class="t-c t-sm" x="109" y="174">按 B_c 行切成块 K_j, V_j</text>
+      <rect x="30" y="184" width="40" height="12" style="fill:var(--c-tgt);opacity:.6"/><rect x="72" y="184" width="40" height="12" style="fill:var(--c-tgt);opacity:.35"/><rect x="114" y="184" width="40" height="12" style="fill:var(--c-tgt);opacity:.35"/><rect x="156" y="184" width="26" height="12" style="fill:var(--c-tgt);opacity:.35"/></g>
+    <g data-part="hbm-o" data-step="6"><rect class="box data" x="24" y="300" width="170" height="60" rx="6"/><text class="t-c t-b" x="109" y="324">O  [N × d]</text><text class="t-c t-sm" x="109" y="344">+ logsumexp L [N]（供反向）</text></g>
+    <text class="t-xs" x="24" y="392">从不写：S = QKᵀ、P = softmax(S)</text>
+
+    <!-- SRAM column -->
+    <rect class="panel" x="240" y="10" width="440" height="400" rx="12"/>
+    <text class="t-lg" x="254" y="36">SRAM（一个线程块）</text>
+    <g class="enc" data-part="sram-q" data-step="1"><rect class="box" x="254" y="56" width="120" height="44" rx="8"/><text class="t-c t-b" x="314" y="74">Q_i</text><text class="t-c t-xs" x="314" y="90">B_r × d，常驻</text></g>
+    <path class="edge" d="M194,86 H250" data-step="1"/>
+    <g class="tgt" data-part="sram-kv" data-step="2"><rect class="box" x="254" y="120" width="120" height="44" rx="8"/><text class="t-c t-b" x="314" y="138">K_j, V_j</text><text class="t-c t-xs" x="314" y="154">B_c × d，循环载入</text></g>
+    <path class="edge" d="M194,170 H250" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="2"/>
+    <g class="pred" data-part="s-block" data-step="3"><rect class="box" x="400" y="56" width="130" height="44" rx="8"/><text class="t-c t-b" x="465" y="74">S_ij = Q_i K_jᵀ</text><text class="t-c t-xs" x="465" y="90">B_r × B_c</text></g>
+    <path class="edge" d="M374,78 H396" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="3"/>
+    <g class="reg" data-part="stats" data-step="4"><rect class="box" x="400" y="120" width="130" height="62" rx="8"/><text class="t-c t-b" x="465" y="140">更新 m_i, ℓ_i</text><text class="t-c t-xs" x="465" y="157">m = max(m_old, rowmax S)</text><text class="t-c t-xs" x="465" y="172">ℓ = e^{m_old−m} ℓ + rowsum P̃</text></g>
+    <path class="edge" d="M465,100 V116" style="stroke:var(--c-reg);marker-end:url(#ah-reg)" data-step="4"/>
+    <g class="pred" data-part="p-block" data-step="4"><rect class="box" x="550" y="56" width="120" height="44" rx="8"/><text class="t-c t-b" x="610" y="74">P̃_ij = e^{S_ij − m}</text><text class="t-c t-xs" x="610" y="90">未归一化</text></g>
+    <path class="edge" d="M530,78 H546" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="4"/>
+    <g class="pred" data-part="o-acc" data-step="5"><rect class="box" x="400" y="210" width="270" height="62" rx="8"/><text class="t-c t-b" x="535" y="232">O_i ← e^{m_old − m} · O_i + P̃_ij V_j</text><text class="t-c t-xs" x="535" y="252">把之前累加的结果按新最大值重新缩放，再加上这一块</text></g>
+    <path class="edge" d="M610,100 C610,160 560,180 548,206" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="5"/>
+    <path class="edge" d="M374,150 C390,190 420,200 440,206" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="5"/>
+    <g data-part="loop" data-step="5"><path d="M535,272 C535,300 330,300 314,170" style="fill:none;stroke:var(--text-2);stroke-width:1.6;stroke-dasharray:5 4;marker-end:url(#ah)"/><text class="t-sm" x="330" y="300">对 j = 1 … N/B_c 循环（内循环）</text></g>
+    <g data-part="finalize" data-step="6"><rect class="box" x="400" y="320" width="270" height="44" rx="8"/><text class="t-c t-b" x="535" y="338">O_i ← O_i / ℓ_i；L_i ← m_i + log ℓ_i</text><text class="t-c t-xs" x="535" y="356">最后一次性归一化</text></g>
+    <path class="edge" d="M535,272 V316" data-step="6"/>
+    <path class="edge" d="M400,342 C300,342 240,330 198,330" style="marker-end:url(#ah)" data-step="6"/>
+
+    <!-- right notes -->
+    <rect class="panel" x="700" y="10" width="252" height="400" rx="12"/>
+    <text class="t-lg" x="714" y="36">为什么是精确的</text>
+    <text class="t-sm" x="714" y="62">softmax 的分母要看完整行；</text>
+    <text class="t-sm" x="714" y="80">但 e^{s−m} 可以用“当前最大值”算，</text>
+    <text class="t-sm" x="714" y="98">最大值变了就把旧结果乘 e^{m_old−m}</text>
+    <text class="t-sm" x="714" y="116">补回来 — 结果与一次算完全相同。</text>
+    <text class="t-lg" x="714" y="160">反向</text>
+    <text class="t-sm" x="714" y="186">不存 P（N²），只存 O 和 L（N）；</text>
+    <text class="t-sm" x="714" y="204">反向时用 Q、K、L 重算 P 的块。</text>
+    <text class="t-sm" x="714" y="222">多算 O(N²d) FLOPs，省 O(N²) 读写。</text>
+    <text class="t-lg" x="714" y="266">块大小</text>
+    <text class="t-sm" x="714" y="292">B_c = B_r = ⌈M / 4d⌉，</text>
+    <text class="t-sm" x="714" y="310">M = SRAM 大小，4 份：Q_i K_j V_j O_i</text>
+    <text class="t-sm" x="714" y="328">典型 64–128 行。</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="hbm-q"><h4>Q 在 HBM</h4><p>N × d 的查询矩阵按 B_r 行切块。FA1 的外循环遍历 K/V 块、内循环遍历 Q 块（每个 K/V 块对应多个 Q 块的更新），FA2 把它反过来：<b>每个线程块负责一个 Q_i，内循环遍历所有 K_j / V_j</b>，这样 O_i 的累加完全在片上、不同 Q 块之间无通信。图中画的是 FA2 的顺序。</p></div>
+    <div data-note="hbm-kv"><h4>K、V 在 HBM</h4><p>按 B_c 行切块，循环载入。每个 K_j / V_j 块会被所有 Q 块各读一次：总 HBM 读取 ≈ (N/B_r) × N × d，这就是 IO 复杂度 O(N²d²/M) 的来源（B_r ∝ M/d）。</p></div>
+    <div data-note="sram-q"><h4>Q_i 常驻 SRAM</h4><p>一个线程块把自己的 Q_i 载入一次后不再动它；FA2/FA3 里 Q_i 实际放在寄存器与共享内存中。</p></div>
+    <div data-note="sram-kv"><h4>K_j、V_j 流式载入</h4><p>每轮内循环载入一对块。FA3 用 Hopper 的 TMA（Tensor Memory Accelerator）异步搬运，由“生产者 warp”负责搬、“消费者 warp”负责算，二者流水重叠。</p></div>
+    <div data-note="s-block"><h4>分数块 S_ij</h4><p>B_r × B_c 的小矩阵，由 Tensor Core 计算，只存在于片上，算完即弃。</p></div>
+    <div data-note="stats"><h4>运行最大值与归一化常数</h4><p>每一行维护两个标量：目前见过的最大分数 m_i 和未归一化的 exp 和 ℓ_i。它们是“在线 softmax”的全部状态。FA2 进一步把 ℓ 的除法推迟到最后，减少非矩阵乘的 FLOPs。</p></div>
+    <div data-note="p-block"><h4>未归一化的概率块 P̃</h4><p>e^{S − m}，以当前最大值为基准，数值安全（最大值处为 1）。注意它<b>还没除以分母</b>。</p></div>
+    <div data-note="o-acc"><h4>输出累加</h4><p>关键一步：若这一块把最大值从 m_old 提高到 m，之前累加的 O_i 是以 m_old 为基准的，乘上 e^{m_old − m} 即可对齐，再加上 P̃_ij V_j。这保证了最终结果与一次性算完整行 softmax 后乘 V 完全一致。</p></div>
+    <div data-note="loop"><h4>内循环</h4><p>遍历所有 K/V 块。FA3 的“乒乓调度”让两个 warp 组交替：一个做 GEMM 时另一个做 softmax，掩盖 softmax（非矩阵乘，吞吐低得多）的延迟。</p></div>
+    <div data-note="finalize"><h4>收尾</h4><p>O_i 除以 ℓ_i 得到真正的注意力输出；同时写出 logsumexp L_i = m_i + log ℓ_i（每行一个数），反向传播靠它重建 P。</p></div>
+    <div data-note="hbm-o"><h4>写回</h4><p>只写 O（N × d）和 L（N）。对比标准实现要写 S、P 各 N × N。</p></div>
+    <div data-step-note="1"><h4>① 载入 Q_i</h4><p>每个线程块取一块 Q，B_r 行，常驻片上。</p></div>
+    <div data-step-note="2"><h4>② 载入 K_j、V_j</h4><p>内循环第 j 轮：从 HBM 流式读入一对块。</p></div>
+    <div data-step-note="3"><h4>③ 算分数块</h4><p>S_ij = Q_i K_jᵀ，Tensor Core 上的 B_r × d × B_c 矩阵乘。</p></div>
+    <div data-step-note="4"><h4>④ 在线 softmax 统计量</h4><p>更新行最大值 m 与和 ℓ，计算未归一化的 P̃。</p></div>
+    <div data-step-note="5"><h4>⑤ 重缩放并累加输出</h4><p>O_i ← e^{m_old−m} O_i + P̃ V_j；回到 ② 处理下一块。</p></div>
+    <div data-step-note="6"><h4>⑥ 归一化并写回</h4><p>所有块处理完后除以 ℓ，写出 O_i 与 L_i。</p></div>
+  </div>
+  <figcaption>图 2　FlashAttention 前向（FA2 的循环顺序）。依据 FA1 论文 Algorithm 1–2 与 FA2 论文 §3。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 三代的演进</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>FlashAttention（2022-05）</th><th>FlashAttention-2（2023-07）</th><th>FlashAttention-3（2024-07）</th></tr></thead>
+  <tbody>
+    <tr><td>核心贡献</td><td>IO 感知：分块 + 在线 softmax + 反向重算</td><td>工作划分：减少非矩阵乘 FLOPs；沿序列维度跨线程块并行；warp 之间按 Q 切分而非按 K 切分</td><td>面向 Hopper：warp 专业化（生产者/消费者）+ TMA 异步、GEMM 与 softmax 乒乓交错、FP8 的块量化与非相干处理</td></tr>
+    <tr><td>硬件</td><td>A100</td><td>A100 / H100（未用 Hopper 新特性）</td><td>H100</td></tr>
+    <tr><td>效率</td><td>GPT-2 训练 3×，BERT-large 15%，LRA 2.4×</td><td>比 FA1 快约 2×；A100 上达理论峰值 50–73%（FA1 约 25–40%）；端到端 225 TFLOPS/GPU（72% MFU）</td><td>FP16 740 TFLOPS（75%，FA2 在 H100 仅 35%）；FP8 接近 1.2 PFLOPS，误差比基线 FP8 低 2.6×</td></tr>
+    <tr><td>新能力</td><td>块稀疏 FlashAttention；Path-X（16K）首次超过随机</td><td>—</td><td>FP8 注意力</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="c-fa2">3.1 FA2 的三处改动为什么有效</h3>
+<ol>
+  <li><b>减少非矩阵乘 FLOPs</b>：A100 的矩阵乘吞吐 312 TFLOPS，非矩阵乘只有 19.5 TFLOPS——每个标量 exp / 除法的代价相当于 16 次乘加。FA2 把 O 的重缩放推迟、只在块末尾做一次，并把 ℓ 的除法移到最后。</li>
+  <li><b>沿序列维度并行</b>：FA1 只在 batch × heads 上并行，长序列、小 batch 时线程块数不够用（A100 有 108 个 SM）。FA2 把不同的 Q 块分给不同线程块（反向则沿 K/V 块并行），占满 SM。</li>
+  <li><b>warp 间按 Q 切分</b>：FA1 在一个线程块内把 K、V 切给 4 个 warp，每个 warp 得到部分的 QKᵀ 后要通过共享内存同步求和；FA2 改为把 Q 切给各 warp，每个 warp 独立完成自己几行的全部计算，不再有 warp 间通信。</li>
+</ol>
+
+<h3 id="c-fa3">3.2 FA3：把 Hopper 的异步用起来</h3>
+<p>H100 的 Tensor Core（wgmma）和 TMA 都是异步指令；FA2 的同步写法只能用到 35% 的峰值。FA3：</p>
+<ul>
+  <li><b>生产者 / 消费者 warp 专业化</b>：一组 warp 专门发 TMA 把 K、V 块搬进共享内存（环形缓冲），其余 warp 组专门算；用寄存器重分配让计算 warp 拿到更多寄存器。</li>
+  <li><b>乒乓调度</b>：两个 warp 组交替执行“GEMM”与“softmax”，一个在 Tensor Core 上乘时另一个在多功能单元上算 exp，掩盖 softmax 的延迟。</li>
+  <li><b>FP8</b>：按块量化（block quantization）配合随机正交变换（incoherent processing）把离群值摊开，降低量化误差。</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. IO 复杂度与形状</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>量</th><th>标准注意力</th><th>FlashAttention</th></tr></thead>
+  <tbody>
+    <tr><td>FLOPs</td><td>O(N²d)</td><td>O(N²d)（反向多一次重算 P）</td></tr>
+    <tr><td>HBM 访问</td><td>Θ(Nd + N²)</td><td>Θ(N²d²/M)，M = SRAM 大小；d² ≪ M 时远小于 N²</td></tr>
+    <tr><td>额外显存</td><td>O(N²)（存 S、P 供反向）</td><td>O(N)（存 L）</td></tr>
+    <tr><td>块尺寸</td><td>—</td><td>B_c = B_r = ⌈M/4d⌉；d=64、M=100KB 时约 400 行，实际用 64–128</td></tr>
+  </tbody>
+</table></div>
+<p>论文证明：对 M ∈ [d, Nd] 的任何 SRAM 大小，没有精确注意力算法能渐近地少于 Ω(N²d²/M) 次 HBM 访问——FlashAttention 在这个意义上是最优的。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">5. 伪代码</h2>
+<div class="code-title">flash_attention_forward.py（FA2 顺序，单头）</div>
+<pre><code class="lang-py">def flash_attention_forward(Q, K, V, Br, Bc):          # Q,K,V: [N, d] in HBM
+    N, d = Q.shape
+    O = zeros(N, d); L = zeros(N)
+    for i in range(0, N, Br):                           # 每个线程块一个 Q 块（并行）
+        Qi = load(Q[i:i+Br])                            # SRAM 常驻
+        Oi = zeros(Br, d); mi = full(Br, -inf); li = zeros(Br)
+        for j in range(0, N, Bc):                       # 内循环：流式读 K/V 块
+            Kj, Vj = load(K[j:j+Bc]), load(V[j:j+Bc])
+            Sij = Qi @ Kj.T / sqrt(d)                   # [Br, Bc]，片上
+            m_new = maximum(mi, Sij.max(axis=1))
+            P = exp(Sij - m_new[:, None])               # 未归一化
+            li = exp(mi - m_new) * li + P.sum(axis=1)
+            Oi = exp(mi - m_new)[:, None] * Oi + P @ Vj # 重缩放 + 累加
+            mi = m_new
+        store(O[i:i+Br], Oi / li[:, None])              # 最后归一化
+        store(L[i:i+Br], mi + log(li))                  # 供反向重算 P
+    return O, L</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">6. 关键结果</h2>
+<ul>
+  <li>FA1：BERT-large（序列 512）端到端比 MLPerf 1.1 纪录快 15%；GPT-2（1K）快 3×；Long-Range Arena（1K–4K）快 2.4×；Path-X（16K）61.4%、Path-256（64K）63.1%，首次超过随机。</li>
+  <li>FA2：比 FA1 快约 2×；A100 上前向达到理论峰值的 50–73%；GPT 训练端到端 225 TFLOPS/GPU（72% MFU）。</li>
+  <li>FA3：H100 上 FP16 前向 740 TFLOPS（75% 利用率），FP8 接近 1.2 PFLOPS；比 FA2 快 1.5–2.0×。</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="questions">7. 简答题</h2>
+<div class="qa">
+  <h3 id="q3"><span class="qid">Q3</span>FlashAttention 为什么能在不写出 N×N 矩阵的前提下得到精确的 softmax 注意力？FA2 与 FA3 各自改进了什么？</h3>
+  <div class="ans">
+    <p class="short">靠在线 softmax：分块载入 K、V，每块只需当前行的最大值 m 与未归一化的和 ℓ 就能算出 e^{s−m}；当新块把最大值抬高时，把已累加的输出乘 e^{m_old−m} 重新对齐再加上新块的贡献，最后统一除以 ℓ——结果与一次算完整行完全相同，而 N×N 的分数矩阵从未离开片上内存。</p>
+    <ul>
+      <li>IO 从标准实现的 Θ(N² + Nd) 降到 Θ(N²d²/M)，并被证明在 M ∈ [d, Nd] 内渐近最优；反向只存每行一个 logsumexp，用重算换掉 O(N²) 的存储。</li>
+      <li>FA2：减少非矩阵乘 FLOPs（重缩放推迟到块末尾）、沿序列维跨线程块并行、warp 之间按 Q 切分避免共享内存同步 → A100 上 50–73% 峰值。</li>
+      <li>FA3：Hopper 的 warp 专业化 + TMA 异步搬运、GEMM 与 softmax 乒乓交错、带块量化与非相干处理的 FP8 → H100 FP16 75% 峰值、FP8 接近 1.2 PFLOPS。</li>
+    </ul>
+    <p class="cite">依据：FA1 §3 与定理 2–3；FA2 §3；FA3 §3。</p>
+  </div>
+  <h3 id="q4"><span class="qid">Q4</span>FlashInfer 与 FlashAttention 分别解决什么层面的问题？FlashInfer 用什么抽象统一了分页、基数树、树状等 KV 布局？</h3>
+  <div class="ans">
+    <p class="short">FlashAttention 解决的是“一个注意力算子怎么算得快”；FlashInfer 解决的是“推理服务里成百上千条长度不一、KV 布局各异的请求，怎么一起算得快”。</p>
+    <ul>
+      <li><b>数学相同</b>：FlashInfer 的核心内核本身就建立在 FA2 / FA3 的分块 + 在线 softmax 之上（FlashInfer 论文 §3.2）。</li>
+      <li><b>FlashAttention 的输入假设</b>：稠密或 varlen 的连续张量；主要面向训练（前向 + 反向），对分页 / 基数树 / 树状共享前缀这类 KV 布局没有统一抽象；解码场景下 tile 选择并不最优（FlashInfer §4.2 的测量）。</li>
+      <li><b>FlashInfer 增加的三层</b>：① 块稀疏格式统一各种 KV 布局并支持不同块大小的组合；② JIT 模板生成注意力变体（自定义 logits 变换 / 掩码，可去掉 softmax）；③ plan/run 调度：按请求长度做负载均衡、固定 grid 以兼容 CUDAGraph、确定性输出。详见 <a href="02-flashinfer.html#q4">FlashInfer 页</a>。</li>
+      <li><b>一句话</b>：FlashAttention 是算子，FlashInfer 是围绕算子的“服务引擎”——它调用 FA 风格的内核，但负责批处理、布局和调度。</li>
+    </ul>
+    <p class="cite">依据：FA1 §2–3；FA2 §3；FA3 §3；FlashInfer §3.1–3.4、§4.2、附录 B。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Dao, Fu, Ermon, Rudra, Ré. <i>FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.</i> NeurIPS 2022. <a href="https://arxiv.org/abs/2205.14135">arXiv:2205.14135</a></li>
+  <li>Dao. <i>FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning.</i> 2023. <a href="https://arxiv.org/abs/2307.08691">arXiv:2307.08691</a></li>
+  <li>Shah, Bikshandi, Zhang, Thakkar, Ramani, Dao. <i>FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2407.08608">arXiv:2407.08608</a></li>
+  <li>Milakov, Gimelshein. <i>Online normalizer calculation for softmax.</i> 2018.（在线 softmax 的来源）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

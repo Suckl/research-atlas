@@ -93,8 +93,8 @@ def check_registry(reg: dict) -> tuple[set[str], set[str]]:
                 err(f"node '{n.get('id')}': missing '{k}'")
         if n.get("track") not in tset:
             err(f"node '{n.get('id')}': unknown track '{n.get('track')}'")
-        if n.get("kind") not in ("model", "concept", "bridge"):
-            err(f"node '{n.get('id')}': kind must be model|concept|bridge")
+        if n.get("kind") not in ("model", "concept", "bridge", "paper"):
+            err(f"node '{n.get('id')}': kind must be model|concept|bridge|paper")
         if not re.fullmatch(r"\d{4}-\d{2}", str(n.get("date", ""))):
             err(f"node '{n.get('id')}': date must be YYYY-MM")
         page = n.get("page", "").split("#")[0]
@@ -156,7 +156,34 @@ WIDGET_FILES = {
     "attn-mask": "attnmask.js",
     "cem": "cem.js",
     "sigreg": "sigreg.js",
+    "roofline": "roofline.js",
+    "paged-kv": "pagedkv.js",
+    "specdec": "specdec.js",
+    "collectives": "collectives.js",
 }
+
+
+def check_questions(reg: dict, node_ids: set[str]) -> None:
+    """track.questions[].nodes[] must point at known nodes, and each anchor must exist on the page."""
+    by_id = {n["id"]: n for n in reg.get("nodes", []) if "id" in n}
+    for t in reg.get("tracks", []):
+        for q in t.get("questions", []):
+            for k in ("id", "text", "nodes"):
+                if k not in q:
+                    err(f"track '{t.get('id')}': question {q} missing '{k}'")
+            for ref in q.get("nodes", []):
+                nid = ref.get("node")
+                if nid not in node_ids:
+                    err(f"track '{t.get('id')}' {q.get('id')}: unknown node '{nid}'")
+                    continue
+                page = ROOT / by_id[nid]["page"].split("#")[0]
+                if not page.exists():
+                    continue
+                scan = PageScan()
+                scan.feed(page.read_text(encoding="utf-8"))
+                anchor = ref.get("anchor")
+                if anchor and anchor not in scan.ids:
+                    err(f"track '{t.get('id')}' {q.get('id')}: page {page.relative_to(ROOT).as_posix()} has no id '{anchor}'")
 
 
 def check_page(path: Path, node_ids: set[str]) -> None:
@@ -215,6 +242,8 @@ def main() -> int:
     pages = [p for p in ROOT.rglob("*.html") if "templates" not in p.parts and ".git" not in p.parts]
     for page in sorted(pages):
         check_page(page, node_ids)
+    if reg:
+        check_questions(reg, node_ids)
     # nodes without a page scan (page listed but no data-node pointing back)
     declared = {n["page"].split("#")[0] for n in reg.get("nodes", [])}
     linked_back = set()

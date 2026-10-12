@@ -61,13 +61,31 @@ tracks: [{ id, title, short, status, page, summary,
            reading_order: [node ids in reading order],
            lanes: [{ id, label }],            // rows of the lineage diagram
            milestones: [{ date, label, node? }],
-           compare_fields: [{ key, label }] }]  // rows of the compare table
+           compare_fields: [{ key, label }],   // rows of the compare table
+           questions?: [{ id, text, nodes: [{ node, anchor }] }] }]  // review-question index
 nodes:  [{ id, track, kind, lane, title, full_title?, authors?, org?, date, venue?, arxiv?,
            links?: [{ label, url }], page, tldr, tags?, facts?: { <compare key>: text } }]
 edges:  [{ from, to, label }]                  // lineage arrows (node ids)
 ```
 
+`kind` is one of `model` (a model/architecture), `paper` (a systems/method paper), `concept`, `bridge`.
 `page` paths are relative to the repo root. A page may include a `#fragment`.
+
+### Question index (tracks that answer a fixed list of questions)
+
+A track may carry `questions[]`. Each entry maps a question id (`"Q7"`) and its text to one or more
+`{ node, anchor }` pairs. The track page renders the index with `<div data-render="questions">`; a node
+page's hero automatically shows "本页回答 Q7 Q16 …" badges linking to `#<anchor>`. Put the answers in a
+`<h2 id="questions">简答题</h2>` section using this markup (CSS in `atlas.css` §9):
+
+```html
+<div class="qa">
+  <h3 id="q7"><span class="qid">Q7</span>Question text</h3>
+  <div class="ans"><p class="short">One-paragraph answer.</p><ul>…</ul><p class="cite">依据：…</p></div>
+</div>
+```
+
+`check.py` verifies every `{node, anchor}` points at an existing page id.
 
 ## Page anatomy (what templates/model-page.html gives you)
 
@@ -128,8 +146,13 @@ rely on them (`01-i-jepa.html#c-masking`, etc.).
 
 `<div data-widget="<name>" data-…></div>` + `<script defer src="../../assets/js/widgets/<file>.js">`.
 Available: `mask-2d` (I-JEPA block masking), `mask-3d` (V-JEPA tubelet masking),
-`attn-mask` (block-causal vs causal+AdaLN), `cem` (CEM + MPC toy planner),
-`sigreg` (SIGReg / Epps–Pulley in 2-D with gradient descent).
+`attn-mask` (block-causal vs causal+AdaLN), `cem` (CEM + MPC toy planner; caption via `data-caption`),
+`sigreg` (SIGReg / Epps–Pulley in 2-D with gradient descent),
+`roofline` (prefill/decode roofline + KV-cache calculator; `data-panel="both|roofline|kv"`),
+`paged-kv` (PagedAttention blocks, block tables, copy-on-write), `specdec` (speculative-decoding
+speedup curves + rejection-sampling demo), `collectives` (all-reduce / all-gather / reduce-scatter /
+all-to-all step-through; `data-ranks`). Widget attributes must not be named `data-note` — that name is
+reserved for architecture-figure notes and the checker will flag it.
 New widget = new file registering `window.AtlasWidgets["<name>"] = (el, Atlas) => {…}`;
 helpers on `Atlas`: `h` (DOM), `s` (SVG), `rng(seed)`, `gauss(rand)`, `esc`, `typeset`.
 Widgets must be deterministic for a given seed and must not fetch anything.
