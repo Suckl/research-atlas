@@ -178,6 +178,7 @@ WIDGET_FILES = {
     "specdec": "specdec.js",
     "collectives": "collectives.js",
     "fewstep-2d": "fewstep2d.js",
+    "memory-toy": "memorytoy.js",
 }
 
 

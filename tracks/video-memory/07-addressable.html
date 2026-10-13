@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorldTrace 与 L2R：记忆如何被读回</title>
+<meta name="description" content="WorldTrace 修复 KV RoPE 地址与 canonical 压缩；L2R 用 camera gate、re-visibility trigger 从 GLA/GDN 循环状态读回。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="worldtrace">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：存着记忆，为什么还会忘？</h2>
+<p><a href="06-evicted-kv.html">保留被逐出的 KV</a>解决了“没有证据”，但“证据在库里”与“query 能读到它”仍是两回事。WorldTrace 诊断时间 RoPE 地址超出训练分布，以及对不同旋转相位直接平均造成的信号抵消；Learning to Retrieve（L2R）则研究怎样从固定形状的循环状态中，按当前相机视角读回历史。<span class="src">WorldTrace §2；L2R §3.2</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  WorldTrace 修复 KV 的“地址与内容坐标”；L2R 学习循环状态的“读什么、何时读”。两篇解决不同的读失败，共页比较不表示架构或权重继承。
+</div>
+<p>本页沿用视频时间 \(t\)、去噪时间 \(\tau\)、latent \(x_t\)、近期窗口 \(H_t\)、动作 \(a_t\)、文本 \(c_t\)、相机 \(p_t\)、记忆 \(M_t\)、查询 \(q_t\)、读出 \(r_t\)：</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\quad x_{t+1}\sim G(H_t,r_t,a_t,c_t),\quad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1}).$$</div>
+<p>WorldTrace 的 \(M_t\) 是 summary/recent KV，\(q_t\) 是注意力 query；L2R 的 \(M_t\) 是内部 state，camera features 调节其访问。下面用 token 索引 \(j\) 表示 L2R 的扫描顺序，用 \(g_j\) 表示 trigger，避免把论文的 token 时间与视频时间、论文的 trigger \(r_j\) 与本轨道读出 \(r_t\) 混淆。</p>
+
+<h2 id="architecture">2. 全局架构：WorldTrace 的地址与 writer</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>动作 / 相机 / 文本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<p>下图以 WorldTrace 为主：生成器保持冻结，writer 是规则算子。L2R 的可训练门控与状态更新另见 <a href="#learning-to-retrieve">组件节</a>。<span class="src">WorldTrace §3；L2R §3.2–3.3</span></p>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 450" role="img" aria-label="WorldTrace：离窗 key 先解除时间旋转，再生成摘要或 landmark，按槽位重定位读取">
+    <g class="data" data-part="oldkeys" data-step="1 5">
+      <rect class="box" x="20" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="69">离窗帧的 K / V</text>
+      <text class="t-c t-sm" x="110" y="96">原写入位置 t_m</text>
+    </g>
+    <path class="edge" d="M200,80 H256" data-step="2"/>
+    <g class="reg" data-part="canonical" data-step="2 6">
+      <rect class="box" x="260" y="40" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="69">canonical key</text>
+      <text class="t-c t-sm" x="370" y="96">去掉原时间 RoPE</text>
+    </g>
+    <path class="edge reg" d="M370,120 V206" data-step="2"/>
+    <g class="data" data-part="writer" data-step="2 6">
+      <rect class="box" x="260" y="210" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="239">Field / Landmark</text>
+      <text class="t-c t-sm" x="370" y="266">分组平均 / 原样冻结</text>
+    </g>
+    <path class="edge reg" d="M480,250 H500 V80 H536" data-step="3 6"/>
+    <g class="reg" data-part="slots" data-step="3 6">
+      <rect class="box" x="540" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="69">摘要槽位</text>
+      <text class="t-c t-sm" x="630" y="96">各有虚拟位置</text>
+    </g>
+    <g class="act" data-part="query" data-step="1 3">
+      <rect class="box" x="780" y="40" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="860" y="69">当前 query</text>
+      <text class="t-c t-sm" x="860" y="96">q_t + 条件</text>
+    </g>
+    <path class="edge reg" d="M630,120 V206" data-step="3"/>
+    <path class="edge act" d="M860,120 V155 H700 V206" data-step="3"/>
+    <g class="reg" data-part="recent" data-step="1 3 5">
+      <rect class="box" x="20" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="239">近期原样 KV</text>
+      <text class="t-c t-sm" x="110" y="266">保留局部细节</text>
+    </g>
+    <path class="edge reg" d="M200,250 H220 V318 H510 V250 H536" data-step="3"/>
+    <g class="enc" data-part="generator" data-step="3 4">
+      <rect class="box frozen" x="540" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="239">原 attention + G</text>
+      <text class="t-c t-sm" x="630" y="266">读取重新旋转的 K</text>
+    </g>
+    <path class="edge enc" d="M720,250 H776" data-step="4"/>
+    <g class="data" data-part="output" data-step="4 5">
+      <rect class="box" x="780" y="210" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="860" y="239">新生成块</text>
+      <text class="t-c t-sm" x="860" y="266">写入近期 KV</text>
+    </g>
+    <path class="edge enc" d="M860,290 V336 H110 V294" data-step="5"/>
+    <path class="edge reg" d="M110,290 V390 H256" data-step="5"/>
+    <g class="reg" data-part="update" data-step="5 6">
+      <rect class="box" x="260" y="350" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="379">逐出与更新</text>
+      <text class="t-c t-sm" x="370" y="406">重分组 / 旧 landmark 淘汰</text>
+    </g>
+    <path class="edge reg" d="M260,390 H12 V80 H16" data-step="6"/>
+    <text class="t-sm" x="548" y="393">新位置不代表新观察时间</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="oldkeys"><h4>缓存存在，不保证可读</h4><p>旧 key 仍带原时间相位；当前 query 的相对 RoPE offset 随 rollout 增长，可能超出训练范围。地址失配与内容已经丢失是两种诊断。<span class="src">WorldTrace §2.1</span></p></div>
+    <div data-note="canonical"><h4>先解除相位再压缩</h4><p>只去掉 temporal RoPE，保留需要的空间结构；values 不带 RoPE。不同时间旋转过的 key 直接平均可能抵消，canonical 平均只在共同坐标下合并。<span class="src">WorldTrace §2.2、§3.1、Eq. 3</span></p></div>
+    <div data-note="writer"><h4>writer 按任务选择</h4><p>Field 平均连续时间组，适合平滑历史；Landmark 按相邻 canonical keys 的距离突变检测 scene-entry，保留原样关键帧。它们共享地址机制，但不是同一种召回容量。<span class="src">WorldTrace §3.3–3.4</span></p></div>
+    <div data-note="slots"><h4>槽位排名成为虚拟位置</h4><p>每个 summary slot 按 rank 获得训练分布内的固定相对 offset，避免多个远程摘要都被截到同一旧地址。内容年代与 attention 虚拟地址被分开。<span class="src">WorldTrace Def. 1、Rem. 1</span></p></div>
+    <div data-note="query"><h4>地址修复不需要位姿检索</h4><p>WorldTrace 让原 attention 读取摘要，不增加 camera Top-k 检索器。相机/动作仍是已有世界模型的条件；LoopBench 用轨迹构造配对回访。<span class="src">WorldTrace §3、§4.1</span></p></div>
+    <div data-note="recent"><h4>局部高带宽通路</h4><p>recent 保留原样帧级 KV，summary 用有限槽位覆盖更远历史。相同 slot 数不意味着不同 writer 保留相同细节。<span class="src">WorldTrace §3.1–3.4</span></p></div>
+    <div data-note="generator"><h4>训练免费，位置仍有前提</h4><p>不修改权重；attention 读取重新旋转的 summary K 与对应 V。需要槽位预算及相对 offset 与训练可见范围兼容。<span class="src">WorldTrace §3.1、§4.1</span></p></div>
+    <div data-note="output"><h4>写入生成证据</h4><p>新块来自模型自己，缓存保留其生成表征。回访与第一次生成相似不能保证第一次生成本来就是正确世界。<span class="src">WorldTrace §4.1</span></p></div>
+    <div data-note="update"><h4>固定 GPU 槽位与完整历史</h4><p>Field 将逐出帧 canonical keys 留在 host memory，重新按来源组计算均值；Landmark 满后删除最老 scene-entry。前者摘要有界而主机源历史增长，后者 landmark bank 有界。<span class="src">WorldTrace §3.3–3.4、App. E.6</span></p></div>
+    <div data-step-note="1"><h4>① 准备 query 与缓存</h4><p>分开当前 query、近期原样 KV 和较远历史。</p></div>
+    <div data-step-note="2"><h4>② 在共同坐标写内容</h4><p>解除 key 的原时间相位，再平均来源组或冻结 scene-entry key。</p></div>
+    <div data-step-note="3"><h4>③ 分配可读地址</h4><p>按 slot rank 重新旋转 summary K，让原 attention 读取。</p></div>
+    <div data-step-note="4"><h4>④ 生成</h4><p>当前块去噪，读取摘要和 recent 两种粒度的历史。</p></div>
+    <div data-step-note="5"><h4>⑤ 写近期 KV</h4><p>新块加入近期缓存，最老 recent 帧离窗。</p></div>
+    <div data-step-note="6"><h4>⑥ 更新有限 summary</h4><p>Field 更新分组均值；Landmark 按事件加入或 FIFO 淘汰，下一步重新分配虚拟位置。</p></div>
+  </div>
+  <figcaption>图 1　WorldTrace 的一次生成及缓存更新；新旧地址分离是共同部分，Field 与 Landmark 是互选 writer。<span class="src">WorldTrace Fig. 2、§3、App. G</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解：两种“读失败”</h2>
+<h3 id="c-address">3.1 WorldTrace：地址超界与相位抵消</h3>
+<p>时间 RoPE 的 attention logit 含有 \(q^\top R(\iota_q-\iota_k)k\)。复制旧 key 到新 cache 位置，却不修正其旋转相位，并不会改变真实相对地址。反过来，只把远程 offset 截到上限，也可能让不同 summary 槽位拥有相同位置，失去区分。<span class="src">WorldTrace §2.1、Rem. 1</span></p>
+<div class="formula">$$\iota_s^v=\iota_q-(L_{\mathrm{attn}}-1-s),\quad s=0,\ldots,N_s-1,\quad N_s+N_r=L_{\mathrm{attn}}.$$</div>
+<p>此处 \(\iota\) 是视频位置索引，\(N_s,N_r\) 分别是 summary 与 recent 槽位数。虚拟位置只随当前 query 和槽位 rank 变化，历史延长不会扩大它的相对 offset。<span class="src">WorldTrace Def. 1</span></p>
+<div class="formula">$$\bar K_s^0=\frac{1}{|\mathcal B_s|}\sum_{m\in\mathcal B_s}R(-\iota_m)\widetilde K_m,\qquad \widetilde K_s=R(\iota_s^v)\bar K_s^0,\qquad \bar V_s=\frac{1}{|\mathcal B_s|}\sum_{m\in\mathcal B_s}V_m.$$</div>
+<p>Field 在 canonical 域平均，Landmark 相当于取单一来源，不做平均。这里简写旋转频率，原式按 RoPE frequency pair 定义。所谓平均 attention 保留，只是把来源 keys 放在同一虚拟位置后的<b>平均 pre-softmax 分数</b>，不是完整 attention 权重或输出的精确保真定理。<span class="src">WorldTrace Eq. 3–4、Rem. 2、App. C</span></p>
+<h3 id="learning-to-retrieve">3.2 Learning to Retrieve：从 GLA / GDN 状态中读什么、何时读</h3>
+<p><a href="https://arxiv.org/abs/2610.11444">L2R</a>没有外部历史帧 Top-k。它将部分 self-attention 替换为持久状态层，保留一部分 softmax 层处理局部空间结构。相机 Plücker 特征调制 gate \(\gamma_j\)，trigger \(g_j\) 决定何时激活这个相机条件访问。gate 是内部状态的调节算子，不是返回旧帧 ID 的可解释索引。<span class="src">L2R §3.2–3.3</span></p>
+<p>GLA 的写入是 value–key 外积；GDN 额外用 delta correction 抑制已记住方向的旧分量。下式采用 Appendix B 的方向，\(S_j\in\mathbb R^{d_v\times d_k}\)，\(\Gamma_j\) 为门控向量的对角矩阵，\(\beta_j\) 为 GDN 写入强度：</p>
+<div class="formula">$$S_j^{\mathrm{GLA}}=\begin{cases}\Gamma_j S_{j-1}+v_jk_j^\top,&g_j=1,\\S_{j-1}+v_jk_j^\top,&g_j=0,\end{cases}$$</div>
+<div class="formula">$$S_j^{\mathrm{GDN}}=\begin{cases}\Gamma_j(S_{j-1}-\beta_jS_{j-1}k_jk_j^\top)+\beta_jv_jk_j^\top,&g_j=1,\\S_{j-1}+\beta_jv_jk_j^\top,&g_j=0.\end{cases}$$</div>
+<p>trigger 关闭时仍保留既有状态并写入新 token，并不是“没有上下文”。GLA 与 GDN 的额外修正不同，不能将 L2R 归成一种通用的帧库检索。<span class="src">L2R Eq. 3、App. B Eq. 18–19</span></p>
+<p><b>Re-visibility trigger：</b>训练时离线预测深度，将旧表面反投影后用已知相机轨迹投到目标帧；曾经离开视锥或被遮挡、现在重新出现的有效 token 赋正标签。推理用学到的 trigger，无需在线显式几何库。这个监督面向静态表面再可见，离屏动态状态预测仍是开放问题。<span class="src">L2R Fig. 2、Eq. 5、App. D</span></p>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>WorldTrace</th><th>L2R（GLA / GDN）</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>recent 原样 KV；Field 分组 canonical K/V 均值，或 Landmark 原样 scene-entry K/V。<span class="src">§3.1–3.4</span></td><td>每 memory layer/head 的循环矩阵状态；没有逐帧候选 bank。<span class="src">§3.2、App. B</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>推理生成 KV；recent 离窗后重组摘要或事件写入。<span class="src">§3.3–3.4、App. G</span></td><td>层内按 token 递推；训练为含参考/上下文的加噪视频。跨去噪时刻具体持久化协议未从公开代码核验。<span class="src">§3.2–3.3、App. A.3</span></td></tr>
+    <tr><td>如何寻址</td><td>槽位 rank 的虚拟时间地址；原 query 内容匹配。<span class="src">Def. 1</span></td><td>camera-conditioned \(\gamma_j\) 选状态方向，学到的 re-visibility trigger 激活。<span class="src">Eq. 4–5</span></td></tr>
+    <tr><td>如何读</td><td>canonical K 重新旋转后由已有 attention 读取。<span class="src">Eq. 3–4</span></td><td>内部 gated state-access 与状态转移；混合保留 softmax 层。<span class="src">§3.2–3.3</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>Field 平均混合细节但保留 host 来源；Landmark 满后删最老事件。<span class="src">§3.3–3.4</span></td><td>gate、外积写入与 GDN delta correction 改写固定状态；不存在帧级 FIFO，可能产生干扰与遗忘。<span class="src">App. B–C</span></td></tr>
+  </tbody>
+</table></div>
+<h3 id="c-vmem">3.3 与 VMem 的对照：显式证据与内部状态</h3>
+<p><a href="10-vmem.html">VMem</a>按 surfel 可见性与覆盖关系索引历史视图，生成器实际读取的是挑出的旧 views。L2R 用 recurrent state 取代外部取帧路径，减少在线几何维护，但无法直接展示“读回了哪一帧”，也有固定状态容量瓶颈。<span class="src">VMem §3.1–3.2；L2R §3.2、§4.4</span></p>
+<div class="callout code-note"><span class="callout-title">对照实现的开销，不能当作原方法定义</span>L2R §4.5 所测 VMem 实现每步对全部 stored frames 重建 surfel index；原 VMem §3.1 使用新生成视图与 retrieved views 联合构建 point-map，App. C 冻结旧深度并保存新深度。L2R 的耗时曲线绑定其评测实现，不能概括为 VMem 必然每步重建全部历史。</div>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 预算</th><th>限制</th></tr></thead>
+  <tbody>
+    <tr><td>WorldTrace 每层 summary KV（示意）</td><td>K、V 各 \([B,N_sn,h,d_h]\)</td><td>每 slot 相当于一个 latent 帧；\(n\) 为每帧 token 数。<span class="src">§3.1</span></td></tr>
+    <tr><td>WorldTrace Field / Landmark 配置</td><td>Field \(N_s/N_r=2/4\)；Landmark \(4/2\)</td><td>总计 6 latent 帧；不同任务的 writer 与近期预算不同。<span class="src">§4.1</span></td></tr>
+    <tr><td>WorldTrace Field host 来源</td><td>随逐出帧数增长的 canonical keys</td><td>固定 GPU summary 不等于总历史存储固定。<span class="src">§3.3、App. E.6</span></td></tr>
+    <tr><td>L2R 状态（按 Appendix B 方向）</td><td>\([B,h,d_v,d_k]\) / memory layer</td><td>视频变长不增加矩阵维数，但覆盖、干扰与读取能力受容量限制。<span class="src">App. B–C</span></td></tr>
+    <tr><td>L2R 的相机条件</td><td>每 token 的 12 维 Plücker 特征</td><td>投影后调制 \(\log\gamma_j\)，不是 latent bank 的帧 ID。<span class="src">§3.2 Eq. 2–4</span></td></tr>
+    <tr><td>L2R memory:softmax 层比</td><td>主比较 3:1；另测 1:1 与 7:1</td><td>3:1 replay 较强，1:1 loop closure 较强；并非全部替换更好。<span class="src">§4.4、Tab. 4</span></td></tr>
+  </tbody>
+</table></div>
+<p><span class="unverified">L2R 截至核查时的官方代码、每个去噪时间的 state 复制/重置/提交细节未核验。</span>本页只把论文明确的 token 递推作为机制说明，不假定它与流式 KV 一样仅在 clean pass 写入。</p>
+
+<h2 id="objective">5. 训练目标：位置修复无需训练，读回策略需要监督</h2>
+<p>WorldTrace 不训练新模块；Field/Landmark 的选择规则及槽位位置直接用于推理。L2R 则把 memory layer 的 Q/K/V/output 投影从原 attention 初始化，相机依赖路径零初始化，再联合优化 target-frame flow loss 与 trigger 监督。参考帧、上下文帧不进入生成目标损失。<span class="src">WorldTrace §3；L2R §3.3</span></p>
+<div class="formula">$$\mathcal L=\mathcal L_{\mathrm{denoise}}+\lambda_g\mathcal L_g,\qquad \mathcal L_g=\frac{1}{|\mathcal V|}\sum_{j\in\mathcal V}\mathrm{BCE}_{w_+}(\hat g_j,y_j).$$</div>
+<p>\(\mathcal V\) 仅含有效 target tokens；默认 \(\lambda_g=0.05\)、正例权重 \(w_+=3\)。BCE 从 logits 计算，trigger 二值化不可导，其离散决策停止梯度；camera gate 与生成主干由联合目标训练。<span class="src">L2R Eq. 5–6</span></p>
+<p>训练用几何构造监督与推理在线维护几何是不同成本条件。L2R 省去外部 retrieval pathway，但训练数据仍需要相机轨迹与离线深度标签；“无显式 3D 推理条件”不意味着训练不需要几何。<span class="src">L2R Fig. 2、§3.2</span></p>
+
+<h2 id="pseudocode">6. 伪代码：地址修复与状态门控分别发生在哪里</h2>
+<div class="code-title">addressable_memory.py（机制示意；WorldTrace §3/App. G，L2R App. B）</div>
+<pre><code class="lang-py">recent, summaries, host_sources = [], [], []
+for chunk in generated_stream:
+    q = current_query_position(chunk)
+    positions = [q - (L_attn - 1 - s) for s in range(Ns)]
+    K_read = rotate_temporal(summaries.K_canonical, positions)
+    x, kv = generate_with_kv(K_read, summaries.V, recent, chunk)
+    recent.extend(kv)
+    evicted = pop_old_recent(recent, Nr)
+    canonical = unrotate_temporal(evicted.K, evicted.original_positions)
+    if writer == "field":
+        host_sources.extend((canonical, evicted.V))
+        groups = partition_contiguous_history(host_sources, Ns)
+        summaries = means_from_original_sources(groups)
+    elif writer == "landmark":
+        if canonical_key_distance_spikes(canonical):
+            summaries.append(freeze_canonical_kv(canonical, evicted.V))
+            summaries = keep_latest_landmarks(summaries, Ns)
+    # Reassign fresh positions on the next read; do not rotate in-place.
+
+# L2R: alternative token-level memory block, not a WorldTrace successor
+# S is supplied by the model's state protocol for this forward pass.
+for j, token in enumerate(tokens_in_scan_order):
+    k, v, query = project(token)
+    gate = camera_modulated_log_gate(token, camera_features[j])
+    trigger = binarize(trigger_logit(token))  # BCE trained; detached decision
+    if rule == "GLA":
+        accessed = gate @ S if trigger else S
+        S = accessed + outer(v, k)
+    elif rule == "GDN":
+        beta = delta_write_strength(token)
+        corrected = S - beta * S @ outer(k, k)
+        accessed = gate @ corrected if trigger else S
+        S = accessed + beta * outer(v, k)
+    output[j] = state_readout(S, query)  # schematic linear-state readout
+# Softmax blocks retained elsewhere supply local spatial structure.</code></pre>
+
+<h2 id="hyperparams">7. 关键超参与适用条件</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>调节什么</th><th>对记忆的影响</th></tr></thead>
+  <tbody>
+    <tr><td>WorldTrace</td><td>summary/recent 比、scene-entry 阈值</td><td>更多 summary 增加远程容量，更多 recent 保持局部细节；检测阈值决定 landmark 的覆盖。<span class="src">§3.4、§4.1</span></td></tr>
+    <tr><td>WorldTrace</td><td>canonical 精度与旋转次数</td><td>Landmark 保存一次 canonical key，再每次 fresh rotation，避免反复去旋转/重旋转的低精度漂移。<span class="src">§3.4</span></td></tr>
+    <tr><td>L2R memory capacity 设置</td><td>Wan2.1；352×640；81 帧 chunk</td><td>5000 步、AdamW 5e-5、8×A100；与高分辨率 video quality 设置分开。<span class="src">App. A.3</span></td></tr>
+    <tr><td>L2R</td><td>层替换比、trigger 正例权重、loss 权重</td><td>固定状态瓶颈不能靠无限堆叠门控层消失；保留 softmax 通路及检查动态场景标签。<span class="src">§4.4、App. C–D</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="results">8. 关键结果：读到了什么，按哪个协议衡量？</h2>
+<p><b>WorldTrace：</b>LoopBench 比较同 rollout 的首访和返回，PAC 为几何配对帧的 CLIP 相似度；TempSSIM 比较相邻解码帧。下表为 Matrix-Game-2 上的标准 ABA，16 个 AR chunks，每配置 100 个初始场景，Landmark 用 summary/recent=4/2。<span class="src">WorldTrace §4.1、Tab. 3 Tier 1、Tab. 6</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>PAC↑</th><th>TempSSIM↑</th></tr></thead>
+  <tbody>
+    <tr><td>Sliding window <span class="src">WorldTrace Tab. 3</span></td><td>0.723 ± 0.013</td><td>0.761</td></tr>
+    <tr class="hl"><td>WorldTrace-Landmark <span class="src">WorldTrace Tab. 3</span></td><td>0.864 ± 0.009</td><td>0.786</td></tr>
+  </tbody>
+</table></div>
+<p>Field 的连续性实验采用另一种预算：summary/recent=2/4，48 个 chunks，TempSSIM 从 0.472 到 0.545，约相对提高 15.5%；它不等于上述 episodic recall。Scene Drift 在 32 chunks 时反而由 0.0229 到 0.0250，不能写成所有时长所有指标都改善。<span class="src">WorldTrace Tab. 2</span></p>
+<p><b>L2R：</b>采用 Echo-Memory 的 replay、in-domain loop closure、open-domain return（O-V）三分支。基座 Wan2.1；带 * 的 VMem 等按论文数据重训，其他 baseline 数字沿用 Echo-Memory。各分支的信息条件不同，不能把 replay PSNR 与 O-V 拼成一个记忆分。<span class="src">L2R §4.1、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>Replay PSNR↑</th><th>Replay LPIPS↓</th><th>Loop PSNR↑</th><th>Loop LPIPS↓</th><th>O-V↑</th></tr></thead>
+  <tbody>
+    <tr><td>VMem* <span class="src">L2R Tab. 1</span></td><td>13.71</td><td>0.507</td><td>13.17</td><td>0.581</td><td>64.73</td></tr>
+    <tr><td>Context as Memory K=20 <span class="src">L2R Tab. 1</span></td><td>12.54</td><td>0.496</td><td>11.07</td><td>0.543</td><td>58.63</td></tr>
+    <tr class="hl"><td>L2R-GLA <span class="src">L2R Tab. 1</span></td><td>14.74</td><td>0.430</td><td>13.14</td><td>0.603</td><td>72.57</td></tr>
+    <tr class="hl"><td>L2R-GDN <span class="src">L2R Tab. 1</span></td><td>13.86</td><td>0.558</td><td>12.81</td><td>0.614</td><td>69.37</td></tr>
+  </tbody>
+</table></div>
+<p>L2R-GLA 的 replay 和 O-V 较强，但 loop LPIPS 弱于这里的 VMem 和 CaM，loop PSNR 也略低于 VMem；不同指标的优势不应被“全面领先”抹掉。<span class="src">L2R Tab. 1</span></p>
+<p>一张 H100 上匹配分辨率、camera conditioning 和 chunk 的每个 denoising step，L2R-GLA/GDN 分别约 0.50/0.49 秒，随论文测试时长近乎固定。这是单步去噪成本，包含完整采样步数、VAE、状态调度的端到端 FPS 要另测。<span class="src">L2R §4.5、Fig. 4(b)</span></p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>保存与读取之间的缺口</h4><ul><li><a href="06-evicted-kv.html">KV 归档 / archive</a>扩大可供读取的历史，位置与噪声条件仍可能失配。</li><li><a href="04-recurrent-state.html">循环记忆</a>用固定状态压缩历史，但容量存在不等于查询知道如何读取。</li></ul></div>
+  <div class="now"><h4>读失败需要分别验证</h4><ul><li>WorldTrace：固定内容 writer、改变位置，再固定位置、改变 writer，分开检验地址与内容。<span class="src">§4.2–4.4</span></li><li>L2R：camera gate、trigger 与 re-visibility 监督逐项消融。与 <a href="10-vmem.html">VMem</a>是主要 baseline 对照，非权重继承。<span class="src">Tab. 1、Tab. 3</span></li><li><a href="08-worldmem.html">帧库与空间查询</a>让取回的证据可检查；<a href="11-dynamic-memory.html">离屏动态状态</a>还要求正确更新。</li></ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q13"><span class="qid">Q13</span>旧 KV 明明还在，为何读不出？只缩短 RoPE 距离或只在 canonical 空间平均，各有什么不足？</h3>
+  <div class="ans"><p class="short">旧 key 的相对时间旋转可能超出训练分布；直接平均不同时间旋转过的 key 又会抵消内容信号。只截短距离可能让多个远程摘要共用同一地址；只做 canonical 平均则仍可能把保真的摘要放到不可读的位置。WorldTrace 同时用 canonical writer 和按槽位 rank 分配的训练范围内位置。</p>
+    <ul><li>比较时固定缓存内容改变地址，才能隔离地址贡献。</li><li>Field 的平均 pre-softmax 分数保留不等于完整 attention 输出无损。</li><li>Landmark 保留关键帧细节，但容量满后仍会删事件。</li></ul>
+    <p class="cite">依据：WorldTrace §2、Def. 1–2、Rem. 1–2、§3.4、Tab. 1。</p>
+  </div>
+  <h3 id="q14"><span class="qid">Q14</span>L2R 的 camera gate 与 re-visibility trigger 各决定什么？为什么不能把它理解成 VMem 的帧检索或 WorldTrace 的后继？</h3>
+  <div class="ans"><p class="short">camera gate 决定内部状态哪些方向被访问，trigger 决定何时启用这个访问，并由旧表面重新可见的标签训练。VMem 则用几何索引取回具体历史视图，WorldTrace 修复 KV 虚拟位置。三者的保存对象、查询返回物和监督都不同；论文没有给出 WorldTrace 到 L2R 的继承关系。</p>
+    <ul><li>trigger 关闭仍保留、更新状态，不表示完全丢弃历史。</li><li>GLA / GDN 固定矩阵没有旧帧地址；干扰、覆盖不能靠地址重编号恢复。</li><li>离线深度监督与推理无外部几何读取可以同时成立，二者的信息成本应分别报告。</li></ul>
+    <p class="cite">依据：L2R §3.2–3.3、App. B–D；VMem §3.1；WorldTrace §3。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Wu, Elflein, Lucas, Russakovsky, Leal-Taixé, Paschalidou, Lorraine, Ošep. <i>Addressable Memory for Video World Models.</i> 2026，arXiv v1；官方项目页标注 NeurIPS 2026 accepted。<a href="https://arxiv.org/abs/2608.07408">论文</a> · <a href="https://research.nvidia.com/labs/sil/projects/WorldTrace/">项目与录用声明</a>。</li>
+  <li>Hu et al. <i>Learning to Retrieve: Internalizing Memory Retrieval for Video World Models.</i> 2026，arXiv v1。<a href="https://arxiv.org/abs/2610.11444">论文</a> · <a href="https://jkhu29.github.io/l2r/">作者提供的项目地址</a>；代码未核验。</li>
+  <li>Li, Torr, Vedaldi, Jakab. <i>VMem: Consistent Interactive Video Scene Generation with Surfel-Indexed View Memory.</i> ICCV 2025。<a href="https://arxiv.org/abs/2506.18903">论文</a> · <a href="10-vmem.html">本轨道页面</a>。</li>
+  <li>King et al. <i>Echo-Memory: A Controlled Study of Memory in Action World Models.</i> 2026。<a href="https://arxiv.org/abs/2606.09803">论文</a>；L2R Tab. 1 的三分支协议来源。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

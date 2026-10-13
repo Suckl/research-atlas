@@ -11,7 +11,9 @@
 
 **路线三：少步生成（扩散 / 流模型蒸馏，从图像到视频）** — 17 个拆解页、19 个节点，时间线 2020 → 2026-10，按监督信号分五个范式：[从头讲起](tracks/few-step/01-foundations.html)、轨迹蒸馏（Progressive Distillation / Rectified Flow / InstaFlow）、一致性与流映射（Consistency Models / LCM / sCM / MeanFlow）、对抗蒸馏（ADD / LADD / SDXL-Lightning）、分布匹配（DMD / DMD2）、表征空间匹配与漂移（Drifting / RDM）；以及各范式迁移到视频的工作（VideoLCM / T2V-Turbo、rCM、Seaweed-APT / APT2、CausVid、Self Forcing、Causal Forcing、ViRDM）。总览页有[图像 → 视频迁移表](tracks/few-step/index.html#transfer)，每页附简答题（共 34 题）。
 
-三条路线的总览页都有演化图（每列一条路线、按年自上而下，悬停高亮上下游）、完整时间线（未单独成页的重要论文以虚线节点 + arXiv 链接列出）和逐维度对比表。
+**路线四：视频记忆（离开视野以后，世界还在吗？）** — 18 个拆解页、37 篇论文（2025–2026 为主），按记忆机制分六列：历史上下文（FramePack / TinyHistory、LCT / MoC）、循环状态（TTT-Video / SSM 世界模型 / RAD）、流式缓存（Self Forcing / LongLive / Rolling Forcing、WorldKV / Memory Forcing、WorldTrace / Learning to Retrieve）、历史检索（WorldMem / VRAG、Context-as-Memory / WorldPack、VMem、HyDRA / ActWorld）、三维状态（GEN3C / Spatial Memory、Voyager / LSM、PERSIST / Honeycomb、Matrix-Game 3.0 / 3.5）、叙事记忆（Captain Cinema / OneStory / StoryMem、IAMFlow / SlotMem、ShotStream / CausalCine）。每页用同一张“记忆的四个操作”表拆解；总览页有[记忆专测索引](tracks/video-memory/index.html#benchmarks)，时间线另含 42 条未展开的论文与评测；每页附简答题（共 36 题）。
+
+四条路线的总览页都有演化图（每列一条路线、按年自上而下，悬停高亮上下游）、完整时间线（未单独成页的重要论文以虚线节点 + arXiv 链接列出）和逐维度对比表。
 
 ## 打开
 
@@ -27,7 +29,7 @@ python scripts/serve.py
 
 动机 → 全局架构（点击组件看说明，「逐步讲解」按前向/反向顺序高亮）→ 组件拆解（含交互演示）→ 张量形状追踪 → 训练目标与防坍塌 → 伪代码 → 关键超参 → 关键结果 → 承上启下 → 参考。
 
-交互演示：I-JEPA 多块掩码采样器、V-JEPA 时空掩码、块因果 / AdaLN 注意力掩码、CEM + MPC 玩具规划器、SIGReg（Epps–Pulley）二维梯度下降；AI Infra 路线另有 roofline / KV 计算器、PagedAttention 块表、投机解码加速比、集合通信分步演示；少步生成路线有二维玩具上的少步采样 / 配对回归 / DMD / 漂移场演示。
+交互演示：I-JEPA 多块掩码采样器、V-JEPA 时空掩码、块因果 / AdaLN 注意力掩码、CEM + MPC 玩具规划器、SIGReg（Epps–Pulley）二维梯度下降；AI Infra 路线另有 roofline / KV 计算器、PagedAttention 块表、投机解码加速比、集合通信分步演示；少步生成路线有二维玩具上的少步采样 / 配对回归 / DMD / 漂移场演示；视频记忆路线有“拆墙后回访”的四种记忆策略演示。
 
 ## 扩展
 
@@ -45,5 +47,6 @@ templates/model-page.html
 tracks/jepa/{index,00-foundations,01-i-jepa,…,11-robojepa}.html     tracks/jepa/SOURCES.md
 tracks/ai-infra/{index,00-inference-basics,…,23-deepseek-v4}.html  tracks/ai-infra/SOURCES.md
 tracks/few-step/{index,01-foundations,…,17-virdm}.html            tracks/few-step/SOURCES.md
+tracks/video-memory/{index,01-foundations,…,18-shotstream}.html    tracks/video-memory/SOURCES.md
 scripts/{check,serve}.py
 ```

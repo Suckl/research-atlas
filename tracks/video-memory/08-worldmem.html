@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorldMem、VRAG 与空间版 Memory Forcing</title>
+<meta name="description" content="历史帧的 pose/time bank、状态感知 attention、retrieved-context 训练与几何 source-frame 索引，区分 GT 和预测位姿及各自 Minecraft 协议。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="worldmem">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：时间远，不一定空间远</h2>
+<p>转身离开房间，过一段时间再回到原处，需要的证据可能是很早的那一帧，而非最近几帧。<a href="05-streaming-kv.html">滑动窗口</a>按时间删历史；WorldMem、VRAG 与空间版 Memory Forcing 把历史保存为可查询证据，让当前视角决定读哪些旧帧。<span class="src">WorldMem §3.3；VRAG §3.3；Memory Forcing 2025 §3.4</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  帧库保存“过去看到了什么”，pose/time 指明“在哪里、何时看到”，retrieval 决定“这次值得读什么”。空间索引可以让找证据更精确，但最终生成器仍要学会使用证据，而非把检索命中当成生成成功。
+</div>
+<p>视频时间 \(t\) 与去噪时间 \(\tau\) 分开；\(x_t\) 是 latent，\(H_t\) 是近期窗口，\(a_t,c_t,p_t\) 是动作、文本、相机，\(M_t\) 是记忆，\(q_t\) 为目标查询，\(r_t\) 为读出：</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\quad x_{t+1}\sim G(H_t,r_t,a_t,c_t),\quad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1}).$$</div>
+<p>本页 \(q_t\) 通常含目标视角；WorldMem 另含 timestamp。空间版 Memory Forcing 用几何找来源帧，读出的仍是帧特征；它与直接渲染三维状态作为图像条件的 <a href="12-geometry-cache.html">几何缓存路线</a>不同。<span class="src">WorldMem §3.3–3.4；Memory Forcing 2025 §3.2、§3.4</span></p>
+
+<h2 id="architecture">2. 全局架构：WorldMem 的一次视角查询</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络（VAE / 几何）</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>动作 / 相机 / 文本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 460" role="img" aria-label="WorldMem：目标位姿查询历史帧库，状态感知 attention 读取，生成后写入；空间版采用几何索引替代排名">
+    <g class="act" data-part="pose" data-step="1">
+      <rect class="box" x="20" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="69">目标 pose + time</text>
+      <text class="t-c t-sm" x="110" y="96">查询 q_t</text>
+    </g>
+    <g class="reg" data-part="bank" data-step="1 2 5">
+      <rect class="box" x="260" y="40" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="69">帧库 M_t</text>
+      <text class="t-c t-sm" x="370" y="96">latent + pose + timestamp</text>
+    </g>
+    <path class="edge act" d="M200,80 H222 V18 H630 V36" data-step="2"/>
+    <path class="edge reg" d="M480,80 H536" data-step="2"/>
+    <g class="data" data-part="retrieve" data-step="2 3">
+      <rect class="box" x="540" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="69">FoV / 时间排名</text>
+      <text class="t-c t-sm" x="630" y="96">去相似候选后选帧</text>
+    </g>
+    <g class="pred" data-part="state" data-step="3">
+      <rect class="box" x="780" y="40" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="860" y="69">相对状态嵌入</text>
+      <text class="t-c t-sm" x="860" y="96">相机射线 + 时差</text>
+    </g>
+    <path class="edge reg" d="M630,120 V206" data-step="3"/>
+    <path class="edge pred" d="M860,120 V155 H700 V206" data-step="3"/>
+    <g class="data" data-part="recent" data-step="1 3">
+      <rect class="box" x="20" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="239">近期 H_t + 噪声</text>
+      <text class="t-c t-sm" x="110" y="266">动作 a_t</text>
+    </g>
+    <path class="edge" d="M200,250 H220 V310 H500 V250 H536" data-step="3"/>
+    <g class="enc" data-part="generator" data-step="3 4">
+      <rect class="box" x="540" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="239">DiT + memory attn</text>
+      <text class="t-c t-sm" x="630" y="266">带状态 Q / K，视觉 V</text>
+    </g>
+    <path class="edge enc" d="M720,250 H776" data-step="4"/>
+    <g class="data" data-part="output" data-step="4 5">
+      <rect class="box" x="780" y="210" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="860" y="239">新 clean latent</text>
+      <text class="t-c t-sm" x="860" y="266">x_(t+1)</text>
+    </g>
+    <path class="edge enc" d="M860,290 V336 H370 V294" data-step="5"/>
+    <g class="reg" data-part="write" data-step="5">
+      <rect class="box" x="260" y="210" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="239">写入历史单元</text>
+      <text class="t-c t-sm" x="370" y="266">附 pose / time，滑窗前移</text>
+    </g>
+    <path class="edge reg" d="M370,210 V124" data-step="5"/>
+    <path class="edge idx" d="M370,290 V346" data-step="6"/>
+    <g data-part="geometry" data-step="6">
+      <rect class="panel" x="260" y="350" width="220" height="90" rx="10"/>
+      <text class="t-c t-b" x="370" y="377">空间版的替代索引</text>
+      <text class="t-c t-sm" x="370" y="400">VGGT → 点云 / source ID</text>
+      <text class="t-c t-xs" x="370" y="421">关键帧新增、尺度对齐、降采样</text>
+    </g>
+    <path class="edge idx" d="M480,395 H746 V80 H724" data-step="6"/>
+    <text class="t-sm" x="548" y="423">WorldMem 本身不使用这条 3D 分支</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="pose"><h4>位姿是额外信息</h4><p>WorldMem Minecraft 主结果使用 simulator GT pose；真实交互可用预测器。查询含时间，使同一位置的不同历史状态可区分。<span class="src">WorldMem §4.1、§7.1</span></p></div>
+    <div data-note="bank"><h4>保存图像证据与状态</h4><p>每个单元保存历史 latent、位姿和 timestamp；不同年代同一位置的观测可以共存。库大小和本次读入的帧数是不同预算。<span class="src">WorldMem §3.3</span></p></div>
+    <div data-note="retrieve"><h4>置信度与去冗余是两步</h4><p>先按 FoV overlap 和时间差评分；贪心取最高分，再从候选中移除与已选帧过相似的单元。这是本次选择过滤，不是删除原 bank。<span class="src">WorldMem Alg. 1</span></p></div>
+    <div data-note="state"><h4>相对状态简化匹配</h4><p>query frame 的 pose/time 作为零参考，memory state 转成相对 pose/time；Plücker 射线与 timestamp embedding 加入 Q/K，V 保留视觉内容。<span class="src">WorldMem §3.4、Eq. 3–5</span></p></div>
+    <div data-note="recent"><h4>局部运动与远程回访</h4><p>近期 context 与 memory 负责不同信息。训练时 context 独立加噪；推理时 context/memory 位于最低噪声，当前帧从最高噪声开始。<span class="src">WorldMem §3.4</span></p></div>
+    <div data-note="generator"><h4>生成器必须学会采纳证据</h4><p>WorldMem 用专用 memory cross-attention；VRAG 将 retrieved frames 拼入 joint self-attention 并专门训练这种输入。两者都不依靠取到帧后自动出现的语言模型式 in-context learning。<span class="src">WorldMem §3.4；VRAG §3.3、Tab. 5</span></p></div>
+    <div data-note="output"><h4>新输出可以成为后续记忆</h4><p>在线写入生成 latent，会把生成错误一起存下；GT bank 初始化的实验提供更强证据条件，必须单列。<span class="src">WorldMem §3.3、§4.1</span></p></div>
+    <div data-note="write"><h4>离窗不等于删库</h4><p>WorldMem 保留历史单元，近期窗口前移；VRAG 使用固定长度 buffer；空间版只将有新覆盖或历史不足的帧作为关键帧写几何。<span class="src">WorldMem §3.3；VRAG §3.3；Memory Forcing 2025 §3.4</span></p></div>
+    <div data-note="geometry"><h4>空间版 Memory Forcing 的替代路径</h4><p>VGGT 预测深度，结合 pose-derived extrinsics 写全局点云并附 source frame ID。查询可见点的来源计数，取历史帧；跨窗尺度对齐及 voxel sampling 控制冗余。不是 WorldMem 的组件，也不是直接渲染点云给生成器。<span class="src">Memory Forcing 2025 §3.2、§3.4、App. A.1</span></p></div>
+    <div data-step-note="1"><h4>① 准备目标状态</h4><p>区分给定、GT 与预测 pose；准备近期窗口和帧库。</p></div>
+    <div data-step-note="2"><h4>② 选择历史帧</h4><p>WorldMem 以 FoV/时间评分，并过滤近重复候选。</p></div>
+    <div data-step-note="3"><h4>③ 状态感知读取</h4><p>relative pose/time 帮助当前 query 从视觉 memory 中取信息。</p></div>
+    <div data-step-note="4"><h4>④ 去噪生成</h4><p>近期 context、动作与 memory 共同确定新帧。</p></div>
+    <div data-step-note="5"><h4>⑤ 写入与滑窗前移</h4><p>生成 latent 连同 pose/time 成为新单元；活动窗口与完整 bank 分别维护。</p></div>
+    <div data-step-note="6"><h4>⑥ 空间版的可选替代</h4><p>若采用空间版 Memory Forcing，则选择关键帧、增量对齐重建、按 source ID 进行下一次检索。</p></div>
+  </div>
+  <figcaption>图 1　主路径为 WorldMem；虚线索引分支对比空间版 Memory Forcing 的几何查询，不表示两篇共享完整实现。<span class="src">WorldMem Fig. 2；Memory Forcing 2025 Fig. 2</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解：帧、位置、时间与空间索引</h2>
+<h3 id="c-worldmem">3.1 WorldMem：相同视角，不同年代</h3>
+<p>记忆单元 \((x_i^m,p_i,t_i)\) 同时保存视觉证据和状态。Minecraft pose 使用位置、pitch、yaw；FoV overlap 由空间采样估计，confidence 兼顾 overlap 与时间邻近，再贪心去相似候选。它不会把相同 pose 的旧状态自动覆盖成最新状态，时间 embedding 让生成器有机会区分它们。<span class="src">WorldMem §3.3、Alg. 1、§7.2 Alg. 2</span></p>
+<div class="formula">$$\alpha_i=w_o\,\mathrm{Overlap}_{\mathrm{FoV}}(p_i,p_{t+1})-w_t|t_i-t_{t+1}|,\qquad Q=W_q(X_q+E_q),\ K=W_k(X_m+E_m),\ V=W_vX_m.$$</div>
+<p>\(E\) 结合 dense Plücker pose 与 timestamp MLP；Q/K 含状态，V 保留视觉内容。相对状态将 query 置为原点。世界发生合法变化时，读到旧外观并不一定是正确答案；timestamp 只是变化建模的条件，不是隐藏状态更新的形式化保证。<span class="src">WorldMem Eq. 3–5、§3.4、§4.1</span></p>
+<h3 id="vrag">3.2 VRAG：取到帧还要训练怎么用</h3>
+<p><a href="https://arxiv.org/abs/2505.21996">VRAG</a>把历史帧与当前窗口拼接，直接进入时空 DiT self-attention。Minecraft 全局状态为 \([x,y,z,\mathrm{yaw}]\)，对各状态维度加权后与目标状态比较，取最相近历史帧并排序；状态和动作通过 AdaLN 注入。它不是 WorldMem 的专用 memory cross-attention。<span class="src">VRAG §3.2–3.3、§4.2</span></p>
+<p>专门的 retrieved-context 训练包含：为历史帧设置时间 RoPE offset；历史帧加较低噪声以适应不完美生成证据；历史帧不进入 diffusion loss；历史 action 条件置空、global state 条件保留，避免跨时间拼接造成虚假的动作连续性。<span class="src">VRAG §3.3、Eq. 6–7</span></p>
+<p>默认输入由 10 个 retrieved frames 和 10 个当前 context frames 构成。论文称历史 buffer 固定长度，但不应把 <b>History Buffer baseline</b> 的 124 帧分段采样设置当成 VRAG 的已核验永久容量或淘汰规则。<span class="src">VRAG §3.3–3.4、§4.2</span>内容相似检索属于论文讨论的候选方案；主 VRAG 用 global-state 条件的排名。</p>
+<h3 id="memory-forcing-spatial">3.3 Memory Forcing：Spatio-Temporal Memory（2025 空间版）</h3>
+<div class="callout code-note"><span class="callout-title">同名方法请按编号区分</span>本节为 <a href="https://arxiv.org/abs/2510.03198">2510.03198</a> 的 Minecraft 空间记忆与训练框架。<a href="06-evicted-kv.html#memory-forcing-kv">2610.11756 的 2026 版</a>在流式 KV 内维护 archive/working banks；本节没有这一缓存协议，也未声明继承 2026 版。</div>
+<p><b>Point-to-Frame Retrieval：</b>维护带 source frame ID 的全局点云，投影到当前相机，统计可见点的来源帧，选择覆盖最多可见区域的历史视图。生成器读取这些帧的 latent / features，并在 memory cross-attention 的 Q/K 加入相对 Plücker 信息。几何负责索引，不是完整世界状态。<span class="src">Memory Forcing 2025 §3.2、§3.4 Eq. 5</span></p>
+<p><b>Selective write：</b>新区域覆盖足够或历史候选不足时保存关键帧；重建窗口联合新关键帧、相关历史与上一窗口重叠帧。VGGT 输出深度与置信度，通过重叠区域估计尺度因子，再按 pose extrinsics 反投影，voxel sampling 限制局部点密度。<span class="src">Memory Forcing 2025 §3.4、App. A.1</span></p>
+<p>“查询不逐帧扫描全部历史”与“地图随探索空间增长”可以同时成立。论文的 \(O(1)\) 描述依赖可见区域与点密度控制，不能据此宣称点云、关键帧库、重建开销或全系统总内存均为常数。<span class="src">Memory Forcing 2025 §3.4、§4.3</span></p>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>WorldMem</th><th>VRAG</th><th>Memory Forcing（2025 空间）</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>历史帧 latent、pose、timestamp 单元。<span class="src">§3.3</span></td><td>历史帧 buffer + global state，帧级证据。<span class="src">§3.3</span></td><td>选择性关键帧；全局点云带 source frame ID。<span class="src">§3.4</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>在线写生成历史；训练 memory 用最低噪声，窗外主测初始化 GT bank。<span class="src">§3.4、§4.1</span></td><td>在线存生成帧；训练 retrieved history 低噪声、target 独立噪声。<span class="src">§3.3</span></td><td>仅新覆盖或历史不足帧入 keyframe；CFT 的近期 context 混合 GT 与生成预测。<span class="src">§3.3–3.4</span></td></tr>
+    <tr><td>如何寻址</td><td>FoV overlap 与时间差，贪心去重复。<span class="src">Alg. 1</span></td><td>加权 global-state 相近度，取历史帧并排序。<span class="src">Eq. 5</span></td><td>目标 pose 下可见点的 source ID 计数。<span class="src">Eq. 5</span></td></tr>
+    <tr><td>如何读</td><td>state-aware memory cross-attention，Q/K 含 relative pose/time。<span class="src">Eq. 3–5</span></td><td>retrieved frames 拼接后 joint self-attention；action 置空、state 保留。<span class="src">Eq. 6–7</span></td><td>选中历史帧 + temporal context，经 memory cross-attention 注入。<span class="src">§3.2</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>完整历史可增长；相似过滤只影响当次候选。<span class="src">§3.3、§7.2</span></td><td>固定 buffer 限制保存范围；<span class="unverified">确切永久淘汰实现未核验</span>。<span class="src">§3.3</span></td><td>不逐帧保存；关键帧选择与 voxel 降采样去冗余；动态删除/覆写无独立保证。<span class="src">§3.4</span></td></tr>
+  </tbody>
+</table></div>
+<h3 id="c-pose">3.4 位姿来自哪里？</h3>
+<p><b>WorldMem：</b>Minecraft 主实验使用 simulator GT pose；交互版轻量预测器输入前一图像、前一 pose 与下一动作，输出下一 pose。RealEstate10K 使用带注释相机。<span class="src">WorldMem §4.1、§7.1 Fig. 9</span></p>
+<p><b>VRAG：</b>主表训练和推理都提供 GT global state；Appendix C.4 另训图像+动作到 pose increment 的预测器，将增量加到当前 pose。预测位姿的消融不能自动变成主表的输入条件。<span class="src">VRAG §4.2、App. C.4</span></p>
+<p><b>2025 Memory Forcing：</b>用 predicted depth 与 pose-derived camera extrinsics；其 MineDojo 评测提供 pose 条件，未独立给出 action-only 在线 pose predictor 的性能表。不能把 VGGT 深度预测误写为“所有 camera pose 也无需给定”。<span class="src">Memory Forcing 2025 §3.4 Eq. 7、§4.1、App. A.2</span></p>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<p>设每帧 patch 数为 \(n\)，通道为 \(d\)，历史条目数为 \(N_t\)，本次选中帧数为 \(K\)。库容量与 attention 规模分别取决于 \(N_t\) 与 \(K\)。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 设置</th><th>预算含义</th></tr></thead>
+  <tbody>
+    <tr><td>WorldMem Minecraft latent</td><td>\([B,F,16,18,32]\)，patch 网格 9×16</td><td>像素 360×640；通道数来自附录 bank shape。<span class="src">WorldMem §4、§7.2</span></td></tr>
+    <tr><td>WorldMem 活跃输入</td><td>8 context + 8 memory 帧（默认训练）</td><td>选中 memory feature \([B,8n,d]\)；历史 bank 大小另计。<span class="src">WorldMem §4</span></td></tr>
+    <tr><td>WorldMem 状态</td><td>pose 5 维，dense ray 6 维 / patch</td><td>再加 timestamp；Q/K 状态增强、V 不加状态。<span class="src">WorldMem §3.3–3.4</span></td></tr>
+    <tr><td>VRAG 活跃输入</td><td>10 retrieved + 10 context 帧</td><td>self-attention token 数 \(20n\)；固定 buffer 不等于无限候选。<span class="src">VRAG §4.2</span></td></tr>
+    <tr><td>空间版 Memory Forcing</td><td>16 帧 context；top-8 历史视图</td><td>分配空间/时间证据；像素 384×224，VAE 网格 24×14。<span class="src">§3.3–3.4、§4.1</span></td></tr>
+    <tr><td>几何索引（示意）</td><td>\([P,3]\) 点 + confidence + source ID</td><td>\(P\) 随新空间覆盖增长；每区域点密度有界不等于全图点数有界。<span class="src">空间版 §3.4</span></td></tr>
+  </tbody>
+</table></div>
+<p>对 WorldMem 式帧库，视觉存储约为 \(N_tC h w b\)，metadata 与索引另计；memory cross-attention 只读取本次选中 \(K\) 帧。几何索引将检索成本转移到深度、尺度对齐、可见点查询及地图维护，不能只报 frame count 就声称整个系统节省相同比例。</p>
+
+<h2 id="objective">5. 训练目标与记忆采纳</h2>
+<p><b>WorldMem：</b>Diffusion Forcing 的逐帧独立噪声目标，memory 保持最低噪声；特殊时间 mask 防止 memory 帧彼此串扰，专用 cross-attention 学习跨视角与时间读回。它不是在推理中持续优化模型权重。<span class="src">WorldMem §3.1、§3.4 Eq. 6</span></p>
+<p><b>VRAG：</b>retrieved 与 target 的噪声不同，loss mask 只监督当前 context/target。以下是讲解形式，\(\epsilon_i\) 为对应帧噪声：</p>
+<div class="formula">$$\mathcal L_{\mathrm{VRAG}}=\mathbb E\sum_i m_i\left\|\epsilon_i-\epsilon_\theta([X_{\mathrm{hist}}^{\tau'},X^{\tau}],\,[\varnothing,A],\,[P_{\mathrm{hist}},P])_i\right\|^2,\quad m=[0_{\mathrm{hist}},1_{\mathrm{current}}].$$</div>
+<p>公式改用 \(\tau\) 避免与视频时间混淆；历史帧噪声水平低于当前帧。无需新增“检索命中标签”，生成目标训练模型使用证据。<span class="src">VRAG Eq. 6–7</span></p>
+<p><b>2025 Memory Forcing：</b>Hybrid Training 在 VPT 人类探索数据用 temporal-only，在 MineDojo 回访数据用 spatial+temporal；固定上下文的一部分用于近期，另一部分灵活分配。CFT 按窗口链式训练，前窗预测在无梯度少步生成后替换下一窗口对应 GT context；后续 denoising loss 仍有监督目标，区别于 DMD 的无配对分布匹配。<span class="src">Memory Forcing 2025 §3.3、Eq. 3–4、Alg. 1</span></p>
+<p>新场景没有可信空间证据时应允许依赖 temporal context；回访时再依赖 spatial memory。让模型无条件“更多复制旧帧”会妨碍探索和合法状态变化，这是该文训练设计针对的取舍。<span class="src">Memory Forcing 2025 Fig. 1、§3.3</span></p>
+
+<h2 id="pseudocode">6. 伪代码：先查询，再生成，再更新证据</h2>
+<div class="code-title">view_memory.py（机制示意；WorldMem Alg. 1、VRAG §3.3、空间版 §3.4）</div>
+<pre><code class="lang-py">bank, recent, geometry = initialize_past_observations()
+for t, action in interactive_stream:
+    pose = given_pose_or_action_predictor(recent, action)
+    query = (pose, t + 1)
+    if mode == "WorldMem":
+        scores = fov_overlap(bank.poses, pose) - time_penalty(bank.times, t + 1)
+        selected = greedy_select_with_similarity_filter(scores, bank, K)
+        memory = relative_pose_time_features(bank[selected], query)
+        x = denoise_with_memory_cross_attention(recent, memory, action)
+    elif mode == "VRAG":
+        selected = nearest_weighted_global_states(bank.states, pose, K)
+        retrieved = temporal_offset_and_state_condition(bank[selected])
+        # Historical actions are blank; state conditions are retained.
+        x = denoise_joint_self_attention(retrieved, recent, action, pose)
+    elif mode == "MF_spatial_2025":
+        visible = project_visible_points(geometry, pose)
+        selected = most_frequent_source_frames(visible, K)
+        memory = bank[selected]
+        context = allocate_spatial_or_extended_temporal(memory, recent)
+        x = denoise_memory_cross_attention(context, action, pose)
+    if mode == "MF_spatial_2025":
+        if adds_new_coverage(x, pose, geometry) or too_few_history(selected):
+            bank.add_keyframe(x, pose, t + 1)
+            if reconstruction_window_ready():
+                views = keyframes_history_and_overlap(bank, geometry)
+                depth, confidence = VGGT(views)  # predicted geometry
+                depth = align_scale_from_overlap(depth, confidence)
+                points = backproject_with_supplied_poses(depth, views.poses)
+                geometry = voxel_fuse_with_source_ids(geometry, points)
+    else:
+        bank.append_clean_latent_state(x, pose, t + 1)
+        enforce_documented_buffer_policy(bank, mode)
+    recent = advance_recent_window(recent, x)
+    # Do not replace GT-conditioned evaluation with predicted pose silently.</code></pre>
+
+<h2 id="hyperparams">7. 关键超参：窗口、地址与证据来源</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>与记忆直接相关的设置</th><th>注意事项</th></tr></thead>
+  <tbody>
+    <tr><td>WorldMem</td><td>候选相似阈值 0.9；\(w_o=1,w_t=0.2/t_c\)；最低/最高噪声 15/1000。<span class="src">§4 实验设置</span></td><td>时间权重与当前时间绑定；最低噪声不是严格零噪声。</td></tr>
+    <tr><td>VRAG</td><td>global-state 权重 [10,10,10,3]；retrieved RoPE offset 100。<span class="src">App. B</span></td><td>按游戏坐标范围设置；不是通用相机距离标定。</td></tr>
+    <tr><td>空间版 Memory Forcing</td><td>关键帧需新覆盖或历史数量不足；重建需重叠帧与置信尺度对齐。<span class="src">§3.4、App. A.1</span></td><td>缺少可靠 pose/depth 时几何索引可能误检，扩展空间仍需更多存储。</td></tr>
+  </tbody>
+</table></div>
+<p><span class="unverified">未核验 VRAG 主方法的确切永久 buffer 淘汰代码，也未逐行复现各论文的 pose/depth 前处理。</span>以下结果均为作者报告，设置与证据来源随表保留。</p>
+
+<h2 id="results">8. 关键结果：三种 Minecraft 协议分别读</h2>
+<p><b>WorldMem 窗外：</b>300 个测试视频，8 帧 context + 8 帧 memory，初始化 600 帧真值 bank，再生成随后 100 帧，与真实未来比较；使用 simulator GT poses。<span class="src">WorldMem §4.1、Tab. 1</span>它测 GT 记忆支持下的未来生成，不是从首帧开始的全自生成回访。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>WorldMem 原论文：窗外</th><th>PSNR↑</th><th>LPIPS↓</th><th>rFID↓</th></tr></thead>
+  <tbody>
+    <tr><td>Diffusion Forcing <span class="src">WorldMem Tab. 1</span></td><td>17.32</td><td>0.4376</td><td>51.28</td></tr>
+    <tr class="hl"><td>WorldMem <span class="src">WorldMem Tab. 1</span></td><td>23.98</td><td>0.1429</td><td>15.37</td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">WorldMem 表间不一致，不能混用</span>Tab. 1 主表的 WorldMem PSNR 是 23.98；附录 Tab. 8 的 GT-pose 行是 25.32，而 LPIPS/rFID 同为 0.1429/15.37。Tab. 8 predicted-pose 行为 23.13/0.1786/20.36。论文未清楚解释该 PSNR 差异；本页分别引用，不以主表与附录混算位姿退化量。<span class="src">WorldMem Tab. 1、Tab. 8</span></div>
+<p><b>VRAG coherence：</b>60 条受控旋转、反向和环形轨迹，每条 300 帧，前 100 帧初始化历史、后 200 帧预测，与 GT 视频比较；主表提供 GT global state。<span class="src">VRAG §4.1、Tab. 1、App. C.4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>VRAG 原论文：coherence</th><th>SSIM↑</th><th>PSNR↑</th><th>LPIPS↓</th></tr></thead>
+  <tbody>
+    <tr><td>DF window 20 <span class="src">VRAG Tab. 1</span></td><td>0.466</td><td>16.643</td><td>0.538</td></tr>
+    <tr><td>VRAG no training <span class="src">VRAG Tab. 5</span></td><td>0.455</td><td>16.670</td><td>0.528</td></tr>
+    <tr><td>VRAG no memory <span class="src">VRAG Tab. 5</span></td><td>0.436</td><td>16.372</td><td>0.547</td></tr>
+    <tr class="hl"><td>VRAG <span class="src">VRAG Tab. 1、Tab. 5</span></td><td>0.506</td><td>17.097</td><td>0.506</td></tr>
+    <tr class="hl"><td>VRAG predicted pose <span class="src">VRAG Tab. 6</span></td><td>0.500</td><td>17.116</td><td>0.506</td></tr>
+  </tbody>
+</table></div>
+<p>“no training”仍检索，但模型未学会利用这种输入；“no memory”保留 global state 条件。论文另在 20 条 1200 帧随机游戏视频测 compounding errors：DF20/VRAG 平均 SSIM 为 0.321/0.349；这不是同一个 coherence 集。<span class="src">VRAG §4.1、§4.4、Tab. 2、§4.7</span></p>
+<p><b>2025 Memory Forcing：</b>MineDojo long-term memory 集 150 条轨迹；生成第 600–800 帧，分辨率 384×224、context 16 帧，WorldMem 为该文同协议重训对照。不能与上方 WorldMem 原表的窗口、分辨率和生成长度直接拼榜。<span class="src">Memory Forcing 2025 §4.1–4.2、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>空间版原论文：long-term memory</th><th>FVD↓</th><th>PSNR↑</th><th>SSIM↑</th><th>LPIPS↓</th></tr></thead>
+  <tbody>
+    <tr><td>Oasis <span class="src">空间版 Tab. 1</span></td><td>196.8</td><td>16.83</td><td>0.5654</td><td>0.3791</td></tr>
+    <tr><td>WorldMem（该文对照） <span class="src">空间版 Tab. 1</span></td><td>122.2</td><td>19.32</td><td>0.5983</td><td>0.2769</td></tr>
+    <tr class="hl"><td>Memory Forcing（空间） <span class="src">空间版 Tab. 1</span></td><td>84.9</td><td>21.41</td><td>0.6692</td><td>0.2156</td></tr>
+  </tbody>
+</table></div>
+<p>效率实验在 20 条 4000 帧视频上，WorldMem / 空间版的 memory frame count 为 4000 / 平均 72.65，管线吞吐为 4.27 / 31.21 FPS。作者的约 98.2% 减少指<b>保存帧数</b>，约 7.3 倍速度指该文的重建+检索管线；不是总 GPU bytes 减少 98.2%，也不是视频生成 FPS。<span class="src">Memory Forcing 2025 §4.3、Tab. 2</span></p>
+<p>这些结果主要考察环境重访、视觉一致与生成质量。WorldMem 展示种植、放置物体与时间变化，但不能从同位置图像相似或 FVD 推出所有离屏动态、删除操作和动作后果均已正确更新。<span class="src">WorldMem Fig. 3；空间版 §4.2</span></p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>按时间决定可见历史</h4><ul><li><a href="06-evicted-kv.html">流式 KV</a>保留内部表征，读取受缓存与地址规则约束。</li><li>WorldMem 与 VRAG 建立帧级证据库，但 FoV/pose 相近不一定代表真实可见内容相同。</li></ul></div>
+  <div class="now"><h4>空间查询与更新仍需区分</h4><ul><li>空间版沿用 WorldMem 式 memory cross-attention 并对照 WorldMem，新增 geometry index 与 Hybrid/CFT。<span class="src">空间版 §3.2–3.4、Tab. 1</span></li><li><a href="09-context-as-memory.html">Context as Memory / WorldPack</a>比较挑哪些视图与给多少压缩预算；<a href="10-vmem.html">VMem</a>进一步处理 surfel 可见性。</li><li><a href="11-dynamic-memory.html">动态记忆</a>要求恢复更新后的主体与动作状态；旧帧复刻只是其中一个环节。</li></ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q15"><span class="qid">Q15</span>为什么历史帧库还要保存 pose 和 timestamp？GT 位姿、预测位姿与自生成历史应如何分别评测？</h3>
+  <div class="ans"><p class="short">pose 让当前视角能定位相关证据，timestamp 区分同一地点的不同时刻；仅看外观可能取回错误视角或过时状态。GT pose 与 GT bank 给更强查询和证据条件；预测 pose 会影响查询与生成，自生成历史还会把早期错误写回库，三者应分别报告。</p>
+    <ul><li>WorldMem 主表与 predicted-pose 消融分别引用，不能混算。</li><li>VRAG 主表提供 global state，另有预测增量的消融。</li><li>先固定 bank 测地址误差，再固定地址比较 GT/generated bank，可定位错误来源；这是建议的诊断实验。</li></ul>
+    <p class="cite">依据：WorldMem §3.3–3.4、§4.1、Tab. 8；VRAG §3.3、App. C.4。</p>
+  </div>
+  <h3 id="q16"><span class="qid">Q16</span>空间索引怎样避免扫描全部旧帧？为什么快速查询与更少关键帧仍不能证明常数总内存或正确动态更新？</h3>
+  <div class="ans"><p class="short">空间版 Memory Forcing 把可见点映射回 source frame ID，按覆盖计数选择历史帧，并仅为新覆盖或不足历史写关键帧。查询围绕当前可见空间，帧库不必每步线性扫描；但点云与关键帧随新空间增长，降采样只限制局部密度，旧表面及图像也未必代表变化后的状态。</p>
+    <ul><li>论文报告减少的是 memory frame count，总 bytes 还包括几何与索引。</li><li>重建+检索吞吐与完整视频生成吞吐分开。</li><li>与 2026 同名 Memory Forcing 区分：后者维护固定 KV bank，满后 FIFO 丢中段事件。</li></ul>
+    <p class="cite">依据：Memory Forcing 2025 §3.4、§4.3、Tab. 2；Memory Forcing 2026 §3.3。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Xiao, Lan, Zhou, Ouyang, Yang, Zeng, Pan. <i>WorldMem: Long-term Consistent World Simulation with Memory.</i> NeurIPS 2025；本页读 arXiv v3。<a href="https://arxiv.org/abs/2504.12369">论文</a> · <a href="https://xizaoqu.github.io/worldmem/">项目</a> · <a href="https://github.com/xizaoqu/WorldMem">代码</a>。</li>
+  <li>Chen, Hu, Ding, Jin. <i>VRAG: Learning World Models for Interactive Video Generation.</i> NeurIPS 2025；本页读 arXiv v4。<a href="https://arxiv.org/abs/2505.21996">论文</a> · <a href="https://sites.google.com/view/vrag">项目</a> · <a href="https://github.com/yeyutaihan/vrag">代码</a>。</li>
+  <li>Huang, Hu, Han, Shi, Tian, He, Jiang. <i>Memory Forcing: Spatio-Temporal Memory for Consistent Scene Generation on Minecraft.</i> 2025，arXiv v1。<a href="https://arxiv.org/abs/2510.03198">论文</a> · <a href="https://junchao-cs.github.io/MemoryForcing-demo/">项目</a> · <a href="https://github.com/Junchao-cs/Memory-Forcing">代码</a>。</li>
+  <li>Zhang et al. <i>Memory Forcing: Attendable Mid-Horizon History for Streaming Video Generation.</i> 2026，同名 KV 方法。<a href="https://arxiv.org/abs/2610.11756">论文</a> · <a href="06-evicted-kv.html#memory-forcing-kv">缓存拆解</a>。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

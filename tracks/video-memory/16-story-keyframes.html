@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captain Cinema / OneStory / StoryMem：故事关键帧记忆</title>
+<meta name="description" content="稀疏关键帧记忆如何支持多镜头叙事：Captain Cinema 的 GoldenMem 规划、OneStory 内容重要度预算、StoryMem 在线写入与筛选；区分生成过去、外部参考和未来视觉锚。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="captain-cinema">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- JOB6_BODY_START -->
+<h2 id="motivation">1. 动机：镜头切走以后，人物和场景如何回来？</h2>
+<p>故事镜头不按连续时间或固定相机排列：主角离场、插入别处镜头、再以新服装或视角返回。最后一帧可能没有要回忆的人物；完整视频历史又含大量冗余。因此关键不是保存最多相邻帧，而是保存可用于下一镜头的视觉证据，并区分哪些外观应保持、哪些事件状态应变化。<span class="src">OneStory §4.2；StoryMem §3.2、§3.4</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  Captain Cinema 先规划视觉锚再合成运动；OneStory 按下一镜头内容分配历史预算；StoryMem 每生成一镜头就筛选关键帧并更新 bank。三者共享稀疏视觉证据这个问题，却不是已声明的相互继承链。<span class="src">Captain §3；OneStory §4；StoryMem §3</span>
+</div>
+<p>本页把<b>生成过去的在线记忆</b>、<b>预先提供的角色参考</b>和<b>已经规划好的未来视觉锚</b>分开。稳定人物外观可以帮助故事连贯，但仍不能单凭相似度证明“杯子已打碎”“角色换装后不回退”等状态更新正确。</p>
+
+<h2 id="architecture">2. 两种时序：先完成分镜，或逐镜头写记忆</h2>
+<p>统一记号：\(t\) 是视频时间、\(\tau\) 是 diffusion / flow 时间，\(x_t\) 是当前 latent，\(H_t\) 是近期历史，\(M_t\) 是记忆，\(q_t\) 是查询，\(r_t\) 是读出；镜头文本为 \(c_t\)。本页以镜头索引 \(i\) 写循环，不使用动作 \(a_t\) 或相机 \(p_t\) 作为这三种系统的通用必需输入。</p>
+<div class="formula">$$r_i=\mathrm{Read}(M_{i-1},q_i(c_i)),\qquad V_i\sim G_\theta(r_i,c_i),\qquad M_i=\mathrm{Write}(M_{i-1},V_i).$$</div>
+<p><b>Captain Cinema 的偏离：</b>planner 先按图文历史生成 \(\{I_i\}\)，GoldenMem 服务的是该关键帧阶段；之后 LCT 类视频生成器读取已生成的整套关键帧，含后续镜头锚。它不是一边播放视频一边只记住生成过去的单环系统。<span class="src">Captain §3.2–3.3、§4.1</span></p>
+<div class="legend">
+  <span><i class="sw data"></i>观测 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结 VAE / 特征编码器</span><span><i class="sw pred"></i>可训练记忆部件</span>
+  <span><i class="sw reg"></i>关键帧记忆</span><span><i class="sw act"></i>镜头文本 / 脚本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="StoryMem 逐镜头读取、筛帧、去重与 sink 加窗口更新">
+    <g class="act" data-part="prompt" data-step="1">
+      <rect class="box" x="510" y="25" width="210" height="64" rx="9"/>
+      <text class="t-c t-b" x="615" y="50">当前镜头 cᵢ</text>
+      <text class="t-c t-sm" x="615" y="74">人物 / 场景 / 动作描述</text>
+    </g>
+    <g class="data" data-part="initial" data-step="1">
+      <rect class="box" x="20" y="25" width="210" height="64" rx="9"/>
+      <text class="t-c t-b" x="125" y="50">可选初始参考</text>
+      <text class="t-c t-sm" x="125" y="74">MR2V：不是生成历史</text>
+    </g>
+    <path class="edge" d="M125,89 V154" data-step="1"/>
+    <path class="edge act" d="M615,89 V149" data-step="3"/>
+    <g class="reg" data-part="bank" data-step="2 6">
+      <rect class="box" x="20" y="160" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="125" y="186">关键帧 bank Mᵢ₋₁</text>
+      <text class="t-c t-sm" x="125" y="209">早期 sink + 最近窗口</text>
+      <text class="t-c t-sm" x="125" y="233">已完成镜头的视觉证据</text>
+    </g>
+    <path class="edge reg" d="M230,205 H264" data-step="2"/>
+    <g class="tgt" data-part="read" data-step="2">
+      <rect class="box" x="270" y="160" width="190" height="90" rx="10"/>
+      <text class="t-c t-b" x="365" y="186">VAE 编码记忆</text>
+      <text class="t-c t-sm" x="365" y="209">独立关键帧 latent</text>
+      <text class="t-c t-sm" x="365" y="233">负时间 RoPE + mask</text>
+    </g>
+    <path class="edge reg" d="M460,205 H504" data-step="3"/>
+    <g class="enc" data-part="generator" data-step="3">
+      <rect class="box" x="510" y="155" width="210" height="100" rx="10"/>
+      <text class="t-c t-b" x="615" y="181">M2V DiT</text>
+      <text class="t-c t-sm" x="615" y="205">记忆 / 当前噪声联合读</text>
+      <text class="t-c t-sm" x="615" y="230">LoRA；仅生成当前 shot</text>
+    </g>
+    <path class="edge enc" d="M720,205 H764" data-step="4"/>
+    <g class="data" data-part="shot" data-step="4">
+      <rect class="box" x="770" y="160" width="160" height="90" rx="10"/>
+      <text class="t-c t-b" x="850" y="186">新镜头 Vᵢ</text>
+      <text class="t-c t-sm" x="850" y="209">完成去噪 / 解码</text>
+      <text class="t-c t-sm" x="850" y="233">再提取候选帧</text>
+    </g>
+    <path class="edge" d="M850,250 V332" data-step="5"/>
+    <g class="tgt" data-part="extract" data-step="5">
+      <rect class="box" x="730" y="338" width="200" height="88" rx="10"/>
+      <text class="t-c t-b" x="830" y="363">CLIP + HPSv3</text>
+      <text class="t-c t-sm" x="830" y="387">语义变化 / 画质筛选</text>
+      <text class="t-c t-sm" x="830" y="410">与历史 bank 去重</text>
+    </g>
+    <path class="edge reg" d="M730,382 H636" data-step="6"/>
+    <g class="reg" data-part="update" data-step="6">
+      <rect class="box" x="400" y="338" width="230" height="88" rx="10"/>
+      <text class="t-c t-b" x="515" y="363">写入与容量控制</text>
+      <text class="t-c t-sm" x="515" y="387">合格帧加入；保留 sink</text>
+      <text class="t-c t-sm" x="515" y="410">满时移除最老窗口帧</text>
+    </g>
+    <path class="edge reg" d="M400,382 H125 V256" data-step="6"/>
+    <text class="t-c t-sm" x="255" y="363" data-step="6">Mᵢ 供下一镜头读</text>
+    <text class="t-c t-sm" x="480" y="461">主图为 StoryMem；OneStory 的选择 / 压缩在读取侧，Captain 的 bank 在规划侧</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>下一镜头提供语义查询</h4><p>StoryMem 的 prompt 通过生成器注意力选择 bank 中有用的上下文，不使用外部 Top-k 内容检索；OneStory 则显式用当前 caption 驱动可训练 selector。<span class="src">StoryMem §3.3–3.4；OneStory §4.2</span></p></div>
+    <div data-note="initial"><h4>空 bank 与用户参考是两种输入条件</h4><p>StoryMem 默认从空记忆开始，首镜头由文本生成；MR2V 可以预写角色 / 场景参考。后者提供额外视觉身份信息，应和在线记住自生成历史的设定分别报告。<span class="src">StoryMem §3.2、§3.5</span></p></div>
+    <div data-note="bank"><h4>保留什么过去</h4><p>StoryMem 保存清晰且有语义变化的关键帧，早期 sink 与近期窗口构成有限活动 bank。OneStory 保存全部先前镜头 latent 候选，再压缩少量选中帧；Captain 的 bank 是 planner 已生成的图文关键帧。<span class="src">三文方法节</span></p></div>
+    <div data-note="read"><h4>记忆不是普通连续前缀</h4><p>StoryMem 每张记忆图独立编码，不做跨记忆帧时间压缩；负 temporal RoPE index 将它们和从零开始的当前 shot 分开。它编码“稀疏先前证据”，不是恢复真实镜头间时间。<span class="src">StoryMem §3.3</span></p></div>
+    <div data-note="generator"><h4>保留单镜头先验</h4><p>M2V 适配 Wan-I2V 的 condition / mask 通道，记忆沿时间维加到当前序列，用 LoRA 学会跨上下文读取；无新增外部检索网络。OneStory 用 selected context tokens 与当前 noise tokens joint attention。<span class="src">StoryMem §3.3；OneStory §4.3</span></p></div>
+    <div data-note="shot"><h4>完成生成再写入</h4><p>writer 处理完整生成镜头的解码帧，而不是 denoising 中间的 noisy tokens。MI2V 可用上一镜头末帧衔接无 cut 镜头；它属于邻接连续性条件，仍需 bank 支持远程回忆。<span class="src">StoryMem §3.4–3.5</span></p></div>
+    <div data-note="extract"><h4>两道过滤解决不同问题</h4><p>CLIP 变化筛选寻找有新语义的帧；HPSv3 排除模糊或低审美候选；再与已存关键帧比较以去重。清晰不等于事件状态正确，语义相似也不等于同一角色。<span class="src">StoryMem §3.4、§4.4</span></p></div>
+    <div data-note="update"><h4>容量边界是可见的</h4><p>超额时保留最早 sink，淘汰最老 short-term memory。公开 pipeline 从磁盘关键帧文件选活动子集；这些文件并未因活动淘汰而删除，不能宣称所有存储常数。<span class="src">StoryMem §3.4；官方 pipeline.py</span></p></div>
+    <div data-step-note="1"><h4>① 准备当前文本与初始条件</h4><p>默认无外部视觉参考；若预写参考，记录该额外信息条件。</p></div>
+    <div data-step-note="2"><h4>② 编码已有关键帧</h4><p>只读此前完成的镜头或明确提供的参考，构造记忆位置与条件 mask。</p></div>
+    <div data-step-note="3"><h4>③ 记忆条件生成</h4><p>记忆与当前噪声共同进入模型，当前 caption 决定该使用哪些证据。</p></div>
+    <div data-step-note="4"><h4>④ 完成镜头</h4><p>得到 clean latent / 视频，供观看和后续写入。</p></div>
+    <div data-step-note="5"><h4>⑤ 选变化且清晰的帧</h4><p>语义选择和画质过滤共同构造候选；与历史去重。<span class="src">StoryMem §3.4</span></p></div>
+    <div data-step-note="6"><h4>⑥ 更新 bank</h4><p>保留 sink 与最近合格帧，有限容量意味着没有被选入或已逐出的事件可能无法再读。</p></div>
+  </div>
+  <figcaption>图 1　StoryMem 的在线镜头循环；各颜色表示职责，冻结评分器不等于可训练 writer。<span class="src">依据 StoryMem Fig. 2、§3.3–3.5；OneStory / Captain 对照见下文。</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解：把选择、压缩和写入分开</h2>
+<h3 id="c-captain">Captain Cinema：GoldenMem 在 planner 中，LCT 在合成中</h3>
+<p>输入是详细 storyline / shot descriptions，可由人或外部语言模型提供；Captain 本身不自主构思故事。planner 从 FLUX.1-dev 出发处理交错图文：早期 double-stream blocks 的 block-diagonal mask 只在各 pair 内处理，后期 single-stream blocks 才聚合跨 pair 信息；训练可双向，生成可换因果掩码。<span class="src">Captain §3.2、§5</span></p>
+<p>检索先比较当前文字与历史图文：论文比较 CLIP text-to-image 与 T5 text-to-text，前者的检索覆盖更好。GoldenMem 将历史图像逐级降采样，压缩<b>活动视觉条件</b>。语义召回和分辨率分配是不同操作，不应把它概括为“只留最近帧”。<span class="src">Captain §3.2、Fig. 5</span></p>
+<div class="formula">$$\varphi=\frac{1+\sqrt5}{2},\qquad s_j=\lfloor s_{j-1}/\varphi\rfloor,\qquad T_{\mathrm{visual}}\approx t_0\sum_{j=0}^{k}\varphi^{-2j}&lt;\varphi t_0\approx1.62t_0.$$</div>
+<p>论文以固定长宽比的几何缩放解释该常数因子；\(t_0\) 为当前全分辨率帧的 token 数，包含当前帧。它不约束全部原始关键帧、文本 token 或检索库的存储，也不保证低分辨率历史的小字和道具细节可恢复。<span class="src">Captain §3.2、Fig. 4</span></p>
+<p>关键帧先生成完，再交给 Seaweed / LCT 类视频模型补每镜头运动。§3.3 的条件写成全部 \(I_{1:K}\)，所以合成镜头时已有后续视觉锚；两阶段分别训练，不能把完整系统的叙事一致性说成视频基模独立学会了在线远程记忆。LCT 的跨镜头注意力见 <a href="03-lct-moc.html">第 03 页</a>。<span class="src">Captain §3.3、§4.1、§5</span></p>
+
+<h3 id="onestory">OneStory：重要内容得到更细的 patch</h3>
+<p>OneStory 从所有此前镜头构造 latent memory。可学习 queries 先 cross-attend 当前 caption，再 attend 历史视觉 tokens；根据 query–memory interaction 得到帧级 relevance，选取非连续的 Top-k 历史帧。高分帧使用较小 kernel / 较细 patchifier，低分帧更强压缩，再把所有 context tokens 与当前 noise tokens 拼接。<span class="src">OneStory §4.2–4.3、Eq. 2–8</span></p>
+<div class="formula">$$q_i'=\mathrm{Attn}(Q,\phi_T(c_i),\phi_T(c_i)),\quad q_i''=\mathrm{Attn}(q_i',\phi_V(M),\phi_V(M)),\quad r_i=\operatorname{Concat}_{\ell}\mathcal P_\ell(\widehat M_{\mathcal I_\ell}).$$</div>
+<p>这改变了时间距离决定压缩率的假设：主角所在旧镜头可能比刚结束的插入镜头重要。selector 的候选 history 仍增长，且查询需访问历史表示；“一个 latent 帧等价的活动 context”不等于完整历史只有一帧。训练时的 DINOv2 / CLIP target-shot 相似度是伪标签监督，推理 selector 不获未来目标视觉。<span class="src">OneStory §4.2、§5.3、App. A.2</span></p>
+<p>OneStory 不要求单独的全片 global script，以当前 shot caption 的指代关联历史；第一镜头可文本或文本加图初始化。它在 inference 图中维护 prior-shot memory，并未描述一个训练过的语义写入 / 全局淘汰模块。<span class="src">OneStory §3、§4.1、Fig. 3</span></p>
+
+<h3 id="storymem">StoryMem：在生成后决定什么值得留下</h3>
+<p>StoryMem 从 Wan2.2-I2V 出发，记忆帧独立 VAE 编码，沿时间维加入 condition latent，再把 noisy latent、condition latent、binary mask 沿通道维拼接。memory 区域保持为已知条件，只输出当前 shot；读取 bank 中哪个人物由文本条件与注意力完成，没有显式 selector 的 Top-k 查询。<span class="src">StoryMem §3.3</span></p>
+<div class="formula">$$\mathrm{TimeIndex}=\{-mS,-(m-1)S,\ldots,-S,\;0,1,\ldots,F-1\}.$$</div>
+<p>\(m\) 是记忆帧数，\(F\) 是当前 shot latent 帧数，\(S\) 是固定负 RoPE 间隔；当前镜头位置仍从零开始。这些位置不是真实历史时间戳，也不能恢复关键帧间未保存的运动。<span class="src">StoryMem §3.3</span></p>
+<p>每生成一镜头，先用 CLIP 比较与最新选中帧的语义变化，再用 HPSv3 审美过滤；与原 bank 去重后写入。早期 sink 不随窗口淘汰，余下保留近期合格帧。它把“写什么”放在 generation 之后，和 OneStory 在 read 时决定“哪些候选值得花 token”形成对照。<span class="src">StoryMem §3.4</span></p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码：阈值、首帧与容量</span>
+  论文 §3.4 说选帧过多时提高相似度阈值；但选取条件是 similarity 低于 threshold，提高会选更多。官方 <code>extract_keyframes.py</code> 实际将阈值减小 0.01，并选第一个通过质量过滤的帧，而非无条件保留帧零。公开 <code>pipeline.py</code> 的容量默认是 8 个关键帧、<code>fix=3</code>；README 则写默认 10 个 shots。论文未给总 bank 容量，复现应以具体入口为准。<span class="src">官方 commit 052c68d，extract_keyframes.py / pipeline.py / README.md；论文 §3.4、§4.1</span>
+</div>
+
+<h3 id="c-information">信息条件：未来文本不等于未来视觉</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>条件</th><th>在哪个模块可用</th><th>能够支撑的判断</th></tr></thead>
+  <tbody>
+    <tr><td>全片文本 / 镜头描述</td><td>Captain planner 与视频合成；StoryMem script；OneStory 当前 caption</td><td>提供“应发生什么”的语义控制；不会自动提供后续画面或证明模型自主推断故事。<span class="src">三文问题定义</span></td></tr>
+    <tr><td>自己已生成的过去</td><td>Captain planner 的关键帧历史；OneStory prior shots；StoryMem keyframe bank</td><td>检验读写闭环与生成错误传播，仍须看长 gap / 回归角色的协议。<span class="src">三文推理流程</span></td></tr>
+    <tr><td>预给参考图像</td><td>OneStory 首图可选；StoryMem MR2V；Captain 外域 identity 实验的外部照片</td><td>额外视觉信息；需与默认文本起始 / 自写记忆分别报告。<span class="src">OneStory §4.1；StoryMem §3.5；Captain App. E</span></td></tr>
+    <tr><td>未来视觉锚</td><td>Captain 完成 planner 后的底层视频合成，条件为整套 keyframes</td><td>视频模型执行已规划外观；不能等同仅用过去视频的在线因果记忆。<span class="src">Captain §3.3</span></td></tr>
+  </tbody>
+</table></div>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>Captain Cinema</th><th>OneStory</th><th>StoryMem</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>planner 图文关键帧；活动视觉多尺度压缩。<span class="src">§3.2</span></td><td>此前镜头 VAE latent 帧的全局候选库。<span class="src">§4.2</span></td><td>生成镜头中的稀疏语义关键帧。<span class="src">§3.4</span></td></tr>
+    <tr><td>何时写（GT / generated、clean / noisy）</td><td>训练真值电影图文，context 可加噪；推理 planner 生成 keyframe 后成为历史。<span class="src">§3.1–3.2、§4.2</span></td><td>训练真值 prior shots；推理完成 shot 后进入候选历史，不保存未完成噪声。<span class="src">§4、Fig. 3</span></td><td>训练从相关真值 clips 抽 memory；推理完整生成 shot 后选清晰帧。<span class="src">§3.3–3.4</span></td></tr>
+    <tr><td>如何寻址（内容 / 时间）</td><td>CLIP text–image / T5 text–text 语义召回。<span class="src">§3.2、Fig. 5</span></td><td>当前 caption→learned queries→帧 relevance→Top-k。<span class="src">§4.2</span></td><td>无外部内容召回器；生成器注意力读有限 bank，写入按 CLIP 变化与去重。<span class="src">§3.3–3.4</span></td></tr>
+    <tr><td>如何读（注意力 / 拼接）</td><td>GoldenMem planner 交错图文；合成阶段另读全部 keyframe anchors。<span class="src">§3.2–3.3</span></td><td>importance-guided patchification，与当前 noise joint attention。<span class="src">§4.3</span></td><td>latent 时间拼接、condition / mask 通道拼接、负 RoPE。<span class="src">§3.3</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>压缩约束活动条件；全文未给统一全库淘汰 / 事件覆写规则。</td><td>Top-k 限活动读出；全文未给全部候选的容量淘汰规则。</td><td>保留 sink；满时逐出最老短期帧；不按实体状态显式覆盖。<span class="src">§3.4</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="shapes">4. 从完整镜头到有限活动 token</h2>
+<p>\(B\) 为 batch，\(C,h_\ell,w_\ell\) 为 VAE latent 通道 / 网格，\(D\) 为 DiT 隐维，\(n\) 为一个原生 latent 帧的 token 数。符号形状是数据流说明，以下只列论文明确提供的预算。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 预算</th><th>为什么保留空间维</th></tr></thead>
+  <tbody>
+    <tr><td>Captain 图文 pair</td><td>图像 [LI,D] + 文本 [LT,D]</td><td>局部 mask 处理 pair，后期跨 pair 聚合；视觉压缩不压成单个身份向量。<span class="src">Captain §3.2</span></td></tr>
+    <tr><td>GoldenMem</td><td>Tvisual ≲1.62t₀（理想几何级数）</td><td>包括当前帧；不含全文文本 / 原始库；压缩历史图像的细节会减少。<span class="src">Captain §3.2</span></td></tr>
+    <tr><td>OneStory 候选历史</td><td>[B,Fhist,Ns,Dv]</td><td>Eq. 2 保留每帧空间 tokens；Fhist 随 prior shots 增长。<span class="src">OneStory Eq. 2</span></td></tr>
+    <tr><td>OneStory 活动 context</td><td>[B,Nc,D]；默认 Nc≈n</td><td>当前噪声对应 21 latent 帧；单帧等价预算是压缩后的多帧内容。<span class="src">OneStory §5.3、Tab. 2(c)</span></td></tr>
+    <tr><td>StoryMem 条件</td><td>memory [B,C,m,hℓ,wℓ]；current [B,C,F,hℓ,wℓ]</td><td>各 memory 图独立编码；时间拼接后另叠 noisy / condition / mask 通道。<span class="src">StoryMem §3.3</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">OneStory Eq. 6 的简写遗漏空间轴</span>
+  Eq. 6 将 Top-k 后 memory 标作 \([K_{\mathrm{sel}},D]\)，但紧邻 Eq. 2 与 §4.3 的多尺度 patchification 都要求帧内空间特征。上表将选中对象理解为“保留空间网格的帧”，而把压缩结果另记 \([N_c,D]\)；这是数据流解释，不是从论文推得的绝对 tensor 配置。<span class="src">OneStory Eq. 2、6–8</span>
+</div>
+
+<h2 id="objective">5. 训练：读取监督与写入启发式的区别</h2>
+<p><b>Captain：</b>用电影提取的交错图文微调 planner，以逐步增加 context 长度和混合噪声训练适应长条件；视频模块另训 keyframe-conditioned synthesis。分开训练意味着没有视频后续损失贯穿 planner / GoldenMem 的端到端闭环。<span class="src">Captain §3.2–3.3、§4.2、§5</span></p>
+<p><b>OneStory：</b>训练预测 triplet 最后镜头；两镜头数据通过插入无关镜头或增强首镜头变成统一 triplet。warm-up 用真实历史均匀取帧，随后才依赖 selector。target-shot 的 DINOv2 / CLIP 相似度给相关度伪标签，训练读出是有监督的，而不是只让 generator 自发学检索。<span class="src">OneStory §4.4、App. A</span></p>
+<div class="formula">$$\mathcal L_{\mathrm{OneStory}}=\mathcal L_{\mathrm{shot}}+\lambda\mathcal L_{\mathrm{sel}},\qquad \mathcal L_{\mathrm{sel}}=\frac1{F_{\mathrm{hist}}}\sum_r(s_r-y_r)^2.$$</div>
+<p><b>StoryMem：</b>训练从语义相关 clips 抽记忆帧、重建 target clip，用 LoRA 学 M2V 条件生成；CLIP / HPS 选帧是推理中的确定性程序，不是通过跨镜头梯度学到的 writer，也未报告训练时完全 self-generated memory rollout。<span class="src">StoryMem §3.3–3.4、§4.1</span></p>
+<div class="callout code-note"><span class="callout-title">flow 时间与符号不能照搬混用</span>
+  本页若写 \(x^\tau=(1-\tau)x+\tau\epsilon\)，则随 \(\tau\) 增加的导数为 \(\epsilon-x\)，采样从 noise 向 clean 积分。StoryMem Eq. 2 用该插值，Eq. 3 的 target 却写 \(x-\epsilon\)。这两式存在方向约定不一致；本文不据此补写训练代码的速度符号，复现需检查实际 scheduler / target。<span class="src">StoryMem Eq. 1–3</span>
+</div>
+
+<h2 id="pseudocode">6. 伪代码：规划 bank 与视频 bank 不混成一条链</h2>
+<div class="code-title">story_memory_loop.py（机制示意；StoryMem 阈值方向按官方代码）</div>
+<pre><code class="lang-py">if method == "Captain Cinema":
+    key_bank = initial_keyframe_context()
+    anchors = []
+    for caption in planned_shot_captions:
+        selected = semantic_retrieve(key_bank, caption)
+        context = golden_ratio_downsample(selected)
+        keyframe = interleaved_keyframe_planner(context, caption)
+        key_bank.add(keyframe, caption)
+        anchors.append(keyframe)
+    # 此时合成器已能读取后续镜头视觉锚；不是纯过去视频条件。
+    movie = lct_synthesize_all_shots(anchors, planned_shot_captions)
+else:
+    bank = explicit_initial_references_or_empty()
+    for caption, cut in shot_script:
+        if method == "OneStory":
+            scores = frame_selector(caption, bank.all_prior_latents)
+            selected = topk_frames(bank, scores)
+            context = importance_patchify(selected, scores)
+            shot = next_shot_generator(context, caption)
+            bank.add_completed_shot(shot)  # 全历史候选，未指定全库 FIFO
+        else:
+            frames = active_sink_and_recent(bank)
+            context = vae_encode_each_memory_image(frames)
+            last = None if cut else previous_shot_last_frame()
+            shot = m2v_with_negative_rope(context, caption, last)
+            threshold = initial_similarity_threshold
+            while True:
+                keys = clip_change_and_hps_filter(shot, threshold)
+                if len(keys) &lt;= per_shot_limit:
+                    break
+                threshold -= threshold_step  # similarity &lt; threshold
+            keys = remove_semantic_duplicates(keys, bank)
+            bank.add(keys)
+            bank.keep_sink_and_recent_for_next_read()
+        publish_completed_shot(shot)
+        # bank 不是实体状态机；换装 / 道具变化仍需专门核验。</code></pre>
+<p>StoryMem 官方实现把选帧文件留在输出目录，再在下一次读取前选活动 bank；上面的 <code>keep_sink_and_recent_for_next_read</code> 表示活动截断，不承诺删除全部历史文件。<span class="src">官方 pipeline.py、extract_keyframes.py，commit 052c68d</span></p>
+
+<h2 id="hyperparams">7. 关键配置与复现差异</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>已核实配置</th><th>读取预算 / 训练条件</th></tr></thead>
+  <tbody>
+    <tr><td>Captain</td><td>FLUX.1-dev planner；Seaweed-3B / LCT 合成；keyframe 400×800。<span class="src">§3.2、§4、App. A</span></td><td>逐级 context 8 / 16 / 32 pairs；GoldenMem stress test 延长到 48 pairs。<span class="src">§3.2、Tab. 2</span></td></tr>
+    <tr><td>OneStory</td><td>Wan2.1 I2V；480×832；约 60K multi-shot videos。<span class="src">§3、§5.1</span></td><td>默认活动 context 为 1 latent 帧等价；候选为全部 prior shots。<span class="src">§4.2、§5.3</span></td></tr>
+    <tr><td>StoryMem</td><td>Wan2.2-I2V-A14B；rank-128 LoRA，约 0.7B active 新参数；400K 五秒训练 clips。<span class="src">§4.1</span></td><td>训练 memory 1–10 帧；S=5；推理 sink=3、每 shot ≤3 keyframes、初始 CLIP 阈值 0.9、HPS 阈值 3.0。<span class="src">§4.1</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">Captain 的超参不能拼成一个“标准复现配置”</span>
+  正文实验设置写 planner 40000 steps、video 15000 steps；App. A 文字写 2500 / 20000 steps；Tab. 4 又写 planner 每 stage 20000、video total 10000。learning rate 与 batch 也不同。上述表只保留相容的基座 / 分辨率 / context 设计，训练步数应向具体版本或公开实现核对，不能擅选其中一组作为统一配置。<span class="src">Captain §4 Experimental Setup、App. A、Tab. 4</span>
+</div>
+
+<h2 id="results">8. 结果：各自协议中的记忆收益</h2>
+<h3 id="c-results-captain">Captain：长 context 压力测试</h3>
+<p>每设定生成 20 clips；Gemini 2.5 Flash 按 0–5 rubric 判断角色 / 场景 / 叙事等，另报 VBench2 Identity。它测关键帧序列的一致性，不是 online leave-return 的实体状态成功率。<span class="src">Captain §4.1、Tab. 2、App. D</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型 / context pairs</th><th>Character↑</th><th>Scene↑</th><th>Narrative↑</th><th>Identity↑</th></tr></thead>
+  <tbody>
+    <tr><td>LCT / 24 <span class="src">Captain Tab. 2</span></td><td>3.1</td><td>0.7</td><td>0.6</td><td>0.14</td></tr>
+    <tr><td>Captain 无 GoldenMem / 32 <span class="src">Captain Tab. 2</span></td><td>4.5</td><td>3.8</td><td>3.4</td><td>0.37</td></tr>
+    <tr class="hl"><td>Captain + GoldenMem / 32 <span class="src">Captain Tab. 2</span></td><td>4.6</td><td>3.5</td><td>3.5</td><td>0.35</td></tr>
+    <tr class="hl"><td>Captain + GoldenMem / 48 <span class="src">Captain Tab. 2</span></td><td>4.5</td><td>3.0</td><td>3.3</td><td>0.31</td></tr>
+  </tbody>
+</table></div>
+<p>同 context 的 GoldenMem 压缩并非每项都提高：scene / identity 略降。Tab. 3 的 32-pair 消融将估计计算量从 55 降到 35 PFLOPS，Visual Consistency 为 4.3→4.2；48-pair 全分辨率为 OOM，压缩版可运行。计算量由 token×steps×FLOP/token 估计，不能读成实测延迟或固定 GPU 内存。<span class="src">Captain Tab. 3</span></p>
+<h3 id="c-results-onestory">OneStory：同预算消融选择与压缩</h3>
+<p>作者的 benchmark 包含文本 / 首图条件各 64 个六镜头 cases；指标将标注同一角色的 YOLO person 区域及同一环境的背景区域做 DINOv2 相似度，ViCLIP 另测 prompt alignment。下表是同一 latent 帧等价 context 预算的设计消融。<span class="src">OneStory §5.2–5.3、App. B、Tab. 2(a)</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>同预算设计</th><th>Character↑</th><th>Environment↑</th><th>Semantic↑</th></tr></thead>
+  <tbody>
+    <tr><td>仅上一镜头末帧 <span class="src">OneStory Tab. 2(a)</span></td><td>0.5153</td><td>0.5112</td><td>0.1814</td></tr>
+    <tr><td>仅 Adaptive Conditioner <span class="src">OneStory Tab. 2(a)</span></td><td>0.5465</td><td>0.5597</td><td>0.2172</td></tr>
+    <tr><td>仅 Frame Selection <span class="src">OneStory Tab. 2(a)</span></td><td>0.5526</td><td>0.5710</td><td>0.2238</td></tr>
+    <tr class="hl"><td>OneStory：两者结合 <span class="src">OneStory Tab. 2(a)</span></td><td>0.5874</td><td>0.5752</td><td>0.2389</td></tr>
+  </tbody>
+</table></div>
+<p>增大活动 context 从 1 到 3 帧等价，Character 为 0.5874→0.5926，Environment 为 0.5752→0.5863；这支持相关内容预算的收益，不证明全部候选历史的保存 / 查询成本不增长。<span class="src">OneStory Tab. 2(c)、§4.2</span></p>
+<h3 id="c-results-storymem">StoryMem：ST-Bench 与写入消融</h3>
+<p>ST-Bench 为 30 个故事、每故事 8–12 shots、共 300 prompts；论文解释主结果使用含平滑连接的 MI2V setting。Cross-shot Overall 是全部 shot-pair 的 ViCLIP cosine 平均；Top-10 先按文本 prompt 特征挑相关 pairs，再平均视频相似度。它会受场景相似性影响，不能直接命名为角色身份准确率。<span class="src">StoryMem §4.1–4.3、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>ST-Bench 方法</th><th>Overall↑</th><th>Top-10↑</th><th>证据范围</th></tr></thead>
+  <tbody>
+    <tr><td>StoryDiffusion + Wan2.2-I2V <span class="src">StoryMem Tab. 1</span></td><td>0.4600</td><td>0.4732</td><td>keyframe + I2V 两阶段</td></tr>
+    <tr><td>HoloCine <span class="src">StoryMem Tab. 1</span></td><td>0.4628</td><td>0.5005</td><td>joint multi-shot baseline</td></tr>
+    <tr><td>去掉 semantic selection <span class="src">StoryMem Tab. 2</span></td><td>0.4878</td><td>0.5287</td><td>仅取首帧可能漏记中途新角色</td></tr>
+    <tr><td>去掉 aesthetic filtering <span class="src">StoryMem Tab. 2</span></td><td>0.4844</td><td>0.5330</td><td>低质量候选影响后续条件</td></tr>
+    <tr><td>去掉 memory sink <span class="src">StoryMem Tab. 2</span></td><td>0.4891</td><td>0.5241</td><td>全窗口滚动淘汰早期锚</td></tr>
+    <tr class="hl"><td>StoryMem 完整系统 <span class="src">StoryMem Tab. 1–2</span></td><td>0.5065</td><td>0.5337</td><td>有限 keyframe bank + 在线更新</td></tr>
+  </tbody>
+</table></div>
+<p>作者报告对 HoloCine 的 Overall 相对提升 9.4%，分母是该 embedding 分数，不是 9.4 个百分点的真实记忆成功率。复杂多角色会让纯视觉 bank 歧义，论文 Fig. 7 展示失败并说明 prompt 中明确人物细节可缓解；合法状态变化是否覆盖旧参考仍需专门评测。<span class="src">StoryMem §4.3、§5、Fig. 7</span></p>
+<p>三张结果表采用不同基座、任务、额外条件和 evaluator，不能拼成三个方法的统一名次；这些分数均为作者报告，本页未运行生成模型复现。</p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>把视觉证据从完整时间轴拆出来</h4><ul>
+    <li>Captain 明确采用 <a href="03-lct-moc.html">LCT</a> 类底层合成，先做关键帧规划；GoldenMem 将压缩放在 planner 的历史条件中。</li>
+    <li>前页 <a href="15-matrix-game.html">Matrix-Game</a> 按相机找到旧观察；本页按镜头文本、内容重要性或写入筛选保留叙事证据。</li>
+  </ul></div>
+  <div class="now"><h4>从整帧记忆继续走向可寻址角色</h4><ul>
+    <li>OneStory 与 StoryMem 分别改善读预算和写入质量；合页是设计比较，没有从日期推断继承箭头。</li>
+    <li><a href="17-entity-slots.html">实体与角色槽位</a> 进一步处理“该取哪个人物”的歧义；整帧相似度不能独立证明多实体状态正确。</li>
+    <li><a href="18-shotstream.html">流式多镜头</a> 再把 shot 级记忆与 chunk 级低延迟生成结合；活动预算与全历史成本仍要分开。</li>
+  </ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q31"><span class="qid">Q31</span>Captain、OneStory、StoryMem 都用稀疏视觉历史，为什么它们的“记忆一致性”不能直接按分数比较？</h3>
+  <div class="ans">
+    <p class="short">记忆所在模块、可用信息和评测对象不同。Captain 的 planner 记关键帧，视频合成已有全套视觉锚；OneStory 从全部生成过去中选择和压缩内容；StoryMem 每 shot 更新有限关键帧 bank。其 evaluator 分别测关键帧 rubric / Identity、人物背景 DINOv2、shot-pair ViCLIP，分数不是同一能力尺度。<span class="src">Captain §3–4；OneStory §4–5；StoryMem §3–4</span></p>
+    <ul><li>给定未来视觉锚与仅给未来文本的任务不同；预写人物参考也有额外信息。</li><li>公平比较需统一初始化、镜头 script、return gap、基座 / 预算，并单列身份、事件变化和更新正确性。</li></ul>
+    <p class="cite">依据：Captain §3.3、Tab. 2；OneStory App. B；StoryMem §3.5、§4.3。</p>
+  </div>
+</div>
+<div class="qa">
+  <h3 id="q32"><span class="qid">Q32</span>只存每镜头第一帧会漏掉什么？重要度读取和生成后筛帧能否解决所有叙事状态问题？</h3>
+  <div class="ans">
+    <p class="short">首帧可能没有中途进入的人物、后来拿起的道具或变化后的服装。OneStory 可从完整 prior-shot 候选选择相关帧；StoryMem 的语义变化筛选把新内容写入，避免只记镜头起点。但相似度筛选、审美过滤和有限 bank 都不显式表示实体状态或保证覆盖旧事实。<span class="src">OneStory §4.2、§5.3；StoryMem §3.4、§4.4</span></p>
+    <ul><li>新状态若未入 bank，或旧状态 sink 一直保留，可能产生相互冲突条件；这是需实验区分的机制风险，不能当作本文已证明的普遍失败。</li><li>身份稳定、清晰帧和场景相似分别是有用证据，仍需“按指令变化→离场→返回保持新状态”的单独任务。</li></ul>
+    <p class="cite">依据：StoryMem Fig. 6–7、Tab. 2；OneStory Fig. 6–7、App. B。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Xiao et al. <i>Captain Cinema: Towards Short Movie Generation.</i> ICLR 2026；机制与数值按 arXiv v1。<a href="https://arxiv.org/abs/2507.18634">arXiv:2507.18634</a> · <a href="https://thecinema.ai/">项目</a> · <a href="https://proceedings.iclr.cc/paper_files/paper/2026/hash/86ab3ff2c1387c895766f5c5fc2b610c-Abstract-Conference.html">会议记录</a>。<span class="unverified">未核实可用于本文配置的官方代码仓库。</span></li>
+  <li>An et al. <i>OneStory: Coherent Multi-Shot Video Generation with Adaptive Memory.</i> CVPR 2026。<a href="https://arxiv.org/abs/2512.07802">arXiv:2512.07802</a> · <a href="https://zhaochongan.github.io/projects/OneStory/">项目</a> · <a href="https://openaccess.thecvf.com/content/CVPR2026/html/An_OneStory_Coherent_Multi-Shot_Video_Generation_with_Adaptive_Memory_CVPR_2026_paper.html">会议论文</a>。<span class="unverified">未核实官方代码发布。</span></li>
+  <li>Zhang et al. <i>StoryMem: Multi-shot Long Video Storytelling with Memory.</i> arXiv v1，<span class="unverified">未核实录用 venue</span>。<a href="https://arxiv.org/abs/2512.19539">arXiv:2512.19539</a> · <a href="https://kevin-thu.github.io/StoryMem/">项目</a> · <a href="https://github.com/Kevin-thu/StoryMem">代码</a>。</li>
+  <li>Guo et al. <i>Long Context Tuning for Video Generation.</i> <a href="https://arxiv.org/abs/2503.10589">arXiv:2503.10589</a>；本轨道 <a href="03-lct-moc.html">LCT / MoC 页</a>。</li>
+  <li>StoryMem 公开实现核读版本：<a href="https://github.com/Kevin-thu/StoryMem/tree/052c68d2627a22a95f79dbb4d3376cc30c96f1a3">commit 052c68d</a>；<a href="https://github.com/Kevin-thu/StoryMem/blob/052c68d2627a22a95f79dbb4d3376cc30c96f1a3/pipeline.py">pipeline.py</a>、<a href="https://github.com/Kevin-thu/StoryMem/blob/052c68d2627a22a95f79dbb4d3376cc30c96f1a3/extract_keyframes.py">extract_keyframes.py</a>。</li>
+</ol>
+<!-- JOB6_BODY_END -->
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，参见本页 <a href="#references">参考</a>。</footer>
+</body>
+</html>

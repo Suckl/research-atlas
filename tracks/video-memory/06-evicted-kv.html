@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorldKV 与 Memory Forcing：被逐出的 KV</title>
+<meta name="description" content="KV 归档与相机动作召回、固定 archive/working banks、Bank-aware RoPE、MAG 压缩 writer，以及活跃缓存与总历史的预算区别。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="worldkv">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：滑窗逐出的 KV，还能再用吗？</h2>
+<p><a href="05-streaming-kv.html">滚动缓存</a>让生成器持续运行，但近期窗口淘汰某段视频后，相应场景就失去可读取的证据。固定 opening sink 只能保留开场；中途出现、离开、再返回的对象未必仍在缓存里。WorldKV 将淘汰改成归档与召回；Memory Forcing 的流式版本将有限缓存分出 archive，让中段事件继续参与注意力。<span class="src">WorldKV §4；Memory Forcing 2026 §3.3</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  WorldKV 的问题是“这次回访要把哪段旧 KV 装回窗口”；Memory Forcing 的问题是“固定窗口内，怎样让近期运动与中段事件共存”。前者有外部候选历史，后者直接注意有限 archive；两者都不能承诺无限历史的逐细节恢复。
+</div>
+<p>统一记号：视频时间为 \(t\)，去噪时间为 \(\tau\)；\(x_t\) 为当前视频 latent，\(H_t\) 为近期窗口，\(a_t,c_t,p_t\) 分别为动作、文本和相机位姿。\(M_t\) 是记忆，\(q_t\) 是查询，\(r_t\) 是读出。一次迭代也可生成一个 chunk：</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\qquad x_{t+1}\sim G(H_t,r_t,a_t,c_t),\qquad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1}).$$</div>
+<p>WorldKV 的 \(q_t\) 可由位姿或累计动作构成；Memory Forcing 没有单独的几何检索器，\(q_t\) 是当前去噪窗口的 attention query。记忆中的 KV 是生成网络形成的层级表征，不能当作独立于模型、文本与位置编码的通用图像数据库。<span class="src">WorldKV §4.2；Memory Forcing 2026 §3.3–3.5</span></p>
+
+<h2 id="architecture">2. 全局架构：WorldKV 的一次读写</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>动作 / 相机 / 文本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<p>颜色表示模块角色；WorldKV 在此流程中冻结已有生成器，不新增可训练 writer。图中压缩与检索是运行时规则。<span class="src">WorldKV §4</span></p>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 450" role="img" aria-label="WorldKV：按位姿召回档案 KV，生成后写缓存，逐出时压缩归档">
+    <g class="act" data-part="query" data-step="1">
+      <rect class="box" x="20" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="69">相机 / 累计动作</text>
+      <text class="t-c t-sm" x="110" y="96">查询 q_t</text>
+    </g>
+    <g class="reg" data-part="archive" data-step="1 2 6">
+      <rect class="box" x="260" y="40" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="69">压缩 KV 档案 M_t</text>
+      <text class="t-c t-sm" x="370" y="96">GPU / CPU + 位姿索引</text>
+    </g>
+    <path class="edge act" d="M200,80 H222 V18 H630 V36" data-step="2"/>
+    <path class="edge reg" d="M480,80 H536" data-step="2"/>
+    <g class="data" data-part="retrieve" data-step="2 3">
+      <rect class="box" x="540" y="40" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="69">Top-k 召回</text>
+      <text class="t-c t-sm" x="630" y="96">原 KV 直接装入</text>
+    </g>
+    <path class="edge reg" d="M630,120 V206" data-step="3"/>
+    <g class="reg" data-part="recent" data-step="1 3 5">
+      <rect class="box" x="20" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="239">sink + recent</text>
+      <text class="t-c t-sm" x="110" y="266">当前噪声另行输入</text>
+    </g>
+    <path class="edge reg" d="M200,250 H220 V318 H510 V250 H536" data-step="3"/>
+    <g class="enc" data-part="generator" data-step="3 4">
+      <rect class="box frozen" x="540" y="210" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="630" y="239">已有生成器 G</text>
+      <text class="t-c t-sm" x="630" y="266">native attention</text>
+    </g>
+    <path class="edge enc" d="M720,250 H776" data-step="4"/>
+    <g class="data" data-part="output" data-step="4 5">
+      <rect class="box" x="780" y="210" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="860" y="239">新 clean chunk</text>
+      <text class="t-c t-sm" x="860" y="266">x_(t+1)</text>
+    </g>
+    <path class="edge enc" d="M860,290 V336 H110 V294" data-step="5"/>
+    <path class="edge reg" d="M110,290 V390 H256" data-step="6"/>
+    <g class="reg" data-part="evict" data-step="6">
+      <rect class="box" x="260" y="350" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="379">窗口逐出</text>
+      <text class="t-c t-sm" x="370" y="406">移出活跃区，保留历史</text>
+    </g>
+    <path class="edge reg" d="M370,350 V294" data-step="6"/>
+    <g class="data" data-part="writer" data-step="6">
+      <rect class="box" x="260" y="210" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="370" y="239">Key-Key 去冗余</text>
+      <text class="t-c t-sm" x="370" y="266">anchor + 新内容 token</text>
+    </g>
+    <path class="edge reg" d="M370,210 V124" data-step="6"/>
+    <text class="t-sm" x="548" y="393">活动窗口有界；完整档案另计</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="query"><h4>地址来自哪里？</h4><p>LingBot 使用给定 camera pose；Matrix-Game 将键鼠命令累积成伪平移、伪旋转。后者没有标定到真实场景几何，动作相同也未必到达同一位置。<span class="src">WorldKV §5.1</span></p></div>
+    <div data-note="archive"><h4>档案不是活动窗口</h4><p>保存被逐出 chunk 的各层 KV 与生成时的 camera/action 状态。CPU offload 可以稳定 GPU 驻留量，却不会消除 CPU 历史存储增长。<span class="src">WorldKV §4.1–4.3、Fig. 2</span></p></div>
+    <div data-note="retrieve"><h4>召回后不重编码</h4><p>按候选集归一化的平移平方距离与旋转测地距离求和，取距离最小的 chunk。检索结果装入 native attention 的 retrieved 区；框架也支持 query-based 打分。<span class="src">WorldKV §4.2、§5.1、App. C</span></p></div>
+    <div data-note="recent"><h4>留出近期运动通路</h4><p>sink、retrieved、recent 与当前去噪块具有不同职责。几何近的旧场景补细节，近期 KV 提供运动连续性，检索不能替代整个局部窗口。<span class="src">WorldKV Fig. 4、§4.2</span></p></div>
+    <div data-note="generator"><h4>训练免费改变缓存管理</h4><p>不训练新的记忆网络；使用原自回归 world model 的注意力消费召回 KV。这一结论绑定论文验证的基座，不能直接推广到任意 RoPE 或跨模型缓存。<span class="src">WorldKV §4–5</span></p></div>
+    <div data-note="output"><h4>写入已生成内容</h4><p>历史表征来自已完成生成的 chunk，而非提供未来真值。后续归档保留的是这次生成的证据，也会保留生成错误。<span class="src">WorldKV §3–4</span></p></div>
+    <div data-note="evict"><h4>逐出工作区，未必删除</h4><p>WorldKV 把逐出 KV 变成档案候选；Memory Forcing 则把 working 中与新块最不相似的一块晋升到 archive，archive 满后才 FIFO 删除。<span class="src">WorldKV §4.2；Memory Forcing 2026 Alg. 1</span></p></div>
+    <div data-note="writer"><h4>逐层保留不同 token</h4><p>完整保留首帧 anchor；对非 anchor key 求相对于全部 anchor keys 的平均余弦相似度，删除高相似 token，并同步保留对应 value。每层独立选择。<span class="src">WorldKV Eq. 5、§4.3</span></p></div>
+    <div data-step-note="1"><h4>① 准备记忆与查询</h4><p>近期 KV 在 GPU，旧档案可在 GPU 或 CPU；构造当前 camera/action 地址。</p></div>
+    <div data-step-note="2"><h4>② 选择旧 chunk</h4><p>在档案中排名，取有限预算的视角相关证据。</p></div>
+    <div data-step-note="3"><h4>③ 读取</h4><p>将召回 KV 与 sink、recent、当前去噪块联合送入原注意力。</p></div>
+    <div data-step-note="4"><h4>④ 完成生成</h4><p>迭代去噪直到新 chunk 可以提交。</p></div>
+    <div data-step-note="5"><h4>⑤ 更新近期缓存</h4><p>把新生成内容的 KV 写入工作窗口。</p></div>
+    <div data-step-note="6"><h4>⑥ 逐出、压缩、归档</h4><p>即将离窗的 chunk 经逐层 Key-Key 去冗余后加入档案，供未来回访召回。</p></div>
+  </div>
+  <figcaption>图 1　WorldKV 的运行时路径。节点表示角色，箭头表示数据流；具体异步 offload 调度未在本图假定。<span class="src">WorldKV Fig. 4、§4</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解：外部召回与有限 archive</h2>
+<h3 id="c-compression">3.1 WorldKV：保留“与 anchor 不同”的 token</h3>
+<p>压缩不是按 attention 重要性永久删帧。令每帧有 \(n\) 个 token，首帧为 anchor，非 anchor token 的冗余分数为 \(s_j=n^{-1}\sum_i\cos(k_j,k_i^{\mathrm{anchor}})\)。保留低分 token，优先留下新显露区域与局部变化。各层可以选择不同索引；必须成对取对应的 K 和 V。<span class="src">WorldKV Eq. 5、§4.3</span></p>
+<p>默认 chunk 含 3 个 latent 帧，anchor 全保留，其余 token 保留 25%，因此从 \(3n\) 变成约 \(1.5n\)；这是约 2 倍缓存压缩，不是整个生成系统内存减半。<span class="src">WorldKV §4.3、§5.1</span>低冗余也不保证未来必需的小细节一定留下，这是压缩启发式的能力边界。</p>
+<h3 id="memory-forcing-kv">3.2 Memory Forcing：Attendable Mid-Horizon History（2026）</h3>
+<p>此文是 <a href="https://arxiv.org/abs/2610.11756">2610.11756</a>，与 <a href="08-worldmem.html#memory-forcing-spatial">2025 年 Minecraft 空间版 Memory Forcing</a>同名但不同。它明确沿用 <a href="05-streaming-kv.html#rolling-forcing">Rolling Forcing</a> 的滚动窗口联合去噪与 DMD，改的是后续步骤读取的缓存内容及其位置。<span class="src">Memory Forcing 2026 §3</span></p>
+<p><b>Archive &amp; Working Banks：</b>opening chunk 填入 sink 后固定；新 clean chunk 进入 working。working 满时，将与新块 key 最不相似的旧块移入 archive，再让新块占 working 尾部。archive 满时 FIFO 删除最老 archive 块。当前 query 直接注意 sink、archive、working 与 current，不需要 camera Top-k 从更大外部库召回。<span class="src">Memory Forcing 2026 §3.3、Eq. 5、Alg. 1</span></p>
+<p><b>Bank-aware RoPE：</b>Rolling Forcing 只允许 sink 原始 key 重定位，其他 key 带写入时的绝对时间旋转。新版把整个窗口存成未旋转 key，在每次注意力前按 bank 重新旋转；sink、archive、working 的时间角色因此可以保持可区分。<span class="src">Memory Forcing 2026 §3.4</span></p>
+<div class="formula">$$\iota(\mathrm{sink})=0,\quad \iota(\mathrm{archive}_j)=\frac{j-1}{N_a-1},\quad \iota(\mathrm{working}_w)=w,\quad \widetilde K=R(\iota)K_{\mathrm{raw}}.$$</div>
+<p>这里 \(\iota\) 是虚拟视频位置，避免与去噪时间 \(\tau\) 混淆；\(N_a\) 计 archive 帧，单帧退化情形映射到零。current 排在 working 后。<span class="src">Memory Forcing 2026 Eq. 9</span></p>
+<div class="callout code-note"><span class="callout-title">论文内部的边界表述</span>正文多处把 archive 描述为开区间 \((0,1)\)，但式 (9) 均匀映射实际包含端点 \([0,1]\)。本页以式 (9) 为准；不能据文字宣称所有 bank 的每个位置绝不重合。<span class="src">Memory Forcing 2026 §3.4、Eq. 9、消融讨论</span></div>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>WorldKV</th><th>Memory Forcing（2026 KV）</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>逐层压缩 KV chunk + camera/action key；完整 anchor 与差异 token。<span class="src">§4.2–4.3</span></td><td>sink/archive/working 中的原始 K 与 V，chunk 粒度管理。<span class="src">§3.3–3.4</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>运行时保存生成历史；离窗时一次压缩归档。<span class="src">§3–4</span></td><td>滚动窗口提交 clean 生成块后写入；训练也练习相同分区与位置规则。<span class="src">§3.3、§3.5</span></td></tr>
+    <tr><td>如何寻址</td><td>给定相机或累计动作的对应距离；可替换 query-based retrieval。<span class="src">§5.1、App. C</span></td><td>按 bank 分配虚拟时间地址；attention 内容匹配，无外部几何排名。<span class="src">§3.4</span></td></tr>
+    <tr><td>如何读</td><td>Top-k 装回 native self-attention，无重编码。<span class="src">§4.2</span></td><td>当前窗口联合注意所有保留 bank；每次重新旋转 raw K。<span class="src">Alg. 1、§3.4</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>recent 逐出转归档；高冗余 token 删除；完整档案的永久容量策略未由默认方案保证有界。<span class="src">§4.2–4.3</span></td><td>working 最不相似块晋升；archive 最老块 FIFO 删除，sink 固定。<span class="src">Alg. 1</span></td></tr>
+  </tbody>
+</table></div>
+<h3 id="c-mag">3.3 MAG：把压缩改成可监督 writer</h3>
+<p><a href="https://arxiv.org/abs/2512.18741">Memorize-and-Generate（MAG）</a>用独立 memory model 承担最终 KV 写入：块内全注意力把内容压入末帧 KV，再由该缓存重建整块来训练 writer。之后冻结 memory model，训练生成器读取其压缩缓存。论文默认块级 3 倍 KV 压缩，与 WorldKV 的运行时删冗余不同。<span class="src">MAG §3.3–3.5、Fig. 2–3、Tab. 4</span></p>
+<p>MAG 保留逐块压缩历史；常数压缩率不能把随块数增长的历史变成常数总存储。它还在部分后续片段训练时移除生成器文本条件，促使模型使用历史。回访任务 MAG-Bench 区分真值历史与自生成历史，不能将两者视作同一记忆能力。<span class="src">MAG §3.2、§3.5–3.6</span></p>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<p>以下形状是讲解用记号：批量 \(B\)、头数 \(h\)、head 维度 \(d_h\)、层数 \(L\)、每帧 token 数 \(n\)，均不冒充论文未报告的配置。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>量</th><th>形状 / 配置</th><th>预算含义</th></tr></thead>
+  <tbody>
+    <tr><td>未压缩 chunk 的每层 K、V</td><td>各 \([B,3n,h,d_h]\)</td><td>3 个 latent 帧。<span class="src">WorldKV §4.3</span></td></tr>
+    <tr><td>压缩 chunk 的每层 K、V</td><td>各约 \([B,1.5n,h,d_h]\)</td><td>anchor + 非 anchor 的 25%；索引逐层独立。<span class="src">WorldKV §4.3</span></td></tr>
+    <tr><td>WorldKV 活跃窗口</td><td>sink 3 / retrieval 9 / recent 3 / current 3 帧等价预算</td><td>总计 18 个 latent 帧；压缩使 retrieved 区可覆盖更多 chunk。<span class="src">WorldKV §5.1</span></td></tr>
+    <tr><td>WorldKV 档案</td><td>\(\sum_{i=1}^{N_t}\mathrm{size}(KV_i)\)</td><td>\(N_t\) 可增长；CPU offload 只改变驻留位置。<span class="src">WorldKV §4.1–4.3</span></td></tr>
+    <tr><td>Memory Forcing bank</td><td>sink 3 / archive 6 / working 12 latent 帧</td><td>bank 预算 21 帧，另有滚动窗口；训练总窗口 33 帧。<span class="src">Memory Forcing 2026 §4.1</span></td></tr>
+    <tr><td>KV 占用（推算）</td><td>\(2LBnhd_hb\)</td><td>\(b\) 为每元素字节，\(n\) 此处取总缓存 token 数；权重、激活、VAE、索引与输出视频另计。</td></tr>
+  </tbody>
+</table></div>
+<p>有限 archive 可以在实现层保证缓存长度有界，也明确丢弃远程事件；WorldKV 可以留更多候选，但需支付归档存储、检索与搬运代价。这是容量与召回覆盖的取舍，不能用“constant memory”概括整个系统。</p>
+
+<h2 id="objective">5. 训练目标与写入协议</h2>
+<p><b>WorldKV：</b>直接改变推理缓存管理，不训练检索器或压缩器，没有新的记忆损失。高质量回访并不构成压缩 token 保真度的独立监督。<span class="src">WorldKV §4</span></p>
+<p><b>Memory Forcing：</b>继承 DMD 的分布匹配与 flow critic；训练混合滚动窗口和 self-forcing 窗口，等概率抽样，推理只用 rolling。生成器在自生成历史上学习，archive 晋升规则本身是 key similarity 启发式。<span class="src">Memory Forcing 2026 §3.1–3.2、§3.5</span></p>
+<div class="formula">$$\nabla_\theta\mathcal L_{\mathrm{DMD}}\approx\mathbb E\!\left[(s_{\mathrm{gen}}(\hat x^{\tau},\tau)-s_{\mathrm{data}}(\hat x^{\tau},\tau))\frac{\partial\hat x}{\partial\theta}\right].$$</div>
+<p>上式沿用通用 score 记号，省略前向加噪权重；不是新增 paired return 重建损失。<b>Aligned cache insertion</b>要求提交 KV 的前向也能看到 sink、archive、working 和 current，与去噪前向的可见集合对齐，避免“生成时使用记忆、写入时没有记忆”的表征失配。<span class="src">Memory Forcing 2026 Eq. 3、§3.5</span></p>
+
+<h2 id="pseudocode">6. 伪代码：两种缓存管理</h2>
+<div class="code-title">cache_memory.py（机制示意，非官方 API；据 WorldKV §4 与 Memory Forcing Alg. 1）</div>
+<pre><code class="lang-py"># x is a clean completed chunk; tau is denoising time
+archive, recent, sink = [], [], []
+for t, controls in stream:
+    q = camera_or_accumulated_action(controls)
+    ids = nearest_chunks(archive, q, retrieval_budget)
+    recalled = load_kv(archive, ids)           # may transfer CPU to GPU
+    active = concat_kv(sink, recalled, recent)
+    x = denoise_new_chunk(active, controls)
+    recent.append(clean_kv(x, controls))
+    for old in pop_outside_recent_budget(recent):
+        anchor, other = split_anchor(old)
+        scores = mean_cosine_to_anchor(other.K, anchor.K)
+        keep = lowest_similarity_indices(scores, retention)
+        compact = keep_anchor_and_matching_kv(anchor, other, keep)
+        archive.append((compact, old.camera_or_action))
+
+# Alternative: Memory Forcing uses no external candidate archive
+sink, archive, working = fixed_capacity_banks()
+for rolling_window in rolling_stream:
+    raw_ctx = concat_kv(sink, archive, working)
+    positions = interpolated_bank_positions(raw_ctx, rolling_window)
+    x = rolling_denoise(rolling_window, raw_ctx, positions)
+    kv = aligned_clean_insertion(x, raw_ctx, rolling_window)
+    if sink.has_room():
+        sink.append(kv)
+    else:
+        if working.is_full():
+            j = least_key_similarity(working, kv)
+            promoted = working.pop(j)
+            if archive.is_full():
+                archive.pop_oldest()
+            archive.append(promoted)
+        working.append(kv)
+    # Store raw K; rotate afresh at the next attention call.
+    # The deleted archive entry has no later recovery path.</code></pre>
+
+<h2 id="hyperparams">7. 关键超参：先固定读预算，再讨论召回</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>需要固定的项</th><th>论文设置 / 影响</th></tr></thead>
+  <tbody>
+    <tr><td>WorldKV</td><td>活跃分区、非 anchor retention</td><td>18 latent 帧等价窗口；retention 25%。过强压缩会丢失非 anchor 的新增信息。<span class="src">§5.1、Tab. 2</span></td></tr>
+    <tr><td>WorldKV</td><td>camera/action 地址与检索预算</td><td>平移、旋转距离分别在候选集归一化后相加；动作模型使用伪位姿。<span class="src">§5.1</span></td></tr>
+    <tr><td>Memory Forcing</td><td>chunk、滚动 schedule、bank</td><td>chunk 3 latent 帧；4 步 [1000,750,500,250]；bank 3/6/12。<span class="src">§4.1</span></td></tr>
+    <tr><td>Memory Forcing</td><td>后训练</td><td>1000 步、batch 32；G 学习率 1.5e-6，fake score 4e-7；fake:G 更新比 5:1。<span class="src">§4.1</span></td></tr>
+  </tbody>
+</table></div>
+<p><span class="unverified">未核验公开的 2026 Memory Forcing 官方代码仓库，因此这里不宣称具体缓存 kernel、异步搬运或实际 FPS。</span>Wan2.2 5B 的因果转换与后训练是单独配置，不能将其画质、参数量与默认基座的缓存实验拼成一个最优系统。<span class="src">Memory Forcing 2026 §3.6、§4</span></p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码示例</span>WorldKV 论文主设置为非 anchor 保留 25%、retrieved 区 9 latent 帧等价预算；官方 README Quick Start 使用 <code>--kv_compression_keep_ratio 0.5 --retrieval_frames 18</code>，后者说明为 6 个原始 3 帧 chunk，并可选 <code>--retrieval_rope_correction</code>。保留率不同；压缩前帧数与压缩后帧等价预算也不能直接按 18 对 9 比较。复现需明确 retention、预算口径与 RoPE 开关。<span class="src">WorldKV §5.1；官方 README.md §Quick Start/Arguments</span></div>
+
+<h2 id="results">8. 关键结果：回访分与长视频质量分分开</h2>
+<p><b>WorldKV：</b>60 个 scene–trajectory 配对，以同一次 rollout 的首访生成帧作为回访参考；不是对真实未来帧的重建。下表节选 Matrix-Game-2.0（1.3B），吞吐在末 chunk 测量，硬件为 4×H200。<span class="src">WorldKV §5.1、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>同基座缓存</th><th>LPIPS↓</th><th>PSNR↑</th><th>SSIM↑</th><th>FPS↑</th></tr></thead>
+  <tbody>
+    <tr><td>Sliding window <span class="src">WorldKV Tab. 1</span></td><td>0.594</td><td>11.422</td><td>0.280</td><td>18.87</td></tr>
+    <tr><td>Full KV <span class="src">WorldKV Tab. 1</span></td><td>0.529</td><td>13.748</td><td>0.364</td><td>7.82</td></tr>
+    <tr class="hl"><td>WorldKV <span class="src">WorldKV Tab. 1</span></td><td>0.462</td><td>14.101</td><td>0.405</td><td>16.25</td></tr>
+  </tbody>
+</table></div>
+<p>选择性读比 full KV 更好，是这一基座和协议上的观察；“无关、退化历史会干扰 attention”是作者解释，不能据此断言所有长缓存都无用。另一基座 LingBot 的 LPIPS 仍以 full KV 更好：0.441 对 WorldKV 0.455。<span class="src">WorldKV Tab. 1、§5.2</span></p>
+<p><b>Memory Forcing：</b>默认 Wan2.1-T2V-1.3B，832×480、16 FPS；下表为 30 秒视频的缓存消融。它报告 VBench Total/Quality/Semantic，并用定性 leave-and-return 展示记忆，未在这组表中给出独立检索准确率或配对回访 PSNR。<span class="src">Memory Forcing 2026 §4.1、Tab. 2(a)、§4.4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>缓存</th><th>Total↑</th><th>Quality↑</th><th>Semantic↑</th></tr></thead>
+  <tbody>
+    <tr><td>Official Rolling Forcing <span class="src">Tab. 2(a)</span></td><td>82.04</td><td>82.64</td><td>79.61</td></tr>
+    <tr><td>Working only <span class="src">Tab. 2(a)</span></td><td>82.41</td><td>83.46</td><td>78.22</td></tr>
+    <tr class="hl"><td>Archive + working <span class="src">Tab. 2(a)</span></td><td>83.58</td><td>84.57</td><td>79.63</td></tr>
+  </tbody>
+</table></div>
+<p>VBench Total 从 5 秒的 83.88 到 60 秒的 83.20，下降 0.68 分；这是时长下的总体质量稳定性证据，不能替代“中段对象确实召回”的专测。<span class="src">Memory Forcing 2026 Tab. 1</span></p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前：开场 + 近期</h4><ul><li><a href="05-streaming-kv.html">Self Forcing / LongLive / Rolling Forcing</a>训练流式生成与局部稳定性；中段事件仍可能离窗。</li><li>MAG 学习可重建的压缩 writer；WorldKV 运行时压缩和召回已有 KV。</li></ul></div>
+  <div class="now"><h4>之后：保存也要能读</h4><ul><li>Memory Forcing 明确修改 Rolling Forcing 缓存协议，属于继承关系。<span class="src">2026 版 §3</span></li><li><a href="07-addressable.html">WorldTrace / L2R</a>继续区分位置兼容与状态读取；没有证据就不从时间先后推断继承。</li><li><a href="08-worldmem.html">帧库检索</a>用位姿与历史图像作为独立证据；KV 则绑定生成器的内部表征。</li></ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q11"><span class="qid">Q11</span>归档全部逐出 KV 与固定 archive bank 有何区别？为什么“活跃缓存固定”不足以说明总内存固定？</h3>
+  <div class="ans"><p class="short">WorldKV 将活跃窗口与候选档案分开，限定本次 attention 的大小，但旧 chunk 可以继续积累在 GPU/CPU。Memory Forcing 把 archive 也限定在缓存内，直接参与 attention，容量满就永久删除旧事件。两者的区别在保存范围和删除规则，不能只比较当前 GPU 活跃 token。</p>
+    <ul><li>CPU offload 减少 GPU 驻留量，完整历史仍占 CPU 容量。</li><li>固定比例压缩减小增长斜率，不能消除历史增长。</li><li>固定 bank 真实限制了缓存，但远程召回能力也受到容量与晋升规则限制。</li></ul>
+    <p class="cite">依据：WorldKV §4.1–4.3、Fig. 2；Memory Forcing 2026 §3.3、Alg. 1；MAG §3.3–3.4。</p>
+  </div>
+  <h3 id="q12"><span class="qid">Q12</span>为什么把旧块放进 archive 还不够？Memory Forcing 对 Rolling Forcing 的位置与写入协议改了什么？</h3>
+  <div class="ans"><p class="short">旧 key 若仍绑定原绝对时间，后续 query 可能读到训练范围之外的旋转相位；写缓存的前向若缺少生成时使用的上下文，KV 也会失配。新版存整个窗口的 raw K，在读取时按 bank 重定位，并让 clean insertion 看到与去噪相同的上下文集合。</p>
+    <ul><li>继承 rolling joint denoising 与 DMD；改动发生在缓存管理和读取地址。</li><li>bank-aware 位置区分 opening、mid-horizon 与近期；没有几何 Top-k 外部召回。</li><li>Aligned cache insertion 对齐写入与去噪的可见集合，不能恢复已 FIFO 删除的 archive。</li></ul>
+    <p class="cite">依据：Memory Forcing 2026 §3.3–3.5、Eq. 9、Alg. 1。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Yi, Kim, Cho, Jang, Yun, Kim. <i>WorldKV: Efficient World Memory with World Retrieval and Compression.</i> 2026，arXiv v1。<a href="https://arxiv.org/abs/2605.22718">论文</a> · <a href="https://cvlab-kaist.github.io/WorldKV/">项目</a> · <a href="https://github.com/cvlab-kaist/WorldKV">代码与参数说明</a>。</li>
+  <li>Zhang, Wang, Shi, Wu, Wang. <i>Memory Forcing: Attendable Mid-Horizon History for Streaming Video Generation.</i> 2026，arXiv v1。<a href="https://arxiv.org/abs/2610.11756">论文</a>；官方代码链接未核验。</li>
+  <li>Zhu et al. <i>Memorize-and-Generate: Towards Long-Term Consistency in Real-Time Video Generation.</i> 2025。<a href="https://arxiv.org/abs/2512.18741">论文</a>。</li>
+  <li>Liu et al. <i>Rolling Forcing.</i> 2025。<a href="https://arxiv.org/abs/2509.25161">论文</a> · <a href="05-streaming-kv.html#rolling-forcing">本轨道缓存拆解</a>。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

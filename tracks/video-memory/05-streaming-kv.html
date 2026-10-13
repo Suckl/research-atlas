@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self Forcing / LongLive / Rolling Forcing：KV 缓存作为记忆</title>
+<meta name="description" content="clean K/V 写入、滚动窗口、frame sink、prompt re-cache 与联合滚动去噪；区分长期画面稳定与具体远程事件记忆。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<!-- widgets used on this page, e.g. <script defer src="../../assets/js/widgets/cem.js"></script> -->
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="vm-self-forcing">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：缓存里的帧，到底能记住多久</h2>
+<p>Self Forcing 的蒸馏与训练历史对齐已在 <a href="../few-step/12-self-forcing.html">少步生成轨道</a>拆解。本页只沿记忆的数据流看它与 LongLive、Rolling Forcing：过去帧怎样变成 K/V，哪些保留、哪些淘汰，文本变化后缓存为何需要重算，以及多帧联合去噪如何稳定持续生成。<span class="src">Self Forcing §3.2、§3.4；LongLive §3；Rolling Forcing §3</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  KV cache 既是省掉历史重算的计算缓存，也是当前能直接读取的视觉记忆。rolling window 记近期，sink 记开头；它们稳定画面，但没有自动为中途事件建立可长期查询的档案。
+</div>
+<p>记视频时间为 \(t\)，扩散时间为 \(\tau\)，clean latent 为 \(x_t\)，带噪状态为 \(x_t(\tau)\)，近期窗口为 \(H_t\)，文本为 \(c_t\)，缓存记忆为 \(M_t\)，query 为 \(q_t\)，读出为 \(r_t\)。本页 \(t\) 可以指 latent 帧或生成 chunk，具体数量注明粒度；这些 T2V 模型没有单独的动作 \(a_t\)／相机 \(p_t\) 检索索引。</p>
+
+<h2 id="architecture">2. 全局架构：读缓存、生成、clean 写入与淘汰</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络（VAE 等）</span><span><i class="sw pred"></i>记忆模块可训练部分</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>文本 / 动作 / 相机条件</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 495" role="img" aria-label="流式视频 KV 记忆的读写、sink 保留、prompt recache 与 FIFO 淘汰">
+    <g class="act" data-part="prompt" data-step="1 7">
+      <rect class="box" x="20" y="35" width="170" height="62" rx="10"/>
+      <text class="t-c t-b" x="105" y="60">当前文本 cₜ</text>
+      <text class="t-c t-sm" x="105" y="82">切换时刷新条件</text>
+    </g>
+    <g class="data" data-part="noise" data-step="1 3">
+      <rect class="box" x="20" y="180" width="170" height="82" rx="10"/>
+      <text class="t-c t-b" x="105" y="207">当前噪声 / 窗口</text>
+      <text class="t-c t-sm" x="105" y="232">RF：多块错峰去噪</text>
+    </g>
+    <g class="reg" data-part="recent" data-step="2 5 6 7">
+      <rect class="box" x="250" y="35" width="220" height="82" rx="10"/>
+      <text class="t-c t-b" x="360" y="60">近期 K/V：Mᵣ</text>
+      <text class="t-c t-sm" x="360" y="84">来自完成的 clean 帧</text>
+      <text class="t-c t-sm" x="360" y="104">FIFO 滚动窗口</text>
+    </g>
+    <g class="reg" data-part="sink" data-step="2 6">
+      <rect class="box" x="520" y="35" width="220" height="82" rx="10"/>
+      <text class="t-c t-b" x="630" y="60">初始 K/V：Mˢ</text>
+      <text class="t-c t-sm" x="630" y="84">LongLive / RF 的 sink</text>
+      <text class="t-c t-sm" x="630" y="104">保留开头，非中段档案</text>
+    </g>
+    <path class="edge act" d="M105,97 V142 H510 V175" data-step="1"/>
+    <path class="edge" d="M190,221 H425" data-step="3"/>
+    <path class="edge reg" d="M360,117 V163 H470 V175" data-step="2"/>
+    <path class="edge reg" d="M630,117 V160 H580 V175" data-step="2"/>
+    <g class="enc" data-part="generator" data-step="2 3">
+      <rect class="box" x="430" y="180" width="220" height="82" rx="10"/>
+      <text class="t-c t-b" x="540" y="207">因果历史 + 生成器</text>
+      <text class="t-c t-sm" x="540" y="232">RF 窗口内双向互看</text>
+    </g>
+    <path class="edge enc" d="M650,221 H775" data-step="4"/>
+    <g class="data" data-part="clean" data-step="4">
+      <rect class="box" x="780" y="180" width="160" height="82" rx="10"/>
+      <text class="t-c t-b" x="860" y="207">输出 clean xₜ₊₁</text>
+      <text class="t-c t-sm" x="860" y="232">RF 释放最前块</text>
+    </g>
+    <path class="edge" d="M860,262 V335 H745" data-step="5"/>
+    <g class="enc" data-part="writer" data-step="5">
+      <rect class="box" x="520" y="295" width="220" height="82" rx="10"/>
+      <text class="t-c t-b" x="630" y="322">clean 前向重编码</text>
+      <text class="t-c t-sm" x="630" y="348">τ = 0 → 写入新 K/V</text>
+    </g>
+    <path class="edge reg" d="M520,335 H475" data-step="6"/>
+    <g class="reg" data-part="evict" data-step="6">
+      <rect class="box" x="250" y="295" width="220" height="82" rx="10"/>
+      <text class="t-c t-b" x="360" y="322">追加 / 淘汰旧条目</text>
+      <text class="t-c t-sm" x="360" y="348">sink 保留，近期移窗</text>
+    </g>
+    <path class="edge reg" d="M360,295 V122" data-step="6"/>
+    <g class="pred" data-part="recache" data-step="7">
+      <rect class="box" x="20" y="402" width="920" height="65" rx="10"/>
+      <text class="t-c t-b" x="480" y="427">LongLive：prompt 切换 → 近期 generated 帧 + 新文本 → KV re-cache</text>
+      <text class="t-c t-sm" x="480" y="450">刷新已有上下文的表示；已经淘汰的中段帧不会自动恢复</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>条件写进了 K/V</h4><p>文本经 cross-attention 影响后续层的视觉表示，历史 self-attention 的 K/V 因而带有旧 prompt 语义。只替换当前文本不能抹掉缓存里的旧条件。<span class="src">LongLive §3.1</span></p></div>
+    <div data-note="noise"><h4>当前工作区不是持久缓存</h4><p>Self Forcing／LongLive 完成当前 chunk 的去噪；RF 同时推进多个处于不同噪声水平的 chunk。未完成的 future buffer 与 clean 历史必须分开。<span class="src">Rolling Forcing §3.2</span></p></div>
+    <div data-note="recent"><h4>存每层 K/V</h4><p>近期历史用于 motion 和细节连续性。窗口淘汰的是层内表示的直接读取路径，不等于模型权重删除了通用知识。<span class="src">Self Forcing §3.4</span></p></div>
+    <div data-note="sink"><h4>固定开头锚点</h4><p>LongLive 保留首个 frame chunk；RF 保留初始 global context，并动态调整其 K 的 RoPE 地址。Self Forcing 原方案不依赖永久首 chunk sink。<span class="src">LongLive §3.3；RF §3.3；SF §3.4</span></p></div>
+    <div data-note="generator"><h4>历史因果，当前窗口可双向</h4><p>RF 当前窗口内部联合去噪，但完成历史不会因后续帧被反向更新，因此历史缓存仍可复用。<span class="src">RF §3.2–3.3</span></p></div>
+    <div data-note="clean"><h4>何时成为记忆</h4><p>只有完成并释放的生成帧才进入持久 clean K/V；RF 剩余帧继续放在带噪工作窗口。<span class="src">SF Alg. 2；RF Alg. 1–2</span></p></div>
+    <div data-note="writer"><h4>“重编码”指生成主干的 clean pass</h4><p>将预测的 clean latent 在零噪声时间再送生成器得到 K/V，不是直接拿最后一次 noisy forward 的 K/V，也不要求每次 RGB decode → VAE encode。<span class="src">SF Alg. 1–2；RF Alg. 1、App. A</span></p></div>
+    <div data-note="evict"><h4>淘汰范围</h4><p>SF 近期 cache FIFO；LongLive／RF 另外固定初始 sink。中间事件离开近期窗口后没有专门的可寻址副本。<span class="src">SF §3.4；LongLive §3.3；RF App. E</span></p></div>
+    <div data-note="recache"><h4>表示更新，不是检索</h4><p>LongLive 在切换边界以已有近期生成帧和新文本重建缓存，用视觉历史维持连续性，用新条件更新语义。图中的流程不表示新增一个独立可训练 writer 网络。<span class="src">LongLive §3.1、§3.3</span></p></div>
+    <div data-step-note="1"><h4>① 给当前文本与噪声</h4><p>当前 prompt 决定生成条件；RF 还维护未完成的滚动窗口。</p></div>
+    <div data-step-note="2"><h4>② 读取历史 K/V</h4><p>近期窗口，以及方法启用的初始 sink，进入注意力。</p></div>
+    <div data-step-note="3"><h4>③ 去噪当前工作区</h4><p>SF／LongLive 单 chunk；RF 窗口内错峰噪声联合推进。</p></div>
+    <div data-step-note="4"><h4>④ 输出完成帧</h4><p>释放 clean 结果，带噪 future buffer 继续保留在工作区。</p></div>
+    <div data-step-note="5"><h4>⑤ clean 写入</h4><p>在零噪声前向重算完成帧的 K/V。</p></div>
+    <div data-step-note="6"><h4>⑥ 保留与淘汰</h4><p>追加近期 cache，删除超预算旧条目；启用 sink 的方法保留开头锚。</p></div>
+    <div data-step-note="7"><h4>⑦ 切换时重建</h4><p>LongLive 用新 prompt 重编码近期上下文，不要求所有旧视频重新进入注意力。</p></div>
+  </div>
+  <figcaption>图 1　一次流式生成与缓存写入。<span class="src">依据 SF §3.2、§3.4；LongLive §3.1–3.3；RF §3.2–3.3、App. A。</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-clean-write">3.1 Self Forcing：缓存 clean 表示，不沿用 noisy 中间态</h3>
+<p>SF 去噪当前生成块时，历史 K/V 作为条件被读取；完成以后再以 \(\tau=0\) 做前向，把完成 latent 编成历史 K/V。训练也使用自己生成的历史，缓存写入停止梯度；推理则维护固定长度 FIFO。<span class="src">SF §3.2、§3.4、Alg. 1–2</span></p>
+<p>“clean”是没有扩散噪声的模型输出，不等于真值正确。错误外观也会被 clean pass 编成后续条件；所以 clean 写入解决表示的噪声水平一致性，自生成历史训练解决另一种分布偏差。蒸馏损失、随机截断和教师规模见 <a href="../few-step/12-self-forcing.html#objective">已有训练目标页</a>。</p>
+<p>SF 特别指出：首个 VAE latent 帧只编码初始图像，与时间压缩后的其他 latent 统计不同。若训练时一直能看见它、推理滚动后却淘汰它，会产生闪烁。原方法训练时屏蔽“最后 chunk 看首 chunk”的路径来模拟丢失首帧，并没有把永久 sink 作为唯一解。<span class="src">SF §3.4</span></p>
+
+<h3 id="longlive">3.2 LongLive：近期窗口、frame sink 与 prompt re-cache</h3>
+<p>LongLive 在近期 KV 之外保留首个 frame chunk 作永久 sink，让当前 query 始终能够读取开头的身份、背景和色调证据。训练也用短窗口和 sink，并通过 streaming long tuning 继续沿用跨迭代 KV 生成后续片段，使训练见到长期自生成历史。<span class="src">LongLive §3.2–3.3</span></p>
+<p>prompt 切换时有一个信息冲突：保留原 KV 会留下旧语义；彻底清空又丢掉视觉连续性。KV re-cache 用<b>已有 generated 帧 + 新 prompt</b>重新计算表示，保留可见内容，刷新文本影响。实现成本绑定仍持有的近期窗口；它不为所有旧帧建立检索索引，也不会凭空恢复已淘汰的事件。<span class="src">LongLive §3.1、§3.3</span></p>
+<div class="formula">$$M_t^{\mathrm{recent,new}}=\mathrm{KV}_{\theta}\big(H_t,\tau=0,c_{\mathrm{new}}\big),\qquad r_t=\mathrm{Attn}\big(q_t,[M_t^{\mathrm{sink}},M_t^{\mathrm{recent,new}}]\big)$$</div>
+<p>上式概括近期 re-cache 与锚点读取的分工。论文后文明确以最近窗口重建 cache；本次核对的官方 LongLive1.0 交互配置设 <code>global_sink: true</code>，保留原 sink，只刷新近期表示。关闭该选项时，交互 pipeline 传入 sink 重建标记，允许覆盖 sink。不能从“整个 prefix”这句概括推定所有路径都刷新初始锚。<span class="src">LongLive §3.3；官方 c6a27e7：LongLive1.0/pipeline/interactive_causal_inference.py、wan/modules/causal_model.py</span></p>
+<div class="callout code-note"><span class="callout-title">论文内部：sink 粒度描述不一致</span>
+  §3.3 的一般训练段落写 “first two frames”，但 Fig. 5、§4 Implementation 与 §4.5 的具体配置是首个 chunk，实验比较为 9 个近期 latent 帧 + 3 个 sink latent 帧。<span class="src">LongLive v2 §3.3、Fig. 5、§4.5</span> 官方原版配置也设 <code>local_attn_size: 12</code>、<code>sink_size: 3</code>、<code>context_noise: 0</code>。<span class="src">官方 c6a27e7：LongLive1.0/configs/longlive_interactive_inference.yaml</span> 本页按具体实验与该配置解释粒度，不能把 RGB 帧、latent 帧与 chunk 混算。
+</div>
+
+<h3 id="rolling-forcing">3.3 Rolling Forcing：多个未来块共同去噪</h3>
+<p>RF 不只是换了缓存淘汰规则。它维护一个滚动去噪窗口：越靠后的块噪声越高，当前窗口内部双向注意力，让相邻块共同修正；每次推进所有块的噪声水平，释放最前面的 clean 块，再在末尾加入新噪声。历史 KV 仍只被因果读取。<span class="src">RF §3.2、Fig. 3</span></p>
+<p>窗口长度按去噪阶段数设置；实际 chunk 包含多个 latent 帧。这个未完成窗口是<b>工作区</b>，近期与开头 KV 是<b>持久可读上下文</b>，三者不能叫成同一个“历史窗口”。未来内容已经部分计算，会影响 interactive prompt 切换延迟；这是论文明确列出的取舍。<span class="src">RF §3.2、§4.1、App. E</span></p>
+<p>RF 的开头锚还有地址管理：保存 global context 的<b>未施加 RoPE 的 K</b>，每次读取时把它重定位到近期历史之前，使相对距离处于训练范围内。保留内容与修复地址缺一不可；若原始开头索引一直不动，随生成变长可能产生位置外推伪影。<span class="src">RF §3.3、App. D、Fig. 7</span></p>
+<p>写入近期缓存时，RF 的 clean pass 只看近期上下文，排除 global context；global anchor 单独保留。这样生成时的“全局 + 近期”读取，和近期 KV 的构造范围也必须分开。<span class="src">RF App. A：KV Cache</span></p>
+
+<h3 id="c-stability-recall">3.4 稳定画面，为什么仍会忘掉中途事件</h3>
+<p>如果开头是一件红外套，中途换成蓝外套并离开视野，sink 保留的是开头信息；近期窗口最后也不含换装帧。模型可能维持稳定色调与流畅运动，却没有可寻址的证据回答回来以后应穿哪件衣服。这个例子是机制推断；RF 附录则明确承认中段内容离开 temporal context 后被丢弃，没有中段记忆。<span class="src">RF App. E</span></p>
+<p>因此需区分三个检查：写入是否 clean、缓存地址是否可用、需要的事件是否仍被保留。re-cache 能刷新存着的信息；sink 能保留指定初始锚；联合去噪能减缓误差传播。它们都不自动提供“按事件检索全部远程历史”的能力。</p>
+
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>Self Forcing</th><th>LongLive</th><th>Rolling Forcing</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>各层最近 latent 帧／chunk 的 K/V。</td><td>近期 K/V + 初始 frame-chunk sink；re-cache 所需近期 generated 帧。</td><td>近期 K/V + 初始 global K/V；另有未完成的多块去噪工作区。</td></tr>
+    <tr><td>何时写（GT / generated，clean / noisy）</td><td>训练／推理都将自生成 clean latent 在零噪声前向写 KV。</td><td>沿用自生成历史；切 prompt 时以新文本重算近期 K/V。</td><td>每次释放最前面的 clean 块后写 KV；工作区剩余 noisy 块不当永久历史。</td></tr>
+    <tr><td>如何寻址</td><td>时间次序 + RoPE + attention Q/K。</td><td>近期时间窗口与固定初始锚；没有事件检索器。</td><td>global K 重新施加位置，放在近期 context 之前；当前 query 对内容打分。</td></tr>
+    <tr><td>如何读</td><td>当前 chunk 读因果历史 KV。</td><td>读 sink + recent；切换后读刷新的表示。</td><td>clean 历史因果读取，当前滚动窗口内部双向联合 attention。</td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>满窗口 FIFO 淘汰最旧 K/V。</td><td>保留 sink，其余滚动淘汰；prompt switch 覆盖近期表示。</td><td>保留 global context，其余 temporal KV 滚动淘汰；没有中段档案。</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">表格依据 <span class="src">SF §3.2、§3.4、Alg. 1–2；LongLive §3；RF §3.2–3.3、App. A、App. E</span>。未完成 noisy 工作区的生命周期与已完成历史不同。</p>
+
+<h2 id="shapes">4. 缓存预算与张量形状</h2>
+<p>设每帧 token 数为 \(P\)，头数为 \(h\)，每头宽度为 \(d\)，层数为 \(L\)，近期帧数为 \(w\)，sink 帧数为 \(s\)，去噪工作区 latent 帧数为 \(u\)。形状是机制推导，具体配置来自各论文。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>每层近期 K、V</td><td>各 [B, wP, h, d]</td><td>存储量约 2B·L·wP·h·d 个元素；固定 w 后不随时长增长。<span class="src">由 SF Alg. 2 推导</span></td></tr>
+    <tr><td>sink K、V</td><td>各 [B, sP, h, d]</td><td>独立于 FIFO；其保留内容来自开头而不是自动摘要。</td></tr>
+    <tr><td>LongLive 实验短窗口</td><td>w = 9，s = 3 latent 帧</td><td>活动历史共 12 latent 帧，与 21-frame 长窗口作比较。<span class="src">LongLive Fig. 5、§4.5</span></td></tr>
+    <tr><td>RF 历史与工作区</td><td>w = 3，s = 3，u = 15 latent 帧</td><td>5 阶段 × 3 latent 帧／chunk 的工作窗口；总活动范围 21 latent 帧。<span class="src">RF §4.1、App. A；乘加为推导</span></td></tr>
+    <tr><td>流式训练</td><td>resident：近期 + sink + 当前监督片段</td><td>历史缓存截断梯度；当前片段的训练图另占显存。<span class="src">LongLive §3.2–3.3</span></td></tr>
+  </tbody>
+</table></div>
+<p>固定 KV 不等于整个应用固定内存：保存全部输出视频、prompt 记录或用于重建的原始帧另计。窗口的 token 数也受分辨率和 VAE 压缩率影响；不能只比较“记住多少秒”。</p>
+
+<h2 id="objective">5. 记忆怎样进入训练</h2>
+<p>SF 的要点是训练 rollout 读取自己写出的历史；缓存写入停止梯度。LongLive 将缓存跨训练迭代保留，继续生成新片段，只在当前片段接受教师监督，并把 prompt switch 的 re-cache 纳入训练。RF 使用滚动生成历史，联合窗口和 SF 目标交替以稳定运动；损失与蒸馏推导见 <a href="../few-step/12-self-forcing.html#c-long">少步轨道的长视频后训练</a>。<span class="src">SF §3.2；LongLive §3.1–3.2；RF §3.4</span></p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\qquad x_{t+1}\sim G_\theta(H_t,r_t,c_t),\qquad M_{t+1}=\mathrm{EvictAppend}\!\left(M_t,\mathrm{KV}_{\theta}(x_{t+1},0,c_t)\right)$$</div>
+<p>上式是本页统一的记忆骨架；RF 的 \(G\) 同时更新整个带噪工作区，仅释放的 clean 块进入 \(M\)。LongLive 遇 prompt switch 还插入 \(\mathrm{Recache}\)；sink 的保留策略由方法决定。训练输出更稳定，不直接意味着模型优化了特定远程事件的召回损失。</p>
+
+<h2 id="pseudocode">6. 伪代码：一次 clean 写入与一次 prompt 更新</h2>
+<div class="code-title">streaming_memory.py（机制示意；省略少步蒸馏）</div>
+<pre><code class="lang-py">recent_kv, sink_kv = [], []
+recent_latents = []                       # 仅近期，供 prompt recache
+prompt = initial_prompt
+rolling = initialize_noise_ladder()       # RF；其他方法为空
+for event in generation_requests:
+    if mode == "LongLive" and event.prompt != prompt:
+        prompt = event.prompt
+        recent_kv = encode_clean_kv(recent_latents, prompt)
+        # LongLive1.0 默认 global_sink=True，保持原 sink
+    memory = select_active_history(recent_kv, sink_kv)
+    if mode == "RollingForcing":
+        memory.global_K = rope_at_effective_indices(sink_kv.K_raw)
+        rolling.append(sample_noise())
+        clean_predictions = G(rolling, noise_levels, prompt, memory,
+                              window_attention="bidirectional")
+        output = clean_predictions[0]     # 最前块在本轮完成
+        rolling = renoise_remaining(clean_predictions[1:])
+    else:
+        current = sample_noise()
+        for tau in denoise_schedule:
+            pred = G(current, tau, prompt, memory)
+            current = next_denoise_state(pred, tau)
+        output = current
+    emit(output)
+    write_context = recent_kv if mode == "RollingForcing" else memory
+    new_kv = encode_clean_kv(output, prompt, write_context,
+                             noise_level=0)  # 重新计算 clean 表示
+    if use_sink(mode) and not sink_kv:
+        sink_kv = capture_initial_chunk(new_kv)
+    recent_kv = fifo_append(recent_kv, new_kv, budget=recent_budget)
+    recent_latents = fifo_append(recent_latents, output,
+                                 budget=recent_budget)
+    # 超窗中段内容无 archive；无法靠 recache 自动找回</code></pre>
+<p class="muted">RF 的 global K 延后应用 RoPE，clean 写入只使用近期 context；具体头、层、启动窗口与 sink 捕获由实现处理。<span class="src">RF §3.3、App. A</span></p>
+
+<h2 id="hyperparams">7. 与记忆相关的关键设置</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>核实配置</th><th>记忆含义</th></tr></thead>
+  <tbody>
+    <tr><td>Self Forcing</td><td>chunk-wise：每块 3 latent 帧，4 步；原训练片段 5 s。<span class="src">SF §4</span></td><td>多次读取同一 clean 历史，完成块后才写缓存。</td></tr>
+    <tr><td>LongLive</td><td>60 s 流式训练，每迭代续写 5 s，并包含一次 prompt switch。<span class="src">LongLive §4 Implementation</span></td><td>训练接触逐渐累积的自生成缓存，教师只监督新片段。</td></tr>
+    <tr><td>Rolling Forcing</td><td>5 去噪阶段，每 chunk 3 latent 帧；训练长度在 21–27 latent 帧采样。<span class="src">RF §4.1、App. A</span></td><td>短教师窗口、长工作区训练与长期输出演示分开。</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="results">8. 结果：缓存策略改善什么，尚未证明什么</h2>
+<p>首先看 LongLive 的 prompt-switch 消融：生成 10 s，在 5 s 切换一次；背景／主体 consistency 测视觉连续性，CLIP 测新文本语义。全部来自同一实验，均为作者报告。<span class="src">LongLive §4.4、Tab. 4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>LongLive 切换策略</th><th>Background ↑</th><th>Subject ↑</th><th>CLIP ↑</th></tr></thead>
+  <tbody>
+    <tr><td>清空 KV <span class="src">LongLive Tab. 4</span></td><td>92.75</td><td>89.59</td><td>28.95</td></tr>
+    <tr><td>保留原 KV <span class="src">LongLive Tab. 4</span></td><td>94.77</td><td>93.69</td><td>25.92</td></tr>
+    <tr class="hl"><td>KV re-cache <span class="src">LongLive Tab. 4</span></td><td>94.81</td><td>94.04</td><td>27.87</td></tr>
+  </tbody>
+</table></div>
+<p class="muted"><span class="src">全部值：LongLive Tab. 4。</span>re-cache 的 CLIP 并非最高；它在视觉保留与文本更新之间取得更好折中，不能写成每列都胜过清空。</p>
+<p>LongLive 的单 prompt 30 s VBench-Long 对照中，Self Forcing 的 Quality 为 83.82，LongLive 为 85.44。另一个多 prompt 60 s 自建协议，Quality 为 82.46 与 84.38；两组指标不能混用，也都不是指定中段事件离窗后的召回准确率。<span class="src">LongLive Tab. 2–3、§4.2–4.3</span></p>
+<p>RF 在 200 条 MovieGen prompts 上生成 30 s、16 FPS、832×480 视频，\(\Delta_{\mathrm{Drift}}\) 是首尾各 5 s 的 imaging quality 绝对差。它是质量漂移指标，不是读回某个事件的成功率。<span class="src">RF §4.1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>RF 同协议比较</th><th>Subject ↑</th><th>Background ↑</th><th>ΔDrift ↓</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>Self Forcing</td><td>86.48</td><td>90.29</td><td>1.66</td><td><span class="src">RF Tab. 1</span></td></tr>
+    <tr class="hl"><td>Rolling Forcing</td><td>92.80</td><td>93.71</td><td>0.01</td><td><span class="src">RF Tab. 1</span></td></tr>
+    <tr><td>RF：去掉 attention sink</td><td>83.22</td><td>87.99</td><td>4.63</td><td><span class="src">RF Tab. 2</span></td></tr>
+    <tr><td>RF：不用 rolling inference</td><td>86.01</td><td>89.94</td><td>5.53</td><td><span class="src">RF Tab. 2</span></td></tr>
+  </tbody>
+</table></div>
+<p>sink 消融与联合去噪消融支持抗漂移作用；RF 作者同时承认中段离窗即忘，说明低 ΔDrift 与具体历史召回是两个问题。要测后者，应设计“出现事件—真正离窗—再次需要”并核对终态，而非仅比较开头和结尾画质。<span class="src">RF App. E；后一句为评测建议</span></p>
+<div class="callout code-note"><span class="callout-title">速度与长度也要绑定协议</span>
+  LongLive 报告单 H100 20.7 FPS、展示最长 240 s；RF 主表为 15.79 FPS、0.76 s，但延迟定义是稳定运行后的延迟，而非首帧延迟。<span class="src">LongLive Tab. 1、§5；RF Tab. 1、§4.1</span> 两篇采用不同评测与训练配置，不能从这些数值单独判断哪个记忆机制更强。
+</div>
+
+<h2 id="evolution">9. 承上启下：从活跃缓存到被逐出的记忆</h2>
+<div class="diff">
+  <div class="was"><h4>能持续读写的有限上下文</h4><ul>
+    <li><a href="04-recurrent-state.html">循环状态</a>压缩旧内容；本页 K/V 保留近期具体 token。</li>
+    <li>SF 提供自生成历史与滚动缓存；LongLive 扩展长期训练和 prompt 适配。</li>
+  </ul></div>
+  <div class="now"><h4>固定 sink 之外的事件</h4><ul>
+    <li>RF 改变工作窗口，配合初始 sink 与动态位置，降低长期漂移。</li>
+    <li><a href="06-evicted-kv.html">WorldKV / Memory Forcing KV</a>进一步保存或重读被活动窗口逐出的内容。</li>
+    <li><a href="07-addressable.html">可寻址记忆</a>讨论内容仍在却读不到的问题；<a href="08-worldmem.html">帧库检索</a>显式选择更早视觉证据。</li>
+  </ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q9"><span class="qid">Q9</span>为什么写 KV 需要 clean pass？prompt 变化时，clean 缓存又为什么还要 re-cache？</h3>
+  <div class="ans">
+    <p class="short">clean pass 让持久缓存表示完成帧而不是某个去噪中间态；但完成帧的层内 K/V 仍受生成时文本条件影响。切换 prompt 后重新用已有帧与新文本计算缓存，能保留视觉历史同时减弱旧语义惯性。clean 与 condition-compatible 是不同要求。</p>
+    <ul><li>这里的重编码是 clean latent 的生成主干前向，不是必须每次走 RGB–VAE 循环。</li><li>清空缓存提高新条件影响，却破坏视觉连续性；保留原缓存可能迟迟不跟新条件。</li><li>re-cache 只更新仍持有的上下文，不是远程事件检索。</li></ul>
+    <p class="cite">依据：SF Alg. 1–2；LongLive §3.1、§3.3、Tab. 4；RF App. A。</p>
+  </div>
+</div>
+<div class="qa">
+  <h3 id="q10"><span class="qid">Q10</span>滚动窗口、sink 和联合去噪为什么能稳定长视频，却仍不等于记住一个中途发生的远程事件？</h3>
+  <div class="ans">
+    <p class="short">滚动 KV 保存近邻，sink 保留指定开头，联合去噪让相邻未来块共同修正。它们控制局部连续性与全局外观漂移，但没有为所有中段事件保留可寻址证据。事件帧一旦不属于近期窗口也不属于 sink，后续只能依赖残留影响或模型先验。</p>
+    <ul><li>RF 动态重定位 global K 解决地址外推，不扩充中段档案。</li><li>ΔDrift 比较首尾画质，不验证特定对象返回时状态正确。</li><li>要测具体记忆，必须确保事件真正离窗，再要求恢复更新后的状态。</li></ul>
+    <p class="cite">依据：LongLive §3.3；RF §3.3、§4.1、App. D–E；事件例与评测建议为机制推断。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Huang et al. <i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion.</i> NeurIPS 2025 Spotlight；arXiv v2。<a href="https://arxiv.org/abs/2506.08009">arXiv:2506.08009</a> · <a href="https://github.com/guandeh17/Self-Forcing">代码</a> · <a href="https://self-forcing.github.io/">项目</a>。</li>
+  <li>Yang et al. <i>LongLive: Real-time Interactive Long Video Generation.</i> ICLR 2026；本文依据原论文 arXiv v2，而非后续 LongLive 版本。<a href="https://arxiv.org/abs/2509.22622">arXiv:2509.22622</a> · <a href="https://github.com/NVlabs/LongLive/tree/c6a27e771e803b1c12ffa28b82ba69b42472020e/LongLive1.0">已核查原版代码</a> · <a href="https://nvlabs.github.io/LongLive/">项目</a>。</li>
+  <li>Liu et al. <i>Rolling Forcing: Autoregressive Long Video Diffusion in Real Time.</i> ICLR 2026；arXiv v1。<a href="https://arxiv.org/abs/2509.25161">arXiv:2509.25161</a> · <a href="https://github.com/TencentARC/RollingForcing">代码</a> · <a href="https://kunhao-liu.github.io/Rolling_Forcing_Webpage/">项目</a>。</li>
+  <li>训练目标与 distillation 细节见 <a href="../few-step/12-self-forcing.html">Self Forcing 少步生成页</a>，其中 <a href="../few-step/12-self-forcing.html#c-long">长视频后训练</a>包含三种方法的训练对照。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="#references">参考与逐项引用</a></footer>
+</body>
+</html>

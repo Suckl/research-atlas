@@ -66,7 +66,8 @@ tracks: [{ id, title, short, status, page, summary,
 nodes:  [{ id, track, kind, lane, title, full_title?, authors?, org?, date, venue?, arxiv?,
            modality?: "image" | "video",   // optional; if any node of a track has it, the lineage colours by modality
            links?: [{ label, url }], page, tldr, tags?, facts?: { <compare key>: text } }]
-edges:  [{ from, to, label }]                  // lineage arrows (node ids)
+edges:  [{ from, to, label, kind? }]          // lineage arrows (node ids); kind "baseline" = only a main
+                                               // baseline comparison (dotted), default = inheritance
 ```
 
 `kind` is one of `model` (a model/architecture), `paper` (a systems/method paper), `concept`, `bridge`.
@@ -79,7 +80,8 @@ width, so text never scales; it re-lays out on resize. Same-lane edges that skip
 margin; cross-lane edges choose a curve or elbow that does not pass through other boxes. Edge labels appear on hover
 (the node's ancestors and descendants are highlighted) or via the "显示全部关系标签" toggle. Keep `title` short
 (≤ 2 lines of ~10 CJK chars in a 5-lane track) and edge `label` ≤ 16 chars. With `modality` set, image→video
-edges are drawn dashed green ("图像 → 视频").
+edges are drawn dashed green ("图像 → 视频"). A track may set `lineage_band: "half" | "quarter"` when its nodes
+cluster in a short period (rows become "2025 Q3" bands); a long compare table can use `data-orient="rows"`.
 `page` paths are relative to the repo root. A page may include a `#fragment` (several nodes may share one page,
 e.g. `lejepa` → `04-le-world-model.html#lejepa`, `h-jepa` → `10-hierarchical-wm.html#h-jepa`).
 
@@ -178,7 +180,9 @@ Available: `mask-2d` (I-JEPA block masking), `mask-3d` (V-JEPA tubelet masking),
 `paged-kv` (PagedAttention blocks, block tables, copy-on-write), `specdec` (speculative-decoding
 speedup curves + rejection-sampling demo), `collectives` (all-reduce / all-gather / reduce-scatter /
 all-to-all step-through; `data-ranks`), `fewstep-2d` (2-D toy for few-step generation with an exact GMM
-teacher: `data-focus="sampling|regress|dmd|drift"` — Euler NFE, regression coupling, DMD particles, drifting field). Widget attributes must not be named `data-note` — that name is
+teacher: `data-focus="sampling|regress|dmd|drift"` — Euler NFE, regression coupling, DMD particles, drifting field),
+`memory-toy` (top-down toy world: four memory policies — window, frame retrieval, 3D map, recurrent state — recalling a
+demolished wall on revisit, change seen vs. unseen). Widget attributes must not be named `data-note` — that name is
 reserved for architecture-figure notes and the checker will flag it.
 New widget = new file registering `window.AtlasWidgets["<name>"] = (el, Atlas) => {…}`;
 helpers on `Atlas`: `h` (DOM), `s` (SVG), `rng(seed)`, `gauss(rand)`, `esc`, `typeset`.

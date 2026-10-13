@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context as Memory / WorldPack：历史选择与压缩预算</title>
+<meta name="description" content="比较 CaM 的 FoV 历史帧检索与 WorldPack 的视角相关压缩率分配，解释活动预算、完整历史和回访协议的区别。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="video-memory" data-node="context-as-memory">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================ -->
+<h2 id="motivation">1. 动机：转回来时，哪段历史值得占据上下文？</h2>
+<p>相机刚离开的景物可能不在最近窗口里；把全部历史直接送进注意力又会增加计算并引入无关证据。Context as Memory（下文 CaM）保留历史帧的原始图像形式，按相机 FoV 重叠找出有用帧；WorldPack 则把视角相关性用于历史压缩率分配。前者回答“选哪些历史”，后者回答“每条历史分多少预算”。<span class="src">CaM §1、§3；WorldPack §1、§4</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  回访时，时间远不代表无关。CaM 把相关旧帧重新拿进窗口；WorldPack 把相关旧帧提到高精度档位，同时保留更多低精度证据。这是两种独立方法，本页合放是为了比较设计轴。
+</div>
+<p>与<a href="08-worldmem.html">帧库检索</a>衔接，本页聚焦相机查询怎样改变活动上下文。它们主要处理场景空间一致性；旧帧里的物体状态已经变化时，仅找到相同视角并不足够，见<a href="11-dynamic-memory.html">动态与事件记忆</a>。</p>
+
+<!-- ================================================================ -->
+<h2 id="architecture">2. 一次读历史、生成、写回</h2>
+<p>统一记号：视频时间 \(t\)，扩散时间 \(\tau\)，当前 latent \(x_t\)，近期窗口 \(H_t\)，动作 \(a_t\)，文本 \(c_t\)，相机位姿 \(p_t\)，历史记忆 \(M_t\)，查询 \(q_t\)，读出 \(r_t\)。CaM 的查询是目标段的相机条件，WorldPack Alg. 1 使用当前视角 \(p_t\) 给下一帧预测的历史分配预算。</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\qquad x_{t+1}\sim G_\theta(H_t,r_t,a_t,c_t),\qquad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1}).$$</div>
+<p>这是比较骨架：CaM 不另设动作 writer，\(H_t\) 的近期锚已经包含在 context 中；WorldPack 的 Write 是历史追加，compression 发生在条件读取配置中，不能把一次 pack 当作永久覆盖原始库。<span class="src">CaM Alg. 2；WorldPack Alg. 1、§6.5</span></p>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span>
+  <span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络（VAE / 几何 / 特征）</span>
+  <span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span>
+  <span><i class="sw act"></i>相机 / 动作 / 文本条件</span>
+  <span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="Context as Memory 与 WorldPack：历史选择和压缩预算的两条替代读路径">
+    <g class="reg" data-part="archive" data-step="1">
+      <rect class="box" x="20" y="80" width="185" height="88" rx="10"/>
+      <text class="t-c t-b" x="112.5" y="105">历史帧库 M_t</text>
+      <text class="t-c t-sm" x="112.5" y="127">帧 / latent + pose</text>
+      <text class="t-c t-sm" x="112.5" y="147">保留已完成历史</text>
+    </g>
+    <g class="act" data-part="query" data-step="2">
+      <rect class="box" x="235" y="25" width="195" height="68" rx="10"/>
+      <text class="t-c t-b" x="332.5" y="50">当前视角 p_t</text>
+      <text class="t-c t-sm" x="332.5" y="72">连同动作 / 文本</text>
+    </g>
+    <g class="act" data-part="route" data-step="2">
+      <rect class="box" x="235" y="125" width="195" height="88" rx="10"/>
+      <text class="t-c t-b" x="332.5" y="150">FoV 相关性</text>
+      <text class="t-c t-sm" x="332.5" y="172">CaM：选哪些帧</text>
+      <text class="t-c t-sm" x="332.5" y="192">WorldPack：分配精度</text>
+    </g>
+    <g class="tgt" data-part="encode" data-step="3">
+      <rect class="box" x="475" y="90" width="210" height="88" rx="10"/>
+      <text class="t-c t-b" x="580" y="115">历史 → latent</text>
+      <text class="t-c t-sm" x="580" y="137">CaM：逐帧 VAE</text>
+      <text class="t-c t-sm" x="580" y="157">WorldPack：VAE 后 pack</text>
+    </g>
+    <g class="enc" data-part="generate" data-step="4">
+      <rect class="box" x="730" y="90" width="210" height="88" rx="10"/>
+      <text class="t-c t-b" x="835" y="115">去噪生成 G_θ</text>
+      <text class="t-c t-sm" x="835" y="137">CaM：沿帧维拼接</text>
+      <text class="t-c t-sm" x="835" y="157">WorldPack：cross-attn</text>
+    </g>
+    <g class="data" data-part="output" data-step="5">
+      <rect class="box" x="730" y="265" width="210" height="68" rx="10"/>
+      <text class="t-c t-b" x="835" y="290">完成的新帧</text>
+      <text class="t-c t-sm" x="835" y="312">clean x_(t+1)</text>
+    </g>
+    <g class="reg" data-part="refresh" data-step="6">
+      <rect class="box" x="240" y="265" width="445" height="88" rx="10"/>
+      <text class="t-c t-b" x="462.5" y="290">写回与下次重选</text>
+      <text class="t-c t-sm" x="462.5" y="312">追加新帧及其相机条件</text>
+      <text class="t-c t-sm" x="462.5" y="332">活动上下文替换；未定义全库 FIFO</text>
+    </g>
+    <path class="edge idx" d="M205,124 H231" data-step="2"/>
+    <path class="edge act" d="M332,93 V121" data-step="2"/>
+    <path class="edge idx" d="M430,169 H455 V134 H471" data-step="3"/>
+    <path class="edge tgt" d="M685,134 H726" data-step="4"/>
+    <path class="edge enc" d="M835,178 V261" data-step="5"/>
+    <path class="edge reg" d="M730,299 H689" data-step="6"/>
+    <path class="edge reg" d="M240,309 H110 V172" data-step="6"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="archive"><h4>库与窗口分开</h4><p>CaM 原样存帧；WorldPack 的历史候选用于按查询重新配置压缩率。固定活动 token 预算不等于固定总历史存储。</p></div>
+    <div data-note="query"><h4>相机作为地址</h4><p>CaM 用用户提供的生成相机条件标注历史。WorldPack 需要当前与历史 pose；几何相关性会受遮挡与定位误差影响。</p></div>
+    <div data-note="route"><h4>两条独立策略</h4><p>CaM 的 FoV 筛选及非邻接去冗余决定帧子集。WorldPack 的几何排序决定所纳入历史的压缩档位。二者没有共享一个统一存储结构。</p></div>
+    <div data-note="encode"><h4>编码位置不同</h4><p>CaM 把不连续 RGB 帧逐帧 VAE 编码，避免假设它们时间连续。WorldPack 用不同 input projection 将 latent 转为不同精度的 token。</p></div>
+    <div data-note="generate"><h4>读入方式不同</h4><p>CaM 的 clean context 与 noisy target 沿帧维拼接，参加 DiT attention；WorldPack 的 CDiT 让目标通过 cross-attention 读取 packed history。</p></div>
+    <div data-note="output"><h4>只写完成结果</h4><p>历史证据是已完成的帧或 clean latent；扩散时间 τ 的中间噪声状态不是这一页的持久记忆。</p></div>
+    <div data-note="refresh"><h4>更新的是证据与活动配置</h4><p>CaM Alg. 2 追加生成帧与相机。WorldPack Alg. 1 从历史按当前视角重新分配档位；本图的追加环用于说明自回归续生成，不代表另有 learned writer。</p></div>
+    <div data-step-note="1"><h4>1 · 准备历史</h4><p>帧库含过去观测和生成完成的帧；训练时来自数据视频。</p></div>
+    <div data-step-note="2"><h4>2 · 查相关性</h4><p>以当前目标视角查询历史；区分子集选择与压缩率分配。</p></div>
+    <div data-step-note="3"><h4>3 · 形成读出</h4><p>CaM 编码选中帧；WorldPack 将不同分辨率 token 打包。</p></div>
+    <div data-step-note="4"><h4>4 · 条件生成</h4><p>历史保持 clean，仅更新当前 noisy target。</p></div>
+    <div data-step-note="5"><h4>5 · 完成本段</h4><p>将最终 latent 解码为视频帧。</p></div>
+    <div data-step-note="6"><h4>6 · 追加、重选</h4><p>把新证据加入历史；下次视角到来时重建活动上下文。</p></div>
+  </div>
+  <figcaption>图 1　两种方法的一次条件生成；框内并列项是替代实现。<span class="src">CaM §3.2–3.3、Alg. 2；WorldPack §4、Alg. 1</span>。</figcaption>
+</figure>
+
+<!-- ================================================================ -->
+<h2 id="components">3. 组件拆解：选择证据与分配精度</h2>
+<h3 id="c-cam-storage">3.1 CaM：存图像，读取时才编码</h3>
+<p>记忆直接保存历史帧和相机条件，不额外把帧库改成特征索引或三维模型。选中的历史 RGB 帧是互不连续的，逐帧经 causal VAE 编码；它们与目标 noisy latent 沿帧维拼接，平等参与注意力，输出时只更新目标。context 的 clean latent 保持不变。<span class="src">CaM §3.2–3.3</span></p>
+<p>目标段的 RoPE 位置维持预训练设置，新增 context 使用新位置。这里“无需外部 control module”指历史注入方式，不是模型不需要相机条件；相机编码器仍将位姿映射到特征通道并加到主干中。<span class="src">CaM §3.1–3.2、Fig. 2</span></p>
+
+<h3 id="c-fov">3.2 FoV 重叠是候选过滤，不是精确可见性</h3>
+<p>CaM 的数据将相机运动限制在水平平面，并只绕竖直轴旋转。方法把 FoV 简化为左右边界射线围出的扇形，检查射线交点及其距离，过滤过近或过远的交叠。它不重建真实表面，因此墙后区域与遮挡仍可能产生错误候选。<span class="src">CaM §3.3–3.4、Fig. 4</span></p>
+<p>通过 FoV 的连续候选组仅随机保留其中一帧，减少相邻重复；必要时补空间或时间距离较远的候选。最终还加入最近帧保证连续性。训练从长 GT 视频中取目标段和剩余帧作 context，而推理只能从已经生成的过去查找；训练采样不能直接当作完全因果的自生成历史训练。<span class="src">CaM §3.3、Alg. 1–2</span></p>
+
+<h3 id="worldpack">3.3 WorldPack：几何相关性决定压缩档位</h3>
+<p>WorldPack 独立采用 action-conditioned CDiT：目标帧做 self-attention，通过 cross-attention 读取历史。它把每条候选历史编码成可变 token 数，几何评分越高，分配的空间精度越高；compression 不是按旧帧年龄单调递减。它借用 FramePack 的 rate-specific input projection 设计，并在自身基座中重现 CaM / WorldMem 式检索作为消融。<span class="src">WorldPack §4.1–4.2、§6.3</span></p>
+<div class="formula">$$o_i=\frac{\mathrm{Vol}(V(p_i)\cap V(p_t))}{\mathrm{Vol}(V(p_t))},\quad s_i=w_o o_i-w_t\frac{t-i}{t},\quad \ell_i=\frac{L_f}{\lambda^{d_i}},\quad L_{\mathrm{pack}}=\sum_i\ell_i.$$</div>
+<p>\(V(p)\) 是截断视锥；Monte Carlo 估计体积重叠，温和的时间惩罚用于相似几何分数的排序。\(d_i\) 是压缩优先级，\(L_f\) 是完整帧 token 数，\(\lambda\) 控制档位。几何分数本身不学习；各压缩档的 input projection 可以学习。<span class="src">WorldPack Eq. 4–7、§4.2</span></p>
+<p>“所有历史都保留”应限定为所纳入 pack 的候选证据没有直接被丢弃：实验活动配置仍有有限历史名额，不能推出任意长全部历史都以固定精度同时可读。原始候选库和 pose 仍需另计。<span class="src">WorldPack §4.2、§6.5</span></p>
+
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>Context as Memory</th><th>WorldPack</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>原样 RGB 帧 + 相机；读取后是逐帧 latent。<span class="src">§3.2–3.3</span></td><td>历史帧 latent + pose；活动记忆为多精度 frame tokens。<span class="src">§4.2</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>训练 GT context；推理每段完成后追加 clean 生成帧与相机。<span class="src">Alg. 1–2</span></td><td>历史来自观测及完成的自回归输出；训练使用数据历史，target 加噪。<span class="src">§3–4、App. D</span></td></tr>
+    <tr><td>如何寻址</td><td>FoV 射线交叠 → 非邻接去冗余 → 远时空补充；近期锚必留。<span class="src">§3.3</span></td><td>视锥体积交叠 + 时间惩罚排序，给历史分配压缩率。<span class="src">Eq. 6–7</span></td></tr>
+    <tr><td>如何读</td><td>clean context 与 noisy target 沿帧维拼接，主干 attention 读取。<span class="src">§3.2</span></td><td>rate-specific projection → packed context → CDiT cross-attention。<span class="src">§4.1–4.2</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>每次替换活动子集；Alg. 2 追加全库，未定义全库容量淘汰。<span class="src">Alg. 2</span></td><td>按查询重新分配活动档位；未提出固定总历史库的淘汰或动态状态覆写。<span class="src">Alg. 1、§7</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================ -->
+<h2 id="shapes">4. 活动 token 预算与张量形状</h2>
+<p>\(B\) 是 batch，\(C,h,w\) 为 latent 通道与空间尺寸，\(D\) 为 token width。以下符号形状用于追踪数据流，不补造论文未给出的通道宽度。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状 / 数量</th><th>为何这样设计</th></tr></thead>
+  <tbody>
+    <tr><td>CaM 目标段</td><td>[B, C, 20, h, w]；77 RGB 帧 → 20 latent 帧 <span class="src">CaM §4.1</span></td><td>causal VAE 时间压缩率 4 <span class="src">CaM §4.1</span></td></tr>
+    <tr><td>CaM 检索 context</td><td>[B, C, 20, h, w]；20 不连续 RGB 帧 → 20 latent 帧 <span class="src">CaM §4.1</span></td><td>逐帧编码，不能套连续视频的时间压缩</td></tr>
+    <tr><td>CaM 主干输入</td><td>[B, C, 40, h, w] <span class="src">由 CaM §3.2、§4.1 推算</span></td><td>context + target，context 保持 clean</td></tr>
+    <tr><td>WorldPack 完整帧</td><td>224×224 RGB → 28×28 latent → 14×14 = 196 tokens <span class="src">WorldPack §4.2</span></td><td>Stable Diffusion VAE；CDiT-B/2 patch embedding</td></tr>
+    <tr><td>WorldPack 配额</td><td>2 完整 + 4 个四分之一 + 16 个十六分之一精度帧 <span class="src">WorldPack §4.2</span></td><td>22 帧，以 4 完整帧等效预算表达 <span class="src">WorldPack Eq. 5、§4.2</span></td></tr>
+    <tr><td>WorldPack 活动 context</td><td>[B, L_pack, D]；理论 L_pack = 4L_f = 784 <span class="src">由 WorldPack Eq. 5、L_f=196 推算</span></td><td><span class="unverified">分档投影的实际取整 / padding 未核验</span>，不能由理论长度推定</td></tr>
+  </tbody>
+</table></div>
+<p>这两组配置不是同一预算对照：CaM 使用内部视频 DiT，WorldPack 使用 CDiT 和不同分辨率。只比较机制，不从表中推出谁更省整机内存。</p>
+
+<!-- ================================================================ -->
+<h2 id="objective">5. 训练目标与记忆监督</h2>
+<p>CaM 通过目标段的扩散去噪误差学会用历史，不对 rule-based FoV 检索求梯度。只给 target 加噪，context 保持 clean；目标段和 context 的相机一起注入。论文损失写作噪声预测范数，下式保留该形式，不额外改写成平方：<span class="src">CaM Eq. 1、3、Alg. 1</span></p>
+<div class="formula">$$\mathcal L_{\mathrm{CaM}}=\mathbb E\big[\lVert\epsilon_\theta([x_{\mathrm{target}}^\tau,r_t],\tau,c_t,p_{\mathrm{target}},p_{\mathrm{ctx}})-\epsilon\rVert\big].$$</div>
+<p>WorldPack 同样通过条件扩散预测下一观测；监督落在目标预测，不是为每条压缩历史做逐帧重建。基座使用数据历史与动作，packing 与 geometric selection 在训练 / 推理中提供活动条件。训练扩散的噪声时间与视频时间是两个轴。<span class="src">WorldPack §3–4、App. D</span></p>
+<p>因此，两者都不能因为推理时把输出写回，就被归为 self-rollout 后训练。CaM 训练从同一长视频的剩余位置找 context；WorldPack 在 LoopNav 先训练基座、再微调压缩 / 检索变体，控制了自身消融的训练来源。<span class="src">CaM §3.3；WorldPack App. D Tab. 9</span></p>
+
+<!-- ================================================================ -->
+<h2 id="pseudocode">6. 伪代码：共享接口，不共享结构</h2>
+<div class="code-title">context_read_loop.py（讲解级改写；CaM Alg. 2、WorldPack Alg. 1）</div>
+<pre><code class="lang-py"># video time t != diffusion time tau; archive stores clean evidence
+archive = [(initial_frame, initial_pose)]
+while not finished:
+    p_next, a_t, c_t = next_controls()
+    if method == "CaM":
+        # Target camera trajectory is available as a control condition
+        candidates = fov_ray_filter(archive, p_next)
+        candidates = one_per_adjacent_group(candidates)
+        old = select_with_far_space_time(candidates, context_limit - 1)
+        recent = archive[-1]
+        refs = old + [recent]
+        r_t = vae_encode_each_frame(refs)  # discontinuous RGB frames
+        target = sample_noise_for_segment()
+        for tau in diffusion_schedule:
+            joint = concat_frame_axis(r_t, target)
+            eps = dit(joint, tau, c_t, poses(refs), p_next)
+            target = denoise_target_only(target, eps, tau)
+        new_frames = vae_decode(target)
+    elif method == "WorldPack":
+        # Score with current view; original candidate history remains available
+        scores = fov_volume_scores(poses(archive), current_pose)
+        scores -= temporal_penalty(archive, current_time=t)
+        ranked = rank_candidates(scores)
+        refs, rates = allocate_discrete_packing_slots(ranked)
+        latents = vae_encode(refs)
+        r_t = concat_tokens(rate_specific_project(latents, rates))
+        target = sample_noise_for_next_frame()
+        for tau in diffusion_schedule:
+            pred = cdit(target, tau, cross_context=r_t, action=a_t)
+            target = denoise(target, pred, tau)
+        new_frames = vae_decode(target)
+    archive.extend(zip(new_frames, p_next))
+    current_pose = last_pose(p_next)
+    t += len(new_frames)
+    # Rebuild the active readout on the next query; no global FIFO is specified</code></pre>
+<p>代码省略相机 embedding、RoPE、CFG 和训练分支；WorldPack 的候选及离散档位由其活动预算决定。它不是把 CaM 的原样帧库原地压成一个永久 WorldPack 库。</p>
+
+<!-- ================================================================ -->
+<h2 id="hyperparams">7. 会改变记忆行为的配置</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法 / 项目</th><th>配置</th><th>含义与出处</th></tr></thead>
+  <tbody>
+    <tr><td>CaM 基座</td><td>内部 1B DiT；640×352；50 sampling steps</td><td><span class="src">CaM §4.1</span>；不等同公开 Wan checkpoint</td></tr>
+    <tr><td>CaM context</td><td>20 RGB 帧；训练有 10% 概率只用近期帧</td><td><span class="src">CaM §3.3、§4.1</span>；覆盖无旧记忆的启动情形</td></tr>
+    <tr><td>WorldPack packing</td><td>S=2；压缩率 1、4、16；活动历史 22 帧</td><td><span class="src">WorldPack §4.2</span>；固定等效 token 预算</td></tr>
+    <tr><td>WorldPack 几何评分</td><td>10,000 Monte Carlo 点；w_o=1.0、w_t=0.2</td><td><span class="src">WorldPack §4.2</span>；时间偏置不替代视角相关性</td></tr>
+    <tr><td>WorldPack 训练</td><td>LoopNav 基座 1,000,000 steps；各变体再 200,000 steps</td><td><span class="src">WorldPack App. D Tab. 9</span>；比较的是自身重现机制</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================ -->
+<h2 id="results">8. 结果：把两份协议分开看</h2>
+<h3 id="r-cam">8.1 CaM：GT 读取上限与自生成回访</h3>
+<p>论文在同一内部基座与数据上重现 DFoT / FramePack，各方法用相同训练配置。GT comparison 的 context 来自 GT；History Context comparison 对比新生成和先前生成的对应帧，采用相机转去再转回的轨迹。后者检验自一致，不能证明最初生成场景真实。<span class="src">CaM §4.1–4.2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>同基座方法 <span class="src">CaM Tab. 1</span></th><th>GT PSNR ↑</th><th>GT LPIPS ↓</th><th>HC PSNR ↑</th><th>HC LPIPS ↓</th></tr></thead>
+  <tbody>
+    <tr><td>First + Random <span class="src">Tab. 1</span></td><td>17.70</td><td>0.4847</td><td>17.07</td><td>0.3985</td></tr>
+    <tr><td>DFoT <span class="src">Tab. 1</span></td><td>17.63</td><td>0.4528</td><td>15.70</td><td>0.5102</td></tr>
+    <tr><td>FramePack <span class="src">Tab. 1</span></td><td>17.20</td><td>0.4757</td><td>15.65</td><td>0.4947</td></tr>
+    <tr class="hl"><td>CaM <span class="src">Tab. 1</span></td><td>20.22</td><td>0.3003</td><td>18.11</td><td>0.3414</td></tr>
+  </tbody>
+</table></div>
+<p>检索消融中，随机 context 的 HC LPIPS 为 0.3985，FoV + 非邻接为 0.3571，进一步加远时空候选为 0.3414；HC PSNR 却由 18.19 变成 18.11，因此不能说补远候选让所有指标都提高。<span class="src">CaM Tab. 3</span></p>
+<p>context 从 20 增到 30 帧时，HC PSNR 18.11 → 18.19，速度 0.97 → 0.79 FPS；这是论文自身配置的容量 / 速度折中。<span class="src">CaM Tab. 2</span></p>
+
+<h3 id="r-worldpack">8.2 WorldPack：相同活动预算下，分配精度是否有效？</h3>
+<p>以下是 LoopNav ABA-5 的机制消融，每项预算均为 4 完整帧等效 token；Memory Retrieval 是 WorldPack 基座中重现的 FoV 筛选，不是 CaM 原模型。PSNR 等按轨迹报告均值 ± 标准差，FVD 在整组视频分布上计算。<span class="src">WorldPack §6.3、Tab. 3</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>自身基座变体</th><th>PSNR ↑</th><th>DreamSim ↓</th><th>FVD ↓</th></tr></thead>
+  <tbody>
+    <tr><td>近期窗口 <span class="src">WorldPack Tab. 3</span></td><td>12.2 ± 1.7</td><td>0.31 ± 0.05</td><td>1847</td></tr>
+    <tr><td>Nearest Frame Packing <span class="src">Tab. 3</span></td><td>13.0 ± 1.1</td><td>0.28 ± 0.05</td><td>1683</td></tr>
+    <tr><td>Memory Retrieval <span class="src">Tab. 3</span></td><td>12.8 ± 1.7</td><td>0.30 ± 0.07</td><td>1694</td></tr>
+    <tr class="hl"><td>WorldPack <span class="src">Tab. 3</span></td><td>13.3 ± 1.8</td><td>0.27 ± 0.07</td><td>1510</td></tr>
+  </tbody>
+</table></div>
+<p>扩到 ABCA-50 时，NWM 的 PSNR 为 10.8 ± 2.2，WorldPack 为 12.1 ± 1.9；它针对跨不同回程视角利用历史的能力，不能与 CaM 的转去转回像素分直接排名。LoopNav 由 Lian 等提出，WorldPack 使用该基准。<span class="src">WorldPack §5、Tab. 2</span></p>
+<p>预算固定也有额外成本：diffusion 单步 0.255 → 0.296 s、内存 22.7 → 25.4 GB，这些数字排除了 FoV 评分；单 H100 上候选从 50 到 1,600，选择时间从 0.05 到 0.26 s。<span class="src">WorldPack §6.5、Tab. 5–6</span></p>
+<div class="callout warn"><span class="callout-title">证据边界</span>CaM 明确限于静态场景；WorldPack 承认遮挡与 pose uncertainty 会影响优先级。WorldPack 的 RECON 设置先给 80 帧，筛出 15 条可评轨迹；该未来预测结果不自动等于开放世界回访和动态状态更新能力。<span class="src">CaM §5；WorldPack §7、App. C.2</span></div>
+
+<!-- ================================================================ -->
+<h2 id="evolution">9. 承上启下：从帧名额到读出证据</h2>
+<div class="diff">
+  <div class="was"><h4>已有设计</h4><ul><li><a href="02-history-compression.html">历史压缩</a>让更多证据进入有限 context。</li><li><a href="08-worldmem.html">帧库检索</a>让时间远的相关帧重新可读。</li></ul></div>
+  <div class="now"><h4>本页留下的问题</h4><ul><li><a href="10-vmem.html">VMem</a>用表面可见性而不只是 FoV 找视图。</li><li><a href="11-dynamic-memory.html">HyDRA</a>重训 CaM 作动态主体主要对照，寻找运动线索。</li><li>找到了过去，仍需判断状态是否已过时。</li></ul></div>
+</div>
+<p>后续学习式读者只作为时间线入口：<a href="https://arxiv.org/abs/2605.31336">DecMem</a> 用 sparse global block retrieval 与 anchored local memory；<a href="https://arxiv.org/abs/2606.23105">CaR</a> 用相机相对编码驱动 attention 读取压缩历史。它们不占本页主节点，也不是 CaM / WorldPack 的统一扩展结构。<span class="src">DecMem §3.3–3.5；CaR §3.2–3.3</span></p>
+
+<!-- ================================================================ -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q17"><span class="qid">Q17</span>为什么 CaM 的“选历史”与 WorldPack 的“压缩历史”不能当成同一个记忆结构？</h3>
+  <div class="ans"><p class="short">CaM 原样存帧，先选子集，再把 clean context 沿帧维拼进视频 DiT；WorldPack 用几何分数分配多精度 token，由 CDiT cross-attention 读 packed history。共享的是相机相关性这一设计依据，不是存储、编码或读取结构。</p><ul><li>选择改变证据是否进入活动窗口。</li><li>分配改变纳入证据的保真度与 token 成本。</li><li>WorldPack 的检索消融只重现选择机制，没有沿用 CaM 的内部基座。</li></ul><p class="cite">依据：CaM §3.2–3.3；WorldPack §4、§6.3。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q18"><span class="qid">Q18</span>固定活动预算后，为什么仍会随历史增长变慢，或回忆错误状态？</h3>
+  <div class="ans"><p class="short">固定的是送进生成器的证据预算。历史候选库、pose 记录和 FoV 评分仍可增长；几何相关不等于物体状态正确，遮挡会误选，动态变化也会让旧帧过时。</p><ul><li>活动 token、总存储和查询成本必须分别测。</li><li>高重叠帧可能看到了同一位置的旧状态。</li><li>需要估计 pose、遮挡与状态更新的独立实验；回访像素一致不能替代这些检验。</li></ul><p class="cite">依据：WorldPack §6.5、§7；CaM §3.3、§5。</p></div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Yu et al. <a href="https://arxiv.org/abs/2506.03141">Context as Memory: Scene-Consistent Interactive Long Video Generation with Memory Retrieval</a>. SIGGRAPH Asia 2025 / TOG；本页按 v2。<a href="https://context-as-memory.github.io/">Project</a> · <a href="https://github.com/KwaiVGI/Context-as-Memory">Code</a>。</li>
+  <li>Oshima et al. <a href="https://arxiv.org/abs/2512.02473">WorldPack: Dynamic Frame Compression for Long-context Video World Modeling</a>. TMLR 2026（arXiv comments）；本页按 v3。<a href="https://openreview.net/forum?id=zJuiG3PiNJ">OpenReview</a>。</li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/2605.31336">DecMem: Towards Minute-Long Consistent World Generation with Decoupled Memory</a>. arXiv 2026；仅时间线。</li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2606.23105">Compression and Retrieval: Implicit Memory Retrieval for Video World Models</a>. arXiv 2026；仅时间线。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，核查版本见 <a href="#references">参考</a></footer>
+</body>
+</html>
