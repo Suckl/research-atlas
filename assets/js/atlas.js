@@ -170,8 +170,16 @@
       if (!t) return;
       const order = t.reading_order || [];
       const i = order.indexOf(id);
-      const prev = i > 0 ? Atlas.node(order[i - 1]) : null;
-      const next = i >= 0 && i < order.length - 1 ? Atlas.node(order[i + 1]) : null;
+      // nodes that live on this same page (e.g. "02-x.html#reflow") are skipped; a neighbouring page is
+      // represented by its primary node (the one whose page has no #fragment)
+      const file = (n) => (n ? n.page.split("#")[0] : "");
+      const here = file(Atlas.node(id));
+      const primary = (n) => R.nodes.find((m) => m.page === file(n)) || n;
+      let pi = i - 1, ni = i + 1;
+      while (pi >= 0 && file(Atlas.node(order[pi])) === here) pi--;
+      while (i >= 0 && ni < order.length && file(Atlas.node(order[ni])) === here) ni++;
+      const prev = i > 0 && pi >= 0 ? primary(Atlas.node(order[pi])) : null;
+      const next = i >= 0 && ni < order.length ? primary(Atlas.node(order[ni])) : null;
       host.className = "pager";
       host.innerHTML =
         (prev ? `<a class="prev" href="${href(prev.page)}"><span class="dir">← 上一篇</span>${Atlas.esc(prev.title)}</a>` : `<a class="prev" href="${href(t.page)}"><span class="dir">← 返回路线</span>${Atlas.esc(t.short)} 总览</a>`) +
@@ -232,61 +240,219 @@
     lineage(host) {
       const t = Atlas.track(host.dataset.track || body().dataset.track);
       if (!t) return;
+      // Vertical layout: one column per lane, time flows downwards in year bands. The svg is drawn at
+      // the host's real width (no scaling), so text stays legible and the page scrolls vertically.
       const nodes = R.nodes.filter((n) => n.track === t.id);
-      const dates = [...new Set(nodes.map((n) => n.date))].sort();
-      const lanes = t.lanes || [{ id: "main", label: "" }];
-      const colW = 168, minLaneH = 92, left = 128, top = 18, bw = 142, bh = 54, gap = 10;
-      // Nodes sharing a (month, lane) cell are stacked; each lane grows to fit its tallest stack.
+      const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+      const edges = (R.edges || []).filter((e) => byId[e.from] && byId[e.to]);
+      const lanes = t.lanes && t.lanes.length ? t.lanes : [{ id: "main", label: "" }];
       const laneOf = (n) => Math.max(0, lanes.findIndex((l) => l.id === n.lane));
-      const cells = {};
-      nodes.forEach((n) => { const k = dates.indexOf(n.date) + "|" + laneOf(n); (cells[k] = cells[k] || []).push(n); });
-      const laneH = lanes.map((_, li) => {
-        const most = Math.max(1, ...Object.entries(cells).filter(([k]) => +k.split("|")[1] === li).map(([, v]) => v.length));
-        return Math.max(minLaneH, most * (bh + gap) + 28);
+      const order = t.reading_order || [];
+      const rank = (n) => (order.includes(n.id) ? order.indexOf(n.id) : 999);
+      const yearOf = (n) => String(n.date).slice(0, 4);
+      const byModality = nodes.some((n) => n.modality);
+      const up = {}, down = {};
+      edges.forEach((e) => { (up[e.to] = up[e.to] || []).push(e.from); (down[e.from] = down[e.from] || []).push(e.to); });
+
+      // 1) order: chronological, but a node never precedes its parents (Kahn, ties by date then reading order)
+      const indeg = Object.fromEntries(nodes.map((n) => [n.id, (up[n.id] || []).length]));
+      const ready = nodes.filter((n) => !indeg[n.id]), seq = [];
+      const cmp = (a, b) => String(a.date).localeCompare(String(b.date)) || rank(a) - rank(b);
+      while (ready.length) {
+        ready.sort(cmp);
+        const n = ready.shift(); seq.push(n);
+        (down[n.id] || []).forEach((c) => { if (--indeg[c] === 0) ready.push(byId[c]); });
+      }
+      nodes.forEach((n) => { if (!seq.includes(n)) seq.push(n); });
+      // 2) rows: within a year band a node takes the next free row of its lane, below same-year parents
+      const row = {}, next = {};
+      seq.forEach((n) => {
+        const y = yearOf(n), k = y + "|" + laneOf(n);
+        let r = next[k] || 0;
+        (up[n.id] || []).forEach((p) => { if (yearOf(byId[p]) === y && row[p] !== undefined) r = Math.max(r, row[p] + 1); });
+        row[n.id] = r; next[k] = r + 1;
       });
-      const laneTop = laneH.map((_, i) => top + laneH.slice(0, i).reduce((a, b) => a + b, 0));
-      const W = left + dates.length * colW + 10, H = top + laneH.reduce((a, b) => a + b, 0) + 6;
-      const pos = {};
-      Object.entries(cells).forEach(([k, group]) => {
-        const [ci, li] = k.split("|").map(Number);
-        const stackH = group.length * (bh + gap) - gap;
-        group.forEach((n, j) => { pos[n.id] = { x: left + ci * colW, y: laneTop[li] + (laneH[li] - stackH) / 2 + j * (bh + gap) }; });
-      });
-      const svg = Atlas.s("svg", { class: "dg lineage", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": t.title + " 演化图" });
-      lanes.forEach((l, i) => {
-        const y = laneTop[i];
-        if (i > 0) Atlas.s("line", { class: "lane-ln", x1: 0, x2: W, y1: y, y2: y }, svg);
-        const tx = Atlas.s("text", { class: "lane-label", x: 6, y: y + laneH[i] / 2 }, svg);
-        tx.textContent = l.label;
-      });
-      (R.edges || []).filter((e) => pos[e.from] && pos[e.to]).forEach((e) => {
-        const a = pos[e.from], b = pos[e.to];
-        const x1 = a.x + bw, y1 = a.y + bh / 2, x2 = b.x - 4, y2 = b.y + bh / 2;
-        const mx = (x1 + x2) / 2;
-        Atlas.s("path", { class: "edge", d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}` }, svg);
-        const lab = Atlas.s("text", { class: "edge-label t-c", x: mx, y: (y1 + y2) / 2 - 8 }, svg);
-        lab.textContent = e.label.length > 14 ? e.label.slice(0, 13) + "…" : e.label;
-        Atlas.s("title", { text: e.label }, lab);
-      });
+      const years = [...new Set(nodes.map(yearOf))].sort();
+      const rowsOf = {}, base = {};
+      let acc = 0;
+      years.forEach((y) => { rowsOf[y] = 1 + Math.max(0, ...nodes.filter((n) => yearOf(n) === y).map((n) => row[n.id])); base[y] = acc; acc += rowsOf[y]; });
+
+      // 3) geometry
+      host.classList.add("lineage-wrap");
+      const avail = Math.floor((host.clientWidth || 900) - 22);
+      const W = Math.max(56 + lanes.length * 128, avail);
+      host.classList.toggle("scroll", W > avail);
+      host.dataset.w = String(avail);
+      const gutter = 52, colW = (W - gutter - 4) / lanes.length;
+      const bw = Math.min(200, colW - 22), bh = 52, gapV = 28, pitch = bh + gapV, top = 4;
+      const H = top + acc * pitch + 4;
+      const P = {};
       nodes.forEach((n) => {
-        const p = pos[n.id];
-        const a = Atlas.s("a", { href: href(n.page) }, svg);
-        const g = Atlas.s("g", { class: "node kind-" + n.kind }, a);
+        P[n.id] = { x: gutter + laneOf(n) * colW + (colW - bw) / 2, y: top + (base[yearOf(n)] + row[n.id]) * pitch + gapV / 2 };
+      });
+
+      const mk = "lin-ah-" + t.id;
+      const svg = Atlas.s("svg", { class: "dg lineage", viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": t.title + " 演化图" });
+      const defs = Atlas.s("defs", {}, svg);
+      [["", "var(--text-3)"], ["-x", "var(--c-act)"], ["-on", "var(--text)"]].forEach(([s, c]) => {
+        const m = Atlas.s("marker", { id: mk + s, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
+        Atlas.s("path", { d: "M0,0 L10,5 L0,10 z", style: "fill:" + c }, m);
+      });
+      // year bands + lane separators
+      years.forEach((y, i) => {
+        const y0 = top + base[y] * pitch;
+        Atlas.s("rect", { class: "band" + (i % 2 ? " alt" : ""), x: 0, y: y0, width: W, height: rowsOf[y] * pitch, rx: 6 }, svg);
+        Atlas.s("text", { class: "year-label", x: 8, y: y0 + gapV / 2 + 14, text: y }, svg);
+      });
+      lanes.forEach((_, li) => { if (li) Atlas.s("line", { class: "lane-sep", x1: gutter + li * colW, x2: gutter + li * colW, y1: top, y2: H - 4 }, svg); });
+
+      // edges (under nodes), labels (over nodes)
+      const gE = Atlas.s("g", {}, svg), gN = Atlas.s("g", {}, svg), gL = Atlas.s("g", {}, svg);
+      const inLane = (li, y0, y1) => nodes.some((m) => laneOf(m) === li && P[m.id].y > y0 && P[m.id].y < y1);
+      // Same-lane edges that skip over nodes become brackets in the column margins. Overlapping brackets
+      // get separate tracks (shorter spans inside), alternating right / left margin.
+      const trk = {}, used = {};
+      edges.filter((e) => laneOf(byId[e.from]) === laneOf(byId[e.to]) && inLane(laneOf(byId[e.from]), P[e.from].y, P[e.to].y))
+        .sort((e1, e2) => (P[e1.to].y - P[e1.from].y) - (P[e2.to].y - P[e2.from].y))
+        .forEach((e) => {
+          const li = laneOf(byId[e.from]), y0 = P[e.from].y, y1 = P[e.to].y, u = (used[li] = used[li] || []);
+          let k = 0; while (u.some(([a, b, kk]) => kk === k && a <= y1 && y0 <= b)) k++;
+          u.push([y0, y1, k]); trk[e.from + ">" + e.to] = k;
+        });
+      edges.forEach((e) => {
+        const a = byId[e.from], b = byId[e.to], pa = P[a.id], pb = P[b.id], la = laneOf(a), lb = laneOf(b);
+        const cross = byModality && a.modality === "image" && b.modality === "video";
+        const k = trk[e.from + ">" + e.to];
+        let d, mx, my, anchor = "middle";
+        if (la === lb && k === undefined) {
+          const x = pa.x + bw / 2;
+          d = `M${x},${pa.y + bh} V${pb.y - 1}`; mx = x; my = (pa.y + bh + pb.y) / 2;
+        } else if (la === lb) {
+          const side = k % 2 ? -1 : 1, off = 7 + 4 * Math.floor(k / 2), r = 4;
+          const x1 = side > 0 ? pa.x + bw : pa.x, xo = x1 + side * off, y1 = pa.y + bh / 2, y2 = pb.y + bh / 2;
+          d = `M${x1},${y1} H${xo - side * r} Q${xo},${y1} ${xo},${y1 + r} V${y2 - r} Q${xo},${y2} ${xo - side * r},${y2} H${x1 + side}`;
+          mx = xo - side * 5; my = (y1 + y2) / 2; anchor = side > 0 ? "end" : "start";
+        } else {
+          // leave from the bottom / enter from the top unless a node of the same lane is in the way,
+          // in which case leave / enter through the side that faces the other lane
+          // (other lanes in between may hold boxes too: try a few curve shapes, keep the first that misses them)
+          const dir = lb > la ? 1 : -1, blockA = inLane(la, pa.y, pb.y), blockB = inLane(lb, pa.y, pb.y);
+          const ends = (sideA, sideB) => [
+            sideA ? (dir > 0 ? pa.x + bw : pa.x) : pa.x + bw / 2, sideA ? pa.y + bh / 2 : pa.y + bh,
+            sideB ? (dir > 0 ? pb.x - 1 : pb.x + bw + 1) : pb.x + bw / 2, sideB ? pb.y + bh / 2 : pb.y - 1];
+          const bez = (c) => { const pts = []; for (let s = 0; s <= 1.0001; s += 0.02) { const u = 1 - s, w = [u * u * u, 3 * u * u * s, 3 * u * s * s, s * s * s]; pts.push([0, 1].map((j) => w.reduce((v, wi, i) => v + wi * c[i][j], 0))); } return pts; };
+          const line = (p, q) => Array.from({ length: 21 }, (_, i) => [p[0] + (q[0] - p[0]) * i / 20, p[1] + (q[1] - p[1]) * i / 20]);
+          const curve = (sideA, sideB, f) => {
+            const [x1, y1, x2, y2] = ends(sideA, sideB), kk = Math.max(18, Math.min(64 * f, (y2 - y1) * f / 2));
+            const c = [[x1, y1], sideA ? [x1 + dir * 36, y1] : [x1, y1 + kk], sideB ? [x2 - dir * 36, y2] : [x2, y2 - kk], [x2, y2]];
+            return { d: `M${c[0]} C${c[1]} ${c[2]} ${c[3]}`, pts: bez(c), m: [(x1 + x2) / 2, (y1 + y2) / 2] };
+          };
+          // elbows: drop down the source column then run sideways into the target, or the reverse
+          const elbow = (down) => {
+            const [x1, y1, x2, y2] = down ? ends(false, true) : ends(true, false), r = 6;
+            if (down) return { d: `M${x1},${y1} V${y2 - r} Q${x1},${y2} ${x1 + dir * r},${y2} H${x2}`, pts: line([x1, y1], [x1, y2]).concat(line([x1, y2], [x2, y2])), m: [(x1 + x2) / 2, y2] };
+            return { d: `M${x1},${y1} H${x2 - dir * r} Q${x2},${y1} ${x2},${y1 + r} V${y2}`, pts: line([x1, y1], [x2, y1]).concat(line([x2, y1], [x2, y2])), m: [(x1 + x2) / 2, y1] };
+          };
+          // last resort, always box-free: drop into the gap below the source row, run along it to the lane
+          // separator next to the target, go down the separator and enter the target from the side
+          const gutter = () => {
+            const x1 = pa.x + bw / 2, y1 = pa.y + bh, yg = pa.y + bh + gapV / 2, half = (colW - bw) / 2;
+            const xm = dir > 0 ? pb.x - half : pb.x + bw + half, y2 = pb.y + bh / 2, x2 = dir > 0 ? pb.x - 1 : pb.x + bw + 1;
+            return { d: `M${x1},${y1} V${yg} H${xm} V${y2} H${x2}`, pts: [], m: [xm, (yg + y2) / 2] };
+          };
+          const hits = (pts) => pts.slice(2, -2).some(([x, y]) => nodes.some((m) => m !== a && m !== b && x > P[m.id].x - 2 && x < P[m.id].x + bw + 2 && y > P[m.id].y - 2 && y < P[m.id].y + bh + 2));
+          const tries = [() => curve(blockA, blockB, 1), () => curve(blockA, true, 1), () => curve(true, blockB, 1), () => curve(true, true, 1),
+            () => curve(blockA, blockB, 3), () => (blockA ? null : elbow(true)), () => (blockB ? null : elbow(false)), gutter];
+          const c = tries.map((f) => f()).find((cv) => cv && !hits(cv.pts));
+          d = c.d; [mx, my] = c.m;
+        }
+        const ref = { "data-from": e.from, "data-to": e.to };
+        const path = Atlas.s("path", Object.assign({ class: "lin-edge" + (cross ? " x-modal" : ""), d, "marker-end": `url(#${mk}${cross ? "-x" : ""})` }, ref), gE);
+        Atlas.s("title", { text: `${a.title} → ${b.title}：${e.label}` }, path);
+        Atlas.s("text", Object.assign({ class: "edge-label", x: mx, y: my, "text-anchor": anchor, text: e.label }, ref), gL);
+      });
+      // nodes
+      const est = (s, fs) => [...s].reduce((w, c) => w + (/[⺀-￯]/.test(c) ? fs : c === " " ? fs * 0.3 : fs * 0.58), 0);
+      const wrap = (s, max, fs) => {
+        if (est(s, fs) <= max) return [s];
+        // break after a colon if possible, else at the last fitting space that does not split "a / b",
+        // else greedy by character (CJK)
+        const split = (i, j) => [s.slice(0, i).trimEnd(), s.slice(j).trim()];
+        const fits = ([a, b]) => a && b && est(a, fs) <= max;
+        const ok = ([a, b]) => !/[/·]$/.test(a) && !/^[/·]/.test(b);
+        const short = ([, b]) => est(b, fs) <= max * 1.15;
+        const colon = [...s.matchAll(/[：:]/g)].map((m) => split(m.index + 1, m.index + 1)).filter(fits).reverse();
+        const space = [...s.matchAll(/ /g)].map((m) => split(m.index, m.index + 1)).filter(fits).reverse();
+        const pick = colon.find(short) || space.find((c) => ok(c) && short(c)) || space.find(ok);
+        if (pick) return pick;
+        const tok = s.match(/[A-Za-z0-9.+\-]+|./gu) || [s];
+        let i = 0, w = 0;
+        while (i < tok.length && w + est(tok[i], fs) <= max) w += est(tok[i++], fs);
+        i = Math.max(1, i);   // a single over-long word still goes on line 1 (it is squeezed below)
+        return [tok.slice(0, i).join("").trimEnd(), tok.slice(i).join("").trim()].filter(Boolean);
+      };
+      nodes.forEach((n) => {
+        const p = P[n.id];
+        const a = Atlas.s("a", { href: href(n.page), class: "lin-node", "data-id": n.id }, gN);
+        const mod = byModality && n.kind !== "concept" ? " mod-" + (n.modality || "image") : "";
+        const g = Atlas.s("g", { class: "node kind-" + n.kind + mod }, a);
         Atlas.s("rect", { x: p.x, y: p.y, width: bw, height: bh, rx: 9 }, g);
-        Atlas.s("text", { class: "t-c t-b", x: p.x + bw / 2, y: p.y + 21, text: n.title }, g);
-        Atlas.s("text", { class: "t-c t-sm", x: p.x + bw / 2, y: p.y + 39, text: n.date }, g);
+        const lines = wrap(n.title, bw - 14, 12.5);
+        lines.forEach((ln, i) => Atlas.s("text", { class: "t-c t-b ttl", x: p.x + bw / 2, y: p.y + (lines.length > 1 ? 13 + i * 14.5 : 19), text: ln }, g));
+        const meta = n.date + (byModality && n.modality === "video" ? " · 视频" : "") + (n.kind === "concept" ? " · 概念" : "");
+        Atlas.s("text", { class: "t-c meta", x: p.x + bw / 2, y: p.y + (lines.length > 1 ? 43 : 37), text: meta }, g);
         Atlas.s("title", { text: n.tldr || n.title }, g);
       });
-      host.classList.add("lineage-wrap");
-      host.replaceChildren(svg);
-      // Long titles: squeeze into the box instead of spilling over neighbours.
-      svg.querySelectorAll(".node text.t-b").forEach((tx) => {
+
+      // lane header (sticky HTML row aligned with the columns) + toolbar
+      const head = Atlas.h("div", { class: "lineage-head", style: `grid-template-columns:${gutter}px repeat(${lanes.length}, ${colW}px);width:${W}px` });
+      head.append(Atlas.h("span", { class: "lh-year", text: "年份" }));
+      lanes.forEach((l) => head.append(Atlas.h("span", { text: l.label })));
+      const swatches = byModality
+        ? `<span><i class="lsw image"></i>图像</span><span><i class="lsw video"></i>视频</span><span><i class="lsw concept"></i>概念</span><span><i class="lln x"></i>图像 → 视频</span>`
+        : [...new Set(nodes.map((n) => n.kind))].map((k) => `<span><i class="lsw ${k}"></i>${KIND_LABEL[k] || k}</span>`).join("");
+      const bar = Atlas.h("div", { class: "lineage-bar", html: `<span class="lb-legend">${swatches}</span><label><input type="checkbox"> 显示全部关系标签</label><span class="lb-hint">悬停节点：高亮它的上游与下游（点击进入拆解页）</span>` });
+      bar.querySelector("input").addEventListener("change", (ev) => svg.classList.toggle("show-labels", ev.target.checked));
+      host.replaceChildren(bar, head, svg);
+
+      // squeeze title lines that still overflow their box
+      svg.querySelectorAll(".node text.ttl").forEach((tx) => {
         const len = tx.getComputedTextLength ? tx.getComputedTextLength() : 0;
-        if (len > bw - 12) { tx.setAttribute("textLength", bw - 12); tx.setAttribute("lengthAdjust", "spacingAndGlyphs"); }
+        if (len > bw - 10) { tx.setAttribute("textLength", bw - 10); tx.setAttribute("lengthAdjust", "spacingAndGlyphs"); }
       });
-      // Wide tracks (many date columns) would scale text illegibly: keep natural size and scroll instead.
-      const cw = host.clientWidth || 900;
-      if (W > cw * 1.35) svg.style.width = W + "px";
+
+      // hover / focus: highlight ancestors + descendants and the edges between them
+      const walk = (id, adj) => { const seen = new Set(), st = [id]; while (st.length) (adj[st.pop()] || []).forEach((y) => { if (!seen.has(y)) { seen.add(y); st.push(y); } }); return seen; };
+      const focus = (id) => {
+        const anc = walk(id, up), des = walk(id, down);
+        const inA = (x) => x === id || anc.has(x), inD = (x) => x === id || des.has(x);
+        svg.classList.add("focus");
+        gN.querySelectorAll(".lin-node").forEach((el) => el.classList.toggle("on", inA(el.dataset.id) || inD(el.dataset.id)));
+        svg.querySelectorAll("[data-from]").forEach((el) => {
+          const f = el.dataset.from, to = el.dataset.to;
+          const on = (inA(f) && inA(to)) || (inD(f) && inD(to));
+          el.classList.toggle("on", on);
+          if (el.tagName === "path") el.setAttribute("marker-end", `url(#${mk}${on ? "-on" : el.classList.contains("x-modal") ? "-x" : ""})`);
+        });
+      };
+      const blur = () => {
+        svg.classList.remove("focus");
+        svg.querySelectorAll(".on").forEach((el) => el.classList.remove("on"));
+        gE.querySelectorAll("path").forEach((el) => el.setAttribute("marker-end", `url(#${mk}${el.classList.contains("x-modal") ? "-x" : ""})`));
+      };
+      gN.querySelectorAll(".lin-node").forEach((el) => {
+        el.addEventListener("mouseenter", () => focus(el.dataset.id));
+        el.addEventListener("focus", () => focus(el.dataset.id));
+        el.addEventListener("mouseleave", blur);
+        el.addEventListener("blur", blur);
+      });
+
+      // re-layout when the available width changes noticeably
+      if (!host._linResize) {
+        let tm = 0;
+        host._linResize = () => { clearTimeout(tm); tm = setTimeout(() => { if (Math.abs((host.clientWidth - 22) - +host.dataset.w) > 24) RENDER.lineage(host); }, 150); };
+        window.addEventListener("resize", host._linResize);
+      }
     },
     questions(host) {
       const t = Atlas.track(host.dataset.track || body().dataset.track);
