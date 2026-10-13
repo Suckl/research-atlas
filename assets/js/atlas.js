@@ -206,13 +206,28 @@
     timeline(host) {
       const t = Atlas.track(host.dataset.track || body().dataset.track);
       if (!t) return;
+      // Milestones either point at a node page (optionally at an #anchor) or, for papers
+      // without their own page, at an external url (rendered with ↗ and a hollow dot).
       const ul = Atlas.h("ol", { class: "timeline" });
+      let year = "";
       (t.milestones || []).forEach((m) => {
+        const y = String(m.date).slice(0, 4);
+        if (y !== year) { year = y; ul.append(Atlas.h("li", { class: "year", html: `<span class="date">${Atlas.esc(y)}</span><span class="what"></span>` })); }
         const n = m.node ? Atlas.node(m.node) : null;
-        const label = n ? `<a href="${href(n.page)}">${Atlas.esc(m.label)}</a>` : Atlas.esc(m.label);
-        ul.append(Atlas.h("li", { class: "kind-" + (n ? n.kind : "concept"), html: `<span class="date">${Atlas.esc(m.date)}</span><span class="what">${label}</span>` }));
+        let label = Atlas.esc(m.label), kind = "concept";
+        if (n) {
+          const url = href(n.page.split("#")[0]) + (m.anchor ? "#" + m.anchor : (n.page.includes("#") ? "#" + n.page.split("#")[1] : ""));
+          label = `<a href="${Atlas.esc(url)}">${label}</a>`;
+          kind = n.kind;
+        } else if (m.url) {
+          label = `<a class="ext" href="${Atlas.esc(m.url)}" target="_blank" rel="noopener">${label}</a>`;
+          kind = "ext";
+        }
+        const venue = m.venue ? ` <span class="venue">${Atlas.esc(m.venue)}</span>` : "";
+        ul.append(Atlas.h("li", { class: "kind-" + kind, html: `<span class="date">${Atlas.esc(m.date)}</span><span class="what">${label}${venue}</span>` }));
       });
-      host.replaceChildren(ul);
+      const legend = Atlas.h("p", { class: "timeline-legend", html: `<span class="tl-dot own"></span>本站有拆解页（点击进入）　<span class="tl-dot ext"></span>外部论文链接 ↗（未单独成页）` });
+      host.replaceChildren(legend, ul);
     },
     lineage(host) {
       const t = Atlas.track(host.dataset.track || body().dataset.track);
@@ -220,18 +235,28 @@
       const nodes = R.nodes.filter((n) => n.track === t.id);
       const dates = [...new Set(nodes.map((n) => n.date))].sort();
       const lanes = t.lanes || [{ id: "main", label: "" }];
-      const colW = 168, laneH = 92, left = 128, top = 18, bw = 142, bh = 54;
-      const W = left + dates.length * colW + 10, H = top + lanes.length * laneH + 6;
+      const colW = 168, minLaneH = 92, left = 128, top = 18, bw = 142, bh = 54, gap = 10;
+      // Nodes sharing a (month, lane) cell are stacked; each lane grows to fit its tallest stack.
+      const laneOf = (n) => Math.max(0, lanes.findIndex((l) => l.id === n.lane));
+      const cells = {};
+      nodes.forEach((n) => { const k = dates.indexOf(n.date) + "|" + laneOf(n); (cells[k] = cells[k] || []).push(n); });
+      const laneH = lanes.map((_, li) => {
+        const most = Math.max(1, ...Object.entries(cells).filter(([k]) => +k.split("|")[1] === li).map(([, v]) => v.length));
+        return Math.max(minLaneH, most * (bh + gap) + 28);
+      });
+      const laneTop = laneH.map((_, i) => top + laneH.slice(0, i).reduce((a, b) => a + b, 0));
+      const W = left + dates.length * colW + 10, H = top + laneH.reduce((a, b) => a + b, 0) + 6;
       const pos = {};
-      nodes.forEach((n) => {
-        const ci = dates.indexOf(n.date), li = Math.max(0, lanes.findIndex((l) => l.id === n.lane));
-        pos[n.id] = { x: left + ci * colW, y: top + li * laneH + (laneH - bh) / 2 };
+      Object.entries(cells).forEach(([k, group]) => {
+        const [ci, li] = k.split("|").map(Number);
+        const stackH = group.length * (bh + gap) - gap;
+        group.forEach((n, j) => { pos[n.id] = { x: left + ci * colW, y: laneTop[li] + (laneH[li] - stackH) / 2 + j * (bh + gap) }; });
       });
       const svg = Atlas.s("svg", { class: "dg lineage", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": t.title + " 演化图" });
       lanes.forEach((l, i) => {
-        const y = top + i * laneH;
+        const y = laneTop[i];
         if (i > 0) Atlas.s("line", { class: "lane-ln", x1: 0, x2: W, y1: y, y2: y }, svg);
-        const tx = Atlas.s("text", { class: "lane-label", x: 6, y: y + laneH / 2 }, svg);
+        const tx = Atlas.s("text", { class: "lane-label", x: 6, y: y + laneH[i] / 2 }, svg);
         tx.textContent = l.label;
       });
       (R.edges || []).filter((e) => pos[e.from] && pos[e.to]).forEach((e) => {
@@ -254,6 +279,11 @@
       });
       host.classList.add("lineage-wrap");
       host.replaceChildren(svg);
+      // Long titles: squeeze into the box instead of spilling over neighbours.
+      svg.querySelectorAll(".node text.t-b").forEach((tx) => {
+        const len = tx.getComputedTextLength ? tx.getComputedTextLength() : 0;
+        if (len > bw - 12) { tx.setAttribute("textLength", bw - 12); tx.setAttribute("lengthAdjust", "spacingAndGlyphs"); }
+      });
       // Wide tracks (many date columns) would scale text illegibly: keep natural size and scroll instead.
       const cw = host.clientWidth || 900;
       if (W > cw * 1.35) svg.style.width = W + "px";

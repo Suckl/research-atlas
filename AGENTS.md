@@ -19,7 +19,7 @@ assets/js/atlas.js              runtime: header/hero/TOC/pager, [data-render] bl
 assets/js/widgets/*.js          interactive demos; each registers window.AtlasWidgets["<name>"]
 templates/model-page.html       copy this to start a new model/concept page
 tracks/<track>/index.html       track overview (lineage, timeline, compare table)
-tracks/<track>/NN-<slug>.html   one page per node
+tracks/<track>/NN-<slug>.html   one page per node (NN = order of creation; reading order lives in the registry)
 tracks/<track>/SOURCES.md       where every number on that track's pages comes from
 scripts/check.py                validation (registry JSON, links, ids, defs) — run before commit
 scripts/serve.py                local preview server
@@ -28,7 +28,7 @@ scripts/serve.py                local preview server
 ## Adding a node (paper / concept) to an existing track
 
 1. **Register it** in `registry.js` → `nodes[]`. Required: `id`, `track`, `kind`
-   (`model` | `concept` | `bridge`), `lane`, `title`, `date` (`YYYY-MM`), `page`, `tldr`.
+   (`model` | `paper` | `concept` | `bridge`), `lane`, `title`, `date` (`YYYY-MM`), `page`, `tldr`.
    Add `facts{}` (keys = that track's `compare_fields[].key`) for model nodes so the
    compare table picks it up. Put the node into the track's `reading_order` and add
    `milestones[]` / `edges[]` entries as appropriate.
@@ -60,7 +60,7 @@ site:   { title, subtitle, lang }
 tracks: [{ id, title, short, status, page, summary,
            reading_order: [node ids in reading order],
            lanes: [{ id, label }],            // rows of the lineage diagram
-           milestones: [{ date, label, node? }],
+           milestones: [{ date, label, node?, anchor?, url?, venue? }],  // chronological; node OR url
            compare_fields: [{ key, label }],   // rows of the compare table
            questions?: [{ id, text, nodes: [{ node, anchor }] }] }]  // review-question index
 nodes:  [{ id, track, kind, lane, title, full_title?, authors?, org?, date, venue?, arxiv?,
@@ -69,7 +69,16 @@ edges:  [{ from, to, label }]                  // lineage arrows (node ids)
 ```
 
 `kind` is one of `model` (a model/architecture), `paper` (a systems/method paper), `concept`, `bridge`.
-`page` paths are relative to the repo root. A page may include a `#fragment`.
+`page` paths are relative to the repo root. A page may include a `#fragment` (several nodes may share one page,
+e.g. `lejepa` → `04-le-world-model.html#lejepa`, `h-jepa` → `10-hierarchical-wm.html#h-jepa`).
+
+### Timeline milestones
+
+`milestones[]` must be in chronological order (the checker warns otherwise). Each entry links either to a node
+(`node`, optionally `anchor` = an id on that node's page, e.g. `{ "node": "eagle", "anchor": "c-eagle3" }`) or,
+for notable papers that have no page of their own, to an external `url` (rendered with ↗ and a dashed dot).
+Prefer adding a milestone with `url` over leaving a gap in the timeline; promote it to a node page later.
+`check.py` verifies node/url presence, https, date format, ordering and that every `anchor` / `#fragment` exists.
 
 ### Question index (tracks that answer a fixed list of questions)
 

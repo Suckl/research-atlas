@@ -74,9 +74,26 @@ def check_registry(reg: dict) -> tuple[set[str], set[str]]:
             if nid not in nset:
                 err(f"track '{t['id']}': reading_order references unknown node '{nid}'")
         lane_ids = {l.get("id") for l in t.get("lanes", [])}
+        prev = ""
         for m in t.get("milestones", []):
-            if m.get("node") and m["node"] not in nset:
-                err(f"track '{t['id']}': milestone references unknown node '{m['node']}'")
+            where = f"track '{t['id']}': milestone {m.get('date')} '{str(m.get('label', ''))[:30]}'"
+            if not re.fullmatch(r"\d{4}-\d{2}", str(m.get("date", ""))):
+                err(f"{where}: date must be YYYY-MM")
+            if m.get("date", "") < prev:
+                warn(f"{where}: milestones not in chronological order")
+            prev = max(prev, m.get("date", ""))
+            if m.get("node"):
+                if m["node"] not in nset:
+                    err(f"{where}: references unknown node '{m['node']}'")
+                elif next(n for n in nodes if n.get("id") == m["node"]).get("track") != t["id"]:
+                    err(f"{where}: node '{m['node']}' belongs to another track")
+            elif m.get("url"):
+                if not str(m["url"]).startswith("https://"):
+                    err(f"{where}: external url must be https://")
+            else:
+                err(f"{where}: needs either 'node' or 'url'")
+            if m.get("anchor") and not m.get("node"):
+                err(f"{where}: 'anchor' only makes sense together with 'node'")
         for n in nodes:
             if n.get("track") == t["id"] and lane_ids and n.get("lane") not in lane_ids:
                 err(f"node '{n['id']}': lane '{n.get('lane')}' not in track lanes {sorted(lane_ids)}")
@@ -186,6 +203,30 @@ def check_questions(reg: dict, node_ids: set[str]) -> None:
                     err(f"track '{t.get('id')}' {q.get('id')}: page {page.relative_to(ROOT).as_posix()} has no id '{anchor}'")
 
 
+def check_anchors(reg: dict) -> None:
+    """node.page '#fragment's and milestone 'anchor's must exist on the target page."""
+    by_id = {n["id"]: n for n in reg.get("nodes", []) if "id" in n}
+    cache: dict[Path, set[str]] = {}
+
+    def ids_of(page: Path) -> set[str]:
+        if page not in cache:
+            scan = PageScan()
+            scan.feed(page.read_text(encoding="utf-8"))
+            cache[page] = scan.ids
+        return cache[page]
+
+    wanted = [(n["page"].split("#")[0], n["page"].split("#")[1], f"node '{n['id']}'")
+              for n in by_id.values() if "#" in n.get("page", "")]
+    for t in reg.get("tracks", []):
+        for m in t.get("milestones", []):
+            if m.get("anchor") and m.get("node") in by_id:
+                wanted.append((by_id[m["node"]]["page"].split("#")[0], m["anchor"], f"milestone {m.get('date')} ({m['node']})"))
+    for page_rel, frag, who in wanted:
+        page = ROOT / page_rel
+        if page.exists() and frag not in ids_of(page):
+            err(f"{who}: page {page_rel} has no id '{frag}'")
+
+
 def check_page(path: Path, node_ids: set[str]) -> None:
     rel = path.relative_to(ROOT).as_posix()
     p = PageScan()
@@ -244,6 +285,7 @@ def main() -> int:
         check_page(page, node_ids)
     if reg:
         check_questions(reg, node_ids)
+        check_anchors(reg)
     # nodes without a page scan (page listed but no data-node pointing back)
     declared = {n["page"].split("#")[0] for n in reg.get("nodes", [])}
     linked_back = set()

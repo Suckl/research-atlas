@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeRO 与 FSDP</title>
+<meta name="description" content="ZeRO（SC 2020）的三级分片：优化器状态、梯度、参数各自按数据并行维度切开，每卡显存与通信量的精确账本；PyTorch FSDP 作为 ZeRO-3 的原生实现，以及与张量 / 流水线并行的组合。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/collectives.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="ai-infra" data-node="zero-fsdp">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：数据并行里每张卡都存了一份完整的“模型状态”</h2>
+<p>数据并行（DP）最简单：每张卡持有完整模型，各算一部分样本，反向后 all-reduce 梯度。问题是显存：用混合精度 + Adam 训练一个 Ψ 参数的模型，每张卡要存</p>
+<div class="formula">$$\underbrace{2\Psi}_{\text{FP16 参数}} + \underbrace{2\Psi}_{\text{FP16 梯度}} + \underbrace{4\Psi + 4\Psi + 4\Psi}_{\text{FP32 主参数、动量、方差}\;(K\Psi,\ K=12)} = 16\Psi\ \text{字节}$$</div>
+<p>7.5B 参数就是 120 GB——单卡放不下，而 N 张卡上存着 N 份一模一样的副本。<span class="src">ZeRO §3、Fig. 1</span> Megatron 式的模型并行（<a href="07-megatron.html">张量 / 流水线</a>）能切开模型，但要改模型代码、通信频繁、跨节点效率差。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  ZeRO 不切计算，只切<b>存储</b>：每张卡仍然完整地跑前向和反向，但优化器状态、梯度、参数在 DP 维度上各只存 1/N，需要时用集合通信临时拼回来。前两级几乎“免费”（通信量与普通 DP 相同），第三级用 1.5× 通信换来显存随卡数线性下降。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 四种配置下每张卡的显存（N<sub>d</sub> = 4 示意）</h2>
+<div class="legend">
+  <span><i class="sw enc"></i>FP16 参数 2Ψ</span><span><i class="sw loss"></i>FP16 梯度 2Ψ</span><span><i class="sw tgt"></i>优化器状态 12Ψ</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 460" role="img" aria-label="ZeRO 三个阶段的每卡显存">
+    <text class="t-sm" x="170" y="20">GPU 0</text><text class="t-sm" x="320" y="20">GPU 1</text><text class="t-sm" x="470" y="20">GPU 2</text><text class="t-sm" x="620" y="20">GPU 3</text>
+    <text class="t-sm" x="790" y="20">每卡显存</text>
+    <!-- baseline -->
+    <g data-part="dp" data-step="1">
+      <text class="t-b" x="20" y="58">数据并行</text><text class="t-xs" x="20" y="76">（DDP）</text>
+      <g><rect class="tk enc" x="170" y="44" width="17" height="28"/><rect class="tk loss" x="187" y="44" width="17" height="28"/><rect class="tk tgt" x="204" y="44" width="105" height="28"/></g>
+      <g><rect class="tk enc" x="320" y="44" width="17" height="28"/><rect class="tk loss" x="337" y="44" width="17" height="28"/><rect class="tk tgt" x="354" y="44" width="105" height="28"/></g>
+      <g><rect class="tk enc" x="470" y="44" width="17" height="28"/><rect class="tk loss" x="487" y="44" width="17" height="28"/><rect class="tk tgt" x="504" y="44" width="105" height="28"/></g>
+      <g><rect class="tk enc" x="620" y="44" width="17" height="28"/><rect class="tk loss" x="637" y="44" width="17" height="28"/><rect class="tk tgt" x="654" y="44" width="105" height="28"/></g>
+      <text class="t-b" x="790" y="52">16Ψ</text><text class="t-xs" x="790" y="70">7.5B, N=64 → 120 GB</text>
+    </g>
+    <!-- ZeRO-1 -->
+    <g data-part="z1" data-step="2">
+      <text class="t-b" x="20" y="148">ZeRO-1</text><text class="t-xs" x="20" y="166">P<tspan font-size="8" dy="2">os</tspan><tspan dy="-2">：切优化器状态</tspan></text>
+      <g><rect class="tk enc" x="170" y="134" width="17" height="28"/><rect class="tk loss" x="187" y="134" width="17" height="28"/><rect class="tk tgt" x="204" y="134" width="26" height="28"/><text class="t-c t-xs" x="217" y="148" style="fill:var(--surface)">0</text></g>
+      <g><rect class="tk enc" x="320" y="134" width="17" height="28"/><rect class="tk loss" x="337" y="134" width="17" height="28"/><rect class="tk tgt" x="354" y="134" width="26" height="28"/><text class="t-c t-xs" x="367" y="148" style="fill:var(--surface)">1</text></g>
+      <g><rect class="tk enc" x="470" y="134" width="17" height="28"/><rect class="tk loss" x="487" y="134" width="17" height="28"/><rect class="tk tgt" x="504" y="134" width="26" height="28"/><text class="t-c t-xs" x="517" y="148" style="fill:var(--surface)">2</text></g>
+      <g><rect class="tk enc" x="620" y="134" width="17" height="28"/><rect class="tk loss" x="637" y="134" width="17" height="28"/><rect class="tk tgt" x="654" y="134" width="26" height="28"/><text class="t-c t-xs" x="667" y="148" style="fill:var(--surface)">3</text></g>
+      <text class="t-b" x="790" y="142">4Ψ + 12Ψ/N</text><text class="t-xs" x="790" y="160">→ 31.4 GB</text>
+    </g>
+    <!-- ZeRO-2 -->
+    <g data-part="z2" data-step="3">
+      <text class="t-b" x="20" y="238">ZeRO-2</text><text class="t-xs" x="20" y="256">再切梯度</text>
+      <g><rect class="tk enc" x="170" y="224" width="17" height="28"/><rect class="tk loss" x="187" y="224" width="5" height="28"/><rect class="tk tgt" x="192" y="224" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="320" y="224" width="17" height="28"/><rect class="tk loss" x="337" y="224" width="5" height="28"/><rect class="tk tgt" x="342" y="224" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="470" y="224" width="17" height="28"/><rect class="tk loss" x="487" y="224" width="5" height="28"/><rect class="tk tgt" x="492" y="224" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="620" y="224" width="17" height="28"/><rect class="tk loss" x="637" y="224" width="5" height="28"/><rect class="tk tgt" x="642" y="224" width="26" height="28"/></g>
+      <text class="t-b" x="790" y="232">2Ψ + 14Ψ/N</text><text class="t-xs" x="790" y="250">→ 16.6 GB</text>
+    </g>
+    <!-- ZeRO-3 -->
+    <g data-part="z3" data-step="4">
+      <text class="t-b" x="20" y="328">ZeRO-3 / FSDP</text><text class="t-xs" x="20" y="346">再切参数</text>
+      <g><rect class="tk enc" x="170" y="314" width="5" height="28"/><rect class="tk loss" x="175" y="314" width="5" height="28"/><rect class="tk tgt" x="180" y="314" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="320" y="314" width="5" height="28"/><rect class="tk loss" x="325" y="314" width="5" height="28"/><rect class="tk tgt" x="330" y="314" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="470" y="314" width="5" height="28"/><rect class="tk loss" x="475" y="314" width="5" height="28"/><rect class="tk tgt" x="480" y="314" width="26" height="28"/></g>
+      <g><rect class="tk enc" x="620" y="314" width="5" height="28"/><rect class="tk loss" x="625" y="314" width="5" height="28"/><rect class="tk tgt" x="630" y="314" width="26" height="28"/></g>
+      <text class="t-b" x="790" y="322">16Ψ/N</text><text class="t-xs" x="790" y="340">→ 1.9 GB</text>
+    </g>
+    <g data-part="comm" data-step="5">
+      <rect class="note-bg" x="20" y="380" width="920" height="66" rx="8"/>
+      <text class="t-sm" x="34" y="398" style="font-weight:650;fill:var(--text)">每步通信量（每卡发送 ≈，单位为参数个数）</text>
+      <text class="t-xs" x="34" y="418">DP：梯度 all-reduce = reduce-scatter Ψ + all-gather Ψ = 2Ψ　｜　ZeRO-1 / 2：梯度 reduce-scatter Ψ + 更新后参数 all-gather Ψ = 2Ψ（与 DP 相同）</text>
+      <text class="t-xs" x="34" y="436">ZeRO-3：前向逐层 all-gather 参数 Ψ + 反向再 all-gather 一次 Ψ + 梯度 reduce-scatter Ψ = 3Ψ（1.5×）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="dp"><h4>普通数据并行</h4><p>每张卡一份完整的 FP16 参数、FP16 梯度和 FP32 优化器状态（主参数、Adam 的一阶 / 二阶矩）。优化器状态占 12Ψ，是大头——这正是 ZeRO 第一刀切的地方。反向结束后梯度 all-reduce，每张卡各自做同样的 Adam 更新（N 份重复计算）。</p></div>
+    <div data-note="z1"><h4>ZeRO-1：P<sub>os</sub></h4><p>优化器状态按 DP 秩切成 N 份，第 i 张卡只持有、只更新第 i 份参数对应的 Adam 状态。流程：梯度 reduce-scatter（每卡拿到自己那份的梯度和）→ 只更新自己的 1/N 参数 → all-gather 把更新后的参数发给所有人。reduce-scatter + all-gather 恰好等于一次 all-reduce，所以<b>通信量不变</b>。</p></div>
+    <div data-note="z2"><h4>ZeRO-2：P<sub>os+g</sub></h4><p>既然每张卡只更新自己的 1/N 参数，它也只需要那 1/N 的梯度。反向时按桶（bucket）reduce-scatter，不属于自己的梯度归约后立即释放。通信量仍是 2Ψ。</p></div>
+    <div data-note="z3"><h4>ZeRO-3 / FSDP：P<sub>os+g+p</sub></h4><p>连 FP16 参数也只存 1/N。前向计算某一层前 all-gather 该层完整参数、算完即释放；反向时再 all-gather 一次、算梯度后 reduce-scatter。任一时刻只有“当前层（及预取的下一层）”是完整的。显存随卡数线性下降，代价是多一次 all-gather（通信 1.5×）以及对预取 / 重叠的依赖。</p></div>
+    <div data-note="comm"><h4>通信账本</h4><p>ZeRO 论文 §7 的分析：all-reduce 在环形实现下等价于 reduce-scatter + all-gather，各传 Ψ 个元素。前两级只是把这两步拆开、在中间插入“只更新自己那份”，所以不增加通信；第三级因为参数本身不常驻，前向和反向各要拼一次。见下方的集合通信演示。</p></div>
+    <div data-step-note="1"><h4>① 基线</h4><p>N 份完全相同的 16Ψ。</p></div>
+    <div data-step-note="2"><h4>② 切优化器状态</h4><p>12Ψ → 12Ψ/N，通信不变。</p></div>
+    <div data-step-note="3"><h4>③ 再切梯度</h4><p>2Ψ → 2Ψ/N，通信不变。</p></div>
+    <div data-step-note="4"><h4>④ 再切参数</h4><p>全部 16Ψ/N，通信 1.5×。</p></div>
+    <div data-step-note="5"><h4>⑤ 通信量</h4><p>2Ψ、2Ψ、2Ψ、3Ψ。</p></div>
+  </div>
+  <figcaption>图 1　ZeRO 三级分片的每卡显存（条长与字节数成比例；示意为 4 卡，右侧数字按论文的 Ψ = 7.5B、N<sub>d</sub> = 64 计算）。依据 ZeRO §5、§7 与 Fig. 1。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-collectives">3.1 为什么 reduce-scatter + all-gather = all-reduce</h3>
+<p>环形 all-reduce 本身就是两阶段：先 reduce-scatter（每卡得到 1/N 的完整求和），再 all-gather（把各自的 1/N 广播给所有人），每阶段每卡发送 \((N-1)/N\cdot\Psi\)。ZeRO 的观察是：两阶段之间正好可以插入“只用自己那 1/N 梯度更新自己那 1/N 参数”。下面的演示可切换不同的集合通信：</p>
+<div data-widget="collectives" data-ranks="4"></div>
+
+<h3 id="c-zero-r">3.2 剩余显存：ZeRO-R</h3>
+<p>模型状态之外还有三类“残余”显存，ZeRO 论文用 ZeRO-R 处理：<b>激活</b>——在模型并行下，激活检查点本身也是冗余复制的，ZeRO-R 把它们分片（必要时卸载到 CPU）；<b>临时缓冲区</b>——梯度融合（fused all-reduce）的缓冲区随模型变大，改为固定大小；<b>碎片</b>——长生命周期的张量（检查点、参数梯度）预先放进连续内存，避免分配器碎片导致的 OOM。后续工作 ZeRO-Offload / ZeRO-Infinity 再把优化器状态与参数卸载到 CPU 内存乃至 NVMe。</p>
+
+<h3 id="c-fsdp">3.3 PyTorch FSDP：ZeRO-3 的原生实现</h3>
+<p>FSDP（VLDB 2023）把 ZeRO-3 做进 PyTorch 核心，关键工程选择：</p>
+<ul>
+  <li><b>按单元（unit）分片</b>：用户用 wrap 策略把模型切成若干 FSDP 单元（通常一个 Transformer 块一个单元）；每个单元的参数拍平成一个 FlatParameter 再均分。单元是 all-gather / 释放的粒度——单元越大，通信越高效，但峰值显存越高。</li>
+  <li><b>预取与重叠</b>：前向时提前 all-gather 下一个单元，反向时按执行顺序预取，让通信与计算重叠；限速器（rate limiter）防止过早预取把显存撑爆。</li>
+  <li><b>混合分片（HSDP）</b>：节点内分片、节点间复制——all-gather 留在 NVLink 内，跨节点只做梯度 all-reduce，适合跨节点带宽较低的集群。</li>
+  <li><b>FSDP2</b>：改为逐参数的 DTensor 分片（按第 0 维切），不再需要 FlatParameter，与张量并行等其他 DTensor 并行更容易组合。</li>
+</ul>
+<p>论文报告 FSDP 在小模型上与 DDP 性能相当，同时能训练大得多的模型，TFLOPS 随卡数近似线性扩展。<span class="src">FSDP 论文摘要</span></p>
+
+<h3 id="c-compose">3.4 与张量 / 流水线并行的组合</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>切什么</th><th>通信</th><th>放在哪</th></tr></thead>
+  <tbody>
+    <tr><td>张量并行（TP）</td><td>单层内的矩阵</td><td>每层 2 次 all-reduce（激活），量大且频繁</td><td>节点内（NVLink）</td></tr>
+    <tr><td>流水线并行（PP）</td><td>层</td><td>相邻阶段点对点传激活</td><td>跨节点</td></tr>
+    <tr><td>ZeRO / FSDP（DP 维）</td><td>模型状态</td><td>每步一次（或每层一次）参数 / 梯度集合通信，可与计算重叠</td><td>最外层</td></tr>
+  </tbody>
+</table></div>
+<p>常见做法：TP 在节点内，PP 跨节点，DP 维上叠 ZeRO-1（Megatron 的“分布式优化器”即 ZeRO-1 式的优化器状态分片）。流水线并行下的梯度要在多个微批间累积，ZeRO-2 / 3 每个微批都要做 reduce-scatter / all-gather，开销被放大，因此 PP 通常只配 ZeRO-1。<span class="unverified">DeepSpeed 文档称其流水线引擎不支持 ZeRO-2/3</span>。纯 FSDP（不开 TP / PP）在百亿参数以内、单节点带宽充足时最省事，这也是很多 RL 训练框架（verl 的 FSDP worker）的默认后端。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">fsdp_step.py（ZeRO-3 / FSDP 的一个训练步，按单元）</div>
+<pre><code class="lang-py">def train_step(units, batch, rank, N):
+    # 每个 unit 只常驻 1/N 的 flat 参数 shard[rank]
+    x = batch
+    for u in units:                                  # ---- 前向 ----
+        full = all_gather(u.shard)                   # 拼回完整参数（可提前预取下一个 unit）
+        x = u.forward(x, full)
+        free(full)                                   # 立即释放，只留 shard
+    loss = x.loss()
+    for u in reversed(units):                        # ---- 反向 ----
+        full = all_gather(u.shard)                   # 反向还要再拼一次
+        g_full = u.backward(full)
+        u.grad_shard = reduce_scatter(g_full) / N    # 每卡只留自己那 1/N 的梯度和
+        free(full, g_full)
+    for u in units:                                  # ---- 优化器：只更新自己的 1/N ----
+        adam_update(u.shard_fp32, u.grad_shard, u.m, u.v)
+        u.shard = to_bf16(u.shard_fp32)</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">5. 关键结果</h2>
+<ul>
+  <li>400 张 GPU 上训练 100B+ 参数模型，超线性加速，吞吐 15 PFLOPS；论文称模型规模比当时 SOTA 大 8×、性能高 10×。<span class="src">ZeRO 摘要</span></li>
+  <li>不开模型并行即可训练 13B 参数模型（大于 Megatron GPT 8.3B 与 T5 11B）。<span class="src">ZeRO 摘要</span></li>
+  <li>Turing-NLG（17B）用 ZeRO 训练。<span class="src">ZeRO 摘要</span></li>
+  <li>FSDP：与 DDP 性能相当，支持显著更大的模型，TFLOPS 近线性扩展。<span class="src">FSDP 摘要</span></li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="questions">6. 简答题</h2>
+<div class="qa">
+  <h3 id="q36"><span class="qid">Q36</span>ZeRO 的三个阶段各切分什么？每卡显存与通信量分别如何变化？</h3>
+  <div class="ans">
+    <p class="short">混合精度 Adam 下每参数 16 字节：FP16 参数 2、FP16 梯度 2、FP32 主参数 + 动量 + 方差 12。ZeRO-1 切优化器状态（每卡 4Ψ + 12Ψ/N），ZeRO-2 再切梯度（2Ψ + 14Ψ/N），ZeRO-3 再切参数（16Ψ/N）。前两级通信量与普通 DP 相同（2Ψ），第三级为 3Ψ（1.5×）。</p>
+    <ul>
+      <li>前两级“免费”的原因：all-reduce = reduce-scatter + all-gather，ZeRO 只是在两步之间插入“每卡只更新自己的 1/N 参数”。</li>
+      <li>ZeRO-3 多出的 Ψ：参数不常驻，前向和反向各要 all-gather 一次。需要按层预取与计算重叠才能掩盖。</li>
+      <li>数字例子（论文 Fig. 1）：Ψ = 7.5B、N = 64：120 → 31.4 → 16.6 → 1.9 GB。</li>
+      <li>激活、临时缓冲区、碎片不在这个账本里，由 ZeRO-R（激活分片、固定缓冲区、预分配连续内存）处理。</li>
+    </ul>
+    <p class="cite">依据：ZeRO 论文 §5（显存）、§7（通信）、Fig. 1。</p>
+  </div>
+  <h3 id="q37"><span class="qid">Q37</span>FSDP（ZeRO-3）与张量并行、流水线并行如何分工和组合？</h3>
+  <div class="ans">
+    <p class="short">三者切的东西不同：TP 切单层矩阵（激活要每层 all-reduce，必须放在 NVLink 域内），PP 切层（阶段间点对点传激活，可跨节点），ZeRO / FSDP 在 DP 维上切模型状态（通信可与计算重叠，放在最外层）。典型组合是节点内 TP、跨节点 PP、DP 维叠 ZeRO-1（Megatron 分布式优化器）。</p>
+    <ul>
+      <li>PP 需要在多个微批间累积梯度，ZeRO-2 / 3 会让每个微批都触发 reduce-scatter / all-gather，所以 PP 一般只配 ZeRO-1。</li>
+      <li>模型能放进“单节点 × FSDP”时，纯 FSDP 最简单，不改模型代码；跨节点带宽差时用 HSDP（节点内分片、节点间复制）。</li>
+      <li>FSDP2 基于 DTensor，可以与 TP 在同一个设备网格上组合（2D 并行）；MoE 模型再加专家并行（EP），见 <a href="09-deepseek-v3.html">DeepSeek-V3</a>。</li>
+    </ul>
+    <p class="cite">依据：ZeRO §8；FSDP 论文 §3–4；Megatron-LM（PTD-P）论文；DeepSpeed 流水线文档（ZeRO-2/3 不兼容的说法未逐字核对）。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Rajbhandari, Rasley, Ruwase, He. <i>ZeRO: Memory Optimizations Toward Training Trillion Parameter Models.</i> SC 2020. <a href="https://arxiv.org/abs/1910.02054">arXiv:1910.02054</a></li>
+  <li>Zhao et al. <i>PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel.</i> VLDB 2023. <a href="https://arxiv.org/abs/2304.11277">arXiv:2304.11277</a></li>
+  <li>Narayanan et al. <i>Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM.</i> SC 2021.（PTD-P）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

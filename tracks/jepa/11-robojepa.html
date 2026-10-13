@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoboJEPA 架构拆解</title>
+<meta name="description" content="RoboJEPA（2026-10）：冻结 V-JEPA 2.1-G 编码器，在 12 种机器人平台、1.5 万小时视频上训练 22M–8B 的动作条件预测器；潜空间“想象误差”随算力服从二阶幂律，8B 预测器凭单张目标图像零样本规划。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/attnmask.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="jepa" data-node="robojepa">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：世界模型能不能像语言模型一样“可预测地变大”？</h2>
+<p>语言模型的进步有缩放律指引：给定算力，就能预测损失。机器人世界模型没有这样的工具——<a href="03-v-jepa-2.html">V-JEPA 2-AC</a> 只在单一平台（Franka / DROID）、62 小时数据上训练了一个 300M 的预测器；它变大会不会更好、好多少、靠什么指标判断，都没有答案。而真机评测昂贵且噪声大，无法拿来做缩放实验的度量。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  RoboJEPA 冻结 V-JEPA 2.1-G 编码器，把 23 个公开机器人数据集（12 种平台）统一成一个训练集，训练 22M 到 8B 的动作条件预测器。它发现潜空间多步 rollout 的误差（“想象误差”）随训练算力服从一条二阶幂律，用 ≤2B 的模型拟合就能准确预测 4B、8B 的误差；而想象误差又与下游规划成功率强相关——于是有了一个可以离线计算、可以外推的“世界模型质量”指标。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>多视角观测</span><span><i class="sw tgt"></i>冻结编码器</span><span><i class="sw act"></i>动作 / 状态</span>
+  <span><i class="sw pred"></i>预测器</span><span><i class="sw loss"></i>损失 / 代价</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="RoboJEPA 架构">
+    <g data-part="obs" data-step="1">
+      <rect class="box data" x="20" y="40" width="130" height="44" rx="8"/><text class="t-c" x="85" y="62">视角 1（手腕）</text>
+      <rect class="box data" x="20" y="92" width="130" height="44" rx="8"/><text class="t-c" x="85" y="114">视角 2（外部）</text>
+      <rect class="box data" x="20" y="144" width="130" height="44" rx="8"/><text class="t-c" x="85" y="166">…（视角数不一）</text>
+      <text class="t-c t-xs" x="85" y="206">240×320 或 480×640</text>
+    </g>
+    <g class="tgt" data-part="enc" data-step="2">
+      <rect class="box" x="180" y="50" width="160" height="128" rx="10"/>
+      <text class="t-c t-b" x="260" y="74">V-JEPA 2.1-G</text>
+      <text class="t-c t-xs" x="260" y="96">冻结；patch 16</text>
+      <text class="t-c t-xs" x="260" y="112">特征宽 1664</text>
+      <text class="t-c t-xs" x="260" y="136">换成 V-JEPA 2 时</text>
+      <text class="t-c t-xs" x="260" y="152">缩放不可预测</text>
+    </g>
+    <path class="edge" d="M150,114 H176" data-step="2"/>
+    <g class="act" data-part="act" data-step="3">
+      <rect class="box" x="180" y="214" width="160" height="96" rx="10"/>
+      <text class="t-c t-b" x="260" y="236">动作 + 本体状态</text>
+      <text class="t-c t-xs" x="260" y="258">按机器人 ID 的线性编码器</text>
+      <text class="t-c t-xs" x="260" y="274">补零到 64 维；26 种动作空间</text>
+      <text class="t-c t-xs" x="260" y="292">增量（s+a）或绝对指令</text>
+    </g>
+    <g data-part="layout" data-step="4">
+      <text class="t-xs" x="370" y="44">每个时间步的 token：[所有视角的视觉 token][动作][状态]，按时间交错</text>
+      <g><rect class="tk tgt" x="370" y="56" width="14" height="14"/><rect class="tk tgt" x="386" y="56" width="14" height="14"/><rect class="tk tgt" x="402" y="56" width="14" height="14"/><rect class="tk tgt" x="418" y="56" width="14" height="14"/><rect class="tk act" x="436" y="56" width="14" height="14"/><rect class="tk act" x="452" y="56" width="14" height="14" style="fill-opacity:.55"/>
+      <rect class="tk tgt" x="474" y="56" width="14" height="14"/><rect class="tk tgt" x="490" y="56" width="14" height="14"/><rect class="tk tgt" x="506" y="56" width="14" height="14"/><rect class="tk tgt" x="522" y="56" width="14" height="14"/><rect class="tk act" x="540" y="56" width="14" height="14"/><rect class="tk act" x="556" y="56" width="14" height="14" style="fill-opacity:.55"/>
+      <rect class="tk tgt" x="578" y="56" width="14" height="14"/><rect class="tk tgt" x="594" y="56" width="14" height="14"/><rect class="tk tgt" x="610" y="56" width="14" height="14"/><rect class="tk tgt" x="626" y="56" width="14" height="14"/><rect class="tk act" x="644" y="56" width="14" height="14"/><rect class="tk act" x="660" y="56" width="14" height="14" style="fill-opacity:.55"/></g>
+      <text class="t-c t-xs" x="420" y="84">t</text><text class="t-c t-xs" x="524" y="84">t+1</text><text class="t-c t-xs" x="628" y="84">t+2</text>
+    </g>
+    <path class="edge tgt" d="M340,114 C360,114 360,72 366,68" data-step="4" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge act" d="M340,262 C380,262 440,120 442,74" data-step="4"/>
+    <g class="pred" data-part="pred" data-step="5">
+      <rect class="box" x="400" y="110" width="290" height="150" rx="12"/>
+      <text class="t-c t-b" x="545" y="134">预测器：22M → 8B</text>
+      <text class="t-c t-xs" x="545" y="156">ViT 式 Transformer，pre-norm、RMSNorm、GELU MLP</text>
+      <text class="t-c t-xs" x="545" y="174">QK-norm（规模大时对稳定性关键）</text>
+      <text class="t-c t-xs" x="545" y="192">4 轴 RoPE：(时间, 行, 列, 视角) + 每层可学习视角偏置</text>
+      <text class="t-c t-xs" x="545" y="210">时空-视角联合注意力：按时间步因果</text>
+      <text class="t-c t-xs" x="545" y="226">+ 只看过去 8 个时间步的局部窗口</text>
+      <text class="t-c t-xs" x="545" y="246">一次前向预测下一步所有视角的特征</text>
+    </g>
+    <path class="edge pred" d="M690,185 H726" data-step="6"/>
+    <g class="loss" data-part="loss" data-step="6">
+      <rect class="box" x="730" y="110" width="210" height="150" rx="12"/>
+      <text class="t-c t-b" x="835" y="134">L1，逐 token</text>
+      <text class="t-c t-xs" x="835" y="158">½ teacher forcing：</text>
+      <text class="t-c t-xs" x="835" y="174">每一步都用真实特征作输入</text>
+      <text class="t-c t-xs" x="835" y="198">½ 自回归 rollout：</text>
+      <text class="t-c t-xs" x="835" y="214">给较短的帧前缀 + 完整动作序列，</text>
+      <text class="t-c t-xs" x="835" y="230">用 KV cache 自回归预测剩余帧</text>
+    </g>
+    <g data-part="data" data-step="7">
+      <rect class="panel" x="370" y="290" width="570" height="74" rx="10"/>
+      <text class="t-sm" x="386" y="310" style="fill:var(--text);font-weight:650">数据：23 个公开数据集、12 种平台</text>
+      <text class="t-xs" x="386" y="330">15,022 小时视频（其中 6,692 小时带动作），287 万条轨迹</text>
+      <text class="t-xs" x="386" y="348">最大头：AgiBot World 8,036 h、Open-X（9 个子集）4,298 h、RoboSet 1,244 h、DROID 414 h</text>
+    </g>
+    <g data-part="scaling" data-step="8">
+      <rect class="panel" x="20" y="384" width="440" height="88" rx="10"/>
+      <text class="t-sm" x="36" y="404" style="fill:var(--text);font-weight:650">想象误差的二阶幂律</text>
+      <text class="t-xs" x="36" y="424">L(C) = A · C^(α − γ ln C) + E（C = 训练 FLOPs）</text>
+      <text class="t-xs" x="36" y="442">用 22M–2B 拟合，外推到 4B / 8B：DROID 误差 0.6×10⁻³</text>
+      <text class="t-xs" x="36" y="458">（普通幂律 2.0×10⁻³）；算力范围 2×10¹⁹ – 9.5×10²²</text>
+    </g>
+    <g class="loss" data-part="plan" data-step="9">
+      <rect class="box" x="480" y="384" width="460" height="88" rx="10"/>
+      <text class="t-c t-b" x="710" y="404">零样本规划：单张目标图像</text>
+      <text class="t-c t-xs" x="710" y="424">滚动视野 CEM：最小化预测的 H 步未来与目标潜表征的 L1</text>
+      <text class="t-c t-xs" x="710" y="442">所有平台、任务共用一套超参，只调视野长度</text>
+      <text class="t-c t-xs" x="710" y="460">滚动 KV cache + 预编译：8B 也只需数秒（非实时）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="obs"><h4>多视角观测</h4><p>不同机器人的相机数量与分辨率各不相同。训练时按视角数与分辨率把数据分到不同的 GPU 组，并平衡各组的 batch。训练分辨率为 240×320 与 480×640。</p></div>
+    <div data-note="enc"><h4>冻结的 V-JEPA 2.1-G</h4><p>编码器不训练，表征完全来自视频自监督预训练（见 <a href="08-v-jepa-2-1.html">V-JEPA 2.1</a>）。论文附录比较了底座：用 V-JEPA 2 时缩放“不可预测”，换成稠密特征更好的 2.1 才得到干净的缩放曲线——世界模型要预测的是逐 patch 的特征，稠密质量直接决定了它学到的动力学。</p></div>
+    <div data-note="act"><h4>统一动作空间</h4><p>26 个机器人 ID、26 种动作空间：有的是末端增量（s<sub>t+1</sub> = s<sub>t</sub> + a<sub>t</sub>），有的是绝对指令。每个机器人 ID 一个线性编码器，把动作补零到 64 维后映射进预测器宽度；本体状态同理。</p></div>
+    <div data-note="layout"><h4>token 布局</h4><p>每个时间步依次放所有视角的视觉 token、动作 token、状态 token，再按时间交错。这与 V-JEPA 2-AC 的“动作作为 token、块因果注意力”一脉相承，只是扩展到多视角。</p></div>
+    <div data-note="pred"><h4>预测器</h4><p>确定性的 Transformer，一次前向预测下一步所有视角的特征。位置编码是四轴 RoPE（时间、行、列、视角），RoPE 之后再加一个逐层可学习的视角偏置。注意力按时间步因果，并限制在过去 8 个时间步的局部窗口内——这让 rollout 可以用固定大小的滚动 KV cache。论文指出 QK-norm 在大规模时对训练稳定性很关键。规模从 22M 到 8B，8B 是迄今最大的 JEPA 预测器。</p></div>
+    <div data-note="loss"><h4>两项损失</h4><p>teacher forcing 只训练一步预测；自回归项直接训练多步 rollout（给较短的帧前缀和完整的动作序列，用 KV cache 自回归地往后推），让训练与规划时的使用方式一致。L = ½·L<sub>TF</sub> + ½·L<sub>AR</sub>。优化器 AdamW（权重衰减 0.1、梯度裁剪 1.0），峰值学习率 5×10⁻⁵ 保持不变，冷却阶段线性衰减；冷却有短视野（K = 2）和长视野（K = 10、混合分辨率）两种配方。</p></div>
+    <div data-note="data"><h4>数据</h4><p>DROID 414 h（带动作 138 h）、RoboSet 1,244 h、RoboMIND 276 h、LeRobot 182 h、RoboCasa365（仿真）482 h、1X 90 h、AgiBot World 8,036 h、Open-X 的 9 个子集 4,298 h。<span class="src">RoboJEPA Tab. 1</span> 无动作的视频也能用于训练（只是没有动作条件）。</p></div>
+    <div data-note="scaling"><h4>二阶幂律</h4><p>“想象误差” = 在留出数据上做 9 步潜空间 rollout，预测特征与编码器特征的逐 token L1 的平均。普通幂律 L = A·C<sup>α</sup> + E 在双对数坐标下是直线；这里指数本身随 ln C 变化（α − γ ln C），曲线逐渐变缓。拟合参数（DROID）：E = 0.218、α = 1.91、γ = 0.02308；RoboCasa：E = 0.1709、α = 1.761、γ = 0.02105。<span class="src">Tab. 2</span></p></div>
+    <div data-note="plan"><h4>规划</h4><p>与 V-JEPA 2-AC 相同的思路：在潜空间里用 CEM 搜动作序列，使预测的未来接近目标图像的表征；滚动执行、重新规划。动作从均匀分布采样、由世界模型排序，没有学到的策略做提议。仿真中每执行一个动作就重新规划一次。</p></div>
+    <div data-step-note="1"><h4>① 观测</h4><p>多视角、多分辨率。</p></div>
+    <div data-step-note="2"><h4>② 编码</h4><p>冻结 V-JEPA 2.1-G。</p></div>
+    <div data-step-note="3"><h4>③ 动作</h4><p>按机器人 ID 编码。</p></div>
+    <div data-step-note="4"><h4>④ 布局</h4><p>视觉 / 动作 / 状态按时间交错。</p></div>
+    <div data-step-note="5"><h4>⑤ 预测器</h4><p>22M–8B，时间因果 + 局部窗口。</p></div>
+    <div data-step-note="6"><h4>⑥ 损失</h4><p>teacher forcing + rollout，L1。</p></div>
+    <div data-step-note="7"><h4>⑦ 数据</h4><p>1.5 万小时，12 种平台。</p></div>
+    <div data-step-note="8"><h4>⑧ 缩放律</h4><p>二阶幂律，可外推。</p></div>
+    <div data-step-note="9"><h4>⑨ 规划</h4><p>单张目标图像，CEM。</p></div>
+  </div>
+  <figcaption>图 1　RoboJEPA 的训练与规划。依据 RoboJEPA §2–3、Tab. 1–2。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-law">3.1 为什么需要“二阶”幂律</h3>
+<p>论文比较了两种拟合：标准幂律在 4B / 8B 上的外推误差为 2.0×10⁻³（DROID）与 3.7×10⁻³（RoboCasa），二阶幂律为 0.6×10⁻³ 与 1.4×10⁻³。<span class="src">Tab. 2</span> 二阶项让曲线在双对数坐标下逐渐变平，作者认为这反映了拟合区间已接近<b>数据饱和</b>：数据混合固定，模型越大，每单位算力的收益递减更快。论文只拟合了“算力—误差”关系（固定数据、变模型规模），没有单独拟合数据缩放律。</p>
+<div class="formula">$$L(C) = A\cdot C^{\,\alpha-\gamma\ln C} + E\qquad\Longleftrightarrow\qquad \ln\big(L-E\big) = \ln A + \alpha\ln C - \gamma(\ln C)^2$$</div>
+
+<h3 id="c-emergence">3.2 能力随算力“涌现”</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>能力（仿真 RoboCasa，§3.2–3.3）</th><th>大约出现在</th></tr></thead>
+  <tbody>
+    <tr><td>贪心到达（reach）</td><td>10²⁰ FLOPs</td></tr>
+    <tr><td>抓住物体</td><td>3×10²⁰ FLOPs</td></tr>
+    <tr><td>绕障到达（需长视野冷却配方）</td><td>10²¹ 起飞，10²² 饱和</td></tr>
+    <tr><td>推物体</td><td>约 10²² 之前为 0</td></tr>
+  </tbody>
+</table></div>
+<p>短视野冷却（K = 2）训练的模型在绕障任务上趋势很弱，换成长视野冷却（K = 10）后趋势变强——训练时 rollout 的长度要与任务的规划视野匹配。论文没有给出“想象误差—成功率”的相关系数，相关性由这些缩放曲线定性展示。</p>
+
+<h3 id="c-mask">3.3 注意力掩码</h3>
+<p>预测器按时间步因果：同一时间步内的视觉、动作、状态 token 互相可见，只能看过去的时间步（且只看最近 8 步）。下方演示对比了“块因果”与“逐 token 因果 + AdaLN”两种动作条件方式（前者是 V-JEPA 2-AC / RoboJEPA 的做法，后者是 LeWorldModel 的做法）：</p>
+<div data-widget="attn-mask"></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪</h2>
+<p>以 2 个视角、240×320、patch 16 为例；每视角每帧 15×20 = 300 个 patch。V-JEPA 2.1 的视频分词器沿时间每 2 帧合一（tubelet 2），时间步与帧的对应关系以论文实现为准 <span class="unverified">（下表 token 数为推算）</span>。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>观测</td><td>[B, T, V = 2, 3, 240, 320]</td><td></td></tr>
+    <tr><td>V-JEPA 2.1-G 特征</td><td>[B, T, 2·300, 1664]</td><td>冻结</td></tr>
+    <tr><td>动作 / 状态</td><td>[B, T, 64] → [B, T, 2, D]</td><td>按机器人 ID 的线性编码器</td></tr>
+    <tr><td>预测器输入</td><td>[B, T·(600 + 2), D]</td><td>按时间交错</td></tr>
+    <tr><td>预测器输出</td><td>[B, T, 600, 1664]</td><td>下一步所有视角的特征</td></tr>
+    <tr><td>规划（CEM 每轮）</td><td>[N, H, 64] 候选动作 → [N, H, 600, 1664] rollout</td><td>滚动 KV cache</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与防坍塌</h2>
+<div class="formula">$$\mathcal L = \tfrac12\,\underbrace{\frac1T\sum_t\big\lVert P_\phi(z_{\le t}, a_{\le t}, s_{\le t}) - z_{t+1}\big\rVert_1}_{\mathcal L_\text{TF}} + \tfrac12\,\underbrace{\frac{1}{T-T_0}\sum_{t\ge T_0}\big\lVert \hat z_{t+1} - z_{t+1}\big\rVert_1}_{\mathcal L_\text{AR}:\ \hat z\ \text{由自身 rollout 产生}},\qquad z = \mathrm{Enc}_\text{V-JEPA 2.1-G}(o)\ \text{（冻结）}$$</div>
+<p>防坍塌靠冻结编码器（与 DINO-WM、V-JEPA 2-AC 相同）。公式中的归一化与 T₀（前缀长度）为本页写法，论文以 Eq. 5 给出 L = ½L<sub>TF</sub> + ½L<sub>AR</sub>。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">robojepa_plan.py（滚动视野 CEM，示意）</div>
+<pre><code class="lang-py">def plan(obs_hist, goal_img, robot_id, H, n=..., iters=...):
+    z_hist = enc(obs_hist)                                   # 冻结 V-JEPA 2.1-G
+    z_goal = enc(goal_img)
+    cache = predictor.prefill(z_hist, act_hist, state_hist, robot_id)   # 滚动 KV cache
+    A = uniform_sample(n, H, action_space[robot_id])         # 均匀采样，无策略提议
+    for _ in range(iters):
+        z_pred = predictor.rollout(cache, A, steps=H)        # [n, H, tokens, 1664]
+        cost = l1(z_pred[:, -H:], z_goal).mean((-1, -2, -3))
+        elite = A[cost.argsort()[:k]]
+        A = refit_and_resample(elite, n)
+    return elite[0, 0]                                       # 执行一步，然后重新规划</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td>编码器</td><td>冻结 V-JEPA 2.1-G，宽 1664，patch 16</td></tr>
+    <tr><td>预测器</td><td>22M–8B；4 轴 RoPE + 视角偏置；QK-norm；时间因果 + 8 步窗口</td></tr>
+    <tr><td>动作</td><td>26 种动作空间，补零到 64 维，按机器人 ID 线性编码</td></tr>
+    <tr><td>损失</td><td>L1：½ teacher forcing + ½ rollout</td></tr>
+    <tr><td>优化</td><td>AdamW，wd 0.1，梯度裁剪 1.0，lr 5×10⁻⁵ 恒定 + 冷却线性衰减</td></tr>
+    <tr><td>冷却</td><td>短视野 K = 2（240×320）；长视野 K = 10（240×320 与 480×640 混合）</td></tr>
+    <tr><td>算力</td><td>2×10¹⁹ – 9.5×10²² FLOPs</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>真机（Franka / DROID，Tab. 3）</th><th>目标形式</th><th>抓取</th><th>举起</th><th>抓放</th></tr></thead>
+  <tbody>
+    <tr><td>π0-FAST</td><td>文本</td><td>22</td><td>12</td><td>40</td></tr>
+    <tr><td>π0.5</td><td>文本</td><td>5</td><td>0</td><td>53</td></tr>
+    <tr><td>RoboJEPA-4B</td><td>图像</td><td>60</td><td>30</td><td>21</td></tr>
+    <tr class="hl"><td>RoboJEPA-8B</td><td>图像</td><td>67</td><td>50</td><td>27</td></tr>
+  </tbody>
+</table></div>
+<p>作者明确说明 VLA 基线的目标形式与训练方式不同，只能作为参照，不是可直接比较的基线；与 V-JEPA 2-AC 的真机结果也不是同一设定。8B 好于 4B，与缩放律的方向一致。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>V-JEPA 2-AC（2025-06）</h4><ul><li>冻结 V-JEPA 2 ViT-g；</li><li>单一平台，62 小时 DROID；</li><li>约 300M 的预测器；</li><li>证明“潜空间规划可以上真机”。</li></ul></div>
+  <div class="now"><h4>RoboJEPA（2026-10）</h4><ul><li>冻结 V-JEPA 2.1-G（稠密特征是可缩放的前提）；</li><li>12 种平台、1.5 万小时、26 种动作空间；</li><li>22M–8B 的预测器，第一次给出多本体机器人世界模型的缩放律；</li><li>开放问题：规划仍需数秒；长视野多阶段任务仍弱（抓放 27%），可与 <a href="10-hierarchical-wm.html">层级世界模型</a>结合；与 VLA 的公平比较尚缺。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zholus, Beltran-Velez, Yuan, Chandar, Nagarajan, Severo, Sinha, Drozdzal, Romero Soriano, Bohg, Ballas, Assran. <i>RoboJEPA: Scaling Robotic Latent World Models.</i> 2026. <a href="https://arxiv.org/abs/2610.10515">arXiv:2610.10515</a></li>
+  <li>Mur-Labadia et al. <i>V-JEPA 2.1.</i> 2026. <a href="https://arxiv.org/abs/2603.14482">arXiv:2603.14482</a></li>
+  <li>Assran et al. <i>V-JEPA 2.</i> 2025. <a href="https://arxiv.org/abs/2506.09985">arXiv:2506.09985</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

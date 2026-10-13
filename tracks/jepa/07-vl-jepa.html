@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VL-JEPA 架构拆解</title>
+<meta name="description" content="VL-JEPA：视觉-语言模型不再逐 token 生成，而是预测答案文本的嵌入——冻结 V-JEPA 2 编码器、Llama 层初始化的预测器、EmbeddingGemma 初始化的目标编码器、双向 InfoNCE，以及按需解码与选择性解码。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="jepa" data-node="vl-jepa">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：视觉-语言模型为什么要逐字生成答案？</h2>
+<p>经典 VLM（LLaVA、Qwen-VL 等）把视觉特征接到 LLM 上，用 next-token 交叉熵训练：答案必须一个 token 一个 token 地写出来。这有两个代价：</p>
+<ul>
+  <li><b>表面形式的方差</b>：同一个正确答案可以有许多种措辞，token 空间的目标分布是多峰的，模型要花大量容量去拟合“怎么说”，而不只是“说什么”；</li>
+  <li><b>推理成本</b>：哪怕只是做分类或检索，也要跑自回归解码；对流式视频，每秒都生成描述既昂贵又冗余。</li>
+</ul>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  VL-JEPA 把 JEPA 的思想用到视觉-语言：看视频、读问题，然后<b>预测答案文本的嵌入</b>，而不是答案的 token。训练在抽象的嵌入空间里进行，措辞差异被目标编码器抹平；需要文字时才调用一个轻量解码器把嵌入“翻译”出来。分类、检索、判别式 VQA 直接在嵌入空间里完成，不用解码。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>输入</span><span><i class="sw tgt"></i>冻结 / 慢速更新的编码器</span><span><i class="sw pred"></i>预测器</span>
+  <span><i class="sw enc"></i>目标文本编码器</span><span><i class="sw loss"></i>损失</span><span><i class="sw act"></i>按需解码</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="VL-JEPA 架构">
+    <g data-part="xin" data-step="1">
+      <rect class="box data" x="20" y="40" width="120" height="70" rx="8"/>
+      <text class="t-c t-b" x="80" y="66">X：视频 / 图像</text>
+      <text class="t-c t-xs" x="80" y="88">256²，均匀采帧</text>
+      <text class="t-c t-xs" x="80" y="102">单图复制填满帧数</text>
+    </g>
+    <path class="edge" d="M140,75 H176" data-step="2"/>
+    <g class="tgt" data-part="xenc" data-step="2">
+      <rect class="box" x="180" y="36" width="180" height="78" rx="10"/>
+      <text class="t-c t-b" x="270" y="58">X 编码器（冻结）</text>
+      <text class="t-c t-xs" x="270" y="80">V-JEPA 2 ViT-L，304M</text>
+      <text class="t-c t-xs" x="270" y="98">输出视觉 token 序列</text>
+    </g>
+    <g data-part="query" data-step="3">
+      <rect class="box data" x="20" y="150" width="120" height="60" rx="8"/>
+      <text class="t-c t-b" x="80" y="172">查询文本</text>
+      <text class="t-c t-xs" x="80" y="192">≤ 512 token</text>
+      <rect class="box" x="180" y="150" width="180" height="60" rx="10"/>
+      <text class="t-c t-sm" x="270" y="172" style="fill:var(--text)">Llama-3.2-1B 的</text>
+      <text class="t-c t-sm" x="270" y="190" style="fill:var(--text)">分词器与词嵌入</text>
+      <path class="edge" d="M140,180 H176"/>
+    </g>
+    <path class="edge tgt" d="M360,75 C390,75 395,110 416,110" data-step="4" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge" d="M360,180 C390,180 395,150 416,150" data-step="4"/>
+    <g class="pred" data-part="pred" data-step="4">
+      <rect class="box" x="420" y="70" width="200" height="120" rx="10"/>
+      <text class="t-c t-b" x="520" y="94">预测器</text>
+      <text class="t-c t-xs" x="520" y="116">Llama-3.2-1B 末 8 层初始化</text>
+      <text class="t-c t-xs" x="520" y="132">490M，可训练</text>
+      <text class="t-c t-xs" x="520" y="152">关闭因果掩码：视觉与查询</text>
+      <text class="t-c t-xs" x="520" y="168">token 双向互相注意</text>
+    </g>
+    <path class="edge pred" d="M620,130 H656" data-step="5"/>
+    <g class="pred" data-part="pool" data-step="5">
+      <rect class="box" x="660" y="96" width="120" height="68" rx="10"/>
+      <text class="t-c t-b" x="720" y="118">平均池化</text>
+      <text class="t-c t-xs" x="720" y="138">非 [PAD] token</text>
+      <text class="t-c t-xs" x="720" y="154">→ 线性投影</text>
+    </g>
+    <path class="edge pred" d="M780,130 H816" data-step="5"/>
+    <g data-part="spred" data-step="5">
+      <rect class="tk pred" x="820" y="118" width="110" height="24" rx="4"/>
+      <text class="t-c t-xs" x="875" y="130" style="fill:var(--surface)">Ŝ<tspan font-size="8" dy="2">Y</tspan><tspan dy="-2"> ∈ ℝ¹⁵³⁶</tspan></text>
+    </g>
+    <!-- target -->
+    <g data-part="yin" data-step="6">
+      <rect class="box data" x="420" y="260" width="200" height="54" rx="8"/>
+      <text class="t-c t-b" x="520" y="280">Y：答案 / 描述文本</text>
+      <text class="t-c t-xs" x="520" y="300">“the person opens the drawer”</text>
+    </g>
+    <path class="edge" d="M620,287 H656" data-step="6"/>
+    <g class="enc" data-part="yenc" data-step="6">
+      <rect class="box" x="660" y="250" width="160" height="74" rx="10"/>
+      <text class="t-c t-b" x="740" y="272">Y 编码器</text>
+      <text class="t-c t-xs" x="740" y="292">EmbeddingGemma-300M 初始化</text>
+      <text class="t-c t-xs" x="740" y="310">学习率 × 0.05 继续训练</text>
+    </g>
+    <path class="edge enc" d="M820,287 C850,287 860,250 875,250" data-step="6"/>
+    <g data-part="sy" data-step="6">
+      <rect class="tk enc" x="820" y="226" width="110" height="24" rx="4"/>
+      <text class="t-c t-xs" x="875" y="238" style="fill:var(--surface)">S<tspan font-size="8" dy="2">Y</tspan><tspan dy="-2"> ∈ ℝ¹⁵³⁶</tspan></text>
+    </g>
+    <g class="loss" data-part="loss" data-step="7">
+      <rect class="box" x="820" y="160" width="120" height="52" rx="10"/>
+      <text class="t-c t-b" x="880" y="180">双向 InfoNCE</text>
+      <text class="t-c t-xs" x="880" y="198">批内对比</text>
+    </g>
+    <path class="edge loss" d="M875,142 V156" data-step="7"/>
+    <path class="edge loss" d="M875,226 V216" data-step="7"/>
+    <!-- inference -->
+    <g data-part="decoder" data-step="8">
+      <rect class="panel" x="20" y="340" width="380" height="120" rx="12"/>
+      <text class="t-sm" x="36" y="362" style="fill:var(--text);font-weight:650">推理：同一个预测嵌入，多种用法</text>
+      <text class="t-xs" x="36" y="384">分类：把类名文本经 Y 编码器编码，取最近邻</text>
+      <text class="t-xs" x="36" y="402">检索：文本 ↔ 视频在共享空间里比余弦</text>
+      <text class="t-xs" x="36" y="420">判别式 VQA：候选答案中选与 Ŝ_Y 最近的</text>
+      <text class="t-xs" x="36" y="440">生成：需要文字时才调用轻量 Y 解码器把 Ŝ_Y 转成文本</text>
+    </g>
+    <g class="act" data-part="selective" data-step="9">
+      <rect class="box" x="420" y="340" width="520" height="120" rx="12"/>
+      <text class="t-c t-b" x="680" y="362">选择性解码（流式视频）</text>
+      <g><rect class="tk pred" x="440" y="378" width="18" height="16"/><rect class="tk pred" x="460" y="378" width="18" height="16"/><rect class="tk pred" x="480" y="378" width="18" height="16"/><rect class="tk act" x="500" y="378" width="18" height="16"/><rect class="tk act" x="520" y="378" width="18" height="16"/><rect class="tk act" x="540" y="378" width="18" height="16"/><rect class="tk act" x="560" y="378" width="18" height="16"/><rect class="tk reg" x="580" y="378" width="18" height="16"/><rect class="tk reg" x="600" y="378" width="18" height="16"/><rect class="tk reg" x="620" y="378" width="18" height="16"/></g>
+      <text class="t-xs" x="650" y="390">每秒一个预测嵌入 → 按语义变化聚成片段</text>
+      <text class="t-xs" x="440" y="416">只在片段中点解码一次：约 0.35 Hz 的解码与均匀 1 Hz 解码的 CIDEr 相当</text>
+      <text class="t-xs" x="440" y="436">→ 解码次数约减少 2.85×（EgoExo4D，218 段约 6 分钟的视频）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="xin"><h4>视觉输入</h4><p>视频均匀采帧、分辨率 256²；单张图像复制成同样的帧数。预训练先只用图像（1 帧），再用 8 帧、最后 32 帧的视频。</p></div>
+    <div data-note="xenc"><h4>X 编码器</h4><p>默认是冻结的 V-JEPA 2 ViT-L（304M）。这正是 JEPA 路线的复用：用 JEPA 方式预训练的视觉编码器，作为另一个 JEPA 的上下文编码器。</p></div>
+    <div data-note="query"><h4>查询</h4><p>问题文本用 Llama-3.2-1B 的分词器与词嵌入编码，最多 512 个 token（不足用 [PAD] 补齐）。没有问题时（如描述任务）查询可以是固定提示。</p></div>
+    <div data-note="pred"><h4>预测器</h4><p>用 Llama-3.2-1B 的最后 8 层初始化（490M 可训练参数），但<b>关闭了因果掩码</b>：它不是在生成，而是把视觉 token 与查询 token 一起双向地“读一遍”，输出一个表示“答案应该是什么意思”的向量。</p></div>
+    <div data-note="pool"><h4>池化与投影</h4><p>对所有非 [PAD] 位置的输出做平均池化，再经线性投影头映射到 1536 维共享空间。</p></div>
+    <div data-note="spred"><h4>预测嵌入</h4><p>Ŝ<sub>Y</sub>：对答案语义的预测。整个模型在训练时只需要这一个向量，不需要逐 token 的输出。</p></div>
+    <div data-note="yin"><h4>目标文本</h4><p>答案、描述或类别名。措辞不同但意思相同的答案，经目标编码器后应落在相近的位置——这就是“在抽象空间里学习”的含义。</p></div>
+    <div data-note="yenc"><h4>Y 编码器</h4><p>用 EmbeddingGemma-300M 初始化（最长 512 token），<b>不冻结</b>，但学习率乘以 0.05：作者发现慢速更新比冻结更好。它也接一个线性投影头到 1536 维。</p></div>
+    <div data-note="sy"><h4>目标嵌入</h4><p>S<sub>Y</sub>：答案文本的嵌入，是预测的目标。</p></div>
+    <div data-note="loss"><h4>为什么用 InfoNCE</h4><p>双向 InfoNCE 可分解为对齐项（把预测拉向目标）与均匀性项（把批内嵌入推开）。目标编码器在训练，如果只用 L2 / 余弦回归，模型可以把所有嵌入都压到一点来让损失为 0；InfoNCE 的均匀性项正是防坍塌项。消融（冻结文本编码器、无投影头）：InfoNCE 分类 23.3 / 检索 30.3，L2 为 13.5 / 11.7。</p></div>
+    <div data-note="decoder"><h4>一个嵌入，多种任务</h4><p>预测嵌入与文本嵌入在同一空间里，因此开放词表分类、文本-视频检索、多选式 VQA 都不需要改架构或解码；只有真正需要输出句子时才调用 Y 解码器（论文未详细说明其结构）。</p></div>
+    <div data-note="selective"><h4>选择性解码</h4><p>对流式视频，每个时刻都有一个预测嵌入。先平滑，再用带时间连通约束的凝聚聚类（Ward 距离）把嵌入流切成语义片段，只在每段的中点解码一次。方法部分描述的是方差阈值，实验用的是聚类。</p></div>
+    <div data-step-note="1"><h4>① 视觉输入</h4><p>视频 / 图像。</p></div>
+    <div data-step-note="2"><h4>② 冻结编码</h4><p>V-JEPA 2 ViT-L。</p></div>
+    <div data-step-note="3"><h4>③ 查询</h4><p>问题文本的词嵌入。</p></div>
+    <div data-step-note="4"><h4>④ 预测器</h4><p>双向注意力读视觉 + 查询。</p></div>
+    <div data-step-note="5"><h4>⑤ 预测嵌入</h4><p>池化 + 投影 → 1536 维。</p></div>
+    <div data-step-note="6"><h4>⑥ 目标</h4><p>答案文本经 Y 编码器。</p></div>
+    <div data-step-note="7"><h4>⑦ 损失</h4><p>双向 InfoNCE。</p></div>
+    <div data-step-note="8"><h4>⑧ 推理用法</h4><p>分类 / 检索 / VQA / 按需生成。</p></div>
+    <div data-step-note="9"><h4>⑨ 选择性解码</h4><p>语义变化时才解码。</p></div>
+  </div>
+  <figcaption>图 1　VL-JEPA 的训练路径（上）与推理用法（下）。依据 VL-JEPA §2–3、§4.6。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-controlled">3.1 严格对照：嵌入空间 vs token 空间</h3>
+<p>为了排除编码器和数据的影响，作者做了一个严格对照：同一个冻结的 Perception Encoder ViT-L-14（336²、16 帧），同样的 batch（128）、学习率计划和数据；唯一的区别是训练目标——VL-JEPA 用 0.5B 的预测器预测嵌入，VLM 用 1B 的 LLM 做 next-token 生成（这就是摘要里“可训练参数少 50%”的来源）。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>已见样本数（Fig. 3）</th><th>VL-JEPA：CIDEr / top-5</th><th>VLM：CIDEr / top-5</th></tr></thead>
+  <tbody>
+    <tr><td>500K</td><td>1.23 / 14.9%</td><td>1.35 / 14.0%</td></tr>
+    <tr><td>5M</td><td>14.7 / 35.3%</td><td>—</td></tr>
+    <tr><td>15M</td><td>14.8 / 41.0%</td><td>7.1 / 27.2%</td></tr>
+  </tbody>
+</table></div>
+<p>起步时两者相当，之后 VL-JEPA 学得明显更快。两者的文本生成延迟相近；VL-JEPA 的优势在于编码器 + 预测器可以单独运行做检索，只有需要时才解码。</p>
+
+<h3 id="c-stages">3.2 两阶段训练</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>阶段</th><th>数据</th><th>设置</th></tr></thead>
+  <tbody>
+    <tr><td>预训练（VL-JEPA<sub>BASE</sub>）</td><td>Datacomp + YFCC-100M 图文；Action100M 视频文本</td><td>先纯图像：batch 24k、100k 迭代（约 20 亿样本），ImageNet 零样本 61.6%；再 8 帧 60k 迭代、32 帧 10k 迭代；学习率恒定 5×10⁻⁵；24 节点 × 8 H200 约 4 周</td></tr>
+    <tr><td>SFT（VL-JEPA<sub>SFT</sub>）</td><td>PLM 数据混合：VQA 25M、描述 2.8M、分类 1.8M，加降采样的预训练数据防遗忘</td><td>83k 步，batch 3072，余弦退火</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="c-jepa-view">3.3 放回 JEPA 谱系看</h3>
+<div class="diff">
+  <div><h4>与 I-JEPA / V-JEPA 的对应</h4><p>x = 视觉 + 查询，y = 答案文本，z = 查询（条件变量）；预测器在嵌入空间里预测 y 的表征。不同的是：x 与 y 来自<b>不同模态</b>，目标编码器是一个独立的文本模型而不是上下文编码器的 EMA。</p></div>
+  <div><h4>与 CLIP 类模型的区别</h4><p>CLIP 对齐的是“图像 ↔ 描述”这一固定配对；VL-JEPA 的预测<b>条件于查询</b>——同一段视频，问不同的问题，预测不同的答案嵌入，所以能做 VQA。防坍塌同样靠对比学习的负样本。</p></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪</h2>
+<p>以 32 帧 256² 视频为例。视觉 token 数按 V-JEPA 2 的 16×16 patch、tubelet 2 推算；从 ViT-L 的 1024 维到 Llama 层的 2048 维之间应有一个投影，论文正文未展开 <span class="unverified">（这两行为推算）</span>。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>视频</td><td>[B, 3, 32, 256, 256]</td><td></td></tr>
+    <tr><td>V-JEPA 2 ViT-L</td><td>[B, 16·16·16, 1024]</td><td>冻结；推算值</td></tr>
+    <tr><td>投影到预测器宽度</td><td>[B, 4096, 2048]</td><td>推算值</td></tr>
+    <tr><td>查询词嵌入</td><td>[B, ≤512, 2048]</td><td>Llama-3.2-1B 词表</td></tr>
+    <tr><td>预测器（8 层，双向）</td><td>[B, 4096 + L<sub>q</sub>, 2048]</td><td></td></tr>
+    <tr><td>非 [PAD] 平均池化 → 投影</td><td>[B, 1536]</td><td>Ŝ<sub>Y</sub></td></tr>
+    <tr><td>Y 编码器 → 投影</td><td>[B, 1536]</td><td>S<sub>Y</sub></td></tr>
+    <tr><td>相似度矩阵</td><td>[B, B]</td><td>双向 InfoNCE</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与防坍塌</h2>
+<div class="formula">$$\mathcal L = \frac12\Big[\mathrm{CE}\big(\mathrm{softmax}_j(\langle \hat s_i, s_j\rangle/\tau),\ i\big) + \mathrm{CE}\big(\mathrm{softmax}_i(\langle \hat s_i, s_j\rangle/\tau),\ j\big)\Big],\qquad \hat s = \frac{\hat S_Y}{\lVert\hat S_Y\rVert},\ s = \frac{S_Y}{\lVert S_Y\rVert}$$</div>
+<p>预测器与 Y 编码器联合优化。防坍塌来自 InfoNCE 的“均匀性”：批内其他样本的答案嵌入是负样本，模型不能把所有嵌入压成一点。论文的原话是只有 InfoNCE 带有防坍塌正则、可以配合不冻结的 Y 编码器使用；若改用 L2 / 余弦回归，就必须冻结目标编码器（相当于 DINO-WM 式的防坍塌）。温度 τ 的取值正文未给出，公式为 InfoNCE 的标准形式。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">vl_jepa_step.py</div>
+<pre><code class="lang-py">with torch.no_grad():
+    v = vjepa2_vitl(video)                                # 冻结 X 编码器
+q = llama_embed(query_tokens)                             # 查询词嵌入
+h = predictor(cat(proj_in(v), q), causal=False)           # Llama-3.2-1B 末 8 层，双向
+s_hat = normalize(head_p(masked_mean(h, ~is_pad)))        # [B, 1536]
+s     = normalize(head_y(embedding_gemma(answer_tokens))) # Y 编码器：lr × 0.05
+logits = s_hat @ s.T / tau
+loss = (cross_entropy(logits, arange(B)) + cross_entropy(logits.T, arange(B))) / 2
+
+# 推理：分类 = 与各类名嵌入比余弦；生成 = decoder(s_hat)（仅在需要时）</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td>X 编码器</td><td>V-JEPA 2 ViT-L（304M），冻结；256²</td></tr>
+    <tr><td>预测器</td><td>Llama-3.2-1B 末 8 层（490M），无因果掩码，查询 ≤ 512 token</td></tr>
+    <tr><td>Y 编码器</td><td>EmbeddingGemma-300M，学习率 × 0.05</td></tr>
+    <tr><td>共享空间</td><td>1536 维（两侧各一个线性投影头）</td></tr>
+    <tr><td>总参数</td><td>论文报告 1.6B（上面三部分约 1.1B，其余未逐项说明）</td></tr>
+    <tr><td>预训练</td><td>图像 batch 24k × 100k 迭代；视频 8 帧 60k + 32 帧 10k；lr 5×10⁻⁵ 恒定</td></tr>
+    <tr><td>SFT</td><td>83k 步，batch 3072，余弦退火</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<ul>
+  <li><b>零样本视频分类</b>（8 个数据集平均 top-1）：VL-JEPA<sub>BASE</sub> 52.5；PE-Core-G 44.7、SigLIP2 ViT-g 39.8、CLIP ViT-L 30.7。<span class="src">Tab. 1</span></li>
+  <li><b>零样本文本-视频检索</b>（8 个数据集平均 R@1）：63.7（PE-Core-G 58.1）。<span class="src">Tab. 1</span></li>
+  <li><b>VQA</b>（VL-JEPA<sub>SFT</sub>）：GQA 61.5、TallyQA 69.9、POPE 85.7、POPEv2 86.3，与 InstructBLIP、Qwen-VL 相当，而总参数只有 1.6B。<span class="src">Tab. 2</span></li>
+  <li><b>WorldPrediction-WM</b>：BASE 63.9%、SFT 65.7%，论文称为新的最佳，并高于 GPT-4o、Claude-3.5、Gemini-2.0。<span class="src">Tab. 3</span></li>
+  <li><b>选择性解码</b>：解码次数减少约 2.85×，性能与均匀解码相当。<span class="src">§4.6</span></li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul><li><a href="03-v-jepa-2.html">V-JEPA 2</a> 的视频理解靠“冻结编码器 + 接 LLM”做 VQA，仍是 token 空间的生成；</li><li><a href="06-llm-jepa.html">LLM-JEPA</a> 证明语言模型也能从嵌入空间目标中受益，但只作为正则项。</li></ul></div>
+  <div class="now"><h4>VL-JEPA</h4><ul><li>把嵌入预测变成视觉-语言模型的<b>主</b>训练目标，生成退化为可选的后处理；</li><li>一个嵌入同时服务分类、检索、VQA、描述；</li><li>流式场景里按语义变化解码，指向“持续感知、按需表达”的智能体形态。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Chen, Shukor, Moutakanni, Chung, Yu, Kasarla, Bang, Bolourchi, LeCun, Fung. <i>VL-JEPA: Joint Embedding Predictive Architecture for Vision-language.</i> 2025. <a href="https://arxiv.org/abs/2512.10942">arXiv:2512.10942</a></li>
+  <li>Assran et al. <i>V-JEPA 2.</i> 2025. <a href="https://arxiv.org/abs/2506.09985">arXiv:2506.09985</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

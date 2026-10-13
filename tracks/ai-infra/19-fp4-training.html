@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FP4 训练：NVFP4 与 MXFP4</title>
+<meta name="description" content="4 bit 训练：MXFP4 与 NVFP4 两种微缩放格式的差异，NVIDIA 用 NVFP4 预训练 12B 模型到 10T token 的配方（高精度层、随机 Hadamard 变换、权重二维缩放、梯度随机舍入），以及 FP4 在 gpt-oss、DeepSeek-V4、Kimi K3 中的落地。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="ai-infra" data-node="fp4-training">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：FP8 之后，再减一半</h2>
+<p><a href="08-fp8-formats.html">FP8</a> 让矩阵乘的吞吐翻倍、字节减半，<a href="09-deepseek-v3.html">DeepSeek-V3</a> 证明了它能用于超大规模预训练。Blackwell 的张量核又加入了 FP4：数学吞吐是 FP8 的 2×（GB200）到 3×（GB300），对 BF16 则是 4× 到 6×。<span class="src">NVFP4 论文 §2、Tab. 1</span> 问题是 4 bit 太粗：E2M1 只有 0、0.5、1、1.5、2、3、4、6 及其负数共 15 个值，一个离群值就能把整块的其余元素都压成 0。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  FP4 能用于训练，靠的是“缩放做细 + 误差做无偏”：块越小、缩放因子越精细，离群值的影响就被关在越小的范围内（NVFP4：16 个元素一个 E4M3 缩放，再加一级 FP32 张量缩放）；再用随机 Hadamard 变换打散离群值、用随机舍入让梯度的量化误差期望为 0、让少数敏感层留在高精度。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 格式与一个线性层的三次矩阵乘</h2>
+<div class="legend">
+  <span><i class="sw data"></i>FP4 元素</span><span><i class="sw tgt"></i>缩放因子</span><span><i class="sw enc"></i>前向</span>
+  <span><i class="sw loss"></i>反向</span><span><i class="sw reg"></i>配方中的技巧</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="MXFP4 与 NVFP4 格式及 NVFP4 训练配方">
+    <rect class="panel" x="10" y="8" width="940" height="196" rx="12"/>
+    <g data-part="e2m1" data-step="1">
+      <text class="t-sm" x="24" y="30" style="fill:var(--text);font-weight:650">E2M1：1 符号 + 2 指数 + 1 尾数</text>
+      <line x1="40" y1="62" x2="400" y2="62" style="stroke:var(--border-strong)"/>
+      <g class="t-xs">
+        <circle cx="40" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="40" y="80">0</text>
+        <circle cx="70" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="70" y="80">0.5</text>
+        <circle cx="100" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="100" y="80">1</text>
+        <circle cx="130" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="130" y="80">1.5</text>
+        <circle cx="160" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="160" y="80">2</text>
+        <circle cx="220" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="220" y="80">3</text>
+        <circle cx="280" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="280" y="80">4</text>
+        <circle cx="400" cy="62" r="4" style="fill:var(--c-data)"/><text class="t-c t-xs" x="400" y="80">6</text>
+      </g>
+      <text class="t-xs" x="40" y="100">正半轴只有 8 个点（含 0），间距随数值翻倍；加上负数共 15 个可表示值</text>
+    </g>
+    <g data-part="mxfp4" data-step="2">
+      <text class="t-sm" x="470" y="30" style="fill:var(--text);font-weight:650">MXFP4（OCP MX 规范）</text>
+      <g><rect class="tk data" x="470" y="44" width="11" height="22"/><rect class="tk data" x="481" y="44" width="11" height="22"/><rect class="tk data" x="492" y="44" width="11" height="22"/><rect class="tk data" x="503" y="44" width="11" height="22"/><rect class="tk data" x="514" y="44" width="11" height="22"/><rect class="tk data" x="525" y="44" width="11" height="22"/><rect class="tk data" x="536" y="44" width="11" height="22"/><rect class="tk data" x="547" y="44" width="11" height="22"/><rect class="tk data" x="558" y="44" width="11" height="22"/><rect class="tk data" x="569" y="44" width="11" height="22"/><rect class="tk data" x="580" y="44" width="11" height="22"/><rect class="tk data" x="591" y="44" width="11" height="22"/><rect class="tk data" x="602" y="44" width="11" height="22"/><rect class="tk data" x="613" y="44" width="11" height="22"/><rect class="tk data" x="624" y="44" width="11" height="22"/><rect class="tk data" x="635" y="44" width="11" height="22"/><rect class="tk data" x="646" y="44" width="11" height="22"/><rect class="tk data" x="657" y="44" width="11" height="22"/><rect class="tk data" x="668" y="44" width="11" height="22"/><rect class="tk data" x="679" y="44" width="11" height="22"/><rect class="tk data" x="690" y="44" width="11" height="22"/><rect class="tk data" x="701" y="44" width="11" height="22"/><rect class="tk data" x="712" y="44" width="11" height="22"/><rect class="tk data" x="723" y="44" width="11" height="22"/><rect class="tk data" x="734" y="44" width="11" height="22"/><rect class="tk data" x="745" y="44" width="11" height="22"/><rect class="tk data" x="756" y="44" width="11" height="22"/><rect class="tk data" x="767" y="44" width="11" height="22"/><rect class="tk data" x="778" y="44" width="11" height="22"/><rect class="tk data" x="789" y="44" width="11" height="22"/><rect class="tk data" x="800" y="44" width="11" height="22"/><rect class="tk data" x="811" y="44" width="11" height="22"/></g>
+      <rect class="tk tgt" x="830" y="44" width="40" height="22"/><text class="t-c t-xs" x="850" y="55" style="fill:var(--surface)">E8M0</text>
+      <text class="t-xs" x="470" y="82">32 个元素共享一个 2 的幂缩放：缩放只能取 2ᵏ，最多浪费近一个二进制量级</text>
+    </g>
+    <g data-part="nvfp4" data-step="3">
+      <text class="t-sm" x="470" y="110" style="fill:var(--text);font-weight:650">NVFP4（Blackwell）</text>
+      <g><rect class="tk data" x="470" y="124" width="11" height="22"/><rect class="tk data" x="481" y="124" width="11" height="22"/><rect class="tk data" x="492" y="124" width="11" height="22"/><rect class="tk data" x="503" y="124" width="11" height="22"/><rect class="tk data" x="514" y="124" width="11" height="22"/><rect class="tk data" x="525" y="124" width="11" height="22"/><rect class="tk data" x="536" y="124" width="11" height="22"/><rect class="tk data" x="547" y="124" width="11" height="22"/><rect class="tk data" x="558" y="124" width="11" height="22"/><rect class="tk data" x="569" y="124" width="11" height="22"/><rect class="tk data" x="580" y="124" width="11" height="22"/><rect class="tk data" x="591" y="124" width="11" height="22"/><rect class="tk data" x="602" y="124" width="11" height="22"/><rect class="tk data" x="613" y="124" width="11" height="22"/><rect class="tk data" x="624" y="124" width="11" height="22"/><rect class="tk data" x="635" y="124" width="11" height="22"/></g>
+      <rect class="tk tgt" x="650" y="124" width="40" height="22"/><text class="t-c t-xs" x="670" y="135" style="fill:var(--surface)">E4M3</text>
+      <g><rect class="tk data" x="700" y="124" width="11" height="22"/><rect class="tk data" x="711" y="124" width="11" height="22"/><rect class="tk data" x="722" y="124" width="11" height="22"/><rect class="tk data" x="733" y="124" width="11" height="22"/><rect class="tk data" x="744" y="124" width="11" height="22"/><rect class="tk data" x="755" y="124" width="11" height="22"/><rect class="tk data" x="766" y="124" width="11" height="22"/><rect class="tk data" x="777" y="124" width="11" height="22"/><rect class="tk data" x="788" y="124" width="11" height="22"/><rect class="tk data" x="799" y="124" width="11" height="22"/><rect class="tk data" x="810" y="124" width="11" height="22"/><rect class="tk data" x="821" y="124" width="11" height="22"/><rect class="tk data" x="832" y="124" width="11" height="22"/><rect class="tk data" x="843" y="124" width="11" height="22"/><rect class="tk data" x="854" y="124" width="11" height="22"/><rect class="tk data" x="865" y="124" width="11" height="22"/></g>
+      <rect class="tk tgt" x="880" y="124" width="40" height="22"/><text class="t-c t-xs" x="900" y="135" style="fill:var(--surface)">E4M3</text>
+      <text class="t-xs" x="470" y="162">16 个元素一个 FP8（E4M3）缩放，可取非 2 的幂的值</text>
+      <text class="t-xs" x="470" y="178">+ 整个张量一个 FP32 缩放（第二级），把块缩放放进 E4M3 的范围</text>
+    </g>
+    <g data-part="bits" data-step="3">
+      <text class="t-xs" x="24" y="130">每元素平均位数：MXFP4 = 4 + 8/32 = 4.25 bit</text>
+      <text class="t-xs" x="24" y="148">NVFP4 = 4 + 8/16 = 4.5 bit（忽略张量级缩放）</text>
+      <text class="t-xs" x="24" y="174">代价多 0.25 bit，换来更小的块与更精细的缩放</text>
+    </g>
+    <!-- GEMMs -->
+    <rect class="panel" x="10" y="214" width="940" height="258" rx="12"/>
+    <text class="t-sm" x="24" y="236" style="fill:var(--text);font-weight:650">一个线性层 Y = X·Wᵀ 的三次矩阵乘（NVFP4 配方）</text>
+    <g class="enc" data-part="fprop" data-step="4">
+      <rect class="box" x="24" y="250" width="280" height="86" rx="10"/>
+      <text class="t-c t-b" x="164" y="270">Fprop：Y = X·Wᵀ</text>
+      <text class="t-c t-xs" x="164" y="292">X：1×16 块缩放，就近舍入</text>
+      <text class="t-c t-xs" x="164" y="310">W：16×16 二维块缩放，就近舍入</text>
+      <text class="t-c t-xs" x="164" y="326">FP32 累加，输出 BF16</text>
+    </g>
+    <g class="loss" data-part="dgrad" data-step="5">
+      <rect class="box" x="340" y="250" width="280" height="86" rx="10"/>
+      <text class="t-c t-b" x="480" y="270">Dgrad：dX = dY·W</text>
+      <text class="t-c t-xs" x="480" y="292">dY：1×16 块缩放，随机舍入</text>
+      <text class="t-c t-xs" x="480" y="310">W：沿另一维使用，二维块保证与前向一致</text>
+      <text class="t-c t-xs" x="480" y="326">无 Hadamard（实验中无收益）</text>
+    </g>
+    <g class="loss" data-part="wgrad" data-step="6">
+      <rect class="box" x="656" y="250" width="280" height="86" rx="10"/>
+      <text class="t-c t-b" x="796" y="270">Wgrad：dW = dYᵀ·X</text>
+      <text class="t-c t-xs" x="796" y="292">两个输入沿归约维先乘 16×16 随机 Hadamard</text>
+      <text class="t-c t-xs" x="796" y="310">dY 随机舍入，X 就近舍入</text>
+      <text class="t-c t-xs" x="796" y="326">H 正交：(dYᵀH)(HᵀX) = dYᵀX</text>
+    </g>
+    <g class="reg" data-part="bf16" data-step="7">
+      <rect class="box" x="24" y="350" width="440" height="52" rx="10"/>
+      <text class="t-c t-b" x="244" y="370">少数层留高精度</text>
+      <text class="t-c t-xs" x="244" y="390">12B 模型：前 2 个 + 后 8 个块的线性层用 BF16（约 16%）</text>
+    </g>
+    <g class="reg" data-part="tail" data-step="8">
+      <rect class="box" x="496" y="350" width="440" height="52" rx="10"/>
+      <text class="t-c t-b" x="716" y="370">训练末期切回高精度（可选）</text>
+      <text class="t-c t-xs" x="716" y="390">8.2T token 后前向改高精度：相对损失差 1.5% → 0.5%</text>
+    </g>
+    <g data-part="result" data-step="9">
+      <rect class="note-bg" x="24" y="414" width="912" height="46" rx="8"/>
+      <text class="t-sm" x="38" y="432" style="font-weight:650;fill:var(--text)">12B 混合 Mamba-Transformer，10T token：</text>
+      <text class="t-xs" x="300" y="432">验证损失与 FP8 相差 &lt;1%（学习率衰减后略高于 1.5%）；MMLU-Pro 62.58 vs 62.62</text>
+      <text class="t-xs" x="38" y="450">8B / 1T token 对照：MXFP4 相对损失误差约 2.5%、NVFP4 约 1.5%；MXFP4 需要 1.36T token 才追上 NVFP4 的 1T</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="e2m1"><h4>E2M1</h4><p>4 bit 浮点：1 位符号、2 位指数、1 位尾数，最大值 6。可表示的值稀疏且不均匀：1 到 2 之间只有 1.5，4 到 6 之间什么也没有。量化时先除以缩放因子把块内最大值对齐到 6，再舍入到最近的可表示值。</p></div>
+    <div data-note="mxfp4"><h4>MXFP4</h4><p>OCP Microscaling（MX）规范定义的格式：每 32 个 E2M1 元素共享一个 8 位缩放，缩放格式是 E8M0（纯指数，只能是 2 的幂）。缩放“向上取整到 2 的幂”时，块内最大值可能只用到 E2M1 范围的一半左右，相当于白白丢掉一个二进制量级的分辨率。<span class="src">NVFP4 论文 App. B.4</span></p></div>
+    <div data-note="nvfp4"><h4>NVFP4</h4><p>NVIDIA 的变体：块缩到 16 个元素，块缩放用 E4M3（带 3 位尾数，能取 2 的幂之间的值），再在整个张量上加一个 FP32 缩放，使块缩放落在 E4M3 的可表示范围（最大 448）里。块越小，一个离群值能“污染”的邻居越少。</p></div>
+    <div data-note="bits"><h4>存储开销</h4><p>两种格式的元素都是 4 bit，差别在缩放的摊销：MXFP4 每 32 个元素 8 bit，NVFP4 每 16 个元素 8 bit。gpt-oss 的模型卡给出的 MXFP4 权重为每参数 4.25 bit。</p></div>
+    <div data-note="fprop"><h4>前向（Fprop）</h4><p>激活按 1×16 的块量化（沿归约维），权重按 16×16 的二维块量化。张量核在 FP4 输入上做乘法、FP32 累加，输出写回 BF16 供后续算子使用。</p></div>
+    <div data-note="dgrad"><h4>反向求输入梯度（Dgrad）</h4><p>dX = dY·W 用到的是 W 的转置方向。如果 W 只按行做 1×16 量化，前向与反向看到的是两个不同的量化版本，链式法则被破坏；16×16 的二维块在转置下不变，前向与反向用的是同一个量化权重。梯度 dY 用随机舍入。</p></div>
+    <div data-note="wgrad"><h4>反向求权重梯度（Wgrad）</h4><p>dW = dYᵀ·X 的归约维是 token 维，块内更容易出现离群值。在两个输入上沿归约维乘一个 16×16 的随机 Hadamard 矩阵（Hadamard × 随机符号），把离群值的能量摊到整个块里；因为 H 正交，乘积不变。论文只在 Wgrad 上用 RHT——在 Fprop / Dgrad 上没有观察到收益。</p></div>
+    <div data-note="bf16"><h4>高精度层</h4><p>论文建议少于 15% 的线性层留在 BF16 或 MXFP8，且主要放在网络末端；12B 模型用了前 2 个 + 后 8 个块（约 16% 的线性层）。消融显示只保留最后 4 个块可能就够了。</p></div>
+    <div data-note="tail"><h4>末期切换</h4><p>学习率衰减阶段 FP4 与 FP8 的差距会拉大。8.2T token 之后把前向换成高精度，相对损失差从 1.5% 降到 0.5%。<span class="src">NVFP4 论文 App. D</span></p></div>
+    <div data-note="result"><h4>结果</h4><p>MMLU-Pro 5-shot：FP8 62.62 / NVFP4 62.58；MMLU 77.36 / 76.57；代码任务落后较多（MBPP+ 59.11 / 55.91）。<span class="src">NVFP4 论文 Tab. 2</span></p></div>
+    <div data-step-note="1"><h4>① E2M1</h4><p>4 bit 只有 15 个值。</p></div>
+    <div data-step-note="2"><h4>② MXFP4</h4><p>32 元素一个 2 的幂缩放。</p></div>
+    <div data-step-note="3"><h4>③ NVFP4</h4><p>16 元素一个 E4M3 缩放 + 张量级 FP32 缩放。</p></div>
+    <div data-step-note="4"><h4>④ 前向</h4><p>激活 1×16、权重 16×16。</p></div>
+    <div data-step-note="5"><h4>⑤ Dgrad</h4><p>同一份量化权重；梯度随机舍入。</p></div>
+    <div data-step-note="6"><h4>⑥ Wgrad</h4><p>随机 Hadamard 变换打散离群值。</p></div>
+    <div data-step-note="7"><h4>⑦ 高精度层</h4><p>约 15% 的层留 BF16。</p></div>
+    <div data-step-note="8"><h4>⑧ 末期切换</h4><p>可选：最后阶段回到高精度前向。</p></div>
+    <div data-step-note="9"><h4>⑨ 结果</h4><p>与 FP8 基线几乎持平。</p></div>
+  </div>
+  <figcaption>图 1　两种 FP4 微缩放格式，以及 NVFP4 训练配方在线性层三次矩阵乘中的位置。依据 NVFP4 论文 §2–5、App. B。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-scale">3.1 两级缩放怎么算</h3>
+<p>设张量 X 的绝对值最大为 amax，E2M1 的最大值为 6，E4M3 的最大值为 448。NVFP4 先取张量级缩放 \(s_g\)，使“块最大值 / 6”除以 \(s_g\) 后不超过 448；再对每个 16 元素块取 \(s_b = \mathrm{amax}_b/6\)，以 E4M3 存储 \(s_b/s_g\)：</p>
+<div class="formula">$$s_g = \frac{\mathrm{amax}(X)}{6\cdot 448},\qquad \hat s_b = \mathrm{E4M3}\!\Big(\frac{\mathrm{amax}_b}{6\,s_g}\Big),\qquad \hat x_i = \mathrm{E2M1}\!\Big(\frac{x_i}{\hat s_b\, s_g}\Big)\cdot \hat s_b\, s_g$$</div>
+<p class="hint">公式按格式定义推导（NVFP4 论文 App. B 给出两级缩放的结构），具体实现细节以 Transformer Engine 为准。</p>
+
+<h3 id="c-sr">3.2 为什么梯度用随机舍入、权重和激活不用</h3>
+<p>就近舍入是有偏的：一个总落在两个可表示值之间同一侧的量，每次都被往同一个方向推，累积到参数更新上就是系统性偏差。随机舍入按距离比例随机向上或向下取整，满足 \(\mathbb E[\mathrm{SR}(x)] = x\)，代价是引入方差。梯度要在大量样本与步数上累积，无偏比低方差更重要；权重和激活在前向里只用一次，额外的方差只会增加噪声，所以论文只在梯度上用随机舍入。</p>
+
+<h3 id="c-deploy">3.3 FP4 在模型发布与后训练中的落地</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th>格式与范围</th><th>方式</th></tr></thead>
+  <tbody>
+    <tr><td>gpt-oss（2025-08）</td><td>MoE 权重 MXFP4，每参数 4.25 bit；120b 可放进单张 80 GB GPU</td><td>后训练阶段量化</td></tr>
+    <tr><td>DeepSeek-V4（2026-04）</td><td>MoE 专家权重与 CSA 索引器的 QK 路径用 MXFP4；反量化到 FP8（128×128 的 FP8 块内含 1×32 的 FP4 子块）</td><td>后训练 QAT</td></tr>
+    <tr><td>Kimi K3（2026-07）</td><td>MoE 专家权重 MXFP4、激活 MXFP8；非专家部分保持较高精度</td><td>QAT 贯穿 SFT 与 RL</td></tr>
+  </tbody>
+</table></div>
+<p>这些落地都选择了 MXFP4 而不是 NVFP4，且只用于<b>推理时的权重</b>（以及训练末段的量化感知训练），而非 FP4 从头预训练。DeepSeek-V4 论文指出：在当前硬件上 FP4×FP8 的峰值算力与 FP8×FP8 相同，收益主要来自显存与带宽；未来硬件上才可能更快。<span class="src">DeepSeek-V4 §5.2.1；Kimi K3 §4.1.4；gpt-oss 模型卡 §2.1</span></p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">nvfp4_linear.py（训练时的一个线性层，示意）</div>
+<pre><code class="lang-py">def quant_nvfp4(t, block=(1, 16), stochastic=False):
+    s_g = t.abs().max() / (6 * 448)                       # 张量级 FP32 缩放
+    blocks = t.reshape_blocks(block)
+    s_b = to_e4m3(blocks.abs().amax(-1) / (6 * s_g))      # 块级 E4M3 缩放
+    q = round_e2m1(blocks / (s_b * s_g), stochastic)      # 随机舍入或就近舍入
+    return q, s_b, s_g
+
+def forward(X, W):
+    Wq = quant_nvfp4(W, block=(16, 16))                   # 二维块：转置后仍是同一份量化
+    return gemm_fp4(quant_nvfp4(X), Wq)                   # FP32 累加
+
+def backward(dY, X, Wq):
+    dX = gemm_fp4(quant_nvfp4(dY, stochastic=True), Wq.T) # Dgrad：复用前向的量化权重
+    H = random_hadamard(16)                               # 沿归约维（token）分块旋转
+    dW = gemm_fp4(quant_nvfp4((dY.T) @ H, stochastic=True),
+                  quant_nvfp4(H.T @ X))                   # Wgrad：H 正交，乘积不变
+    return dX, dW</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">5. 关键结果</h2>
+<ul>
+  <li>12B 混合 Mamba-Transformer、10T token：稳定阶段验证损失与 FP8 相差 1% 以内，学习率衰减后略高于 1.5%；MMLU-Pro 62.58（FP8 62.62）、MMLU 76.57（77.36）、MBPP+ 55.91（59.11）。<span class="src">NVFP4 论文 §3、Tab. 2</span></li>
+  <li>8B / 1T token：MXFP4 相对损失误差约 2.5%，NVFP4 约 1.5%；MXFP4 需多 36% token 才追上。<span class="src">NVFP4 论文 §5</span></li>
+  <li>吞吐（相对 BF16）：NVFP4 在 GB200 上 4×、GB300 上 6×；MXFP8 两者均为 2×。<span class="src">NVFP4 论文 Tab. 1</span></li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="questions">6. 简答题</h2>
+<div class="qa">
+  <h3 id="q38"><span class="qid">Q38</span>NVFP4 与 MXFP4 的格式差异是什么？为什么块更小、缩放更精细对训练更重要？</h3>
+  <div class="ans">
+    <p class="short">两者元素都是 E2M1。MXFP4 每 32 个元素共享一个 E8M0 缩放（只能是 2 的幂）；NVFP4 每 16 个元素一个 E4M3 缩放（带尾数），外加一个 FP32 张量级缩放。平均位宽 4.25 vs 4.5 bit。</p>
+    <ul>
+      <li><b>块小</b>：E2M1 只有 15 个值，块内最大值决定缩放，一个离群值会把同块其他元素挤到 0 附近。块从 32 缩到 16，受“污染”的元素减半。</li>
+      <li><b>缩放精细</b>：2 的幂缩放向上取整时，块最大值可能只用到可表示范围的一半左右，相当于丢掉近一个二进制量级；E4M3 缩放能贴合实际最大值。</li>
+      <li><b>为什么训练更敏感</b>：推理只需前向误差可接受；训练中梯度的量化误差会在万亿 token 上累积成偏差。实测 8B / 1T token 下 MXFP4 的损失误差约 2.5%、NVFP4 约 1.5%，MXFP4 需要多 36% 的数据才追上。</li>
+    </ul>
+    <p class="cite">依据：NVFP4 论文 §2、§5、App. B。</p>
+  </div>
+  <h3 id="q39"><span class="qid">Q39</span>FP4 预训练配方中哪些环节必须保留高精度或引入随机化？各自解决什么问题？</h3>
+  <div class="ans">
+    <p class="short">四个组件各管一个误差来源：少数层留高精度（敏感层的前向误差）、Wgrad 输入做随机 Hadamard 变换（块内离群值）、权重二维块缩放（前向与反向看到的量化权重不一致）、梯度随机舍入（舍入偏差的累积）。</p>
+    <ul>
+      <li><b>高精度层</b>：约 15% 的线性层（以网络末端为主）用 BF16 / MXFP8；12B 模型为前 2 个 + 后 8 个块。</li>
+      <li><b>RHT</b>：16×16 随机 Hadamard，只用在 Wgrad 的两个输入上；正交变换不改变乘积，却把离群值摊平。</li>
+      <li><b>2D 缩放</b>：权重用 16×16 块，转置后量化结果不变，保证链式法则用的是同一个函数。</li>
+      <li><b>随机舍入</b>：只用于梯度，使量化误差期望为 0；权重与激活用就近舍入以免增加方差。</li>
+      <li>此外始终保留 FP32 累加、FP32 主权重与优化器状态；学习率衰减阶段可切回高精度前向进一步缩小差距。</li>
+    </ul>
+    <p class="cite">依据：NVFP4 论文 §4.1–4.4、App. D、App. E。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>NVIDIA. <i>Pretraining Large Language Models with NVFP4.</i> 2025. <a href="https://arxiv.org/abs/2509.25149">arXiv:2509.25149</a></li>
+  <li>OCP. <i>OCP Microscaling Formats (MX) Specification v1.0.</i> 2023.</li>
+  <li>OpenAI. <i>gpt-oss-120b &amp; gpt-oss-20b Model Card.</i> 2025. <a href="https://arxiv.org/abs/2508.10925">arXiv:2508.10925</a></li>
+  <li>DeepSeek-AI. <i>DeepSeek-V4.</i> 2026. <a href="https://arxiv.org/abs/2606.19348">arXiv:2606.19348</a>（§5.2.1）</li>
+  <li>Kimi Team. <i>Kimi K3.</i> 2026. <a href="https://arxiv.org/abs/2607.24653">arXiv:2607.24653</a>（§4.1.4）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

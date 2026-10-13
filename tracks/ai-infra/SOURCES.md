@@ -183,3 +183,137 @@ Legend: ✅ verified against the source · ⚠ secondary source, vendor peak spe
 | H100 / B200 reference numbers | NVIDIA datasheets | ⚠ vendor peak |
 | wavefront 64, LDS 64 KB (160 KB on MI355X), MFMA, FNUZ FP8 on MI300, OCP FP8 on MI355X | ROCm docs / CDNA whitepapers | ⚠ from memory of docs |
 | vLLM / SGLang ROCm support | project docs | ✅ |
+
+## 15 — Orca / Sarathi-Serve (`15-orca-sarathi.html`) — OSDI 2022 / 2403.02310
+
+| Claim | Source | Status |
+|---|---|---|
+| Iteration-level scheduling, selective batching; GPT-3 175B: 36.9× throughput at same latency vs FasterTransformer | Orca OSDI 2022 abstract (USENIX page) | ✅ |
+| Orca reserves KV for max output length; vLLM uses Orca variants as baselines | vLLM paper §6 | ✅ |
+| Chunked prefill + stall-free batching; uniform batches reduce PP bubbles; Mistral-7B 2.6×, Yi-34B 3.7×, Falcon-180B 5.6× vs vLLM | Sarathi-Serve abstract | ✅ |
+| Token budget trade-off (small = stable TBT, lower prefill efficiency, KV re-read) | Sarathi-Serve §3–4 (qualitative) | ⚠ paraphrased |
+| Token budget 512 in pseudocode | illustrative only | ❓ not a paper value |
+
+## 16 — ZeRO / FSDP (`16-zero-fsdp.html`) — 1910.02054 / 2304.11277
+
+| Claim | Source | Status |
+|---|---|---|
+| 16Ψ bytes (2+2+12) with mixed-precision Adam; stage formulas; Ψ=7.5B, N_d=64 → 120 / 31.4 / 16.6 / 1.9 GB | ZeRO §3, §5, Fig. 1 | ✅ |
+| Communication 2Ψ (DP, ZeRO-1/2) vs 3Ψ (ZeRO-3) | ZeRO §7 | ✅ |
+| 100B+ on 400 GPUs, 15 PFLOPS, 8× size / 10× perf; 13B without model parallelism; Turing-NLG 17B | ZeRO abstract | ✅ |
+| ZeRO-R (activation partitioning, constant buffers, defragmentation) | ZeRO §6 | ⚠ from memory of paper structure |
+| FSDP: FlatParameter units, prefetch, rate limiter, HSDP; FSDP2 per-parameter DTensor | FSDP paper §3–4; PyTorch docs | ⚠ from memory |
+| FSDP comparable to DDP, near-linear TFLOPS scaling | FSDP abstract | ✅ |
+| DeepSpeed pipeline engine supports only ZeRO-1 | DeepSpeed docs | ⚠ not re-checked (marked unverified on page) |
+| Venues SC 2020 / VLDB 2023 | proceedings | ⚠ from memory |
+
+## 17 — EAGLE 1/2/3 (`17-eagle.html`) — 2401.15077 / 2406.16858 / 2503.01840
+
+| Claim | Source | Status |
+|---|---|---|
+| Feature-level drafting, shifted token, reuse LM head; feature regression + token loss | EAGLE §3; EAGLE-3 §2 | ✅ |
+| EAGLE-2 dynamic tree: confidence ≈ acceptance, expand + rerank | EAGLE-2 §3 | ✅ |
+| EAGLE-3: drop feature loss, fuse low/mid/high (3k → k), training-time test; speedup scales with data | EAGLE-3 §3, Fig. 1 | ✅ |
+| τ / speedup table (Vicuna 13B 6.65 / 5.58×; LLaMA-3.1-8B 6.13 / 4.40×; LLaMA-3.3-70B 5.63 / 4.11×; EAGLE-2 τ 4.83 / 4.05 / 3.67) | EAGLE-3 Tab. 1 | ✅ |
+| Max 6.47× (HumanEval, τ 7.54); "about 1.4× over EAGLE-2" (abstract) vs "20–40%" (§4.1) | EAGLE-3 abstract, §4.1 | ✅ (discrepancy noted) |
+| SGLang H100 batch 64: 1.38×; EAGLE 0.93× at batch 24 | EAGLE-3 Tab. 3 | ✅ |
+| EAGLE 3.1 (May 2026, EAGLE + vLLM + TorchSpec); change list | vLLM blog (title); AMD ATOM docs | ⚠ secondary |
+| SpecForge (SGLang team) | arXiv 2603.18567 | ✅ (title/authors) |
+| Kimi K3 MTP → EAGLE-3-style draft fusing AttnRes blocks 1, 4, last | Kimi K3 §4.1.4 | ✅ |
+| Venue ICML 2024 (EAGLE) | proceedings | ⚠ from memory |
+
+## 18 — RL systems (`18-rl-systems.html`) — 2409.19256 / 2505.24298
+
+| Claim | Source | Status |
+|---|---|---|
+| RLHF dataflow (generation / preparation / training); hybrid single- + multi-controller; @register protocols; ResourcePool; PPO ≈ 8 lines | HybridFlow §1–4 | ✅ |
+| 3D-HybridEngine: N_a = p·t·d = p_g·t_g·d_g·d; zero redundancy; memory / comm table | HybridFlow §5, Tab. 2 | ✅ |
+| Placement findings (colocate small, split 34B, standalone 13B at 128 GPUs) | HybridFlow §8.3 | ✅ |
+| 1.53–20.57×; PPO avg 3.67 / 3.25 / 12.52×; transition −71.2% / −89.1%; 16 × 8 A100 | HybridFlow abstract, §8 | ✅ |
+| AReaL architecture; η definition, η = 4 (code) / 8 (math); decoupled PPO | AReaL §4–5, §7.1 | ✅ |
+| 2.77× (41.0 h → 14.8 h, 1.5B); 2.57× in intro; 512 H800 | AReaL abstract, Tab. 1, §7 | ✅ (discrepancy noted) |
+| Kimi K3 million-token agentic RL, external KV pool | Kimi K3 §5.3 | ✅ |
+| Venue EuroSys 2025 (HybridFlow) | proceedings | ⚠ from memory |
+
+## 19 — FP4 training (`19-fp4-training.html`) — 2509.25149
+
+| Claim | Source | Status |
+|---|---|---|
+| NVFP4: E2M1, block 16, E4M3 scale, FP32 tensor scale; MXFP4: block 32, E8M0, up to one binade waste | NVFP4 paper §2, App. B | ✅ |
+| Recipe: <15% layers high precision (12B: first 2 + last 8 blocks ≈16%); RHT 16×16 on Wgrad only; 2D 16×16 weight scaling; SR on gradients only | §4.1–4.4, App. E | ✅ |
+| 12B / 10T: loss <1% (≈1.5% after LR decay); MMLU-Pro 62.62 vs 62.58; MMLU 77.36 / 76.57; MBPP+ 59.11 / 55.91; switch at 8.2T → 0.5% | §3, Tab. 2, App. D | ✅ |
+| MXFP4 2.5% vs NVFP4 1.5%; 1.36T tokens to match | §5 | ✅ |
+| Throughput vs BF16: NVFP4 4× (GB200) / 6× (GB300); FP4 vs FP8 2× / 3× | Tab. 1, §2 | ✅ (different baselines noted) |
+| Two-level scale formula s_g = amax/(6·448) | derived from format definition | ⚠ derived |
+| gpt-oss: MoE weights MXFP4, 4.25 bits/param, 120b on one 80 GB GPU | gpt-oss model card §2.1 | ✅ |
+| DeepSeek-V4: MXFP4 QAT on experts + indexer QK, dequant to FP8 (1×32 in 128×128); FP4×FP8 peak = FP8×FP8 today | V4 §5.2.1, §2 | ✅ |
+| Kimi K3: MXFP4 experts + MXFP8 activations QAT through SFT and RL | K3 §4.1.4 | ✅ |
+
+## 20 — Kimi Linear / KDA (`20-kimi-linear.html`) — 2510.26692 / 2607.24653
+
+| Claim | Source | Status |
+|---|---|---|
+| KDA recurrence with Diag(α_t); vs GDN / GLA / Mamba2; Mamba2 fails synthetic tasks | Kimi Linear §2.2, §3, §5.1 | ✅ |
+| Neural parameterization (ShortConv + Swish, L2Norm q/k, low-rank α, sigmoid β, head-wise RMSNorm + low-rank sigmoid gate); d_k = d_v = 128 | §4, Eq. 10 | ✅ |
+| Constrained DPLR (a = βk, b = k⊙α, D = Diag(α)); 4 → 2 secondary-chunk matmuls; ≈2× vs DPLR up to 64K | §3.2, §6.2, Fig. 2 | ✅ |
+| 3:1 ratio ablation (5.65 / 5.66 / 5.70 / 5.82 / 5.77); NoPE in MLA (MQA conversion, no RoPE retuning) | §4, Tab. 1 | ✅ |
+| 48B-A3B, 8/256 experts incl. 1 shared; 1.4T comparison runs; 5.7T release; MuonClip, lr 1.1e-3, 32M batch | §5.4 | ✅ |
+| TPOT 1.84 vs 11.48 ms at 1M; prefill 2.3× (512K) / 2.9× (1M); KV up to −75% | abstract, Fig. 1, §5.6 | ✅ |
+| "75% = 3 of 4 layers have constant state" | derived | ⚠ derived |
+| Benchmark table (MMLU-Pro 51.0 vs 47.2 …; EvalPlus/LiveBench worse) | Tab. 3–5 | ✅ |
+| K3: 2.8T-A104B, 93 layers (69 KDA + 24 gated MLA, NoPE), 7168 hidden, g_min = −5; Block AttnRes 8 × 12; LatentMoE 896/16 + 2 shared, 3584 latent; per-head Muon; ≈2.5× scaling efficiency | K3 abstract, §2–3, Tab. 1 | ✅ |
+| K3 infra: FlashKDA, KCP (fixed-size all-gather), MoonEP (S×K per rank), prefix cache 512-token hashes in 6144-token blocks, KDA snapshots at turn boundaries | K3 §5.1–5.4 | ✅ |
+
+## 21 — KV cache tiering (`21-kv-cache-tiering.html`) — 2510.09665 / 2508.18572
+
+| Claim | Source | Status |
+|---|---|---|
+| Stored KV ≫ GPU memory; >19% users reuse >1.5× | LMCache §2.2 | ✅ |
+| 256-token chunks, multi-tier, layer-wise pipelining, zero-copy, connector hooks, control API | LMCache §5–7, Tab. 2–3 | ✅ |
+| Up to 15× throughput; TTFT 1.9–8.1×; PD 1.53–1.84×; 400 vs 88 Gbps; crossover ≈256K at 32 Gbps | LMCache abstract, §8 | ✅ |
+| vLLM page 20–63 KB | LMCache §5 | ✅ |
+| Strata: 22% of PCIe 5.0 at page 32 / 8192 tokens; 1–2 MB for 75–80%; 74% prefill blocked (LooGLE, Qwen2.5-14B) | Strata §1, §3.1 | ✅ |
+| GPU-assisted I/O (128 B granularity, layer-first GPU / page-first host, ≈50 GB/s, GH200 40 → 150 GB/s); delay hits; load/compute threshold 100; bubble filling | Strata §4 | ✅ |
+| 5× vs vLLM+LMCache, 3.75× vs TRT-LLM (abstract: TTFT; §5.2.1: throughput at same TTFT) | Strata abstract, §5.2 | ✅ (metric discrepancy noted) |
+| Typical coding prefix 400K, +4K per turn | Kimi K3 §5.4.3 | ✅ |
+| DeepSeek-V4 on-disk KV; SWA ≈ 8× compressed; three SWA strategies | V4 §3.5 | ✅ |
+
+## 22 — FlashAttention-4 (`22-flash-attention-4.html`) — 2603.05451
+
+| Claim | Source | Status |
+|---|---|---|
+| H100 → B200: 4096 → 8192 FLOPs/clk/SM; SMEM 128 B/clk; MUFU 16/clk (B300: 32); TMEM 256 KB/SM | FA4 §2.2 | ✅ |
+| Tile cycles (128): MMA 1024, SMEM 768, exp 1024 | FA4 Tab. 1 | ✅ |
+| MMA/exp ratio = d/128 | derived from §2.2 numbers | ⚠ derived |
+| Warpgroups: 2 softmax, 1 correction, 1 MMA+TMA; two Q tiles ping-pong; P via TMEM aliasing S | §3.1.2 | ✅ |
+| Software exp2: Cody-Waite + polynomial; degree-3 ≤1 BF16 ulp on 99%; 8.77e-5 vs 1.41e-7; 10–25% emulated | §3.1.3, Tab. 2 | ✅ |
+| Conditional rescaling τ = log2(256) = 8 | §3.1.4, Eq. 6 | ✅ |
+| Backward: TMEM layout; 2-CTA M = 256; SMEM cycles 3328 → 2688; dQ atomics halved; deterministic ≈75% | §3.2, Tab. 3, §5.2 | ✅ |
+| 1613 TFLOPS (71%); 1.1–1.3× cuDNN 9.13; 2.1–2.7× Triton | abstract, §5.1, Fig. 4 | ✅ |
+| Compile 55 → 2.5 s, 45 → 1.4 s | Tab. 4 | ✅ |
+| Appendix says B100 / March 2025 | App. A.1 | ✅ (inconsistency noted) |
+
+## 23 — DeepSeek-V4 / mHC (`23-deepseek-v4.html`) — 2606.19348 / 2512.24880
+
+| Claim | Source | Status |
+|---|---|---|
+| Config table (43/61 layers, 4096/7168, 256/384 experts, top-6, m = 4, k = 512/1024, m′ = 128, n_hc = 4, 20 Sinkhorn iters, MTP 1, SWA 128, indexer 64 heads × 128, 32T/33T tokens) | V4 §4.2.1–4.2.2 | ✅ |
+| CSA / HCA mechanics; shared-KV MQA, grouped output, RMSNorm on Q/KV, partial RoPE 64, attention sinks | V4 §2.3 | ✅ |
+| 27% / 10% FLOPs, 10% / 7% KV vs V3.2; ≈2% of BF16 GQA8 | V4 abstract | ✅ |
+| Muon (momentum 0.95, wd 0.1, RMS 0.18; NS coefficients); AdamW for embedding / head / norms / mHC statics; no QK-Clip | V4 §2, §4.2.2 | ✅ |
+| MegaMoE 1.50–1.73× / 1.96×; 6.1 TFLOP/s per GB/s; TileLang host codegen <1 µs; deterministic kernels; Muon ZeRO knapsack <10% padding | V4 §3 | ✅ |
+| SwiGLU clamp [−10, 10], gate cap 10 | V4 §4.2.3 | ✅ |
+| Benchmarks (base and post-trained tables) | V4 Tab. 1, 6–7 | ✅ |
+| mHC: HC instability (≈3000 gain, loss surge ≈12k steps at 27B); Birkhoff polytope; σ / 2σ maps; fusion (3n+1)C → (n+1)C; recompute √(nL/(n+2)); 6.7% overhead; 27B table; max gain ≈1.6 | mHC §3–5, Tab. 4 | ✅ |
+| arXiv id 2606.19348 with submission date 2026-04-26 | arXiv API metadata | ✅ |
+| Hyper-Connections ICLR 2025 | proceedings | ⚠ from memory |
+
+## Timeline-only entries (track index)
+
+External milestones (no own page) link to arXiv abstracts whose titles and dates were checked against the arXiv API
+on 2026-10-13: GPipe 1811.06965, MQA 1911.02150, GQA 2305.13245, DeepSpeed-Ulysses 2309.14509, Ring Attention
+2310.01889, Mamba 2312.00752, Medusa 2401.10774, DeepSeek-V2 2405.04434, Muon is Scalable 2502.16982, Gated Attention
+2505.06708, Kimi K2 2507.20534, gpt-oss 2508.10925, FP16 mismatch 2510.26788, Engram 2601.07372, GLM-5 2602.15763,
+Attention Residuals 2603.15031, Mamba-3 2603.15569, SpecForge 2603.18567, Gated DeltaNet-2 2605.22791. Venue tags in
+labels (NeurIPS 2025 for Gated Attention, FAST 2025 for Mooncake, OSDI for Orca / Sarathi / Strata) are ⚠ from memory
+except Strata (USENIX OSDI 2026 page ✅).
