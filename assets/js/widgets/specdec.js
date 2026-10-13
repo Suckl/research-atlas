@@ -89,7 +89,8 @@
       });
       A.s("text", { x: X0, y: 16, class: "t-xs", text: "红 = 目标 p　灰 = 草稿 q　青 = 残差 max(0, p−q)（未归一化）　○ = 投机采样的经验频率" }, dist);
       A.s("text", { x: X0, y: 34, class: "t-xs", text: `α = Σ min(p, q) = ${alphaPQ.toFixed(3)}（接受的总概率质量）；残差质量 = 1 − α = ${rsum.toFixed(3)}` }, dist);
-      A.s("text", { x: X0, y: 232, class: "t-xs", text: "接受 x~q 的概率 min(1, p(x)/q(x))：q 高估的词被按比例拒绝；被拒后从残差分布补采，恰好填回 p 比 q 多出的部分。" }, dist);
+      A.s("text", { x: X0, y: 230, class: "t-xs", text: "接受 x~q 的概率 min(1, p(x)/q(x))：q 高估的词被按比例拒绝；" }, dist);
+      A.s("text", { x: X0, y: 246, class: "t-xs", text: "被拒后从残差分布补采，恰好填回 p 比 q 多出的部分。" }, dist);
       return alphaPQ;
     }
 
