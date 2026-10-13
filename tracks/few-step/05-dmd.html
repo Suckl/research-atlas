@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DMD：一步分布匹配蒸馏</title>
+<meta name="description" content="DMD 的反向 KL score 差梯度、在线 fake score、归一化、CFG 与离线回归配对；以及它与 VSD、Diff-Instruct、SiD 和 DMD2 的关系。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/fewstep2d.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="few-step" data-node="dmd">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：学生必须复现教师的每条轨迹吗</h2>
+<p><a href="02-trajectory-distillation.html">轨迹蒸馏</a>把给定噪声与教师终点绑定起来：学生要用极少的计算，拟合教师完整采样器的复杂映射。DMD 换了监督对象——只要学生的输出分布与教师所代表的分布接近，就允许同一噪声走向不同图像。它保留教师的去噪知识，却不在每次训练时跑完教师的采样轨迹<span class="src">论文 §1、§3</span>。</p>
+<p>困难在于，生成器只能采样，无法直接计算自己的概率密度。DMD 用一个冻结扩散模型估计目标分布的 score，再在线训练另一个扩散模型估计当前生成分布的 score；两者之差提供更新生成器的方向。第一版仍需离线教师配对的回归约束，才能稳定覆盖模式<span class="src">论文 §3.2–§3.3、Tab. 2</span>。</p>
+<div class="callout insight"><span class="callout-title">一句话理解</span>教师告诉学生“往哪里更像数据”，fake score 告诉学生“哪里已经挤满自己的样本”；分布匹配使用二者的差，回归配对再把整体结构与模式覆盖拉住。推理只保留学生，训练时的两个 score 网络都不需要带走<span class="src">论文 Fig. 2、Alg. 1</span>。</div>
+
+<h2 id="architecture">2. 全局架构：分布梯度与配对回归并行</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 隐变量</span><span><i class="sw enc"></i>学生生成器（可训练）</span>
+  <span><i class="sw tgt"></i>教师 / 冻结网络</span><span><i class="sw pred"></i>fake score（可训练）</span>
+  <span><i class="sw reg"></i>回归正则</span><span><i class="sw act"></i>条件</span><span><i class="sw loss"></i>损失</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 440" role="img" aria-label="DMD 训练：冻结教师与在线 fake score 构造梯度，离线配对提供回归">
+    <g data-part="input" data-step="1">
+      <rect class="box data" x="20" y="65" width="130" height="62" rx="8"/>
+      <text class="t-c t-b" x="85" y="90">噪声 ε₀</text><text class="t-c t-sm" x="85" y="111">类别 / 文本 c</text>
+    </g>
+    <path class="edge" d="M150,96 H186" data-step="1"/>
+    <g class="enc" data-part="gen" data-step="1">
+      <rect class="box" x="190" y="55" width="170" height="88" rx="10"/>
+      <text class="t-c t-b" x="275" y="83">学生 G_θ</text><text class="t-c t-sm" x="275" y="105">教师权重初始化</text><text class="t-c t-sm" x="275" y="126">输出 x̂₀</text>
+    </g>
+    <path class="edge enc" d="M360,96 H401" data-step="2"/>
+    <g class="data" data-part="noise" data-step="2">
+      <rect class="box" x="405" y="65" width="135" height="62" rx="8"/>
+      <text class="t-c t-b" x="472" y="89">重新加噪</text><text class="t-c t-sm" x="472" y="111">抽 t 与新噪声 ε</text>
+    </g>
+    <path class="edge sg" d="M540,85 H586" data-step="3"/>
+    <path class="edge sg" d="M540,108 H560 V214 H586" data-step="3"/>
+    <g class="tgt" data-part="real" data-step="3">
+      <rect class="box frozen" x="590" y="45" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="670" y="72">real score</text><text class="t-c t-sm" x="670" y="94">冻结教师 μ_real</text><text class="t-c t-sm" x="670" y="113">文本任务带 CFG</text>
+    </g>
+    <g class="pred" data-part="fake" data-step="3 5">
+      <rect class="box" x="590" y="174" width="160" height="80" rx="10"/>
+      <text class="t-c t-b" x="670" y="202">fake score</text><text class="t-c t-sm" x="670" y="225">在线去噪器 μ_fake</text><text class="t-c t-sm" x="670" y="243">跟踪学生分布</text>
+    </g>
+    <path class="edge tgt" d="M750,85 H796" data-step="4"/>
+    <path class="edge pred" d="M750,214 H776 V171 H796" data-step="4"/>
+    <g class="loss" data-part="dm" data-step="4">
+      <rect class="box" x="800" y="65" width="140" height="130" rx="10"/>
+      <text class="t-c t-b" x="870" y="91">分布梯度</text><text class="t-c t-sm" x="870" y="118">μ_fake − μ_real</text><text class="t-c t-sm" x="870" y="142">逐样本归一化</text><text class="t-c t-sm" x="870" y="172">只更新 G_θ</text>
+    </g>
+    <path class="edge grad" d="M870,195 V281 H330 V147" data-step="4"/>
+    <text class="t-c t-xs" x="460" y="274" data-step="4">score 差停止梯度，再注入学生输出</text>
+    <g class="loss" data-part="denoise" data-step="5">
+      <rect class="box" x="590" y="319" width="160" height="70" rx="8"/>
+      <text class="t-c t-b" x="670" y="345">去噪损失</text><text class="t-c t-sm" x="670" y="369">目标 sg(x̂₀)</text>
+    </g>
+    <path class="edge grad" d="M670,319 V258" data-step="5"/>
+    <path class="edge sg" d="M360,123 H380 V354 H586" data-step="5"/>
+    <g class="data" data-part="pairs" data-step="6">
+      <rect class="box" x="20" y="337" width="190" height="80" rx="8"/>
+      <text class="t-c t-b" x="115" y="364">离线教师配对</text><text class="t-c t-sm" x="115" y="386">ε_ref → x_ref</text><text class="t-c t-sm" x="115" y="404">完整 ODE 采样器</text>
+    </g>
+    <path class="edge idx" d="M115,337 V177 H210 V147" data-step="6"/>
+    <path class="edge" d="M210,377 H266" data-step="6"/>
+    <g class="reg" data-part="reg" data-step="6">
+      <rect class="box" x="270" y="337" width="190" height="80" rx="8"/>
+      <text class="t-c t-b" x="365" y="363">LPIPS 回归</text><text class="t-c t-sm" x="365" y="387">G(ε_ref) 与 x_ref</text><text class="t-c t-sm" x="365" y="405">约束大尺度结构</text>
+    </g>
+    <path class="edge enc" d="M275,143 V313 H365 V333" data-step="6"/>
+    <path class="edge grad" d="M270,358 H245 V147" data-step="6"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>两份独立噪声</h4><p>ε₀ 决定学生生成哪张图；ε 用来给已生成图像加噪、查询两个 score。条件 c 在学生、教师与 fake 网络之间保持一致。回归分支另读固定的 ε_ref。</p></div>
+    <div data-note="gen"><h4>学生不是新的扩散教师</h4><p>学生复用基础去噪器的架构与权重，固定输入噪声条件，直接输出图像或 VAE latent。它学习噪声到图像的映射，而不是在完整噪声日程上继续做标准去噪训练<span class="src">论文 §3.1</span>。</p></div>
+    <div data-note="noise"><h4>让两种分布在有噪空间里重叠</h4><p>直接在干净图像上比较 score 容易遇到不相交的支撑集。高斯加噪提供共同支撑，也把查询放到扩散模型学过的任务上<span class="src">论文 Fig. 4、Eq. 3</span>。</p></div>
+    <div data-note="real"><h4>real 是目标分布的估计</h4><p>教师冻结，用其去噪预测换算目标 score。它近似数据分布，不是可直接查询的真实密度；文本蒸馏时只在这一侧加入 CFG<span class="src">论文 Eq. 4、§3.4</span>。</p></div>
+    <div data-note="fake"><h4>fake score 不是判别概率</h4><p>它在学生样本上学习标准去噪目标，估计加噪后的生成分布。学生更新后，这个目标分布也会移动；因此需要持续更新，而不是一直使用教师的另一个冻结副本<span class="src">论文 Eq. 5–6</span>。</p></div>
+    <div data-note="dm"><h4>注入方向，不反传 score 网络</h4><p>梯度下降沿 real − fake 方向；写进损失的梯度是 fake − real。两个去噪预测与归一化因子均作为停止梯度的系数，学生接受这个方向<span class="src">论文 Eq. 7–8、Alg. 2</span>。</p></div>
+    <div data-note="denoise"><h4>独立训练 fake 网络</h4><p>把学生输出 detach 后作为“干净数据”重新加噪。监督目标是这一批生成样本，不是教师去噪结果，也不是配对的真实图像<span class="src">论文 Alg. 1、Alg. 3</span>。</p></div>
+    <div data-note="pairs"><h4>离线成本仍在</h4><p>回归数据需要教师从保存的噪声跑完确定性采样，保存起点和终点。它独立于在线 score 查询，省下的是每次训练都重复教师轨迹的成本<span class="src">论文 §3.3</span>。</p></div>
+    <div data-note="reg"><h4>锚定覆盖，不独自负责细节</h4><p>LPIPS 对齐同一噪声对应的教师图像，约束整体结构。移除分布匹配后图像不够真实；移除回归后原始训练出现模式缺失<span class="src">论文 Fig. 5、Tab. 2</span>。</p></div>
+    <div data-step-note="1"><h4>① 学生生成</h4><p>从基础模型初始化学生与 fake 网络，冻结 real 网络；学生接收噪声和条件。</p></div>
+    <div data-step-note="2"><h4>② 随机加噪</h4><p>给学生输出加新噪声，在不同噪声水平比较两个分布。</p></div>
+    <div data-step-note="3"><h4>③ 查询两个去噪器</h4><p>real 使用冻结教师，fake 使用当前在线网络；本分支不求网络 Jacobian。</p></div>
+    <div data-step-note="4"><h4>④ 更新学生</h4><p>归一化去噪器之差，并通过停止梯度目标把方向传给学生。</p></div>
+    <div data-step-note="5"><h4>⑤ 更新 fake 网络</h4><p>把生成样本当数据做去噪回归；这条梯度不进入学生。</p></div>
+    <div data-step-note="6"><h4>⑥ 加上配对锚点</h4><p>读取离线噪声与教师终点，同步用 LPIPS 更新学生；图中分支在实际学生更新时合并。</p></div>
+  </div>
+  <figcaption>图 1　DMD 训练的两条学生监督与独立 fake 去噪训练。依据论文 Fig. 2、Alg. 1–3；颜色表示参数职责。</figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-score-difference">3.1 为什么必须减去 fake score</h3>
+<p>记学生输出为 \(\hat x_0=G_\theta(\epsilon_0,c)\)，其分布为 \(p_\theta\)。本页使用论文的正向加噪约定：\(x_t=\alpha_t\hat x_0+\sigma_t\epsilon\)，越靠近日程末端噪声越强。\(s_{\rm real}=\nabla_{x_t}\log p_{{\rm real},t}\)，\(s_{\rm fake}=\nabla_{x_t}\log p_{\theta,t}\)。只用 real score 会让每个样本追逐局部高密度区；减去 fake score 才同时考虑当前样本群的拥挤程度，形成分布级而不是逐图像的优化<span class="src">论文 Eq. 1–7、Fig. 3</span>。</p>
+<p>这一解释不是“减了 fake 就保证所有模式都出现”。实际 score 有估计误差，低噪声下离开数据流形的查询尤其不可靠。论文原始配置仍出现模式缺失，回归项正是针对这个实证问题加入的<span class="src">论文 §3.3、Fig. 3、Fig. 5</span>。</p>
+<div data-widget="fewstep-2d" data-focus="dmd"></div>
+<p class="cite">演示使用圆环上的 8 个高斯团，直接移动粒子；real 去噪器有闭式解，fake 去噪器是当前粒子云的精确后验均值，因此没有训练 fake 网络的滞后。它采用 \(x_t=(1-t)\hat x_0+t\epsilon\)、\(t\in[0.02,0.98]\)，逐粒子以平均绝对误差归一化并设 \(10^{-3}\) 下限；这些是玩具实现，不能当作论文的扩散日程或复现结果<span class="src">本站 assets/js/widgets/fewstep2d.js：post、fakeDenoise、update</span>。图中的方向线是中间噪声水平的示意；真正迭代对每个粒子重新抽噪声。</p>
+
+<h3 id="c-fake">3.2 在线 fake 网络：学习“当前学生”的密度</h3>
+<p>fake 去噪器 \(\mu_{\rm fake}^{\psi}\) 从教师初始化，用 detach 的学生样本训练。其输出形状与图像或 latent 相同；由去噪后验均值换算 score。生成器不断变化，fake 网络面对的是非平稳数据分布，更新不足会给学生提供偏差方向。<a href="06-dmd2.html#c-ttur">DMD2 的 TTUR</a>随后把这一滞后作为可直接修复的训练问题<span class="src">DMD §3.2；DMD2 §4.2</span>。</p>
+
+<h3 id="c-regression">3.3 回归为何有用，又为何成为瓶颈</h3>
+<p>离线配对不是把独立噪声和任意真实图像凑在一起，而是教师确定性采样的起点—终点。LPIPS 约束同一噪声对应的整体结构；分布梯度再改善细节。ImageNet 的配对集为 25,000 对、教师使用 256 步 Heun；低 guidance 的 SD v1.5 实验为 500,000 对、50 步 PNDM；高 guidance 实验最终扩大到 12,000,000 对<span class="src">论文 §3.3、App. B.2–B.4</span>。</p>
+<p>所以“少量配对”随规模改变了含义。DMD2 用 SDXL 做成本估算：每对约 5 秒，覆盖 12 million 提示词约需 700 A100-days，超过其自身训练成本的 4 倍<span class="src">DMD2 §3</span>。这是作者对升级到 SDXL 的估算，不是 DMD 已实际花费的配对生成时间。DMD 低 guidance 的学生训练本身耗时约 36 小时、使用 72 张 A100<span class="src">DMD §4.3</span>。</p>
+
+<h3 id="c-cfg">3.4 CFG 蒸馏进 real score</h3>
+<div class="formula">$$\mu_{\rm real}^{(w)}(x_t,t,c)=\mu_{\rm real}(x_t,t,\varnothing)+w\big[\mu_{\rm real}(x_t,t,c)-\mu_{\rm real}(x_t,t,\varnothing)\big].$$</div>
+<p>在 real score 中使用上述 guided 预测，fake score 保持普通条件去噪器；离线教师配对也用同一个 guidance。学生因此在参数中吸收固定的 guidance，推理不再做条件 / 无条件的两次教师查询。FID 配置用 \(w=3\)，高视觉质量配置用 \(w=8\)；这两个实验不能混为同一质量—多样性取舍<span class="src">论文 §3.4、§4.3、Tab. 3–4</span>。</p>
+
+<h3 id="c-origins">3.5 梯度的来源：VSD、Diff-Instruct 与 SiD</h3>
+<h3 id="c-vsd">VSD / ProlificDreamer：优化渲染分布</h3>
+<p><b>VSD / ProlificDreamer</b>先用加噪分布的 KL 和两个 score 的差更新三维表示粒子，并在渲染图上训练 LoRA score。DMD 直接承认这一来源，把被优化对象改成可以摊销采样的神经生成器，并设计归一化和回归锚点<span class="src">VSD §3.2、Eq. 7–9；DMD §1–§2</span>。</p>
+<h3 id="c-diff-instruct">Diff-Instruct：通用可微生成器的 Integral KL</h3>
+<p><b>Diff-Instruct</b>已经给出了面向任意可微生成器的 Integral KL：在噪声时间上积分 KL，交替训练生成分布 score 与生成器。它与 DMD 共享 score-difference 核心，重点是通用的数据自由知识迁移；DMD 的特定贡献在于蒸馏配方和图像规模的效果<span class="src">Diff-Instruct §3.1–§3.2、Thm. 3.3；DMD §2</span>。</p>
+<h3 id="c-sid">SiD：Fisher 型 score matching</h3>
+<p><b>SiD</b>也训练辅助生成分布去噪器，但以 fake 分布上的 score 差平方构造 Fisher 型目标，并用 score identities 处理不可计算项。它是相邻的分布蒸馏路线，不能仅因网络角色相似就把损失写成 DMD 的反向 KL 梯度<span class="src">SiD §4.1–§4.2、Eq. 8–10</span>。</p>
+
+<h2 id="shapes">4. 张量与网络调用追踪</h2>
+<div class="table-wrap"><table class="shapes">
+<thead><tr><th>对象</th><th>形状 / 职责</th><th>梯度与出处</th></tr></thead><tbody>
+<tr><td>ε₀、\(\hat x_0\)、\(x_t\)、两个去噪预测</td><td>[B, C, H, W]；像素或 VAE latent 域一致</td><td>结构由公式与实现推读；具体分辨率依实验<span class="src">论文 Eq. 3–6、Alg. 2</span></td></tr>
+<tr><td>归一化尺度 \(a\)</td><td>[B, 1, 1, 1]；对 C×H×W 取平均绝对误差</td><td>逐样本停止梯度<span class="src">论文 Eq. 8、Alg. 2</span></td></tr>
+<tr><td>训练时学生两条数据流</td><td>新噪声生成用于分布匹配；保存的噪声用于回归</td><td>LAION 还把回归生成样本合入分布分支<span class="src">论文 Alg. 1</span></td></tr>
+<tr><td>采样时 NFE</td><td>学生 1 次；无 real / fake 网络</td><td>文本编码与 VAE 解码仍有开销<span class="src">论文 §3.1、Tab. 3</span></td></tr>
+</tbody></table></div>
+
+<h2 id="objective">5. 目标、归一化与梯度符号</h2>
+<p>理论出发点是 \(\mathrm{KL}(p_\theta\|p_{\rm real})\)。实际查询的是加噪边缘分布；论文把它写成干净 KL 的近似梯度。记 \(\mu_{\rm real}\) 为当前条件与 guidance 下的教师去噪预测，论文公式原样保留其 \(\alpha_t\) 系数<span class="src">论文 Eq. 4–8</span>：</p>
+<div class="formula">$$
+s_{\rm real}=-\frac{x_t-\alpha_t\mu_{\rm real}}{\sigma_t^2},\qquad
+s_{\rm fake}=-\frac{x_t-\alpha_t\mu_{\rm fake}}{\sigma_t^2},
+$$
+$$
+\nabla_\theta\mathcal L_{\rm DM}\simeq
+\mathbb E_{\epsilon_0,t,\epsilon}\!\left[
+w_t\alpha_t\big(s_{\rm fake}-s_{\rm real}\big)\frac{\partial G_\theta}{\partial\theta}
+\right],\qquad
+w_t=\frac{\sigma_t^2}{\alpha_t}\frac{CHW}{\|\mu_{\rm real}-\hat x_0\|_1}.
+$$</div>
+<p>\(t\sim\mathcal U(0.02T,0.98T)\)，\(T=1000\)；这里是离散噪声日程的索引范围。EDM 的实际噪声标准差由 Karras 日程映射，不能把该区间误读成 \(\sigma\in[0.02,0.98]\)<span class="src">论文 §3.1–§3.2、App. B.1–B.2</span>。</p>
+<div class="callout code-note"><span class="callout-title">论文公式 vs 论文实现伪代码</span>论文 App. B 的 Alg. 2 明确说明 mean-prediction 实现的权重与正文稍有不同：实际注入 \(g=(\mu_{\rm fake}-\mu_{\rm real})/\operatorname{mean}|\hat x_0-\mu_{\rm real}|\)，用 \(\frac12\operatorname{MSE}(\hat x_0,\operatorname{sg}(\hat x_0-g))\) 实现。直接代入正文 Eq. 7–8 会多出一个 \(\alpha_t\)；EDM 的 \(\alpha_t=1\) 时一致，VP / SD 则不能把两种权重说成完全相同<span class="src">论文 Alg. 2；由 Eq. 4–8 代入推算</span>。作者后续官方 DMD2 的 <code>main/sd_guidance.py</code> 延续无额外 α 的实现，并用 <code>nan_to_num</code> 处理异常值。</div>
+<div class="formula">$$
+\mathcal L_{\rm fake}=\mathbb E\,\lambda_{\rm denoise}(t)\|\mu_{\rm fake}^{\psi}(x_t,t,c)-\operatorname{sg}(\hat x_0)\|_2^2,\qquad
+\mathcal L_G=\mathcal L_{\rm DM}+\lambda_{\rm reg}\mathbb E_{(\epsilon_{\rm ref},x_{\rm ref})}\operatorname{LPIPS}(G_\theta(\epsilon_{\rm ref},c),x_{\rm ref}).
+$$</div>
+<p>fake 使用基础模型的去噪权重；SD 的噪声预测 MSE 与加 SNR 权重的数据预测损失等价。默认 \(\lambda_{\rm reg}=0.25\)，高 guidance 实验中曾修改此项<span class="src">论文 Eq. 6、Eq. 9、Alg. 3、App. H、Tab. 5</span>。这里的 \(\mathcal L_{\rm DM}\) 是用于注入梯度的代理损失，其标量数值不是可解释的 KL 估计。</p>
+
+<h2 id="pseudocode">6. 伪代码：两个更新互相隔离</h2>
+<p>对应论文 Alg. 1–3，下面采用 App. B 的 mean-prediction 实现；省略混合精度、latent 解码和优化器配置。</p>
+<pre><code class="lang-py">real = freeze(copy(base))
+G, fake = copy(base), copy(base)
+for batch in training:
+    eps0, c = sample_noise_and_condition()
+    eps_ref, x_ref, c_ref = paired_teacher_dataset.sample()
+    x = G(eps0, c)
+    x_pair = G(eps_ref, c_ref)
+    x_dm = concat(x, x_pair) if is_laion else x
+    c_dm = concat(c, c_ref) if is_laion else c
+    with no_grad():
+        t = sample_dm_index(T_min, T_max)
+        xt = forward_diffusion(x_dm, randn_like(x_dm), t)
+        mu_real = guided_denoise(real, xt, t, c_dm, cfg=w)
+        mu_fake = denoise(fake, xt, t, c_dm)  # 不给 fake 加 CFG
+        scale = abs(x_dm - mu_real).mean(CHW, keepdim=True)
+        grad = (mu_fake - mu_real) / scale
+        target = x_dm - grad
+    loss_dm = 0.5 * mse(x_dm, target.detach())
+    loss_reg = lpips(decode(x_pair), decode(x_ref))
+    update(G, loss_dm + lambda_reg * loss_reg)
+
+    clean_fake = x_dm.detach()
+    t_fake = sample_base_training_time()  # 完整基础去噪日程
+    noisy_fake = forward_diffusion(clean_fake, randn_like(clean_fake), t_fake)
+    pred = denoise(fake, noisy_fake, t_fake, c_dm)
+    loss_fake = mean(base_weight(t_fake) * (pred - clean_fake) ** 2)
+    update(fake, loss_fake)  # 不更新 G / real</code></pre>
+
+<h2 id="hyperparams">7. 关键超参：配对成本不可省略</h2>
+<div class="table-wrap"><table><thead><tr><th>配置</th><th>取值</th><th>出处</th></tr></thead><tbody>
+<tr><td>默认分布梯度时间</td><td>0.02T–0.98T，T=1000</td><td><span class="src">论文 §3.1–§3.2</span></td></tr>
+<tr><td>ImageNet EDM 日程 / 配对</td><td>σ_min=0.002，σ_max=80；25,000 对，256 步 Heun</td><td><span class="src">论文 App. B.2</span></td></tr>
+<tr><td>ImageNet 学生训练</td><td>lr 2×10⁻⁶；batch 336；350,000 次迭代；λ_reg=0.25</td><td><span class="src">论文 App. B.2</span></td></tr>
+<tr><td>SD v1.5，低 guidance</td><td>w=3；500,000 对；lr 10⁻⁵；20,000 次迭代</td><td><span class="src">论文 App. B.3</span></td></tr>
+<tr><td>SD v1.5，高 guidance 后期</td><td>w=8；12 million 对；分布匹配最高索引改为 500</td><td><span class="src">论文 App. B.4、Tab. 5</span></td></tr>
+</tbody></table></div>
+
+<h2 id="results">8. 关键结果：分开看基座与 guidance</h2>
+<p>ImageNet 为类条件 64×64；表中前向次数沿用 DMD 原表。文本实验为零样本 COCO 2014 的 30,000 提示词，延迟的 batch size 为 1<span class="src">论文 Tab. 1、Tab. 3、App. D</span>。</p>
+<div class="table-wrap"><table><thead><tr><th>ImageNet 方法</th><th class="num">前向次数</th><th class="num">FID ↓</th><th>出处</th></tr></thead><tbody>
+<tr><td>Consistency Model</td><td class="num">1</td><td class="num">6.20</td><td><span class="src">论文 Tab. 1</span></td></tr>
+<tr><td>Diff-Instruct</td><td class="num">1</td><td class="num">5.57</td><td><span class="src">论文 Tab. 1</span></td></tr>
+<tr class="hl"><td>DMD</td><td class="num">1</td><td class="num">2.62</td><td><span class="src">论文 Tab. 1</span></td></tr>
+<tr><td>EDM teacher</td><td class="num">512</td><td class="num">2.32</td><td><span class="src">论文 Tab. 1</span></td></tr>
+</tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>COCO-30k 方法</th><th>guidance / 步数</th><th class="num">FID ↓</th><th class="num">延迟</th><th>出处</th></tr></thead><tbody>
+<tr><td>InstaFlow</td><td>一步</td><td class="num">13.10</td><td class="num">0.09 s</td><td><span class="src">论文 Tab. 3</span></td></tr>
+<tr class="hl"><td>DMD</td><td>w=3 / 一步</td><td class="num">11.49</td><td class="num">0.09 s</td><td><span class="src">论文 Tab. 3</span></td></tr>
+<tr><td>SD v1.5 teacher</td><td>w=3 / 50 步</td><td class="num">8.78</td><td class="num">2.59 s</td><td><span class="src">论文 Tab. 3、App. C.3</span></td></tr>
+<tr class="hl"><td>DMD，高 guidance</td><td>w=8 / 一步</td><td class="num">14.93</td><td class="num">0.09 s</td><td><span class="src">论文 Tab. 4</span></td></tr>
+<tr><td>SD v1.5 teacher，高 guidance</td><td>w=8 / 50 步</td><td class="num">13.45</td><td class="num">2.59 s</td><td><span class="src">论文 Tab. 4、App. C.3</span></td></tr>
+</tbody></table></div>
+<p>论文另报 FP16 推理约 20 FPS，与表中的 0.09 s 延迟应作为不同精度设置阅读；表格未给出可完整重建的计时硬件配置，不能把该吞吐推广到任意设备<span class="src">论文 §4.3、Tab. 3</span>。ImageNet 消融中，去掉分布匹配 / 回归的 FID 为 9.21 / 5.61，完整方法为 2.62，说明两条监督在当时配置中互补<span class="src">论文 Tab. 2</span>。</p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>从轨迹拟合转向分布监督</h4><ul><li>继承 VSD / Diff-Instruct 的 score 差，把目标从粒子优化或通用迁移落到一步图像生成。</li><li>无需每次重复多步教师采样；教师和 fake 网络提供局部方向。</li></ul></div>
+  <div class="now"><h4>配对锚点仍限制规模</h4><ul><li><a href="06-dmd2.html">DMD2</a>用 TTUR 替代回归的稳定作用，再用真实数据 GAN 校正教师误差。</li><li>fake score 近似和固定 guidance 带来训练成本与多样性取舍，不能从理论相同分布推出实际完全覆盖。</li></ul></div>
+</div>
+<p>视频迁移见 <a href="09-causvid.html">CausVid</a> 与 <a href="12-self-forcing.html">Self Forcing</a>：它们继承 score 差监督，但还必须处理因果结构、历史条件与训练时学生状态的来源。图像上的分布匹配本身不会自动消除视频的曝光偏差。</p>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q9"><span class="qid">Q9</span>为什么用 real score 减去 fake score，而不是只把生成图像推向教师的高密度区域？</h3>
+  <div class="ans"><p class="short">只追逐 real score 会把样本推向附近的高密度模式；减去生成分布自身的 score，才得到反向 KL 对生成器的分布级更新，兼顾目标吸引与当前样本拥挤。</p><ul><li>两侧先加噪，使分布支撑重叠并让扩散网络提供有意义的 score。</li><li>fake 网络在 detach 的学生样本上训练，必须跟随不断变化的生成分布。</li><li>理论方向不等于实际覆盖保证；第一版仍用回归抑制模式缺失。</li></ul><p class="cite">依据：DMD Eq. 1–8、Fig. 3–4、§3.3；VSD Eq. 7–9；Diff-Instruct Thm. 3.3。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q10"><span class="qid">Q10</span>DMD 已经匹配分布，为什么还回归教师配对？这会付出什么代价？</h3>
+  <div class="ans"><p class="short">回归把给定噪声的生成结构拉向教师确定性采样终点，在原始训练中提供稳定与模式覆盖；代价是离线运行大量教师轨迹，并再次约束学生跟随特定映射。</p><ul><li>配对必须保存教师采样起点与对应终点，不能独立随机配对。</li><li>LPIPS 提供结构锚点，score 差改善逼真度；任意删除其中一项都改变原始配置的质量。</li><li>规模越大，配对生成越贵；DMD2 通过改善 fake 估计的跟踪速度消除主训练中的依赖。</li></ul><p class="cite">依据：DMD §3.3、Alg. 1、Tab. 2、App. B；DMD2 §3、§4.1–§4.2。</p></div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Yin et al. <i>One-step Diffusion with Distribution Matching Distillation</i>. CVPR 2024. <a href="https://arxiv.org/abs/2311.18828">arXiv:2311.18828</a>（本页核对 v4）；<a href="https://tianweiy.github.io/dmd/">项目页</a>。</li>
+  <li>Wang et al. <i>ProlificDreamer: High-Fidelity and Diverse Text-to-3D Generation with Variational Score Distillation</i>. NeurIPS 2023. <a href="https://arxiv.org/abs/2305.16213">arXiv:2305.16213</a>。</li>
+  <li>Luo et al. <i>Diff-Instruct: A Universal Approach for Transferring Knowledge From Pre-trained Diffusion Models</i>. <a href="https://arxiv.org/abs/2305.18455">arXiv:2305.18455</a>。</li>
+  <li>Zhou et al. <i>Score identity Distillation: Exponentially Fast Distillation of Pretrained Diffusion Models for One-Step Generation</i>. <a href="https://arxiv.org/abs/2404.04057">arXiv:2404.04057</a>。</li>
+  <li>Yin et al. DMD2. NeurIPS 2024. <a href="https://arxiv.org/abs/2405.14867">arXiv:2405.14867</a>；<a href="https://github.com/tianweiy/DMD2">作者后续官方实现</a>（用于核对沿用的梯度，不冒充第一版独立发布的训练仓库）。</li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见正文与参考。</footer>
+</body>
+</html>

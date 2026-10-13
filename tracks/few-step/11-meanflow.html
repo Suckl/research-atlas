@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MODEL 架构拆解</title>
+<meta name="description" content="一句话说明这页讲什么。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="few-step" data-node="meanflow">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：一步需要的是位移，不是切线</h2>
+<p><a href="01-foundations.html">Flow Matching</a> 学的是当前位置的瞬时速度。即便训练时数据与噪声之间用直线插值，取条件期望后的<b>边缘速度场</b>仍会产生弯曲轨迹；直接把起点切线延长到数据侧，并不等于沿轨迹积分。MeanFlow 因此改学区间的平均速度，让网络输出整段位移所需的方向与大小，而把积分的代价转移到训练时的微分计算<span class="src">论文 §3、§4.1</span>。</p>
+<p>本页统一把真实数据记作 \(x_0\)、噪声记作 \(\epsilon\)，沿用论文的 \(z_t=(1-t)x_0+t\epsilon\)：\(t=0\) 是数据，\(t=1\) 是噪声；训练对的条件速度为 \(v_t=\epsilon-x_0\)，边缘速度为 \(v(z_t,t)=\mathbb E[v_t\mid z_t]\)。平均速度 \(u(z_t,r,t)\) 的目标时间满足 \(0\le r\le t\le1\)<span class="src">论文 §3、Eq. 1–3</span>。</p>
+<div class="callout insight"><span class="callout-title">一句话理解</span>把“去噪轨迹的平均速度”定义清楚，再从定义推出训练恒等式。MeanFlow 的生成网络从零训练，不用预训练扩散教师、离线 ODE 配对或逐渐缩小的离散时间课程；ImageNet 256×256 上只调用生成网络一次，FID 为 3.43<span class="src">论文摘要、Tab. 2</span>。这里的“从零”指生成网络：该实验仍使用预训练 VAE 的 latent<span class="src">论文 §5、App. A</span>。</div>
+
+<h2 id="architecture">2. 全局架构：同一个网络预测平均速度并构造导数目标</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 隐变量</span><span><i class="sw enc"></i>生成网络（可训练）</span>
+  <span><i class="sw act"></i>时间 / 类别条件</span><span><i class="sw loss"></i>损失</span>
+  <span><i class="ln sg"></i>stop-gradient</span><span><i class="ln grad" style="border-top:2px dotted var(--c-loss)"></i>参数梯度</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 390" role="img" aria-label="MeanFlow 训练架构：平均速度预测、JVP 目标与一步采样">
+    <path class="edge grad" d="M940,285 V25 H350 V70" data-step="5"/>
+    <text class="t-c t-xs" x="640" y="17" data-step="5">只通过预测分支更新 θ</text>
+    <g class="data" data-part="input" data-step="1">
+      <rect class="box" x="20" y="75" width="170" height="85" rx="10"/>
+      <text class="t-c t-b" x="105" y="99">数据 x₀ + 噪声 ε</text>
+      <text class="t-c t-xs" x="105" y="122">zₜ = (1−t)x₀ + tε</text>
+      <text class="t-c t-xs" x="105" y="144">vₜ = ε − x₀</text>
+    </g>
+    <path class="edge" d="M190,115 H256" data-step="2"/>
+    <g class="act" data-part="condition" data-step="1 2">
+      <rect class="box" x="20" y="245" width="170" height="85" rx="10"/>
+      <text class="t-c t-b" x="105" y="269">目标 r / 起点 t / c</text>
+      <text class="t-c t-xs" x="105" y="292">网络嵌入 t 与 t−r</text>
+      <text class="t-c t-xs" x="105" y="314">含 r = t 的局部监督</text>
+    </g>
+    <path class="edge act" d="M190,282 H222 V145 H256" data-step="2"/>
+    <g class="enc" data-part="student" data-step="2">
+      <rect class="box" x="260" y="75" width="180" height="85" rx="10"/>
+      <text class="t-c t-b" x="350" y="101">平均速度 u_θ</text>
+      <text class="t-c t-xs" x="350" y="123">DiT · 从零训练</text>
+      <text class="t-c t-xs" x="350" y="145">不需要扩散教师</text>
+    </g>
+    <path class="edge enc" d="M440,115 H496" data-step="3"/>
+    <g class="enc" data-part="jvp" data-step="3">
+      <rect class="box" x="500" y="75" width="185" height="85" rx="10"/>
+      <text class="t-c t-b" x="592" y="101">JVP：du_θ / dt</text>
+      <text class="t-c t-xs" x="592" y="123">同一 u_θ 的输入导数</text>
+      <text class="t-c t-xs" x="592" y="145">切向量 (vₜ, 0, 1)</text>
+    </g>
+    <path class="edge idx" d="M105,160 V191 H592 V164" data-step="3"/>
+    <text class="t-c t-xs" x="350" y="183" data-step="3">vₜ 指定 z 的切向；r 固定，t 变化</text>
+    <path class="edge enc" d="M685,115 H726" data-step="4"/>
+    <g class="data" data-part="target" data-step="4">
+      <rect class="box" x="730" y="75" width="210" height="85" rx="10"/>
+      <text class="t-c t-b" x="835" y="101">回归目标 u_tgt</text>
+      <text class="t-c t-xs" x="835" y="123">vₜ − (t−r) du_θ/dt</text>
+      <text class="t-c t-xs" x="835" y="145">代数目标 · 不是教师网络</text>
+    </g>
+    <path class="edge sg" d="M835,160 V236" data-step="4"/>
+    <text class="t-sm" x="847" y="204" data-step="4">sg</text>
+    <path class="edge enc" d="M350,160 V218 H770 V236" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="730" y="240" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="835" y="265">平均速度回归</text>
+      <text class="t-c t-xs" x="835" y="287">u_θ − sg(u_tgt)</text>
+      <text class="t-c t-xs" x="835" y="310">自适应权重也停止梯度</text>
+    </g>
+    <g data-part="sampling" data-step="6">
+      <rect class="panel" x="260" y="250" width="425" height="80" rx="10"/>
+      <text class="t-c t-b" x="472" y="276">推理：ε → x̂₀ = ε − u_θ(ε, 0, 1, c)</text>
+      <text class="t-c t-xs" x="472" y="300">没有 JVP；训练已折入 CFG，直接调用条件分支</text>
+      <text class="t-c t-xs" x="472" y="318">NFE 仅计生成网络，VAE 解码另计</text>
+    </g>
+    <text class="t-c t-xs" x="480" y="365">图中为无 guidance 的核心训练；CFG 把 vₜ 换成训练构造的引导速度。</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>直接来自数据的速度监督</h4><p>ImageNet 实验先用冻结 VAE 编码数据，然后随机配对 latent 与噪声。瞬时监督来自 \(\epsilon-x_0\)，没有另一个教师网络给出 ODE 轨迹<span class="src">论文 §3、App. A</span>。</p></div>
+    <div data-note="condition"><h4>为什么要两个时间变量</h4><p>同一位置到不同目标时间的平均速度不同。网络需知道起点与区间，不能只知道当前噪声水平；\(r=t\) 的样本则把模型锚定到普通 Flow Matching<span class="src">论文 §4.1、§4.3</span>。</p></div>
+    <div data-note="student"><h4>只有一个可训练生成网络</h4><p>\(u_\theta\) 预测与输入同形状的平均速度；训练目标使用当前网络的输入导数，但不引入 EMA 教师或 fake score<span class="src">论文 Alg. 1</span>。</p></div>
+    <div data-note="jvp"><h4>全导数，不只是时间偏导</h4><p>沿 ODE 移动时，\(z_t\) 和 \(t\) 同时改变，而目标 \(r\) 固定。因此切向量是 \((v,0,1)\)。训练以条件速度 \(v_t\) 代替不可直接获得的边缘速度；不用显式形成 Jacobian<span class="src">论文 Eq. 8、11</span>。</p></div>
+    <div data-note="target"><h4>停止梯度的位置</h4><p>先算 JVP，再对整个回归目标停止参数梯度。这样反传不穿过输入导数，不需要二阶优化；停止参数梯度不等于不计算输入导数<span class="src">论文 Eq. 9–11、App. B.4</span>。</p></div>
+    <div data-note="loss"><h4>稳住大误差样本</h4><p>每个样本先对所有 latent 元素求平方误差和，再用停止梯度的自适应权重缩放。官方实现没有把求和改成均值；换聚合方式会改变平滑常数的相对尺度<span class="src">官方代码 <code>meanflow.py</code>：<code>forward</code></span>。</p></div>
+    <div data-note="sampling"><h4>训练复杂度换推理速度</h4><p>采样只算平均速度并做减法。CFG 的条件 / 无条件调用发生在训练目标的构造中，推理不必再在线组合它们<span class="src">论文 §4.2、Alg. 2</span>。</p></div>
+    <div data-step-note="1"><h4>① 构造状态与时间</h4><p>采样数据、噪声与有序时间对，得到 \(z_t\) 和条件速度 \(v_t\)。</p></div>
+    <div data-step-note="2"><h4>② 预测平均速度</h4><p>当前网络接收 \(z_t,r,t,c\)，输出跨区间的平均速度。</p></div>
+    <div data-step-note="3"><h4>③ 算输入方向导数</h4><p>对同一函数做 JVP，固定 r，沿状态与时间共同变化的方向求导。</p></div>
+    <div data-step-note="4"><h4>④ 建立回归目标</h4><p>由 MeanFlow 恒等式减去导数修正，对目标停止参数梯度。</p></div>
+    <div data-step-note="5"><h4>⑤ 更新生成网络</h4><p>自适应加权回归，参数梯度只经过预测分支。</p></div>
+    <div data-step-note="6"><h4>⑥ 一步采样</h4><p>部署时取完整噪声到数据区间，省去导数分支。</p></div>
+  </div>
+  <figcaption>训练图依据 MeanFlow Eq. 9–11、Alg. 1–2。两个绿色框属于同一网络的计算，不是两个独立模型。</figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-average">3.1 平均速度的定义：平均的是边缘 ODE，不是配对直线</h3>
+<div class="formula">$$u(z_t,r,t)=\frac{1}{t-r}\int_r^t v(z_\tau,\tau)\,d\tau,\qquad z_r=z_t-(t-r)u(z_t,r,t).$$</div>
+<p>积分沿边缘速度场的 ODE 轨迹进行。\(\epsilon-x_0\) 是可采样的<b>条件瞬时速度</b>，不是所求区间平均速度的现成标签；若把所有区间都直接回归到它，就退回 Flow Matching，仍然没有学会大步位移<span class="src">论文 Eq. 3、11–12、§3</span>。</p>
+<p>平均速度随 \(r\to t\) 退化为瞬时速度；不同区间的位移满足积分可加性。设 \(r&lt;s&lt;t\)，先到 \(s\) 再到 \(r\) 与直接到 \(r\) 应有同一终点，且第二段应在<b>第一段得到的 \(z_s\)</b>上计算<span class="src">论文 §4.1</span>：</p>
+<div class="formula">$$(t-r)u(z_t,r,t)=(t-s)u(z_t,s,t)+(s-r)u(z_s,r,s).$$</div>
+
+<h3 id="c-identity">3.2 MeanFlow identity：对定义求导，消掉难算的积分</h3>
+<p>对 \((t-r)u=\int_r^t v\) 的上限 \(t\) 求全导数，固定下限 \(r\)，乘积法则给出<span class="src">论文 Eq. 4–8</span>：</p>
+<div class="formula">$$\boxed{u=v-(t-r)\frac{du}{dt}},\qquad \frac{du}{dt}=\partial_z u\,v+\partial_tu=\operatorname{JVP}_{(z,r,t)}[u;(v,0,1)].$$</div>
+<p>这不是凭经验追加的约束，而是平均速度定义蕴含的恒等式。实践中用网络的导数替代未知真值导数，目标因此仍会随网络变化；“真值场与网络无关”不等于“实际回归标签与网络无关”<span class="src">论文 §4.1；iMF §1、Fig. 1</span>。</p>
+<p>如果网络实际编码的是 \((t,h=t-r)\)，JVP 应对包装函数 \(u_\theta(z,r,t)=\mathrm{net}_\theta(z,t,t-r)\) 求导：固定 \(r\) 时 \(h\) 会随 \(t\) 变化。直接把内部 \(h\) 的切向量设为零会改变训练方程<span class="src">论文 §4.3；官方代码 <code>meanflow.py</code>：<code>forward</code></span>。</p>
+
+<h3 id="c-guidance">3.3 CFG 折入训练：学引导后的流，而不是部署时做两次前向</h3>
+<p>本 track 用 \(w\) 表示 guidance scale（论文用 \(\omega\)）。定义 \(v^{\mathrm{cfg}}=w v(z_t,t\mid c)+(1-w)v(z_t,t)\)，再学习它诱导的平均速度。无条件瞬时速度可由同一网络的对角线 \(u_\theta(z_t,t,t,\varnothing)\) 估计，训练把条件速度换为<span class="src">论文 Eq. 13–19</span>：</p>
+<div class="formula">$$\widetilde v_t=w(\epsilon-x_0)+(1-w)u_\theta(z_t,t,t,\varnothing).$$</div>
+<p>这条 \(\widetilde v_t\) 同时用于目标首项和 JVP 的状态切向。丢弃类别条件的样本回到无引导的条件速度监督。附录另用 \(\kappa\) 混合条件对角线预测，实际 guidance 为 \(w'=w/(1-\kappa)\)，并可限制引导生效的时间范围<span class="src">论文 App. B.1、Tab. 4；官方代码 <code>guidance_fn</code>、<code>cond_drop</code></span>。因此原版固定训练配方的模型并不具备任意测试时 guidance 控制。</p>
+
+<h3 id="c-shortcut">3.4 前驱：Shortcut Models 用步长条件与两段自举</h3>
+<p>Frans、Hafner、Levine、Abbeel 的 <i>One Step Diffusion via Shortcut Models</i> 已提出：给模型增加步长条件，在零步长上用 Flow Matching，在较大步长上要求“一段等于两段半步”。原论文时间从噪声走向数据，与本页相反；下面转换为本页的噪声侧高时间约定，记 shortcut 速度为 \(S_\theta(z_t,t,d)\)<span class="src">Shortcut §2–3、Eq. 3–4（符号转换）</span>：</p>
+<div class="formula">$$z'=z_t-dS_\theta(z_t,t,d),\quad S_{\mathrm{tgt}}=\tfrac12\big[S_\theta(z_t,t,d)+S_\theta(z',t-d,d)\big],\quad S_\theta(z_t,t,2d)\approx\operatorname{sg}(S_{\mathrm{tgt}}).$$</div>
+<p>后半步的状态来自网络真正走出的第一步，而非重新与数据插值。它把局部生成能力递归传播到大步长；MeanFlow 则直接用平均速度的微分恒等式传播，不依赖离散半步的递归标签<span class="src">Shortcut §3.1；MeanFlow §4.1</span>。</p>
+<div class="callout code-note"><span class="callout-title">论文内部不一致</span>Shortcut §3 的合并损失式把第二个 shortcut 的时间写成原始 \(t\)，但 Eq. 4 与 §3.1 都明确使用第一步之后的时间。本页按 Eq. 4 展示，并在转换时间方向后写为 \(t-d\)<span class="src">Shortcut Eq. 4、§3 合并损失、§3.1</span>。</div>
+
+<h3 id="c-ayf">3.5 Align Your Flow：同一流映射视角，侧重教师蒸馏</h3>
+<p>Sabour、Fidler、Kreis 的 <i>Align Your Flow: Scaling Continuous-Time Flow Map Distillation</i>（<a href="https://arxiv.org/abs/2506.14603">2506.14603</a>）学习 \(\Phi_\theta(z_t,t,r)\) 将当前位置直接映射到任意较低时间。以 Euler 形式参数化时，\(\Phi_\theta=z_t-(t-r)u_\theta\)，与平均速度表述连接<span class="src">AYF §3、App. D.5</span>。</p>
+<p>AYF 的 Eulerian / Lagrangian 目标分别检查区间起点 / 终点的局部一致性；主实验采用预训练教师和 autoguidance，可再做短期对抗微调。它研究的是如何把现有强模型蒸馏成可灵活多步采样的流映射，MeanFlow 主实验研究的是无扩散教师的从零训练；不能把 AYF 的额外教师和后训练收益归给 MeanFlow<span class="src">AYF §3–4、App. F；MeanFlow §5</span>。</p>
+<p><a href="03-consistency-models.html">CM</a> 是 \(f_\theta(z_t,t)=\Phi_\theta(z_t,t,0)\)：终点固定为数据侧。流映射增加终点条件，覆盖任意 \(r&lt;t\)；CM 常见多步采样需要“先预测干净终点、再加噪”，流映射则可以直接到中间时刻。这是表达对象的扩展，不能据此断言任何有限容量流映射模型都一定比 CM 更好<span class="src">MeanFlow §4.1；AYF Fig. 2、§3；rCM App. F.1</span>。</p>
+
+<h2 id="shapes">4. 张量形状与 NFE</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 开销</th><th>来源与含义</th></tr></thead>
+  <tbody>
+    <tr><td>ImageNet 像素 → VAE latent</td><td>[B, 256, 256, 3] → [B, 32, 32, 4]</td><td><span class="src">论文 §5、App. A（按 JAX 布局记法）</span></td></tr>
+    <tr><td>时间 r、t 与广播</td><td>[B, 1, 1, 1]；进入 DiT 前为 [B]</td><td><span class="src">官方代码 <code>sample_tr</code>、<code>u_fn</code></span></td></tr>
+    <tr><td>XL/2 的 patch token</td><td>[B, 256, 1152]</td><td>由 32×32 latent、2×2 patch、hidden dim 1152 推算<span class="src">论文 Tab. 4；推算</span></td></tr>
+    <tr><td>u、du/dt 与回归目标</td><td>均为 [B, 32, 32, 4]</td><td>JVP 返回同形状方向导数，不构造完整 Jacobian<span class="src">论文 Alg. 1</span></td></tr>
+    <tr><td>一步 / 两步推理</td><td>1 / 2 NFE</td><td>CFG 已折入；不含 VAE 编码 / 解码<span class="src">论文 §4.2、Tab. 2</span></td></tr>
+  </tbody>
+</table></div>
+<p>JVP 开销是具体实现相关的：论文在 JAX、B/4、v4-8 TPU 上测得 Flow Matching 每迭代 0.045 s、MeanFlow 0.052 s，报告约 16% 墙钟增量<span class="src">论文 App. B.4</span>。这个测量不能直接代表长视频或 PyTorch 分片训练；后者需要 <a href="13-rcm.html">rCM 的专用 JVP 基础设施</a>。</p>
+
+<h2 id="objective">5. 训练目标：回归恒等式右侧</h2>
+<div class="formula">$$u_{\mathrm{tgt}}=v_t-(t-r)\operatorname{JVP}[u_\theta;(v_t,0,1)],\qquad \mathcal L=\mathbb E\big\|u_\theta(z_t,r,t)-\operatorname{sg}(u_{\mathrm{tgt}})\big\|_2^2.$$</div>
+<p>这是无 CFG 的核心形式；带引导时把 \(v_t\) 全部换成 \(\widetilde v_t\)。对角线 \(r=t\) 消去修正项，恢复条件 Flow Matching；非对角线把局部监督扩展到完整区间<span class="src">论文 Eq. 9–11、17–19</span>。</p>
+<p>按本 track 的记号，部署时的学生生成器是 \(G_\theta(\epsilon,c)=\epsilon-u_\theta(\epsilon,0,1,c)\)；网络预测平均速度，生成器再将它转换为数据侧样本<span class="src">论文 Eq. 12、Alg. 2</span>。</p>
+<div class="formula">$$e=\|u_\theta-\operatorname{sg}(u_{\mathrm{tgt}})\|_2^2,\qquad \mathcal L_{\mathrm{adapt}}=\mathbb E\left[\operatorname{sg}\big((e+\delta)^{-p}\big)e\right].$$</div>
+<p>\(p\) 控制大误差样本的下权重，\(\delta\) 是平滑常数（论文写作 \(c\)，本页避免与类别条件混淆）。默认 \(p=1\)，论文示例平滑常数为 \(10^{-3}\)<span class="src">论文 §4.3、Tab. 4、Eq. 22</span>。学习依靠数据速度锚点和恒等式，并没有额外的 GAN 判别器或 DMD 分数正则。</p>
+
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">依据 Alg. 1–2 与 meanflow.py；展示基础 CFG（κ = 0），时间包装保持 (z, r, t) 顺序</div>
+<pre><code class="lang-py">def U(z, r, t, label):
+    return net(z, t=t, interval=t-r, label=label)
+
+for x0, c in data_loader:                     # 冻结 VAE 的 latent
+    t, r = sorted_logit_normal_times(x0.shape[0])
+    r = set_diagonal_subset(r, t)              # 部分样本 r=t
+    eps = randn_like(x0)
+    z = (1-t)*x0 + t*eps
+    v = eps - x0
+    with no_grad():
+        v_null = U(z, t, t, null_label)
+        v_guided = w*v + (1-w)*v_null
+    label, tangent = drop_condition(c, v, v_guided)
+    fn = lambda z, r, t: U(z, r, t, label)
+    pred, du_dt = jvp(fn, (z, r, t),
+                     (tangent, zeros_like(r), ones_like(t)))
+    target = (tangent - (t-r)*du_dt).detach()
+    err2 = sum_nonbatch((pred-target)**2)
+    weight = ((err2 + delta)**(-p)).detach()
+    loss = (weight*err2).mean()
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+
+# 推理没有 JVP，也没有条件 / 无条件在线组合
+eps = randn(latent_shape)
+x_hat = eps - U(eps, r=0, t=1, label=c)
+image = frozen_vae.decode(x_hat)</code></pre>
+<p>伪代码中的比例、平滑常数与引导范围由配置传入；论文最终模型还用附录的 \(\kappa\) 混合。它们不是新的教师参数<span class="src">论文 App. B.1、Tab. 4</span>。</p>
+
+<h2 id="hyperparams">7. 关键超参：区分小模型消融与主结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>论文配置</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>主结果骨干</td><td>XL/2，676M，28 层，hidden 1152，16 heads</td><td><span class="src">论文 Tab. 2、Tab. 4</span></td></tr>
+    <tr><td>主结果训练</td><td>240 epochs；batch 256；EMA 0.9999</td><td><span class="src">论文 Tab. 4（XL/2 列）</span></td></tr>
+    <tr><td>优化器</td><td>Adam，lr 1e-4，β=(0.9,0.95)，weight decay 0</td><td><span class="src">论文 Tab. 4</span></td></tr>
+    <tr><td>时间与权重</td><td>logit-normal(−0.4,1.0)；r≠t 比例 25%；p=1</td><td><span class="src">论文 Tab. 4</span></td></tr>
+    <tr><td>XL/2 guidance</td><td>w′=2.5，w=0.2，κ=1−w/w′；生效区间 [0,0.75]</td><td><span class="src">论文 Tab. 4、App. B.1</span></td></tr>
+    <tr><td>小模型消融</td><td>B/4，80 epochs；无 CFG 的默认消融</td><td><span class="src">论文 §5.1、Tab. 1</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>论文 B/4 消融训练 80 epochs；公开 <code>configs/run_b4.yml</code> 设置的是 240 epochs，README 的 B/4 检查点预期 FID 为 11.4<span class="src">论文 Tab. 1、Tab. 4；官方配置、README</span>。不能拿这个检查点的结果对照无 CFG 的小模型消融，也不能当作 XL/2 的主结果。</div>
+
+<h2 id="results">8. 关键结果：一步与一次网络调用要分开</h2>
+<p>以下为论文同一 ImageNet 256×256、FID-50K 汇总表；不同方法的训练配方并非完全相同。NFE 计算包含推理时 CFG 的额外生成网络调用<span class="src">论文 §5、Tab. 2</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">参数</th><th class="num">NFE</th><th class="num">FID ↓</th><th>来源</th></tr></thead>
+  <tbody>
+    <tr><td>iCT-XL/2</td><td class="num">675M</td><td class="num">1</td><td class="num">34.24</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr><td>Shortcut-XL/2</td><td class="num">675M</td><td class="num">1</td><td class="num">10.60</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr class="hl"><td>MeanFlow-B/2</td><td class="num">131M</td><td class="num">1</td><td class="num">6.17</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr class="hl"><td>MeanFlow-XL/2</td><td class="num">676M</td><td class="num">1</td><td class="num">3.43</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr><td>iMM-XL/2（一步，在线 guidance）</td><td class="num">675M</td><td class="num">1×2</td><td class="num">7.77</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr class="hl"><td>MeanFlow-XL/2</td><td class="num">676M</td><td class="num">2</td><td class="num">2.93</td><td><span class="src">论文 Tab. 2</span></td></tr>
+    <tr class="hl"><td>MeanFlow-XL/2+（更长训练）</td><td class="num">676M</td><td class="num">2</td><td class="num">2.20</td><td><span class="src">论文 Tab. 2、Tab. 4</span></td></tr>
+    <tr><td>DiT-XL/2</td><td class="num">675M</td><td class="num">250×2</td><td class="num">2.27</td><td><span class="src">论文 Tab. 2</span></td></tr>
+  </tbody>
+</table></div>
+<p>机制消融同样重要：B/4 无 CFG 时，只训练 \(r=t\) 的 FID 为 328.91，加入 25% 非对角时间对后为 61.06；把正确 JVP 切向量 \((v,0,1)\) 改成缺少时间项的 \((v,0,0)\)，FID 恶化为 268.06<span class="src">论文 Tab. 1(a–b)</span>。这些实验支持“区间监督和正确全导数有效”，没有证明任意架构、精度或数据域都会获得相同收益。</p>
+<div class="callout code-note"><span class="callout-title">论文内部不一致</span>原始版本 §5.2 把多步 SiT 的 FID 写成 2.15，Tab. 2 列的是 2.06；M/2 参数量也在 Tab. 2 与 Tab. 4 间写成 308M / 497.8M<span class="src">论文 v1 §5.2、Tab. 2、Tab. 4</span>。本页主比较采用无歧义的 XL/2 行，不从这些数字推导等计算量结论。</div>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>已有路线</h4><ul>
+    <li><a href="02-trajectory-distillation.html">轨迹蒸馏 / Reflow</a>：通过教师轨迹或重新配对，让大步运输容易学习。</li>
+    <li><a href="03-consistency-models.html">CM</a>：把同一轨迹的点都送到固定干净终点；Shortcut 把两段小步自举为大步。</li>
+    <li><a href="08-scm.html">sCM</a>：用连续时间导数处理一致性，但通常关注固定终点。</li>
+  </ul></div>
+  <div class="now"><h4>MeanFlow 提供的对象</h4><ul>
+    <li>明确的跨区间平均速度及其恒等式，用可采样的数据速度完成无扩散教师训练。</li>
+    <li>guidance 在训练目标中折入，部署时直接走完整区间。</li>
+    <li>标签含网络自身的导数，原版 guidance 固定；优化与可控性仍有改进空间。</li>
+  </ul></div>
+</div>
+<p>已核实的后续工作 <a href="https://arxiv.org/abs/2512.02012">Improved Mean Flows（iMF）</a> 把目标重写为瞬时速度回归，并增加显式 guidance 条件；这里只将它列为后续文献，不把它的结果并入原版 MeanFlow<span class="src">iMF 摘要、§1</span>。图像到视频的实际延伸见 <a href="13-rcm.html#c-causal-rcm">Causal-rCM</a>：它把 sCM / MeanFlow 作为因果教师蒸馏目标，并开发自定义掩码 JVP，已不再是本页的无教师 ImageNet 设置。</p>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q21"><span class="qid">Q21</span>为什么 Flow Matching 的直线训练对不保证一步生成正确？MeanFlow 的平均速度怎样补上这个缺口？</h3>
+  <div class="ans"><p class="short">训练对的条件直线速度来自特定数据与噪声配对，但模型给定当前位置只能学其条件期望；该边缘速度场的 ODE 通常弯曲。一步 Euler 使用起点切线，漏掉后续方向变化。MeanFlow 学整段积分除以区间长度，直接预测位移所需的平均速度；它用固定终点的全导数恒等式构造训练目标，避免训练时直接积分。</p><ul><li>把平均速度标签始终设成 \(\epsilon-x_0\)，会回到瞬时 Flow Matching。</li><li>CM 固定流映射终点在数据侧；MeanFlow / flow maps 还学习中间终点，因此要增加目标时间条件。</li></ul><p class="cite">依据：MeanFlow §3、Eq. 3–11、Relation to Prior Work；AYF Fig. 2。</p></div>
+  <h3 id="q22"><span class="qid">Q22</span>MeanFlow 为什么既计算 JVP 又对目标停止梯度？CFG 怎样保持一次生成网络调用？</h3>
+  <div class="ans"><p class="short">JVP 计算的是沿状态和时间变化方向的输入全导数，它是恒等式构造标签所必需的信息。停止梯度针对随后优化参数的反传，使标签视为常量，避免再对 JVP 求参数导数。CFG 则先定义引导后的瞬时场，再把它诱导的平均速度学进网络，部署时不需要在线组合条件与无条件预测。</p><ul><li>导数切向量必须固定目标 r；网络若编码 t−r，需要对正确包装函数求导。</li><li>训练仍有额外导数与 guidance 调用；省下的是采样计算。原版固定训练 guidance，测试时不能随意更改它。</li></ul><p class="cite">依据：MeanFlow Eq. 8–11、17–19、§4.3、App. B.4；iMF §1。</p></div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Geng, Deng, Bai, Kolter, He. <i>Mean Flows for One-step Generative Modeling.</i> 原始技术报告 v1，2025. <a href="https://arxiv.org/abs/2505.13447">arXiv:2505.13447</a> · <a href="https://github.com/Gsunshine/meanflow">官方 JAX 代码</a></li>
+  <li>Frans, Hafner, Levine, Abbeel. <i>One Step Diffusion via Shortcut Models.</i> ICLR 2025. <a href="https://arxiv.org/abs/2410.12557">arXiv:2410.12557</a> · <a href="https://github.com/kvfrans/shortcut-models">代码</a></li>
+  <li>Sabour, Fidler, Kreis. <i>Align Your Flow: Scaling Continuous-Time Flow Map Distillation.</i> NeurIPS 2025. <a href="https://arxiv.org/abs/2506.14603">arXiv:2506.14603</a> · <a href="https://research.nvidia.com/labs/toronto-ai/AlignYourFlow/">官方项目页</a></li>
+  <li>Lu, Song. <i>Simplifying, Stabilizing and Scaling Continuous-Time Consistency Models.</i> ICLR 2025. <a href="https://arxiv.org/abs/2410.11081">arXiv:2410.11081</a></li>
+  <li>Geng et al. <i>Improved Mean Flows: On the Challenges of Fastforward Generative Models.</i> 2025. <a href="https://arxiv.org/abs/2512.02012">arXiv:2512.02012</a> · <a href="https://github.com/Lyy-iiis/imeanflow">代码</a></li>
+  <li>Zheng et al. <i>Causal-rCM: A Unified Teacher-Forcing and Self-Forcing Open Recipe for Autoregressive Diffusion Distillation in Streaming Video Generation and Interactive World Models.</i> 2026. <a href="https://arxiv.org/abs/2606.25473">arXiv:2606.25473</a>（见 <a href="13-rcm.html#c-causal-rcm">视频延伸</a>）</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

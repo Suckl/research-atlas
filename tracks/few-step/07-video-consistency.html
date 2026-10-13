@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>视频一致性蒸馏：VideoLCM / AnimateLCM / T2V-Turbo</title>
+<meta name="description" content="视频少步生成的第一波：把 LCM 的潜空间一致性蒸馏搬到视频 U-Net 上（VideoLCM），用图像 / 运动先验解耦绕开低质量视频数据（AnimateLCM），再把图文与视频文奖励梯度加到一步输出上，4 步超过 50 步教师（T2V-Turbo / -v2）。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="few-step" data-node="video-consistency">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：视频扩散每一步都比图像贵一个数量级</h2>
+<p>2023 年的开源文生视频模型（ModelScopeT2V、VideoCrafter、基于 SD1.5 的 AnimateDiff）基本都是“图像 U-Net + 时间层”，采样仍沿用约 50 步 DDIM <span class="src">VideoLCM §1</span>。视频一次前向要处理 16 帧潜变量，再叠加 CFG 的条件 / 无条件两次前向，生成一段几秒的视频要几十秒到几分钟：VideoLCM 在 A100 上测得 8 段 16×448×256 的视频，50 步 DDIM 需 104 s <span class="src">VideoLCM Tab. 1</span>。与此同时，图像侧的 <a href="03-consistency-models.html#lcm">LCM</a> 已经证明：在潜空间里对“CFG 增强的 PF-ODE”做一致性蒸馏，4 步就能出可用的图。</p>
+<p>本页覆盖把这套配方搬到视频上的第一波工作（2023-12 至 2024-10）。它们都是 SD 系 VP 扩散：\(x_t=\alpha_t x_0+\sigma_t\epsilon\)，教师预测噪声 \(\epsilon\)，时间是 1000 步离散网格上取出的子序列 \(t_1\lt\dots\lt t_N\)；学生是一致性函数 \(f_\theta(z_t,t)\)，直接把带噪视频潜变量映到 \(\hat z_0\)。 <span class="src">VideoLCM §1、Tab. 1</span> <span class="src">LCM §3</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>工作</th><th>教师 / 基座</th><th>主要改动</th><th>推理步数</th></tr></thead>
+  <tbody>
+    <tr><td>VideoLCM（2023-12）<br><span class="src">VideoLCM §3.2</span></td><td>TF-T2V 发布的预训练视频扩散模型</td><td>LCM 原样搬到视频，固定 CFG \(w=9\)</td><td>4–6 步</td></tr>
+    <tr><td>AnimateLCM（2024-02）<br><span class="src">AnimateLCM §5.2</span></td><td>SD1.5 + AnimateDiff 运动模块</td><td>图像 / 运动先验解耦蒸馏；无教师适配插件</td><td>2–4 步</td></tr>
+    <tr><td>T2V-Turbo（2024-05）<br><span class="src">T2V-Turbo §4</span></td><td>VideoCrafter2、ModelScopeT2V</td><td>一致性蒸馏 + 图文 / 视频文奖励梯度</td><td>4–8 步</td></tr>
+    <tr><td>T2V-Turbo-v2（2024-10）<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td>VideoCrafter2</td><td>数据配比、多奖励、运动引导蒸进学生</td><td>16 步（4 / 8 步也给出）</td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  视频 U-Net 只是“膨胀”过的图像 U-Net，所以 LCM 的整套做法——潜空间、CFG 增强的 DDIM 教师一步、跳步 \(k\)、EMA 目标网络、LoRA——几乎可以原样移植，VideoLCM 就是这么做的。问题在于学生的质量被两道天花板压住：教师本身（在低质量 WebVid 上训练）和用来蒸馏的数据。AnimateLCM 把“画面”和“运动”拆开，用高质量图像学画面、用视频只学运动；T2V-Turbo 则发现计算一致性损失时本来就有一个免费的一步生成 \(\hat z_0\)，直接对它加奖励梯度，学生于是可以超过教师。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：视频潜空间一致性蒸馏（含可选奖励分支）</h2>
+<div class="legend">
+  <span><i class="sw data"></i>数据 / 隐变量</span><span><i class="sw enc"></i>学生（可训练）</span>
+  <span><i class="sw tgt"></i>教师与冻结网络（VAE、EMA 目标、奖励模型）</span><span><i class="sw act"></i>条件</span>
+  <span><i class="sw loss"></i>损失 / 目标</span><span><i class="ln sg"></i>stop-gradient</span>
+  <span><i class="ln" style="border-top:2px dotted var(--c-loss)"></i>梯度路径</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 500" role="img" aria-label="视频潜空间一致性蒸馏与奖励分支">
+    <g class="act" data-part="cond" data-step="1">
+      <rect class="box" x="480" y="18" width="210" height="48" rx="8"/>
+      <text class="t-c t-b" x="585" y="36">条件 c · 引导尺度 w</text>
+      <text class="t-c t-xs" x="585" y="55">T2V-Turbo：w ~ U[5, 15]</text>
+    </g>
+    <path class="edge act" d="M585,66 V96" data-step="2"/>
+    <g data-part="data" data-step="1">
+      <rect class="box data" x="20" y="160" width="120" height="60" rx="8"/>
+      <text class="t-c t-b" x="80" y="182">视频 x</text>
+      <text class="t-c t-xs" x="80" y="202">16 帧（WebVid 等）</text>
+      <path class="edge" d="M140,190 H166"/>
+      <g class="tgt"><rect class="box frozen" x="170" y="160" width="110" height="60" rx="8"/></g>
+      <text class="t-c t-b" x="225" y="182">VAE 编码 ℰ</text>
+      <text class="t-c t-xs" x="225" y="202">冻结</text>
+      <path class="edge" d="M280,190 H306"/>
+      <rect class="box data" x="310" y="160" width="130" height="60" rx="8"/>
+      <text class="t-c t-b" x="375" y="182">z<tspan font-size="9" dy="3">t</tspan><tspan font-size="8" dy="2">n+k</tspan></text>
+      <text class="t-c t-xs" x="375" y="204">前向加噪（随机 n）</text>
+    </g>
+    <path class="edge" d="M440,178 C460,178 458,135 476,135" data-step="2"/>
+    <path class="edge" d="M440,202 C460,202 458,250 476,250" data-step="3"/>
+    <g class="tgt" data-part="teacher" data-step="2">
+      <rect class="box frozen" x="480" y="100" width="210" height="70" rx="10"/>
+      <text class="t-c t-b" x="585" y="119">教师 ε<tspan font-size="9" dy="3">φ</tspan><tspan dy="-3">（冻结）</tspan></text>
+      <text class="t-c t-sm" x="585" y="140">CFG 增强的 DDIM 一步</text>
+      <text class="t-c t-xs" x="585" y="158">从 t<tspan font-size="8" dy="2">n+k</tspan><tspan dy="-2"> 走到 t</tspan><tspan font-size="8" dy="2">n</tspan><tspan dy="-2">（跨 k 步）</tspan></text>
+    </g>
+    <path class="edge" d="M690,135 H726" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="2"/>
+    <text class="t-c t-xs" x="708" y="124" data-step="2">ẑ<tspan font-size="8" dy="2">tn</tspan></text>
+    <g class="tgt" data-part="ema" data-step="4">
+      <rect class="box frozen" x="730" y="100" width="210" height="70" rx="10"/>
+      <text class="t-c t-b" x="835" y="119">目标网络 f<tspan font-size="9" dy="3">θ⁻</tspan></text>
+      <text class="t-c t-sm" x="835" y="140">学生参数的 EMA 副本</text>
+      <text class="t-c t-xs" x="835" y="158">输入 ẑ<tspan font-size="8" dy="2">tn</tspan><tspan dy="-2">，不回传梯度</tspan></text>
+    </g>
+    <path class="edge sg" d="M835,170 V216" data-step="5"/>
+    <g class="enc" data-part="student" data-step="3">
+      <rect class="box" x="480" y="220" width="210" height="70" rx="10"/>
+      <text class="t-c t-b" x="585" y="239">学生 f<tspan font-size="9" dy="3">θ</tspan><tspan dy="-3">（可训练）</tspan></text>
+      <text class="t-c t-sm" x="585" y="260">视频 U-Net，由教师初始化</text>
+      <text class="t-c t-xs" x="585" y="279">f<tspan font-size="8" dy="2">θ</tspan><tspan dy="-2">(z</tspan><tspan font-size="8" dy="2">t</tspan><tspan dy="-2">, w, c, t) → ẑ</tspan><tspan font-size="8" dy="2">0</tspan></text>
+    </g>
+    <path class="edge enc" d="M690,250 H756" data-step="3"/>
+    <text class="t-c t-xs" x="722" y="240" data-step="3">ẑ<tspan font-size="8" dy="2">0</tspan></text>
+    <g class="loss" data-part="cdloss" data-step="5">
+      <rect class="box" x="760" y="220" width="180" height="70" rx="10"/>
+      <text class="t-c t-b" x="850" y="240">一致性损失 L<tspan font-size="9" dy="3">CD</tspan></text>
+      <text class="t-c t-sm" x="850" y="261">d(ẑ<tspan font-size="8" dy="2">0</tspan><tspan dy="-2">, 目标输出)</tspan></text>
+      <text class="t-c t-xs" x="850" y="279">d 取 Huber 距离</text>
+    </g>
+    <path class="edge grad" d="M800,290 V308 H650 V294" data-step="7"/>
+    <g data-part="reward" data-step="6">
+      <path class="edge enc" d="M585,290 V326"/>
+      <g class="tgt"><rect class="box frozen" x="480" y="330" width="210" height="50" rx="8"/></g>
+      <text class="t-c t-b" x="585" y="348">VAE 解码 𝒟（冻结）</text>
+      <text class="t-c t-xs" x="585" y="368">ẑ<tspan font-size="8" dy="2">0</tspan><tspan dy="-2"> → x̂</tspan><tspan font-size="8" dy="2">0</tspan><tspan dy="-2">（16 帧像素）</tspan></text>
+      <path class="edge" d="M690,355 H716"/>
+      <g class="tgt"><rect class="box frozen" x="720" y="320" width="220" height="80" rx="8"/></g>
+      <text class="t-c t-b" x="830" y="338">奖励模型（冻结）</text>
+      <text class="t-c t-sm" x="830" y="359">R<tspan font-size="8" dy="2">img</tspan><tspan dy="-2">：HPSv2.1，取 M 帧</tspan></text>
+      <text class="t-c t-sm" x="830" y="380">R<tspan font-size="8" dy="2">vid</tspan><tspan dy="-2">：InternVid2 S2 / ViCLIP</tspan></text>
+      <path class="edge" d="M830,400 V416"/>
+      <g class="loss"><rect class="box" x="720" y="420" width="220" height="50" rx="8"/></g>
+      <text class="t-c t-b" x="830" y="438">奖励目标 J（最大化）</text>
+      <text class="t-c t-xs" x="830" y="457">β<tspan font-size="8" dy="2">img</tspan><tspan dy="-2">·ΣR</tspan><tspan font-size="8" dy="2">img</tspan><tspan dy="-2"> + β</tspan><tspan font-size="8" dy="2">vid</tspan><tspan dy="-2">·R</tspan><tspan font-size="8" dy="2">vid</tspan></text>
+    </g>
+    <path class="edge grad" d="M720,445 H460 V272 H476" data-step="7"/>
+    <text class="t-c t-xs" x="590" y="433" data-step="7">奖励梯度只穿过一步生成</text>
+    <g data-part="sampling" data-step="8">
+      <rect class="panel" x="20" y="262" width="420" height="228" rx="12"/>
+      <text class="t-sm" x="36" y="284" style="fill:var(--text);font-weight:650">推理：多步一致性采样（以 4 步为例）</text>
+      <rect class="box data" x="36" y="300" width="110" height="36" rx="6"/>
+      <text class="t-c" x="91" y="318">z<tspan font-size="9" dy="3">T</tspan><tspan dy="-3"> ~ N(0, I)</tspan></text>
+      <path class="edge" d="M146,318 H176"/>
+      <g class="enc"><rect class="box" x="180" y="300" width="90" height="36" rx="6"/></g>
+      <text class="t-c" x="225" y="318">f<tspan font-size="9" dy="3">θ</tspan></text>
+      <path class="edge" d="M270,318 H300"/>
+      <rect class="box data" x="304" y="300" width="120" height="36" rx="6"/>
+      <text class="t-c t-sm" x="364" y="318">x̂<tspan font-size="8" dy="2">0</tspan><tspan dy="-2">（第 1 次）</tspan></text>
+      <path class="edge" d="M364,336 V348 H91 V356"/>
+      <rect class="box data" x="36" y="360" width="110" height="36" rx="6"/>
+      <text class="t-c t-sm" x="91" y="378">重新加噪到 τ<tspan font-size="8" dy="2">2</tspan></text>
+      <path class="edge" d="M146,378 H176"/>
+      <g class="enc"><rect class="box" x="180" y="360" width="90" height="36" rx="6"/></g>
+      <text class="t-c" x="225" y="378">f<tspan font-size="9" dy="3">θ</tspan></text>
+      <path class="edge" d="M270,378 H300"/>
+      <rect class="box data" x="304" y="360" width="120" height="36" rx="6"/>
+      <text class="t-c t-sm" x="364" y="378">x̂<tspan font-size="8" dy="2">0</tspan><tspan dy="-2">（第 2 次）</tspan></text>
+      <text class="t-xs" x="36" y="416">… 重复到第 4 次：共 4 NFE（教师 50 步 DDIM + CFG 约 100 NFE）</text>
+      <text class="t-xs" x="36" y="436">CFG 已蒸进 f<tspan font-size="8" dy="2">θ</tspan><tspan dy="-2">，推理时不再跑无条件分支</tspan></text>
+      <text class="t-xs" x="36" y="456">VideoLCM / T2V-Turbo：4–8 步；AnimateLCM：2–4 步即可用</text>
+      <text class="t-xs" x="36" y="476">1 步仍明显模糊（VideoLCM §4.3、AnimateLCM 局限一节）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="cond"><h4>条件与引导尺度</h4><p>文本 c 同时进教师与学生。引导尺度 w 有两种处理：VideoLCM 固定 w = 9.0，避免为 w 加嵌入模块而改动网络结构；T2V-Turbo / -v2 沿用 LCM 的做法，每步随机取 w ∈ [5, 15] 并把 w 作为学生的输入 f<sub>θ</sub>(z, w, c, t)。v2 还把运动引导强度 λ 也作为输入。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-note="data"><h4>数据与加噪</h4><p>一段 16 帧视频经冻结的 VAE 逐帧编码成潜变量，再随机取网格下标 n、按前向过程加噪到 t<sub>n+k</sub>。VideoLCM 用 WebVid-10M + LAION-5B 图像 + 约 1M 内部视频，裁 448×256；AnimateLCM 视频阶段只用 WebVid-2M；T2V-Turbo 用 WebVid-10M（与两位教师的训练数据相同）。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-note="teacher"><h4>冻结教师：CFG 增强的 ODE 一步</h4><p>教师对 z<sub>t<sub>n+k</sub></sub> 分别做条件与无条件预测，按 (1 + w)·条件 − w·无条件 组合后用 DDIM 走一步到 t<sub>n</sub>，得到同一条 PF-ODE 轨迹上更干净的点 ẑ<sub>t<sub>n</sub></sub>。跨 k 步（T2V-Turbo 取 k = 20，v2 取 k = 5；AnimateLCM 从 1000 步里均匀取 50 个时间点）是 LCM 的“跳步”技巧：网格越粗训练越快，但偏差越大。教师每个训练步要前向两次（推算）。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-note="ema"><h4>EMA 目标网络</h4><p>一致性蒸馏的目标不是教师的输出，而是“学生自己”在更干净的点上的预测 f<sub>θ⁻</sub>(ẑ<sub>t<sub>n</sub></sub>)，用 EMA 参数并 stop-gradient，避免目标随学生一起漂移。VideoLCM 的 EMA 率为 0.95。T2V-Turbo-v2 发现这个目标网络可以去掉、直接用 stop_grad(f<sub>θ</sub>)，训练并不失稳，省下的显存用来做全参数训练。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-note="student"><h4>学生一致性函数</h4><p>结构与教师相同、由教师初始化，输出参数化为 c<sub>skip</sub>(t)·z + c<sub>out</sub>(t)·F<sub>θ</sub>，保证 t → ε 时是恒等映射。VideoLCM 训练整个网络；AnimateLCM 只训练空间 LoRA（图像阶段）和时间层（视频阶段）；T2V-Turbo 只训练 LoRA，训练完合并，推理开销与教师单步相同；v2 改为全参数训练。</p></div>
+    <div data-note="cdloss"><h4>一致性损失</h4><p>让学生在 t<sub>n+k</sub> 的预测与目标网络在 t<sub>n</sub> 的预测一致。VideoLCM、AnimateLCM 用 Huber 距离 √(‖x − y‖² + c²) − c，梯度更平滑、对离群值更稳；AnimateLCM 还按 λ<sub>n</sub> = (1 − δn/N)<sup>γ</sup> 给小 t 更大权重，因为小 t 处的预测是大 t 的学习目标。</p></div>
+    <div data-note="reward"><h4>奖励分支（T2V-Turbo / -v2）</h4><p>计算 L<sub>CD</sub> 时学生已经给出一个完整的一步生成 ẑ<sub>0</sub>。把它解码成像素视频 x̂<sub>0</sub>，随机取 M 帧（T2V-Turbo M = 6，v2 M = 2）喂给图文奖励模型 HPSv2.1，整段喂给视频文模型（VideoCrafter2 教师配 InternVid2 S2，ModelScope 教师配 ViCLIP）。v2 再加 CLIPScore，且只在短字幕的 WebVid 数据上算奖励。总损失 L = L<sub>CD</sub> − β<sub>img</sub>J<sub>img</sub> − β<sub>vid</sub>J<sub>vid</sub>。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-note="sampling"><h4>多步一致性采样</h4><p>推理时从纯噪声出发，f<sub>θ</sub> 一步给出 x̂<sub>0</sub>，再按前向过程加噪到下一个更小的时间点、再跑一次 f<sub>θ</sub>，如此 4 次即 4 NFE。CFG 已经在蒸馏时折进学生，所以不需要无条件分支：AnimateLCM 指出这省掉一半的峰值显存与时间。“教师 50 步 + CFG ≈ 100 NFE”按每步两次前向推算。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 §4</span> <span class="src">T2V-Turbo §3、App. B</span></p></div>
+    <div data-step-note="1"><h4>① 取数据与条件</h4><p>视频经冻结 VAE 编码、加噪到 t<sub>n+k</sub>；采样文本与引导尺度 w。</p></div>
+    <div data-step-note="2"><h4>② 教师走一步</h4><p>冻结教师做 CFG 增强的 DDIM 一步，得到同一轨迹上的 ẑ<sub>t<sub>n</sub></sub>。</p></div>
+    <div data-step-note="3"><h4>③ 学生一步预测</h4><p>学生从 z<sub>t<sub>n+k</sub></sub> 直接预测干净潜变量 ẑ<sub>0</sub>（带梯度）。</p></div>
+    <div data-step-note="4"><h4>④ 目标网络</h4><p>EMA 目标网络在 ẑ<sub>t<sub>n</sub></sub> 上给出目标，不回传梯度。</p></div>
+    <div data-step-note="5"><h4>⑤ 一致性损失</h4><p>两个预测之间的 Huber 距离。</p></div>
+    <div data-step-note="6"><h4>⑥ 奖励分支</h4><p>T2V-Turbo：解码 ẑ<sub>0</sub>，送进图文与视频文奖励模型，得到奖励目标 J。VideoLCM / AnimateLCM 没有这一支。</p></div>
+    <div data-step-note="7"><h4>⑦ 回传与 EMA</h4><p>L<sub>CD</sub> − J 的梯度只更新学生（或其 LoRA）；随后用 EMA 更新目标网络。</p></div>
+    <div data-step-note="8"><h4>⑧ 推理</h4><p>多步一致性采样，4–8 次 f<sub>θ</sub> 前向，无 CFG。</p></div>
+  </div>
+  <figcaption>图 1　一个训练步的计算图：上半部分是 VideoLCM / AnimateLCM / T2V-Turbo 共用的潜空间一致性蒸馏，下半部分是 T2V-Turbo 加的奖励分支，左下为推理。<span class="src">依据 VideoLCM §3、AnimateLCM §4、T2V-Turbo §3 与附录 B（Algorithm 1）。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="from-image">3.1 从图像到视频：LCM 搬到视频 U-Net 后坏了什么</h3>
+<p><b>继承了什么。</b>这一波方法几乎完整继承了 <a href="03-consistency-models.html#lcm">LCM</a>：潜空间一致性蒸馏、把 CFG 写进 ODE 求解器、跳步网格、EMA 目标网络，以及 LCM-LoRA 式的“加速 LoRA”。视频 U-Net 本身就是图像 U-Net 加时间层，所以 c<sub>skip</sub> / c<sub>out</sub> 参数化、ε→x<sub>0</sub> 的换算都不用改。往前追溯，它们属于 <a href="03-consistency-models.html">一致性模型</a> 的“蒸馏”分支（需要教师给出轨迹上的相邻点）。</p>
+<p><b>哪些假设不再成立。</b></p>
+<ul>
+  <li><b>数据质量：</b>LCM 在 LAION 级别的图像上蒸馏；视频这边可用的公开数据（WebVid）分辨率低、带水印、字幕短而含糊 <span class="src">AnimateLCM §4.2</span>。一致性蒸馏的样本来自训练数据加噪，学生的画质于是同时被“教师在 WebVid 上学到的画质”和“蒸馏数据的画质”两道天花板压住 <span class="src">T2V-Turbo §1</span>。</li>
+  <li><b>时间结构在极少步时最先崩：</b>VideoLCM 观察到 1 步时不仅模糊，物体的时间结构也保不住，4–6 步才接近 50 步 DDIM <span class="src">VideoLCM §4.3</span>；只有带深度等结构条件的组合生成能降到 1–2 步。</li>
+  <li><b>插件生态失配：</b>为图像扩散训练的 ControlNet / T2I-Adapter 接到视频一致性模型上还能用，但会丢细节、出现闪烁 <span class="src">AnimateLCM §4.3、Fig. 6</span>；而这些插件没有对应的视频教师可蒸。</li>
+  <li><b>显存：</b>每个样本 16 帧，奖励反馈要把 16 帧解码回像素再过奖励模型；T2V-Turbo 每卡 batch 只能放 1 段视频 <span class="src">T2V-Turbo 附录 A</span>。若像 InstructVideo 那样对整条采样链反传奖励，显存不可承受，只能截断到最后一步 <span class="src">T2V-Turbo §1</span>。</li>
+</ul>
+<p><b>具体改了什么：</b>AnimateLCM 把“画面先验”和“运动先验”拆成两个阶段分别蒸（下节）；用一步 MCMC 近似代替教师分数，做无教师的插件适配；T2V-Turbo 把奖励梯度加在一致性损失顺带产生的一步生成上，并加入视频文奖励补时间维度；v2 再把数据按目标拆开（高质量长字幕数据只算 CD，短字幕数据算奖励），并把从训练视频提取的运动先验写进教师求解器。</p>
+
+<h3 id="c-videolcm">3.2 VideoLCM：最直接的移植（2023-12）</h3>
+<p>VideoLCM 是一份技术报告：教师取 TF-T2V 发布的预训练视频扩散模型（文生视频与 VideoComposer 式组合生成两类），学生与教师同结构、由教师初始化，DDIM 作求解器，固定 w = 9.0 以保持与教师完全相同的网络结构——LCM 原本把 w 编码后注入网络，那需要新增模块 <span class="src">VideoLCM §3.2</span>。训练规模很小：4 张 A100（1 张喂图像、3 张喂视频）、约 4k 次迭代、学习率 1e-5、EMA 0.95、16 帧 448×256 <span class="src">VideoLCM §4.1</span>。它的价值在于给出了基线：文生视频 4–6 步、深度引导等组合任务 2–4 步（有时 1 步）可用 <span class="src">VideoLCM §4.3</span>。作者自己列出的局限也正是后续工作的切入点：强依赖教师、在域外数据上蒸馏效果差、4–6 步仍不是实时 <span class="src">VideoLCM §4.5</span>。</p>
+
+<h3 id="c-animatelcm">3.3 AnimateLCM：图像先验与运动先验解耦（2024-02）</h3>
+<p>AnimateLCM 基于 SD1.5，教师是 SD1.5 + 开源 AnimateDiff 运动模块 <span class="src">AnimateLCM §5.1</span>。它的出发点是：一致性蒸馏的最终画质很大程度取决于训练数据，而高质量图文数据远多于高质量视频。于是分两阶段：</p>
+<figure>
+  <svg class="dg" viewBox="0 0 960 190" role="img" aria-label="AnimateLCM 解耦一致性学习">
+    <rect class="panel" x="10" y="10" width="320" height="170" rx="12"/>
+    <text class="t-sm" x="24" y="30" style="fill:var(--text);font-weight:650">阶段 1：图像一致性蒸馏</text>
+    <g class="tgt"><rect class="box frozen" x="24" y="46" width="140" height="44" rx="8"/></g>
+    <text class="t-c" x="94" y="68">SD1.5（冻结）</text>
+    <g class="enc"><rect class="box" x="176" y="46" width="140" height="44" rx="8"/></g>
+    <text class="t-c t-b" x="246" y="61">空间 LoRA</text>
+    <text class="t-c t-xs" x="246" y="79">训练</text>
+    <rect class="box data" x="24" y="110" width="292" height="40" rx="8"/>
+    <text class="t-c" x="170" y="130">高质量图文数据（过滤、高分辨率）</text>
+    <path class="edge" d="M246,110 V94"/>
+    <text class="t-xs" x="24" y="168">得到图像 LCM，LoRA 可插拔</text>
+    <path class="edge" d="M330,95 H356"/>
+    <rect class="panel" x="360" y="10" width="590" height="170" rx="12"/>
+    <text class="t-sm" x="374" y="30" style="fill:var(--text);font-weight:650">阶段 2：膨胀为 3D + 视频一致性蒸馏（WebVid-2M）</text>
+    <g class="enc"><rect class="box" x="374" y="44" width="180" height="62" rx="8"/></g>
+    <text class="t-c t-b" x="464" y="61">在线模型 f<tspan font-size="9" dy="3">θ</tspan></text>
+    <text class="t-c t-xs" x="464" y="80">SD1.5 + 空间 LoRA（冻结）</text>
+    <text class="t-c t-xs" x="464" y="96">+ 时间层（零初始化，训练）</text>
+    <path class="edge ema" d="M554,75 H576"/>
+    <g class="tgt"><rect class="box frozen" x="580" y="44" width="180" height="62" rx="8"/></g>
+    <text class="t-c t-b" x="670" y="61">目标模型 f<tspan font-size="9" dy="3">θ⁻</tspan></text>
+    <text class="t-c t-xs" x="670" y="80">EMA；起初不含 LoRA</text>
+    <text class="t-c t-xs" x="670" y="96">LoRA 经 EMA 逐步流入</text>
+    <g class="tgt"><rect class="box frozen" x="786" y="44" width="150" height="62" rx="8"/></g>
+    <text class="t-c t-b" x="861" y="61">教师（冻结）</text>
+    <text class="t-c t-xs" x="861" y="80">SD1.5 + AnimateDiff</text>
+    <text class="t-c t-xs" x="861" y="96">运动模块</text>
+    <text class="t-xs" x="374" y="128">若目标模型一开始就带 LoRA，它和刚插入的时间层组合会给出损坏的目标；</text>
+    <text class="t-xs" x="374" y="146">只放进在线模型、让 EMA 慢慢搬过去，目标在训练初期保持“干净”。</text>
+    <text class="t-xs" x="374" y="166">对照：直接在视频上蒸 8 小时，不如 4 小时图像 + 4 小时视频（8×A800，Fig. 5）</text>
+  </svg>
+  <figcaption>图 2　AnimateLCM 的解耦一致性学习与初始化策略。<span class="src">依据 AnimateLCM §4.2、Fig. 3、§5.4。</span></figcaption>
+</figure>
+<ul>
+  <li><b>为什么能解耦：</b>视频扩散模型本来就是“冻结的图像空间层 + 训练的时间层”（AnimateDiff 正是冻结 SD 的空间权重）。把空间层的一致性先在图像上学好，视频阶段只需让时间层学会在一致性目标下建模运动。</li>
+  <li><b>换风格：</b>由于空间权重就是 SD1.5，可以直接换成社区的个性化 SD1.5 模型。换成 Realistic Vision V5.0 后，UCF-101 零样本 FVD 在 1 步从 1256.50 降到 1071.50 <span class="src">AnimateLCM Tab. 1</span>（4、8 步反而变差，作者归因于个性化模型与 UCF-101 的域差）。</li>
+  <li><b>无教师适配：</b>对插件（图生视频的图像编码器、ControlNet / T2I-Adapter）没有现成的视频教师。AnimateLCM 用“同一噪声 ε<sub>0</sub>、两个时间点”的一步估计代替教师 ODE 步：若 x<sub>t</sub> = √α<sub>t</sub> x + √(1−α<sub>t</sub>) ε<sub>0</sub>，DDIM 一步恰好给出 √α<sub>t−1</sub> x + √(1−α<sub>t−1</sub>) ε<sub>0</sub> <span class="src">AnimateLCM Eq. 11–12</span>——这本质上就是一致性模型原文的“一致性训练”（CT），以一定偏差换来不需要教师。用它从头训练了图生视频适配器，并给现有布局插件加 LoRA 微调，控制稳定性明显改善 <span class="src">AnimateLCM Fig. 6</span>。</li>
+</ul>
+
+<h3 id="c-t2v-turbo">3.4 T2V-Turbo / -v2：把奖励梯度加在“免费的一步生成”上</h3>
+<p>T2V-Turbo 的观察很简单：一致性损失里的 \(f_\theta(z_{t_{n+k}},w,c,t_{n+k})\) 就是一次完整的一步生成。对它解码、打分、反传，只多一次 VAE 解码和奖励模型前向，不用穿过多步采样链 <span class="src">T2V-Turbo §3</span>。两类奖励分工不同：图文奖励（HPSv2.1）只看单帧的美学与图文对齐，对随机抽的 M 帧求和；视频文奖励（InternVid2 S2 或 ViCLIP）看整段，补上帧间动态与过渡 <span class="src">T2V-Turbo §3.1–3.2</span>。消融显示单用 R<sub>img</sub> 已带来大部分收益（VC2：Total 73.97 → 80.42），再加 R<sub>vid</sub> 主要提升语义分（71.70 → 74.76） <span class="src">T2V-Turbo Tab. 2</span>。</p>
+<p>T2V-Turbo-v2（ICLR 2025）在三个方向上扩展：① <b>数据</b>：高质量、长字幕的 VidGen-1M 与 WebVid-10M 各半；CD 损失用全部数据，奖励只在短字幕的 WebVid 上算，因为奖励模型的文本上下文只有 77（HPSv2.1 / CLIP）或 40（InternV2）个 token <span class="src">T2V-Turbo-v2 §4.2</span>；② <b>奖励</b>：HPSv2.1 + CLIPScore + InternV2 的组合，并指出“哪个奖励最有用”依赖于数据集；③ <b>条件引导</b>：把 MotionClone 的时间注意力引导写成能量函数 \(\mathcal G\) 加进教师求解器，参考视频就是训练视频本身（生成提示正是它的字幕），并把昂贵的 DDIM 反演挪到训练前的预处理阶段 <span class="src">T2V-Turbo-v2 §3.2</span>。v2 还去掉了 EMA 目标网络，改为全参数训练 <span class="src">T2V-Turbo-v2 §3.1</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与 NFE 追踪</h2>
+<p>三篇论文都没有写出潜变量形状；下表按 SD 系 VAE（空间 8× 下采样、4 通道）<span class="unverified">推算</span>，像素分辨率与帧数来自论文。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状 / 次数</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>VideoLCM 输入<br><span class="src">VideoLCM §4.1</span></td><td>[B, 3, 16, 256, 448] → 潜变量 [B, 4, 16, 32, 56]</td><td>16 帧、中心裁 448×256；潜变量形状为推算</td></tr>
+    <tr><td>AnimateLCM 评测<br><span class="src">AnimateLCM §5.1</span></td><td>16 帧 512×512 → [B, 4, 16, 64, 64]</td><td>UCF-101 评测设置；潜变量为推算</td></tr>
+    <tr><td>T2V-Turbo（VC2）<br><span class="src">T2V-Turbo 附录 A</span></td><td>16 帧 320×512，fps 条件 16 → [1, 4, 16, 40, 64]</td><td>每卡 batch 1</td></tr>
+    <tr><td>T2V-Turbo（MS）<br><span class="src">T2V-Turbo 附录 A</span></td><td>16 帧 256×256，8 fps → [1, 4, 16, 32, 32]</td><td></td></tr>
+    <tr><td>奖励分支<br><span class="src">T2V-Turbo-v2 §4</span></td><td>𝒟(ẑ<sub>0</sub>)：[1, 3, 16, H, W]；R<sub>img</sub> 取 M = 6 帧</td><td>v2 取 M = 2，CD batch 3、奖励 batch 1</td></tr>
+    <tr><td>每个训练步的网络前向<br><span class="src">VideoLCM §4.1、Tab. 1</span> <span class="src">AnimateLCM v1 §5.1</span> <span class="src">Turbo App. A</span> <span class="src">v2 §4、App. C.1（潜变量为推算）</span></td><td>学生 1（有梯度）+ 教师 2（条件 / 无条件）+ 目标网络 1</td><td>由 Algorithm 1 推算；v2 去掉 EMA 后目标仍需一次学生前向（stop-grad）</td></tr>
+    <tr><td>推理 NFE<br><span class="src">VideoLCM §4.1、Tab. 1</span> <span class="src">AnimateLCM v1 §5.1</span> <span class="src">Turbo App. A</span> <span class="src">v2 §4、App. C.1（潜变量为推算）</span></td><td>教师 50 步 DDIM（含 CFG ≈ 100 次前向） → 学生 4 次</td><td>CFG 计两次为推算</td></tr>
+    <tr><td>VideoLCM 实测时延（A100，一次 8 段）<br><span class="src">VideoLCM Tab. 1</span></td><td>16×256×256：60 s → 10 s；16×448×256：104 s → 16 s</td><td>含文本编码与 VAE 解码</td></tr>
+    <tr><td>T2V-Turbo-v2 实测时延（BF16）<br><span class="src">T2V-Turbo-v2 附录 C.1</span></td><td>4 步约 1 s；8 步约 1.5 s；16 步约 3 s</td><td>GPU 型号未说明</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标</h2>
+<p>CFG 增强的教师一步（\(\Psi\) 为 DDIM，\(k\) 为跳步）：</p>
+<div class="formula">$$\hat z^{\Psi,w}_{t_n}=z_{t_{n+k}}+(1+w)\,\Psi(z_{t_{n+k}},t_{n+k},t_n,c)-w\,\Psi(z_{t_{n+k}},t_{n+k},t_n,\varnothing)$$</div>
+<p>一致性蒸馏损失（VideoLCM 固定 \(w\)，学生不显式接收 \(w\)）：</p>
+<div class="formula">$$\mathcal L_\text{CD}=\mathbb E_{z,c,w,n}\Big[\lambda_n\, d\big(f_\theta(z_{t_{n+k}},w,c,t_{n+k}),\ f_{\theta^-}(\hat z^{\Psi,w}_{t_n},w,c,t_n)\big)\Big],\qquad d(x,y)=\sqrt{\lVert x-y\rVert_2^2+c^2}-c$$</div>
+<p>\(\lambda_n=(1-\delta n/N)^\gamma\) 只在 AnimateLCM 中使用。T2V-Turbo 的总目标：</p>
+<div class="formula">$$\mathcal L=\mathcal L_\text{CD}-\beta_\text{img}\,\mathbb E\sum_{m=1}^{M}R_\text{img}(\hat x_0^m,c)-\beta_\text{vid}\,\mathbb E\,R_\text{vid}(\hat x_0,c),\qquad \hat x_0=\mathcal D\big(f_\theta(z_{t_{n+k}},w,c,t_{n+k})\big)$$</div>
+<p>T2V-Turbo-v2 的两处修改：目标网络换成 \(\mathrm{sg}[f_\theta(\cdot)]\)；教师一步再加运动能量的梯度，\(\hat z^{\Psi,w,\lambda}_{t_n}=\hat z^{\Psi,w}_{t_n}+\lambda\nabla_{z}\mathcal G^m(z_{t_{n+k}},z^\text{ref}_{t_{n+k}},t_{n+k})\)，其中 \(\mathcal G^m\) 比较生成与参考视频的时间注意力图（只保留每行最大值处），只在前 \(\tau=50\%\) 的步上施加 <span class="src">T2V-Turbo-v2 Eq. 6–9、§4</span>。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部不一致</span>
+  <ul>
+    <li>T2V-Turbo 正文 §4 写“8 张 A100”，附录 A 写“6–8 张 A100”；均为每卡 batch 1、10K 步。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 Eq. 7–12</span> <span class="src">Turbo Eq. 5–10</span> <span class="src">v2 Eq. 6–9</span></li>
+    <li>T2V-Turbo-v2 摘要与引言称 VBench “Total Score 85.13”，但 Tab. 1 与附录 Tab. 5 中带运动引导的 16 步模型 Total 为 83.52、<b>Quality</b> 为 85.13。本页按表格取 Total 83.52。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 Eq. 7–12</span> <span class="src">Turbo Eq. 5–10</span> <span class="src">v2 Eq. 6–9</span></li>
+    <li>AnimateLCM 的 arXiv v3 是 SIGGRAPH Asia 2024 Technical Communications 的短版，标题也改了；本页的方法细节与 Tab. 1 数字取自完整的 v1。 <span class="src">VideoLCM §3</span> <span class="src">AnimateLCM v1 Eq. 7–12</span> <span class="src">Turbo Eq. 5–10</span> <span class="src">v2 Eq. 6–9</span></li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">video_lcd_step.py（按 T2V-Turbo Algorithm 1 改写；注释标出其他两篇的差别）</div>
+<pre><code class="lang-py">def train_step(video, text):
+    z = vae.encode(video)                              # [B, 4, 16, h, w]，VAE 冻结
+    n = randint(1, N - k)                               # 网格下标；k = 20（T2V-Turbo）
+    w = uniform(5, 15)                                  # VideoLCM：固定 w = 9，学生不接收 w
+    z_tk = q_sample(z, t[n + k], randn_like(z))         # 前向加噪到 t_{n+k}
+    with no_grad():                                     # 教师：CFG 增强的 DDIM 一步
+        eps = (1 + w) * teacher(z_tk, t[n + k], text) - w * teacher(z_tk, t[n + k], null)
+        z_tn = ddim_step(z_tk, eps, t[n + k], t[n])
+        # AnimateLCM 无教师适配：z_tn = q_sample(z, t[n], 同一个噪声)，不调用教师
+        target = ema_student(z_tn, w, text, t[n])       # v2：改为 student(...).detach()
+    z0_hat = student(z_tk, w, text, t[n + k])           # 一步生成（LoRA 可训练）
+    loss = huber(z0_hat, target)                        # AnimateLCM：再乘 λ_n
+    if use_reward:                                      # 仅 T2V-Turbo / -v2
+        x0_hat = vae.decode(z0_hat)                     # 16 帧解码，带梯度（显存大头）
+        frames = x0_hat[:, :, randperm(16)[:M]]         # M = 6（v2：M = 2）
+        loss = loss - beta_img * hps_v21(frames, text).sum() \
+                    - beta_vid * video_rm(x0_hat, text)  # InternVid2 S2 或 ViCLIP
+    loss.backward(); opt.step(); opt.zero_grad()
+    ema_update(ema_student, student, mu)                # VideoLCM：mu = 0.95
+
+def sample(text, steps=4):                              # 多步一致性采样，无 CFG
+    z = randn(shape)
+    for i, tau in enumerate(taus(steps)):               # 从大到小的时间点
+        x0 = student(z, w_infer, text, tau)
+        z = q_sample(x0, taus(steps)[i + 1], randn_like(x0)) if i + 1 &lt; steps else x0
+    return vae.decode(z)</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>VideoLCM</th><th>AnimateLCM</th><th>T2V-Turbo</th><th>T2V-Turbo-v2</th></tr></thead>
+  <tbody>
+    <tr><td>教师<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>TF-T2V 预训练模型</td><td>SD1.5 + AnimateDiff</td><td>VideoCrafter2 / ModelScopeT2V</td><td>VideoCrafter2</td></tr>
+    <tr><td>训练参数<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>全网络</td><td>空间 LoRA → 时间层</td><td>LoRA（训完合并）</td><td>全参数</td></tr>
+    <tr><td>数据<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>WebVid-10M + LAION-5B + 约 1M 内部视频</td><td>图像阶段：过滤的高质量图文；视频阶段：WebVid-2M</td><td>WebVid-10M</td><td>VidGen-1M + WebVid-10M 各半</td></tr>
+    <tr><td>引导尺度 w<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>固定 9.0</td><td>CFG 增强求解器（数值未给）</td><td>[5, 15]</td><td>[5, 15]；运动引导 λ = 500、τ = 0.5</td></tr>
+    <tr><td>求解器 / 网格<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>DDIM</td><td>DDIM，1000 步中取 50 个</td><td>DDIM，k = 20</td><td>DDIM，k = 5</td></tr>
+    <tr><td>损失<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>Huber</td><td>Huber × λ<sub>n</sub></td><td>CD − 1·J<sub>img</sub> − 2·J<sub>vid</sub>（VC2）；2 / 3（MS）</td><td>CD − J；β<sub>img</sub> = 0.2（HPSv2.1、CLIP 各一份）、β<sub>v</sub> = 0.5</td></tr>
+    <tr><td>学习率 / EMA<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>1e-5 / 0.95</td><td>未给出</td><td>1e-5 / μ（未给数值）</td><td>1e-5 / 去掉目标网络</td></tr>
+    <tr><td>算力<br><span class="src">VideoLCM §3.2、§4.1</span> <span class="src">AnimateLCM v1 §4–5</span> <span class="src">Turbo §4、App. A</span> <span class="src">v2 §4</span></td><td>4×A100，约 4k 次迭代</td><td>消融：8×A800 上图像 4 h + 视频 4 h</td><td>8×A100（附录：6–8），10K 步，每卡 1 段</td><td>8×A100，8K 步</td></tr>
+  </tbody>
+</table></div>
+<p>表中取值出处：<span class="src">VideoLCM §3.2、§4.1</span><span class="src">AnimateLCM §4.1–4.2、§5.1、§5.4</span><span class="src">T2V-Turbo §4、附录 A</span><span class="src">T2V-Turbo-v2 §4、§4.1</span></p>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>VBench（16 个维度，每个提示生成 5 段）。</b>基线数字来自 VBench 排行榜（各自的默认采样设置），VCM 与 T2V-Turbo 行由论文按同一协议自测；VCM 指不加奖励的同配置一致性蒸馏。 <span class="src">Turbo Tab. 1–2</span> <span class="src">v2 Tab. 1/5</span> <span class="src">AnimateLCM v1 Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">步数</th><th class="num">Total</th><th class="num">Quality</th><th class="num">Semantic</th></tr></thead>
+  <tbody>
+    <tr><td>ModelScopeT2V（教师）<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">榜单设置</td><td class="num">75.75</td><td class="num">78.05</td><td class="num">66.54</td></tr>
+    <tr><td>VCM (MS)<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">4</td><td class="num">75.84</td><td class="num">78.80</td><td class="num">63.98</td></tr>
+    <tr class="hl"><td>T2V-Turbo (MS)<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">4</td><td class="num">80.62</td><td class="num">82.15</td><td class="num">74.47</td></tr>
+    <tr><td>VideoCrafter2（教师）<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">榜单设置</td><td class="num">80.44</td><td class="num">82.20</td><td class="num">73.42</td></tr>
+    <tr><td>VCM (VC2)<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">4</td><td class="num">73.97</td><td class="num">78.54</td><td class="num">55.66</td></tr>
+    <tr class="hl"><td>T2V-Turbo (VC2)<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">4</td><td class="num">81.01</td><td class="num">82.57</td><td class="num">74.76</td></tr>
+    <tr><td>Gen-2<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">—</td><td class="num">80.58</td><td class="num">82.47</td><td class="num">73.03</td></tr>
+    <tr><td>Pika<br><span class="src">T2V-Turbo Tab. 1</span></td><td class="num">—</td><td class="num">80.40</td><td class="num">82.68</td><td class="num">71.26</td></tr>
+  </tbody>
+</table></div>
+<p>数字来自 <span class="src">T2V-Turbo Tab. 1</span>。人评（EvalCrafter 700 个提示）：T2V-Turbo 的 4 步结果在三个问题上都更受偏好于教师的 50 步 DDIM，即采样步数减少约 12.5 倍（50/4，推算；不是墙钟加速测量） <span class="src">T2V-Turbo §4.2、Fig. 3</span>。</p>
+<p>注意 VCM (VC2) 的语义分 55.66 远低于教师的 73.42：纯一致性蒸馏在文本对齐上掉得最厉害，这正是奖励反馈主要补回的部分。 <span class="src">Turbo Tab. 1–2</span> <span class="src">v2 Tab. 1/5</span> <span class="src">AnimateLCM v1 Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>T2V-Turbo-v2（VBench）</th><th class="num">步数</th><th class="num">Total</th><th class="num">Quality</th><th class="num">Semantic</th></tr></thead>
+  <tbody>
+    <tr><td>T2V-Turbo (VC2)<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">4 / 16</td><td class="num">81.01 / 80.51</td><td class="num">82.57 / 82.27</td><td class="num">74.76 / 73.43</td></tr>
+    <tr><td>Gen-3（榜单）<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">—</td><td class="num">82.32</td><td class="num">84.11</td><td class="num">75.17</td></tr>
+    <tr><td>Kling（榜单）<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">—</td><td class="num">81.85</td><td class="num">83.39</td><td class="num">75.68</td></tr>
+    <tr><td>T2V-Turbo-v2，无运动引导<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">16</td><td class="num">82.93</td><td class="num">84.08</td><td class="num">78.33</td></tr>
+    <tr class="hl"><td>T2V-Turbo-v2，有运动引导<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">16</td><td class="num">83.52</td><td class="num">85.13</td><td class="num">77.12</td></tr>
+    <tr><td>同上<br><span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span></td><td class="num">4 / 8</td><td class="num">82.34 / 83.05</td><td class="num">83.93 / 84.74</td><td class="num">—</td></tr>
+  </tbody>
+</table></div>
+<p>数字来自 <span class="src">T2V-Turbo-v2 Tab. 1、Tab. 5</span>。T2V-Turbo 的 16 步反而比 4 步差，v2 随步数单调变好。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>AnimateLCM，UCF-101 零样本 FVD↓</th><th class="num">1 步</th><th class="num">2 步</th><th class="num">4 步</th><th class="num">8 步</th></tr></thead>
+  <tbody>
+    <tr><td>DDIM（教师，CFG 7.5）<br><span class="src">AnimateLCM v1 Tab. 1、§5.1</span></td><td class="num">4940.83</td><td class="num">3218.74</td><td class="num">1944.82</td><td class="num">1209.88</td></tr>
+    <tr><td>DPM++（教师，CFG 7.5）<br><span class="src">AnimateLCM v1 Tab. 1、§5.1</span></td><td class="num">2731.37</td><td class="num">2093.47</td><td class="num">1043.82</td><td class="num">932.43</td></tr>
+    <tr class="hl"><td>AnimateLCM（无 CFG）<br><span class="src">AnimateLCM v1 Tab. 1、§5.1</span></td><td class="num">1256.50</td><td class="num">1081.26</td><td class="num">925.71</td><td class="num">910.34</td></tr>
+  </tbody>
+</table></div>
+<p>数字来自 <span class="src">AnimateLCM Tab. 1</span>（每类 24 段 16 帧 512×512）。基线是同一教师配少步求解器，而不是其他蒸馏方法——论文写作时没有可比的开源视频蒸馏权重。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>这一波解决了什么</h4><ul>
+    <li>把现成的 U-Net 文生视频模型在几个 GPU 日内压到 4–8 步，LoRA 形式可插拔； <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+    <li>AnimateLCM 证明“画面 / 运动”可以分开蒸，并能接上社区个性化模型与插件；</li>
+    <li>T2V-Turbo 用一步生成上的奖励梯度打破“学生 ≤ 教师”，4 步在 VBench 上超过 50 步教师。 <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>1 步仍模糊：确定性回归在 1 步的上限很低。Seaweed-APT 的视频基线里，一致性蒸馏 1 步 VBench 只有 67.05，它只把一致性蒸馏当初始化，再做对抗后训练（<a href="10-apt.html">APT</a>）； <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+    <li>基座停留在 16 帧、最高 512×512 的 U-Net；一致性路线后来转向连续时间形式（<a href="08-scm.html">sCM</a>），并在大型视频 DiT 上规模化（<a href="13-rcm.html">rCM</a>）； <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+    <li>同期另一条路是分布匹配：<a href="09-causvid.html">CausVid</a> 用 DMD 把双向视频模型蒸成 4 步因果生成器，后续 <a href="12-self-forcing.html">Self Forcing</a> 解决自回归的暴露偏差； <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+    <li>“图像管画面、视频管运动”的思路被 Motion Consistency Model（MCM，2024-06）推进为单阶段：视频一致性蒸馏只作用于运动表征，另用图像判别器把帧画质拉向高质量图像。 <span class="src">APT Tab. 7</span> <span class="src">MCM arXiv:2406.06890 摘要</span></li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q13"><span class="qid">Q13</span>把 LCM 直接搬到视频 U-Net 上，学生画质为什么会被“双重封顶”？AnimateLCM 的解耦一致性学习和初始化策略是如何绕开的？</h3>
+  <div class="ans">
+    <p class="short">一致性蒸馏的样本是“训练数据加噪”，目标是教师在这条轨迹上的 ODE 走向，所以学生同时受限于教师的画质和蒸馏数据的画质；公开视频数据（WebVid）低分辨率、带水印、字幕短，两道上限都很低。AnimateLCM 利用“视频模型 = 冻结的图像空间层 + 时间层”这一结构，先在高质量图像上把空间层蒸成图像一致性模型（只训 LoRA），再膨胀成 3D、冻结空间部分，只让时间层在视频上学一致性——画面先验来自好数据，视频只负责运动。</p>
+    <ul>
+      <li>初始化细节：空间 LoRA 起初只插入在线模型，不插入 EMA 目标模型，避免“LoRA + 未训练时间层”的组合在训练初期给出损坏的目标；LoRA 再经 EMA 逐步流入目标。</li>
+      <li>证据：同样 8 小时预算下，直接在视频上做一致性蒸馏明显不如“4 h 图像 + 4 h 视频”，去掉初始化策略也会变差（Fig. 5）。</li>
+      <li>副产品：空间层仍是 SD1.5，可直接换成个性化风格模型；1 步 FVD 由 1256.50 降到 1071.50。 <span class="src">AnimateLCM v1 §4.2、Fig. 5</span> <span class="src">Turbo §3、Tab. 2</span> <span class="src">v2 §4.2</span></li>
+      <li>VideoLCM 的做法是混入 LAION 图像联合训练，但没有把两类先验分开蒸，因此没有获得同样的解耦收益。</li>
+    </ul>
+    <p class="cite">依据：AnimateLCM §4.2、Fig. 3、Fig. 5、Tab. 1；VideoLCM §4.1；T2V-Turbo §1（“VCM 受教师质量所限”）。</p>
+  </div>
+  <h3 id="q14"><span class="qid">Q14</span>T2V-Turbo 为什么无需反传整条采样链就能把奖励梯度加进一致性蒸馏？为什么既要图文奖励又要视频文奖励，且 CD 损失不能去掉？</h3>
+  <div class="ans">
+    <p class="short">算一致性损失时，学生已经从 \(z_{t_{n+k}}\) 一步预测出完整的干净潜变量 \(\hat z_0\)；把它解码后直接送进可微奖励模型，梯度只穿过“学生一次前向 + VAE 解码 + 奖励模型”，不像 InstructVideo 那样要穿过整条多步采样链（后者只能截断到最后一步）。图文奖励只能逐帧评美学与对齐，看不到运动与过渡，所以再加一个整段视频的视频文模型；消融里单用 R<sub>img</sub> 拿到大部分 Total 提升，加 R<sub>vid</sub> 主要提升语义分。</p>
+    <ul>
+      <li>数字（VC2，4 步）：VCM 73.97 → +R<sub>vid</sub> 77.57 → +R<sub>img</sub> 80.42 → 两者 81.01；语义分 55.66 → 74.76。 <span class="src">AnimateLCM v1 §4.2、Fig. 5</span> <span class="src">Turbo §3、Tab. 2</span> <span class="src">v2 §4.2</span></li>
+      <li>CD 损失的作用是正则：v2 发现若把 CD 数据与奖励数据完全分开（高质量数据只算 CD、短字幕数据只算奖励），会出现颜色失真，说明 CD 防止了奖励的过度优化；因此 CD 用全部数据，奖励只在短字幕子集上算。</li>
+      <li>仍有代价：16 帧解码带梯度很占显存，T2V-Turbo 每卡 batch 只能放 1 段；奖励模型的文本上下文（77 / 40 token）限制了它在长字幕数据上的效果。 <span class="src">AnimateLCM v1 §4.2、Fig. 5</span> <span class="src">Turbo §3、Tab. 2</span> <span class="src">v2 §4.2</span></li>
+      <li>奖励作用在不同噪声水平的一步预测上：大 t 时 \(\hat z_0\) 接近真正的一步生成，小 t 时更接近数据重建（这一点是推论，论文未单独分析）。</li>
+    </ul>
+    <p class="cite">依据：T2V-Turbo §1、§3、Tab. 2、附录 A；T2V-Turbo-v2 §4.2、附录 C.2。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Wang, Zhang, Zhang, Liu, Zhang, Gao, Sang. <i>VideoLCM: Video Latent Consistency Model.</i> 技术报告, 2023. <a href="https://arxiv.org/abs/2312.09109">arXiv:2312.09109</a> · 代码 <a href="https://github.com/ali-vilab/VGen">ali-vilab/VGen</a>（2024-04 发布） <span class="src">VGen README News</span></li>
+  <li>Wang, Huang, Bian, Shi, Sun, Song, Liu, Li. <i>AnimateLCM: Accelerating the Animation of Personalized Diffusion Models and Adapters with Decoupled Consistency Learning</i>（v3 改名为 <i>Computation-Efficient Personalized Style Video Generation without Personalized Video Data</i>）. SIGGRAPH Asia 2024 Technical Communications. <a href="https://arxiv.org/abs/2402.00769">arXiv:2402.00769</a> · 代码 <a href="https://github.com/G-U-N/AnimateLCM">G-U-N/AnimateLCM</a></li>
+  <li>Li, Feng, Fu, Wang, Basu, Chen, Wang. <i>T2V-Turbo: Breaking the Quality Bottleneck of Video Consistency Model with Mixed Reward Feedback.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2405.18750">arXiv:2405.18750</a> · 代码 <a href="https://github.com/Ji4chenLi/t2v-turbo">Ji4chenLi/t2v-turbo</a></li>
+  <li>Li, Long, Zheng, Gao, Piramuthu, Chen, Wang. <i>T2V-Turbo-v2: Enhancing Video Generation Model Post-Training through Data, Reward, and Conditional Guidance Design.</i> ICLR 2025. <a href="https://arxiv.org/abs/2410.05677">arXiv:2410.05677</a></li>
+  <li>Luo, Tan, Huang, Li, Zhao. <i>Latent Consistency Models.</i> 2023. <a href="https://arxiv.org/abs/2310.04378">arXiv:2310.04378</a>；Song, Dhariwal, Chen, Sutskever. <i>Consistency Models.</i> ICML 2023. <a href="https://arxiv.org/abs/2303.01469">arXiv:2303.01469</a></li>
+  <li>Guo et al. <i>AnimateDiff.</i> ICLR 2024. <a href="https://arxiv.org/abs/2307.04725">arXiv:2307.04725</a>；Chen et al. <i>VideoCrafter2.</i> 2024. <a href="https://arxiv.org/abs/2401.09047">arXiv:2401.09047</a>；Wang et al. <i>ModelScope Text-to-Video Technical Report.</i> 2023. <a href="https://arxiv.org/abs/2308.06571">arXiv:2308.06571</a></li>
+  <li>Zhai et al. <i>Motion Consistency Model: Accelerating Video Diffusion with Disentangled Motion-Appearance Distillation.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2406.06890">arXiv:2406.06890</a>；Wang et al. <i>Phased Consistency Models.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2405.18407">arXiv:2405.18407</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

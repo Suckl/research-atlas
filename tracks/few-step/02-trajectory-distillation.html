@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轨迹蒸馏：PD、Rectified Flow 与 InstaFlow</title>
+<meta name="description" content="拆解 Progressive Distillation 的两步合一目标与 v 参数化，解释 Reflow 的端点配对、InstaFlow 单步蒸馏和教师采样成本。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+<script defer src="../../assets/js/widgets/fewstep2d.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="few-step" data-node="progressive-distillation">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：一次学完整条轨迹，还是逐段合并</h2>
+<p>DDIM 的确定性采样给出了一个关键接口：固定初始噪声 \(\epsilon\)，教师输出就确定了。Luhman 与 Luhman 的 <i>Denoising Student</i> 是本线最早的单步 ODE / DDIM 映射蒸馏工作，直接回归教师采样器的最终输出，而不是把独立的真实图像随机配给噪声<span class="src">Denoising Student §3</span>。它先生成 1.024 million 对合成样本；CIFAR-10 与 CelebA 教师用 100 步 DDIM，LSUN 用 50 步<span class="src">Denoising Student §3.1、§4</span>。每个配对都要跑完教师，离线数据成本随教师步数增长。</p>
+<p>Progressive Distillation（PD）把困难的大跳跃拆开：学生每次只学会替代相邻的两步教师 DDIM，再把训练好的学生冻结成下一轮教师，逐轮减半<span class="src">PD §3、Alg. 2</span>。Rectified Flow 则先改造流的几何和噪声—端点配对，让完整映射更容易用单步表示。两者都利用确定配对，但一个压缩局部积分，另一个先把流拉直。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  PD 教学生“用一次跳跃接住教师两步的落点”；Reflow 先重新配对噪声与教师终点，再学习更直的路径。单步效果取决于要拟合的映射有多复杂，而不只取决于教师图像有多好。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：PD 的局部两步合一</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 隐变量</span><span><i class="sw enc"></i>学生生成器（可训练）</span>
+  <span><i class="sw tgt"></i>教师 / 冻结网络</span><span><i class="sw pred"></i>辅助可训练网络</span>
+  <span><i class="sw act"></i>条件</span><span><i class="sw loss"></i>损失</span><span><i class="sw reg"></i>正则项</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="Progressive Distillation：教师两步 DDIM 与学生一步的可逆目标构造">
+    <g class="data" data-part="input" data-step="1">
+      <rect class="box" x="24" y="72" width="152" height="112" rx="10"/>
+      <text class="t-c t-b" x="100" y="99">带噪数据 x_t</text><text class="t-c t-xs" x="100" y="124">α_t x₀ + σ_t ε</text><text class="t-c t-xs" x="100" y="147">离散时间网格</text><text class="t-c t-xs" x="100" y="170">条件 c（若有）</text>
+    </g>
+    <path class="edge" d="M176,110 H216" data-step="2"/>
+    <g class="tgt" data-part="first" data-step="2">
+      <rect class="box frozen" x="220" y="72" width="190" height="112" rx="10"/>
+      <text class="t-c t-b" x="315" y="101">教师 DDIM</text><text class="t-c t-sm" x="315" y="130">t → t′</text><text class="t-c t-xs" x="315" y="155">先到中点 x_t′</text><text class="t-c t-xs" x="315" y="173">参数冻结</text>
+    </g>
+    <path class="edge sg" d="M410,128 H450" data-step="3"/>
+    <g class="tgt" data-part="second" data-step="3">
+      <rect class="box frozen" x="454" y="72" width="190" height="112" rx="10"/>
+      <text class="t-c t-b" x="549" y="101">同一教师 DDIM</text><text class="t-c t-sm" x="549" y="130">t′ → s</text><text class="t-c t-xs" x="549" y="155">得到落点 x_s</text><text class="t-c t-xs" x="549" y="173">不是最终数据端</text>
+    </g>
+    <path class="edge sg" d="M644,128 H690" data-step="4"/>
+    <g class="data" data-part="target" data-step="4">
+      <rect class="box" x="694" y="72" width="240" height="112" rx="10"/>
+      <text class="t-c t-b" x="814" y="101">反解学生 DDIM</text><text class="t-c t-sm" x="814" y="130">构造 x̃₀(x_t, t)</text><text class="t-c t-xs" x="814" y="155">使一步 t → s 落在 x_s</text><text class="t-c t-xs" x="814" y="173">确定的停止梯度目标</text>
+    </g>
+    <path class="edge" d="M176,158 H196 V288 H216" data-step="5"/>
+    <g class="enc" data-part="student" data-step="5">
+      <rect class="box" x="220" y="248" width="190" height="104" rx="10"/>
+      <text class="t-c t-b" x="315" y="278">学生 G_θ</text><text class="t-c t-xs" x="315" y="303">x₀ / v 参数化</text><text class="t-c t-xs" x="315" y="325">从教师权重初始化</text><text class="t-c t-xs" x="315" y="344">一次预测 x̂₀</text>
+    </g>
+    <path class="edge enc" d="M410,286 H440 V220 H814 V244" data-step="5"/>
+    <path class="edge sg" d="M814,184 V202 H924 V244" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5 6">
+      <rect class="box" x="694" y="248" width="240" height="104" rx="10"/>
+      <text class="t-c t-b" x="814" y="278">加权回归损失</text><text class="t-c t-xs" x="814" y="303">a(t) · ‖x̂₀ − x̃₀‖²</text><text class="t-c t-xs" x="814" y="328">只更新学生 θ</text>
+    </g>
+    <path class="edge grad" d="M814,352 V390 H315 V356" data-step="6"/>
+    <text class="t-c t-xs" x="552" y="411" data-step="6">反传不经过教师与目标构造</text>
+    <g class="tgt" data-part="promote" data-step="7">
+      <rect class="box frozen" x="454" y="248" width="190" height="104" rx="10"/>
+      <text class="t-c t-b" x="549" y="278">本轮训练收敛后</text><text class="t-c t-xs" x="549" y="303">学生冻结为新教师</text><text class="t-c t-xs" x="549" y="327">采样步数再减半</text>
+    </g>
+    <path class="edge idx" d="M410,332 H450" data-step="7"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>从真实数据附近开始</h4><p>每次更新取真实数据加噪，而不是从纯噪声跑完整教师。PD 的教师监督仅需局部两次评价，独立于完整教师的采样步数<span class="src">PD §3、§6</span>。</p></div>
+    <div data-note="first"><h4>先走半个学生步长</h4><p>教师在较细网格上走到中点；这是确定性 DDIM 更新，无额外采样噪声<span class="src">PD Alg. 2</span>。</p></div>
+    <div data-note="second"><h4>重新评价中点</h4><p>第二步在新的中间状态评价教师，不是复用第一步的预测；这正是学生一次大跳跃要吸收的计算<span class="src">PD Alg. 2</span>。</p></div>
+    <div data-note="target"><h4>目标不是直接 x_s</h4><p>学生网络预测数据端表示，而采样器负责从 t 更新到 s。反解 DDIM 得到应预测的 x̃₀，才能让两种落点一致<span class="src">PD App. G</span>。</p></div>
+    <div data-note="student"><h4>保留时间条件</h4><p>学生仍是可复用的去噪网络，不只拟合最高噪声端；图中 G_θ 表示它的数据预测接口。选择 v 输出时先换算为 x̂₀。</p></div>
+    <div data-note="loss"><h4>低 SNR 不能丢掉监督</h4><p>普通 ε-MSE 换算到数据空间的权重随 SNR 降到零。PD 改用稳定的输出参数化与 truncated-SNR 或 SNR+1 权重<span class="src">PD §4</span>。</p></div>
+    <div data-note="promote"><h4>跨轮替换，不是 EMA</h4><p>完整训练一轮后才将学生提升为冻结教师。它与每个训练更新就维护的 EMA target 不同。</p></div>
+    <div data-step-note="1"><h4>① 构造输入</h4><p>采样数据、噪声与当前学生网格上的时刻。</p></div>
+    <div data-step-note="2"><h4>② 教师前半段</h4><p>从当前状态做确定性 DDIM 到中点。</p></div>
+    <div data-step-note="3"><h4>③ 教师后半段</h4><p>在中点再次评价教师，到达下一学生时刻。</p></div>
+    <div data-step-note="4"><h4>④ 反解数据目标</h4><p>由当前输入与教师落点构造学生应该预测的数据值。</p></div>
+    <div data-step-note="5"><h4>⑤ 学生前向与损失</h4><p>学生预测与反解目标比较。</p></div>
+    <div data-step-note="6"><h4>⑥ 更新学生</h4><p>只对学生分支反传。</p></div>
+    <div data-step-note="7"><h4>⑦ 下一轮</h4><p>收敛后冻结学生、复制权重，再减半网格。</p></div>
+  </div>
+  <figcaption>图 1　PD 的局部蒸馏更新与跨轮替换，依据 PD Fig. 1、Alg. 2、App. G。图中两次教师评价是共享参数的调用，不是独立教师网络。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-target">3.1 反解 DDIM：监督的是“能够接住落点的数据预测”</h3>
+<p>PD 使用 VP 约定 \(x_t=\alpha_t x_0+\sigma_t\epsilon\)、\(\alpha_t^2+\sigma_t^2=1\)，t 越大噪声越强。一个学生步长记为 h；教师先从 t 到 \(t'=t-h/2\)，再到 \(s=t-h\)。确定性 DDIM 更新可以写成<span class="src">PD Eq. (7)、Alg. 2</span>：</p>
+<div class="formula">$$x_s=\alpha_s\hat x_0+\frac{\sigma_s}{\sigma_t}(x_t-\alpha_t\hat x_0),\qquad
+\tilde x_0=\frac{x_s-(\sigma_s/\sigma_t)x_t}{\alpha_s-(\sigma_s/\sigma_t)\alpha_t}.$$
+</div>
+<p>右边的 \(x_s\) 是教师两步算出的结果，\(\tilde x_0\) 才是学生数据预测的回归标签。一般它既不等于原始训练图像，也不等于中间状态。给定 \(x_t,t\) 后标签是确定的，所以不需要把互不相容的真实图像平均起来<span class="src">PD §3、App. G</span>。</p>
+
+<h3 id="c-v">3.2 v 参数化：不要在纯噪声端除以趋零的 α</h3>
+<div class="formula">$$v=\alpha_t\epsilon-\sigma_t x_0,\qquad \hat x_0=\alpha_t x_t-\sigma_t\hat v_\theta,\qquad \hat\epsilon=\sigma_t x_t+\alpha_t\hat v_\theta.$$
+</div>
+<p><span class="src">PD §4、App. D</span> ε 参数化需要 \(\hat x_0=(x_t-\sigma_t\hat\epsilon)/\alpha_t\)：越接近纯噪声，越会放大预测误差；在 α 为零的端点接口甚至退化。v 参数化通过旋转关系直接得到数据预测，纯噪声端仍能提供有效输出。PD 的 cosine schedule 为 \(\alpha_t=\cos(\pi t/2)\)，对应 \(\sigma_t=\sin(\pi t/2)\)<span class="src">PD §4</span>。</p>
+<div class="callout insight"><span class="callout-title">同一个 v 字母，路径不同</span>PD 的 v 是 VP 路径在角度参数下的切向量；线性 Flow Matching 中的 v 是 ε − x₀。本页分别写明路径，不能直接交换两个网络的输出解释。</div>
+
+<h3 id="c-guided">3.3 Guided Distillation：先吸收 CFG，再减少时间步</h3>
+<p>Meng 等人的 guided distillation 先训练一个带 guidance 强度条件的学生，匹配教师条件与无条件输出的组合；再对这个已吸收 guidance 的网络做 progressive distillation<span class="src">Guided Distillation §3.1–3.2</span>。它解决了两个成本：CFG 的双分支评价和多步采样。guidance 强度是学生输入的一部分，因而仍能调节质量—多样性取舍；不是只蒸馏一个固定提示词或固定强度。</p>
+
+<h3 id="reflow">3.4 Rectified Flow / Reflow：先改变配对，再改变轨迹</h3>
+<p>原论文把 \(X_0\) 记为噪声、\(X_1\) 记为数据，从时间零向时间一生成。为和全 track 一致，这里反转时间，用 \(x_0\) 表示数据、\(\epsilon\) 表示噪声，\(x_t=(1-t)x_0+t\epsilon\)，生成从 t=1 到 t=0；速度符号相应反转<span class="src">Rectified Flow §2.1，记号与时间重写</span>。训练目标沿条件直线回归 \(\epsilon-x_0\)，最优边缘速度为条件期望：</p>
+<div class="formula">$$\mathcal L_\mathrm{RF}=\mathbb E_{(\epsilon,x_0)\sim\gamma,t}\|v_\theta(x_t,t)-(\epsilon-x_0)\|^2,\qquad
+v^*(x,t)=\mathbb E[\epsilon-x_0\mid x_t=x].$$</div>
+<p>独立配对的直线可能相交，交点处有多个方向；ODE 只有一个局部方向，所以会重新组织路径，而不是沿每条训练直线原封不动地走。满足论文假设且精确学习时，ODE 保持这些路径的时间边缘分布，并给出确定的端点 coupling<span class="src">Rectified Flow §2.2、Thm. 3.3</span>。</p>
+<p><b>Reflow</b> 就是用旧流完整积分得到 \(x_0=\Phi_\phi(\epsilon)\)，保留原噪声，重新在这个 coupling 的直线插值上训练新流。反复执行会减少路径弯曲；理想理论还保证凸位移代价不增加<span class="src">Rectified Flow Alg. 1、Thm. 3.5、§3.4</span>。这不是声称每次有限训练都获得全局最优传输，也不是把任意独立 coupling 的第一条流直接变成完美直线。</p>
+<div data-widget="fewstep-2d" data-focus="regress"></div>
+<p>组件展示单步平方回归的理论最优输出：独立配对时为数据均值，ODE 配对时为确定端点映射。它没有实际优化神经网络，ODE 端点用四十八步 Euler 近似；连线仅用于解释配对，二维投影上的视觉交叉不等于同一时刻的 ODE 轨迹相交<span class="src">组件 <code>fewstep2d.js</code>：<code>odeMap</code>、<code>draw</code></span>。实际 Reflow 回归的是整条重新配对的条件路径速度，不只是组件里显示的端点。</p>
+
+<h3 id="c-instaflow">3.5 InstaFlow：拉直之后，仍要学会单步出口</h3>
+<p>InstaFlow 把 Stable Diffusion 当作初始流，从其教师采样端点构造文本条件 coupling，经 Reflow 得到 2-Rectified Flow，再把它的噪声—终点映射蒸馏成固定噪声端的单步网络<span class="src">InstaFlow §3、Fig. 3</span>。Reflow 减少了映射复杂度，但不保证只用一次速度评价就足够；论文中未蒸馏的 2-RF 单步仍明显落后于多步版本。后续先用 L2，再用 LPIPS 蒸馏，提高细节<span class="src">InstaFlow App. D</span>。</p>
+<p>2-RF 保留可连续积分的流，单步出口则吸收了生成映射。不要把“第二条训练出的流”与“两次网络评价”混为一谈，也不要把 pilot 的 SD 1.4 结果与完整训练的 SD 1.5 结果混在同一表里<span class="src">InstaFlow Tab. 1–2</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与教师成本</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状 / 教师调用</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>数据、噪声、x_t、x_s、x̃₀</td><td>[B, C, H, W]</td><td>PD 的两步合并只改变时间跨度，不改变张量维度（按 Alg. 2 推导）</td></tr>
+    <tr><td>PD 教师监督</td><td>每个训练输入两次 DDIM 教师评价</td><td>无需完整 N 步教师轨迹<span class="src">PD §3、Alg. 2</span></td></tr>
+    <tr><td>v 输出</td><td>[B, C, H, W]</td><td>与数据预测同形状；α、σ 按 batch 广播<span class="src">PD §4，形状推导</span></td></tr>
+    <tr><td>Reflow / 端点蒸馏数据</td><td>(ε, 教师终点, c) 配对</td><td>生产每对样本要完整求解旧流；通常只需保存端点<span class="src">RF Alg. 1；InstaFlow §3</span></td></tr>
+    <tr><td>文生图 latent</td><td>[B, C_z, H_z, W_z] → VAE decode → 图像</td><td>流与回归损失位于 latent；不是把所有计算成本都压成单次 U-Net</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 回归目标与仍可能出现的模糊</h2>
+<div class="formula">$$\mathcal L_\mathrm{PD}=\mathbb E\left[a(t)\|\hat x_{0,\theta}(x_t,t)-\mathrm{sg}(\tilde x_0(x_t,t))\|^2\right],\quad
+a(t)=\max(\mathrm{SNR}(t),1)\ \text{或}\ 1+\mathrm{SNR}(t).$$</div>
+<p><span class="src">PD §4</span> 本页把损失权重记作 a(t)，避免与 guidance 系数 w 混淆。它在低 SNR 仍保留数据监督；v-space 的平方损失等价于数据空间的 SNR+1 加权。这个权重关系依赖 VP 的旋转恒等式。</p>
+<div class="formula">$$\mathcal L_\mathrm{distill}=\mathbb E_{\epsilon,c}\,d\!\left(G_\theta(\epsilon,c),\mathrm{sg}(\Phi_\phi(\epsilon,c))\right).$$</div>
+<p><span class="src">Denoising Student Eq. (11)；RF Alg. 1；InstaFlow Eq. (6)</span> 确定 coupling 下，平方回归的理想最优解就是教师映射。但高维细节可能超出学生可表达能力；像素或 latent 的平方误差还会鼓励“平均掉难以拟合的差异”。Denoising Student 已报告高分辨率纹理模糊，InstaFlow 则用 Reflow 与感知损失缓解<span class="src">Denoising Student §4.1；InstaFlow §3、App. D</span>。感知损失改变了误差度量，不能替代模式覆盖检查。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">trajectory_distillation.py（PD Alg. 2、RF Alg. 1；统一为数据端 t=0）</div>
+<pre><code class="lang-py">def ddim_step(model, x_t, t, s):
+    x0_hat = data_prediction(model, x_t, t)   # 若网络输出 v，先转换
+    eps_hat = (x_t - alpha(t) * x0_hat) / sigma(t)
+    return alpha(s) * x0_hat + sigma(s) * eps_hat
+
+# 一轮 PD：teacher 用 2N 步，student 用 N 步
+student.load_state_dict(teacher.state_dict())
+for x0 in data_loader:
+    t = sample_student_grid(N)               # 取值 i/N，含纯噪声端
+    mid, s = t - 0.5 / N, t - 1.0 / N
+    x_t = alpha(t) * x0 + sigma(t) * randn_like(x0)
+    with no_grad():
+        x_mid = ddim_step(teacher, x_t, t, mid)
+        x_s = ddim_step(teacher, x_mid, mid, s)
+        ratio = sigma(s) / sigma(t)
+        target = (x_s - ratio * x_t) / (alpha(s) - ratio * alpha(t))
+    pred = data_prediction(student, x_t, t)
+    loss = weighted_mse(pred, target, time_weight(t))
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+# 收敛后冻结 student 为新 teacher，再将 N 减半
+
+# Reflow 是另一条训练路线，先离线生成确定 coupling
+for eps, c in noise_condition_loader:
+    x0 = frozen_old_flow_endpoint(eps, c)     # 完整 ODE 解；停止梯度
+    save_pair(eps, x0, c)
+for eps, x0, c in pair_loader:
+    t = uniform_time()
+    x_t = (1 - t) * x0 + t * eps
+    loss = mse(new_velocity(x_t, t, c), eps - x0)
+    optimize(loss)
+# 可继续用新流生成端点，再蒸馏 G(eps,c)；不要随机打乱端点配对</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>论文设定</th><th>为什么要记录</th></tr></thead>
+  <tbody>
+    <tr><td>PD 初始教师</td><td>CIFAR-10：8192 步；较大数据集：1024 步<span class="src">PD §5.2</span></td><td>多步质量来源；局部更新成本不随这两个总步数增长</td></tr>
+    <tr><td>PD 每轮更新</td><td>通常 50,000；蒸馏到两步与单步时 100,000<span class="src">PD §5.2</span></td><td>最后的大跳跃更难；总成本还取决于轮数</td></tr>
+    <tr><td>PD 噪声表</td><td>cosine；学生网格 t=i/N，纯噪声端 α=0<span class="src">PD §3–4</span></td><td>训练输入与推理起点对齐；ε 输出在端点不稳定</td></tr>
+    <tr><td>Reflow</td><td>端点 coupling、积分精度、重复轮次<span class="src">RF Alg. 1</span></td><td>教师积分误差会进入新配对；拉直是学习结果，不是预设保证</td></tr>
+    <tr><td>InstaFlow 完整训练</td><td>0.9B 版本总计 199.2 A100 GPU days<span class="src">InstaFlow App. D</span></td><td>包括数据生产、Reflow 与蒸馏；不是单个蒸馏阶段的成本</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果：局部合并与拉直后蒸馏</h2>
+<p>PD 原论文的无条件 CIFAR-10 对照，FID 越低越好；这里保留论文原始结果，不与后续 CM 重做的 PD 结果混用<span class="src">PD Tab. 2</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">采样网络评价</th><th class="num">FID</th></tr></thead>
+  <tbody>
+    <tr><td>Denoising Student</td><td class="num">1</td><td class="num">9.36<span class="src">PD Tab. 2</span></td></tr>
+    <tr><td>DDIM</td><td class="num">20</td><td class="num">6.84<span class="src">PD Tab. 2</span></td></tr>
+    <tr class="hl"><td>PD</td><td class="num">1</td><td class="num">9.12<span class="src">PD Tab. 2</span></td></tr>
+    <tr class="hl"><td>PD</td><td class="num">2</td><td class="num">4.51<span class="src">PD Tab. 2</span></td></tr>
+    <tr class="hl"><td>PD</td><td class="num">4</td><td class="num">3.00<span class="src">PD Tab. 2</span></td></tr>
+    <tr class="hl"><td>PD</td><td class="num">8</td><td class="num">2.57<span class="src">PD Tab. 2</span></td></tr>
+  </tbody>
+</table></div>
+<p>PD 保留较多质量直到少步区域，但单步仍比多步差。下面改看 InstaFlow 完整训练的 COCO 2017 协议：5,000 张图，延迟在 A100 上测量，FID 与 CLIP 列沿用原表；PD-SD 数字是该论文引用的 guided / progressive 基线，不是上面的 CIFAR 模型<span class="src">InstaFlow Tab. 2(a)</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">步数</th><th class="num">延迟 / s</th><th class="num">FID</th><th class="num">CLIP</th></tr></thead>
+  <tbody>
+    <tr><td>SD 1.5</td><td class="num">25</td><td class="num">0.88</td><td class="num">20.1</td><td class="num">0.318<span class="src">InstaFlow Tab. 2(a)</span></td></tr>
+    <tr><td>PD-SD</td><td class="num">1</td><td class="num">0.09</td><td class="num">37.2</td><td class="num">0.275<span class="src">InstaFlow Tab. 2(a)</span></td></tr>
+    <tr><td>2-RF（未蒸馏）</td><td class="num">1</td><td class="num">0.09</td><td class="num">47.0</td><td class="num">0.271<span class="src">InstaFlow Tab. 2(a)</span></td></tr>
+    <tr class="hl"><td>InstaFlow-0.9B</td><td class="num">1</td><td class="num">0.09</td><td class="num">23.4</td><td class="num">0.304<span class="src">InstaFlow Tab. 2(a)</span></td></tr>
+    <tr class="hl"><td>InstaFlow-1.7B</td><td class="num">1</td><td class="num">0.12</td><td class="num">22.4</td><td class="num">0.309<span class="src">InstaFlow Tab. 2(a)</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note">
+  <span class="callout-title">论文内部不一致</span>
+  InstaFlow v2 摘要写 0.9B 版本 FID 23.3，正文 §1 与 Tab. 2(a) 写 23.4；本页及 hand-off 采用表中的 23.4。COCO 2014 的 30,000 张评估另报 13.10，不能替换上表的 COCO 2017 数值<span class="src">InstaFlow v2 摘要、§1、Tab. 2(a–b)</span>。
+</div>
+<p>这些结果支持“拉直后再蒸馏更容易”与“PD 在少步仍有效”，不支持“回归已经解决了单步质量问题”。2-RF 单步与蒸馏后单步的差距也提醒我们：条件直线目标、实际流的直度和单步出口是三个层次。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>改进了什么</h4><ul><li>PD 不必离线完整采样教师才获得每个局部标签。</li><li>Reflow 改造端点 coupling，InstaFlow 再用感知蒸馏拟合单步映射。</li></ul></div>
+  <div class="now"><h4>下一步问什么</h4><ul><li><a href="03-consistency-models.html">Consistency Models</a> 不显式回归每段位移，而让邻近状态共享终点。</li><li><a href="05-dmd.html">DMD</a> 与 <a href="04-adversarial-distillation.html">ADD</a> 用分布监督补足逐样本回归的细节。</li></ul></div>
+</div>
+<p>视频里，轨迹回归仍可作为 <a href="09-causvid.html">CausVid</a> 的初始化。可是从双向教师迁到因果学生时，目标可能依赖学生看不到的未来噪声；确定的完整教师映射不再等于“相对于学生输入确定”，这个区别在 <a href="14-causal-forcing.html">Causal Forcing</a> 中继续展开。</p>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q3"><span class="qid">Q3</span>PD 为什么反解数据预测目标，而不直接回归教师下一状态？v 参数化解决了什么？</h3>
+  <div class="ans"><p class="short">学生网络输出数据预测，DDIM 再把它转换为下一状态；反解后才能保证学生一步匹配教师两步的落点。v 参数化避免在纯噪声附近用趋零的 α 除回数据预测。</p><ul><li>中间状态与数据端表示同形状，语义却不同。</li><li>给定当前输入，教师局部落点与反解目标都确定。</li><li>低 SNR 的损失权重必须保留有效监督；稳定参数化与损失权重需要一起考虑。</li></ul><p class="cite">依据：PD §3–4、Alg. 2、App. D、App. G。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q4"><span class="qid">Q4</span>条件路径已经是直线，为什么还需要 Reflow，为什么之后仍要蒸馏？</h3>
+  <div class="ans"><p class="short">独立配对的条件直线会给出互相冲突的局部方向；边缘 ODE 重新组织路径，实际轨迹仍可能弯曲。Reflow 用旧 ODE 的确定端点重新配对，让新流更直，端点蒸馏再专门拟合单步出口。</p><ul><li>初始条件直线与实际 ODE 轨迹不是同一对象。</li><li>理想的凸运输代价不增加，不代表有限训练获得全局最优运输。</li><li>InstaFlow 中未蒸馏的 2-RF 单步仍较差，说明“拉直”不自动等于“单步训练完成”。</li></ul><p class="cite">依据：RF §2.1–2.2、Alg. 1、Thm. 3.3/3.5；InstaFlow §3、Tab. 2。</p></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Luhman, Luhman. <i>Knowledge Distillation in Iterative Generative Models for Improved Sampling Speed.</i> 2021. <a href="https://arxiv.org/abs/2101.02388">arXiv:2101.02388</a> · <a href="https://github.com/tcl9876/Denoising_Student">代码</a></li>
+  <li>Salimans, Ho. <i>Progressive Distillation for Fast Sampling of Diffusion Models.</i> ICLR 2022. <a href="https://arxiv.org/abs/2202.00512">arXiv:2202.00512</a> · <a href="https://github.com/google-research/google-research/tree/master/diffusion_distillation">官方代码</a></li>
+  <li>Meng, Rombach, Gao, Kingma, Ermon, Ho, Salimans. <i>On Distillation of Guided Diffusion Models.</i> CVPR 2023. <a href="https://arxiv.org/abs/2210.03142">arXiv:2210.03142</a></li>
+  <li>Liu, Gong, Liu. <i>Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow.</i> ICLR 2023. <a href="https://arxiv.org/abs/2209.03003">arXiv:2209.03003</a> · <a href="https://github.com/gnobitab/RectifiedFlow">代码</a></li>
+  <li>Liu, Zhang, Ma, Peng, Liu. <i>InstaFlow: One Step is Enough for High-Quality Diffusion-Based Text-to-Image Generation.</i> ICLR 2024. <a href="https://arxiv.org/abs/2309.06380">arXiv:2309.06380</a> · <a href="https://github.com/gnobitab/InstaFlow">代码</a></li>
+  <li>Song, Meng, Ermon. <i>Denoising Diffusion Implicit Models.</i> ICLR 2021. <a href="https://arxiv.org/abs/2010.02502">arXiv:2010.02502</a></li>
+  <li>本页二维配对演示：<a href="../../assets/js/widgets/fewstep2d.js">组件源码</a>；数值来源交由本 track 的 <code>SOURCES.md</code> 汇总。</li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <code>SOURCES.md</code></footer>
+</body>
+</html>
+

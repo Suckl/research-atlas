@@ -177,6 +177,7 @@ WIDGET_FILES = {
     "paged-kv": "pagedkv.js",
     "specdec": "specdec.js",
     "collectives": "collectives.js",
+    "fewstep-2d": "fewstep2d.js",
 }
 
 

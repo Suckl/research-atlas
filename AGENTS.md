@@ -59,16 +59,27 @@ parser, so keep it that way.
 site:   { title, subtitle, lang }
 tracks: [{ id, title, short, status, page, summary,
            reading_order: [node ids in reading order],
-           lanes: [{ id, label }],            // rows of the lineage diagram
+           lanes: [{ id, label }],            // columns of the lineage diagram (keep labels short)
            milestones: [{ date, label, node?, anchor?, url?, venue? }],  // chronological; node OR url
            compare_fields: [{ key, label }],   // rows of the compare table
            questions?: [{ id, text, nodes: [{ node, anchor }] }] }]  // review-question index
 nodes:  [{ id, track, kind, lane, title, full_title?, authors?, org?, date, venue?, arxiv?,
+           modality?: "image" | "video",   // optional; if any node of a track has it, the lineage colours by modality
            links?: [{ label, url }], page, tldr, tags?, facts?: { <compare key>: text } }]
 edges:  [{ from, to, label }]                  // lineage arrows (node ids)
 ```
 
 `kind` is one of `model` (a model/architecture), `paper` (a systems/method paper), `concept`, `bridge`.
+
+### Lineage diagram
+
+`[data-render="lineage"]` draws one **column per lane** and stacks time **downwards in year bands** (a node takes
+the next free row of its lane inside its year, always below same-year parents). The svg is drawn at the host's real
+width, so text never scales; it re-lays out on resize. Same-lane edges that skip nodes become brackets in the column
+margin; cross-lane edges choose a curve or elbow that does not pass through other boxes. Edge labels appear on hover
+(the node's ancestors and descendants are highlighted) or via the "显示全部关系标签" toggle. Keep `title` short
+(≤ 2 lines of ~10 CJK chars in a 5-lane track) and edge `label` ≤ 16 chars. With `modality` set, image→video
+edges are drawn dashed green ("图像 → 视频").
 `page` paths are relative to the repo root. A page may include a `#fragment` (several nodes may share one page,
 e.g. `lejepa` → `04-le-world-model.html#lejepa`, `h-jepa` → `10-hierarchical-wm.html#h-jepa`).
 
@@ -127,8 +138,11 @@ rely on them (`01-i-jepa.html#c-masking`, etc.).
   `<div class="callout code-note">` ("论文 vs 官方代码") and prefer the code for reproduction.
 - Mark anything you could not verify with `<span class="unverified">…</span>`; never present
   an estimate as a paper number.
-- Use the same symbols across pages: `x` context/history, `y` target, `z` conditioning
+- Use the same symbols across pages of a track. JEPA: `x` context/history, `y` target, `z` conditioning
   variable, `s_x/s_y` representations, `Enc_θ`, `Pred_φ`, `D` distance/energy, `λ` reg weight.
+  Few-step: data `x_0`, noise `ε`, `x_t` (state the time convention), velocity `v`, student `G_θ`, teacher
+  score `s_real`, fake score `s_fake`, consistency function `f_θ`, average velocity `u`, discriminator `D_ψ`,
+  frozen feature encoder `φ`, condition `c`, guidance scale `w`, NFE.
 - Math: `\( … \)` inline, `$$ … $$` display (KaTeX auto-render). Inside `<pre>`/`<code>` math
   is not rendered.
 
@@ -141,6 +155,9 @@ rely on them (`01-i-jepa.html#c-masking`, etc.).
   `loss` loss/energy · `act` actions/proprioception · `reg` regulariser · `data` inputs/indices.
   Token squares: `<rect class="tk enc|tgt|pred|act|mask|off">`. Edges: `<path class="edge [enc|tgt|pred|act|loss|reg|sg|ema|grad|idx]">`
   (`sg` dashed = stop-gradient, `ema` dotted purple, `grad` = gradient path, `idx` = index/mask routing).
+  Few-step track reuses the same classes with these roles: `data` noise / data / latents · `enc` student generator
+  (trainable) · `tgt` teacher or any frozen network · `pred` auxiliary trainable net (fake score, critic,
+  discriminator head) · `loss` · `reg` regulariser · `act` condition (text, past frames, actions, KV cache).
 - Interactive architecture figure: `<figure class="arch">` containing
   `.arch-canvas > svg.dg` + `.arch-foot > .arch-panel + .controls` + hidden `.arch-notes`.
   - Clickable component: `<g data-part="<id>">` ↔ `<div data-note="<id>">` in `.arch-notes`.
@@ -160,7 +177,8 @@ Available: `mask-2d` (I-JEPA block masking), `mask-3d` (V-JEPA tubelet masking),
 `roofline` (prefill/decode roofline + KV-cache calculator; `data-panel="both|roofline|kv"`),
 `paged-kv` (PagedAttention blocks, block tables, copy-on-write), `specdec` (speculative-decoding
 speedup curves + rejection-sampling demo), `collectives` (all-reduce / all-gather / reduce-scatter /
-all-to-all step-through; `data-ranks`). Widget attributes must not be named `data-note` — that name is
+all-to-all step-through; `data-ranks`), `fewstep-2d` (2-D toy for few-step generation with an exact GMM
+teacher: `data-focus="sampling|regress|dmd|drift"` — Euler NFE, regression coupling, DMD particles, drifting field). Widget attributes must not be named `data-note` — that name is
 reserved for architecture-figure notes and the checker will flag it.
 New widget = new file registering `window.AtlasWidgets["<name>"] = (el, Atlas) => {…}`;
 helpers on `Atlas`: `h` (DOM), `s` (SVG), `rng(seed)`, `gauss(rand)`, `esc`, `typeset`.
