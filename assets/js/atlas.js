@@ -249,7 +249,13 @@
       const laneOf = (n) => Math.max(0, lanes.findIndex((l) => l.id === n.lane));
       const order = t.reading_order || [];
       const rank = (n) => (order.includes(n.id) ? order.indexOf(n.id) : 999);
-      const yearOf = (n) => String(n.date).slice(0, 4);
+      // time bands: a year by default; tracks whose nodes cluster in a short period can set
+      // "lineage_band": "half" | "quarter" for finer rows (labels "2025 H2" / "2025 Q3")
+      const bandMode = t.lineage_band || "year";
+      const yearOf = (n) => {
+        const y = String(n.date).slice(0, 4), m = +String(n.date).slice(5, 7) || 1;
+        return bandMode === "quarter" ? `${y} Q${Math.ceil(m / 3)}` : bandMode === "half" ? `${y} H${m > 6 ? 2 : 1}` : y;
+      };
       const byModality = nodes.some((n) => n.modality);
       const up = {}, down = {};
       edges.forEach((e) => { (up[e.to] = up[e.to] || []).push(e.from); (down[e.from] = down[e.from] || []).push(e.to); });
@@ -280,10 +286,10 @@
       // 3) geometry
       host.classList.add("lineage-wrap");
       const avail = Math.floor((host.clientWidth || 900) - 22);
-      const W = Math.max(56 + lanes.length * 128, avail);
+      const W = Math.max((bandMode === "year" ? 56 : 70) + lanes.length * 128, avail);
       host.classList.toggle("scroll", W > avail);
       host.dataset.w = String(avail);
-      const gutter = 52, colW = (W - gutter - 4) / lanes.length;
+      const gutter = bandMode === "year" ? 52 : 66, colW = (W - gutter - 4) / lanes.length;
       const bw = Math.min(200, colW - 22), bh = 52, gapV = 28, pitch = bh + gapV, top = 4;
       const H = top + acc * pitch + 4;
       const P = {};
@@ -367,8 +373,9 @@
           d = c.d; [mx, my] = c.m;
         }
         const ref = { "data-from": e.from, "data-to": e.to };
-        const path = Atlas.s("path", Object.assign({ class: "lin-edge" + (cross ? " x-modal" : ""), d, "marker-end": `url(#${mk}${cross ? "-x" : ""})` }, ref), gE);
-        Atlas.s("title", { text: `${a.title} → ${b.title}：${e.label}` }, path);
+        const base = e.kind === "baseline";   // "main baseline comparison", not inheritance
+        const path = Atlas.s("path", Object.assign({ class: "lin-edge" + (cross ? " x-modal" : "") + (base ? " baseline" : ""), d, "marker-end": `url(#${mk}${cross ? "-x" : ""})` }, ref), gE);
+        Atlas.s("title", { text: `${a.title} → ${b.title}：${base ? "（主要对照）" : ""}${e.label}` }, path);
         Atlas.s("text", Object.assign({ class: "edge-label", x: mx, y: my, "text-anchor": anchor, text: e.label }, ref), gL);
       });
       // nodes
@@ -411,7 +418,8 @@
       const swatches = byModality
         ? `<span><i class="lsw image"></i>图像</span><span><i class="lsw video"></i>视频</span><span><i class="lsw concept"></i>概念</span><span><i class="lln x"></i>图像 → 视频</span>`
         : [...new Set(nodes.map((n) => n.kind))].map((k) => `<span><i class="lsw ${k}"></i>${KIND_LABEL[k] || k}</span>`).join("");
-      const bar = Atlas.h("div", { class: "lineage-bar", html: `<span class="lb-legend">${swatches}</span><label><input type="checkbox"> 显示全部关系标签</label><span class="lb-hint">悬停节点：高亮它的上游与下游（点击进入拆解页）</span>` });
+      const edgeKinds = edges.some((e) => e.kind === "baseline") ? `<span><i class="lln"></i>继承</span><span><i class="lln b"></i>主要对照</span>` : "";
+      const bar = Atlas.h("div", { class: "lineage-bar", html: `<span class="lb-legend">${swatches}${edgeKinds}</span><label><input type="checkbox"> 显示全部关系标签</label><span class="lb-hint">悬停节点：高亮它的上游与下游（点击进入拆解页）</span>` });
       bar.querySelector("input").addEventListener("change", (ev) => svg.classList.toggle("show-labels", ev.target.checked));
       host.replaceChildren(bar, head, svg);
 
@@ -476,6 +484,16 @@
       if (!t) return;
       const cols = t.reading_order.map(Atlas.node).filter((n) => n && n.facts);
       const fields = t.compare_fields || [];
+      if (host.dataset.orient === "rows") {
+        // one row per node, one column per field — readable when a track has many nodes
+        let rows = `<table class="compare rows"><thead><tr><th>节点</th>${fields.map((f) => `<th>${Atlas.esc(f.label)}</th>`).join("")}</tr></thead><tbody>`;
+        cols.forEach((n) => {
+          rows += `<tr><td><a href="${href(n.page)}">${Atlas.esc(n.title)}</a><br><small>${Atlas.esc(n.date)}</small></td>${fields.map((f) => `<td>${Atlas.esc((n.facts || {})[f.key] || "—")}</td>`).join("")}</tr>`;
+        });
+        host.classList.add("table-wrap");
+        host.innerHTML = rows + "</tbody></table>";
+        return;
+      }
       let html = `<table class="compare"><thead><tr><th>维度</th>${cols.map((n) => `<th><a href="${href(n.page)}">${Atlas.esc(n.title)}</a><br><small>${Atlas.esc(n.date)}</small></th>`).join("")}</tr></thead><tbody>`;
       fields.forEach((f) => {
         html += `<tr${f.key === "anti_collapse" || f.key === "condition" ? ' class="hl"' : ""}><td>${Atlas.esc(f.label)}</td>${cols.map((n) => `<td>${Atlas.esc((n.facts || {})[f.key] || "—")}</td>`).join("")}</tr>`;
