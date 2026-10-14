@@ -114,9 +114,12 @@
       const t = Atlas.track(n.track);
       const kindLabel = KIND_LABEL[n.kind] || n.kind;
       const authors = (n.authors || []).join(", ");
-      // review questions this page answers (from track.questions), linked to local anchors
+      // review questions this page answers (from track.questions), linked to local anchors — including questions
+      // attached to the other nodes that live on this same page (e.g. "06-llada.html#smdm")
+      const file = (x) => (x && x.page ? x.page.split("#")[0] : "");
+      const onPage = (id) => id === n.id || file(Atlas.node(id)) === file(n);
       const covers = ((t && t.questions) || [])
-        .map((q) => ({ q, ref: (q.nodes || []).find((r) => r.node === n.id) }))
+        .map((q) => ({ q, ref: (q.nodes || []).find((r) => onPage(r.node)) }))
         .filter((x) => x.ref)
         .map(({ q, ref }) => `<a href="#${Atlas.esc(ref.anchor || "questions")}" title="${Atlas.esc(q.text)}">${Atlas.esc(q.id)}</a>`)
         .join("");
