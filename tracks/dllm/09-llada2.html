@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLaDA-MoE、LLaDA2.0 与 LLaDA2.1：把 dLLM 做到 100B</title>
+<meta name="description" content="从零训练的 7B-A1B MoE 掩码扩散，到由 AR 模型经三阶段块长 WSD 转换的 16B / 100B 块扩散模型，再到 LLaDA2.1 的 Token-to-Token 编辑与 S / Q 两种阈值模式；逐条给出速度数字的测量条件。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="llada2">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：dLLM 怎样长到 100B</h2>
+<p><a href="06-llada.html">LLaDA</a> 证明了 8B 稠密掩码扩散可以从零训到与同规模 AR 相当，但继续放大有两条路。一条是<b>从零训练稀疏 MoE</b>：LLaDA-MoE 用约 20T tokens 训出 7B 总参、1.4B 激活的掩码扩散模型<span class="src">LLaDA-MoE 摘要</span>。另一条是<b>把现成 AR 模型转成扩散</b>：LLaDA2.0 从 Ling-mini-2.0 / Ling-flash-2.0 出发，得到 16B 的 mini 与 100B 的 flash，两者都是 MoE<span class="src">LLaDA2.0 摘要、§4.1</span>。作者给出的理由是，从零训练的 MDLM 规模一直停在 ≤ 8B，数据量与基础设施都追不上 AR<span class="src">LLaDA2.0 §2.1</span>。</p>
+<p>做大之后，速度主要卡在采样器阈值：阈值越低，每次前向定稿的 token 越多，但错误也越多，而吸收态（[M]）扩散一旦定稿就不能再改。LLaDA2.1 在“[M] → token”（M2T）之外加了“token → token”（T2T）编辑，于是可以先激进起草、再回头修改，并据此给出 Speedy（S）与 Quality（Q）两种阈值模式<span class="src">LLaDA2.1 摘要、§2</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  LLaDA2.x 的做法是：把 AR 权重当成块长为 1 的块扩散模型，先把块长逐步放大到整条序列，再缩回 32，从而把 AR 平滑地转成块扩散模型（块间因果、可用 KV cache）。LLaDA2.1 再让已写出的 token 可以被改写，把“质量 – 速度”的取舍做成一对可调阈值。
+</div>
+<p>本页记号：干净序列 \(x_0\)（长 \(L\)），腐蚀序列 \(x_t\)，\(t=1\) 为全掩码；块长 \(B\)；去噪网络 \(p_\theta(x_0^i\mid x_t)\)；prompt \(c\)；阈值 \(\tau\)。LLaDA2.0 论文把块长写作 \(L_B\)、块数写作 \(K\)，并用保留概率 \(\alpha_t\)（掩码概率为 \(1-\alpha_t\)）；LLaDA-MoE 直接以掩码概率 \(t\) 记噪声水平<span class="src">LLaDA2.0 式 (1)；LLaDA-MoE 式 (1)</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：LLaDA2.1 的一次块内解码</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw reg"></i>缓存与状态（KV cache）</span><span><i class="sw act"></i>条件（prompt）</span>
+  <span><i class="sw loss"></i>训练目标</span><span><i class="sw mask"></i>[M]</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 560" role="img" aria-label="LLaDA2.1 块内解码：prompt 与已定稿块进入 KV cache，当前块经去噪网络得到候选与置信，M2T 与 T2T 两个阈值集合并集更新，块收敛后写入缓存">
+    <g class="act" data-part="prompt" data-step="1">
+      <rect class="box" x="20" y="40" width="150" height="84" rx="10"/>
+      <text class="t-c t-b" x="95" y="70">Prompt c</text>
+      <text class="t-c t-sm" x="95" y="98">条件，不加噪</text>
+    </g>
+    <path class="edge act" d="M170,82 H186" data-step="1"/>
+    <g class="reg" data-part="kvcache" data-step="1 6">
+      <rect class="box" x="190" y="40" width="200" height="84" rx="10"/>
+      <text class="t-c t-b" x="290" y="70">KV cache</text>
+      <text class="t-c t-sm" x="290" y="98">prompt + 已定稿块</text>
+    </g>
+    <g class="data" data-part="canvas" data-step="2">
+      <rect class="box" x="420" y="40" width="520" height="84" rx="10"/>
+      <text class="t-b" x="436" y="66">当前块 k</text>
+      <text class="t-sm" x="436" y="96">B = 32（示意 8 格）</text>
+      <rect class="tk enc" x="610" y="50" width="30" height="30"/><rect class="tk enc" x="644" y="50" width="30" height="30"/><rect class="tk mask" x="678" y="50" width="30" height="30"/><rect class="tk loss" x="712" y="50" width="30" height="30"/>
+      <rect class="tk mask" x="746" y="50" width="30" height="30"/><rect class="tk enc" x="780" y="50" width="30" height="30"/><rect class="tk mask" x="814" y="50" width="30" height="30"/><rect class="tk mask" x="848" y="50" width="30" height="30"/>
+      <text class="t-c t-xs" x="744" y="104">斜线 = [M]　实心 = 已写　高亮 = 待改写</text>
+    </g>
+    <path class="edge reg" d="M290,124 V166" data-step="3"/>
+    <path class="edge" d="M680,124 V166" data-step="3"/>
+    <g class="enc" data-part="denoiser" data-step="3">
+      <rect class="box" x="260" y="170" width="440" height="80" rx="10"/>
+      <text class="t-c t-b" x="480" y="198">去噪网络（块内双向的 MoE Transformer）</text>
+      <text class="t-c t-sm" x="480" y="226">对当前块每一格输出 top-1 候选 v_i 与其概率 p_i</text>
+    </g>
+    <path class="edge enc" d="M380,250 C380,276 250,270 250,292" data-step="4"/>
+    <path class="edge enc" d="M580,250 C580,276 710,270 710,292" data-step="5"/>
+    <g data-part="m2t" data-step="4">
+      <rect class="box" x="60" y="296" width="380" height="70" rx="10"/>
+      <text class="t-c t-b" x="250" y="318">M2T：给 [M] 落子</text>
+      <text class="t-c t-sm" x="250" y="340">Γ = {i : x_i = [M] 且 p_i &gt; τ_mask}</text>
+      <text class="t-c t-xs" x="250" y="358">过阈值者不足 1 格时，取置信最高的 1 格</text>
+    </g>
+    <g data-part="t2t" data-step="5">
+      <rect class="box" x="520" y="296" width="380" height="70" rx="10"/>
+      <text class="t-c t-b" x="710" y="318">T2T：改写已写 token</text>
+      <text class="t-c t-sm" x="710" y="340">Δ = {i : x_i ≠ [M], v_i ≠ x_i, p_i &gt; τ_edit}</text>
+      <text class="t-c t-xs" x="710" y="358">只改当前块内非 prompt 的已写格（官方代码）</text>
+    </g>
+    <path class="edge" d="M250,366 V382 H400 V396" data-step="6"/>
+    <path class="edge" d="M710,366 V382 H560 V396" data-step="6"/>
+    <g class="reg" data-part="commit" data-step="6">
+      <rect class="box" x="300" y="400" width="360" height="72" rx="10"/>
+      <text class="t-c t-b" x="480" y="421">按 Γ ∪ Δ 更新，判断块是否收敛</text>
+      <text class="t-c t-sm" x="480" y="443">无 [M] 且本步无编辑，或超过 max_post_steps</text>
+      <text class="t-c t-sm" x="480" y="461">→ 块定稿，K/V 追加进缓存</text>
+    </g>
+    <path class="edge reg" d="M300,436 H40 V140 H240 V128" data-step="6"/>
+    <text class="t-xs" x="48" y="452" data-step="6">定稿 → 下一块 k+1</text>
+    <path class="edge" d="M660,436 H950 V82 H944" data-step="6"/>
+    <text class="t-xs t-r" x="940" y="390" data-step="6">未收敛：同一块再前向一次</text>
+    <g class="loss" data-part="wsd" data-step="7">
+      <rect class="box" x="20" y="490" width="920" height="60" rx="10"/>
+      <text class="t-b" x="36" y="511">训练侧 · LLaDA2.0：块长 WSD 1 → 4 → 32 → 64 → 4096（稳定期即全序列 MDLM）→ 逐级降回 32</text>
+      <text class="t-sm" x="36" y="535">LLaDA2.1：CPT 与 SFT 同时训练 M2T（预测 [M]）与 T2T（从随机替换的噪声 token 复原）两路</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>prompt 不加噪</h4><p>SFT 时只腐蚀回答；为配合块注意力，序列长度向上取整到块长的倍数。HF 参考实现把 prompt 所在的完整块直接预填，从 prompt 末尾所在的块开始解码。<span class="src">LLaDA2.0 §5.1；官方代码 modeling_llada2_moe.py generate()</span></p></div>
+    <div data-note="kvcache"><h4>块间因果，才有 KV cache</h4><p>块 k 只看 prompt 与块 &lt;k。服务端（dInfer、SGLang）复用已定稿块的 KV；LLaDA2.1 另用块级因果 mask 在一次前向中算完长上下文的 KV，并在 SGLang 中支持 radix cache 与 batching。HF 参考 generate() 每步对整个前缀重新前向，不用缓存。<span class="src">LLaDA2.0 §7.3；LLaDA2.1 §4.2；官方代码</span></p></div>
+    <div data-note="canvas"><h4>当前块从全 [M] 开始</h4><p>评测与模型卡默认 B = 32。LLaDA2.0-mini 的消融里 B = 16 得分最高（70.26）但 TPF 最低（2.44），B = 32 为 70.15 / 2.55，B = 64 两项都更差。图中高亮格表示一个已写但将被 T2T 改写的 token。<span class="src">LLaDA2.0 §6.1、§6.3</span></p></div>
+    <div data-note="denoiser"><h4>100B MoE 去噪网络</h4><p>flash 版：非嵌入参数 100B、激活 6.1B（2.0 模型卡）；32 层、hidden 4096、256 个专家取 8 个 + 1 个共享专家、4 个 KV 头、词表 157,184（2.1-flash config.json）。由 AR 模型 Ling-flash-2.0 转换而来；mini 版 16B / 激活 1.4B、20 层。<span class="src">LLaDA2.0 §4.1；HF 模型卡与 config.json</span></p></div>
+    <div data-note="m2t"><h4>M2T：阈值 + 回退</h4><p>LLaDA2.0 只有这一路：评测阈值 0.95，若没有足够 token 过阈值，则按固定个数接受最可能的 token。LLaDA2.1 的 S 模式把 τ_mask 降到 0.5，Q 模式为 0.7——这两个数来自模型卡，论文正文没有给。<span class="src">LLaDA2.0 §5.4、§6.1；LLaDA2.1 模型卡</span></p></div>
+    <div data-note="t2t"><h4>T2T：已写 token 可改</h4><p>某个已写位置的 top-1 候选与当前 token 不同、且概率超过 τ_edit，就改写。模型卡推荐 S 模式 τ_edit = 0.0、Q 模式 0.5。论文式 (2) 字面上也会选中 [M] 位置（因为 [M] ≠ v），官方代码只在非 [M]、非 prompt 的位置编辑。<span class="src">LLaDA2.1 式 (1)–(3)；官方代码</span></p></div>
+    <div data-note="commit"><h4>块收敛与多块编辑</h4><p>没有 [M] 之后，仍允许最多 max_post_steps 步纯编辑（推荐 16）；若某步既无 [M] 又无编辑，就提前结束。论文另有多块编辑（MBE），允许回头修改已定稿的块，在 Tab. 4 中提高分数、降低 TPF；模型卡写的是 MBE 推理“即将推出”。<span class="src">LLaDA2.1 §4.3、Tab. 4；模型卡</span></p></div>
+    <div data-note="wsd"><h4>这些能力从哪里来</h4><p>LLaDA2.0 用块长 WSD 把 AR 转成块扩散（§4.1），之后 SFT、CAP 置信损失、DPO 都在块扩散设置下进行（§5）。LLaDA2.1 在 CPT 与 SFT 中混合 M2T 与 T2T 两路监督，并配合 Multi-turn Forward 数据增强，再做 EBPO 强化学习。<span class="src">LLaDA2.0 §4–5；LLaDA2.1 §3</span></p></div>
+    <div data-step-note="1"><h4>① 预填上下文</h4><p>prompt（及之前已定稿的块）进入 KV cache；块间因果保证它们不再被重算。</p></div>
+    <div data-step-note="2"><h4>② 新块全掩码</h4><p>当前块 k 的 B 个位置全部置为 [M]。</p></div>
+    <div data-step-note="3"><h4>③ 一次前向</h4><p>块内双向注意力 + 读取缓存，得到每一格的 top-1 候选及其概率（温度 0）。</p></div>
+    <div data-step-note="4"><h4>④ M2T</h4><p>概率超过 τ_mask 的 [M] 位置落子；一个都没有时至少接受置信最高的一格。</p></div>
+    <div data-step-note="5"><h4>⑤ T2T</h4><p>已写位置若候选改变且概率超过 τ_edit，就改写。τ_mask 降低造成的错误由这一步回收。</p></div>
+    <div data-step-note="6"><h4>⑥ 收敛判断</h4><p>块内还有 [M] 或本步发生了编辑，就回到 ③；否则定稿、写入 KV，进入下一块。</p></div>
+    <div data-step-note="7"><h4>⑦ 训练侧</h4><p>WSD 块长课程完成 AR → 块扩散的转换；M2T + T2T 双路监督教会模型发现并改正错字。</p></div>
+  </div>
+  <figcaption>图 1　LLaDA2.1 的一次块内解码（LLaDA2.0 是去掉 T2T 分支的特例）。依据 LLaDA2.1 §2、§4.3 与 HF 官方 <code>modeling_llada2_moe.py</code> 的 <code>generate()</code>；训练侧依据 LLaDA2.0 §4.1、LLaDA2.1 §3.1。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="llada-moe">3.1 LLaDA-MoE：从零训练的稀疏 MoE 掩码扩散</h3>
+<p>LLaDA-MoE 沿用 LLaDA 的全序列掩码扩散，只是把 FFN 换成 top-k 路由的 MoE。结构为 16 层、hidden 2048、16 个注意力头、64 个专家中激活 8 个、专家维度 1024、RoPE base 50,000，激活参数 1.4B、非嵌入参数 7B<span class="src">LLaDA-MoE Tab. 2</span>。训练分四段：预训练阶段 1 用 10T tokens；阶段 2 再训 10T，提高数学与代码比例；退火阶段 1 用 500B 高质量 tokens；退火阶段 2 把 RoPE base 从 10,000 调到 50,000、上下文从 4k 扩到 8k，再训 500B；最后做 SFT<span class="src">LLaDA-MoE §3.1、Fig. 3</span>。</p>
+<p>两个与扩散相关的细节：① 预训练固定 4k 长度，而推理时输入长短不一，作者在 1% 的步里随机截断到 \(\ell\in[8,4096]\) 来缩小这一差距；② SFT 时 EOS 填充被当作回答的一部分参与掩码，但样本限制在 4k，否则按 8k 填充会让模型倾向于生成过多 EOS<span class="src">LLaDA-MoE §3.2</span>。负载均衡与 z-loss 的权重分别为 0.01 与 0.001<span class="src">LLaDA-MoE §3.2 式 (4)</span>。</p>
+<div class="callout code-note"><span class="callout-title">论文内部不一致</span>Fig. 2 图注写路由“每个 token 选 top-2 专家”，Tab. 2 写激活 8 个专家；激活参数在正文与表中分别写作 1B 与 1.4B（模型名 7B-A1B）。上下文长度：论文说退火阶段 2 扩到 8k，HF Base 模型卡写 4,096。本页以 Tab. 2 与正文 1.4B 为准。<span class="src">LLaDA-MoE Fig. 2、Tab. 1–3；HF 模型卡</span></div>
+
+<h3 id="c-wsd">3.2 LLaDA2.0：块长 WSD，把 AR 转成块扩散</h3>
+<p>出发点是把 AR 模型视为块长 \(B=1\) 的块扩散模型（BDLM，即 <a href="11-block-diffusion.html">BD3-LM</a>）。直接换成扩散目标会使优化不稳、预训练知识退化<span class="src">LLaDA2.0 §4</span>，因此 WSD 分三段：</p>
+<ul>
+  <li><b>Warmup</b>：块长 1 → 4 → 32 → 64 → 4096，每次转换都用中等规模数据训练，并要求序列长度能被当前块长整除。到 4096 时整条序列就是一个块，等价于标准 MDLM。</li>
+  <li><b>Stable</b>：块长固定为 4096，在大规模语料上训练。此时注意力不再需要维护 clean 副本，计算量明显下降，大部分数据放在这一段。</li>
+  <li><b>Decay</b>：块长从 4096 逐级降到 2048 …… 直到 32，把全局去噪能力“压缩”回小块，重新获得 KV cache 复用与变长生成。<span class="src">LLaDA2.0 §4.1</span></li>
+</ul>
+<p>配套措施：<b>文档级注意力掩码</b>把 packing 在一起的不同文档隔开，作者称它在 CPT 中比 random-length、CART 更关键；<b>top-k checkpoint 合并</b>按验证集指标挑出 k 个检查点做参数平均；<b>数值稳定</b>：AR 训练中 [M] 的嵌入从未被使用、逐渐衰减到接近 0，高掩码率时容易梯度爆炸，作者在训练初期给 [M] 的嵌入输出加独立高斯噪声，而不是重新初始化。<span class="src">LLaDA2.0 §4.2、§4.3、§7.1</span></p>
+
+<h3 id="c-post">3.3 LLaDA2.0 的后训练：互补掩码、CAP、DPO</h3>
+<p>SFT 沿用块扩散目标，只腐蚀回答；掩码率不在 \([0,1]\) 上均匀采样，而是裁剪到 \([\alpha_{\min},\alpha_{\max}]\)（具体数值未给），理由与 BD3-LM 的 clipped schedule 相同：极端掩码率的梯度方差大、信息量小<span class="src">LLaDA2.0 §5.1</span>。<b>互补掩码</b>为同一条样本构造掩码互补的两份输入，保证每个位置恰好被监督一次；作者在 CPT 中也试过，发现超过 100B tokens 后没有优势，所以只在后训练中使用<span class="src">LLaDA2.0 §5.1 脚注 1</span>。</p>
+<p><b>CAP</b>（Confidence-Aware Parallel）训练加一个辅助损失：只对本步已预测正确的 token 最小化输出熵，使模型在正确时更“笃定”，从而有更多 token 越过阈值——思路来自 <a href="15-learned-parallel.html">dParallel</a><span class="src">LLaDA2.0 §5.2</span>。<b>DPO</b> 用 1.5M 偏好对，把对数似然换成单样本 MC 估计的块扩散 ELBO，\(\beta=0.1\)，参考模型取 SFT 后的权重<span class="src">LLaDA2.0 §5.3 式 (7)(8)</span>。</p>
+
+<h3 id="llada21">3.4 LLaDA2.1：Token-to-Token 编辑与两种阈值模式</h3>
+<p>作者观察到，并行解码一旦出错，后续步骤会变得越来越保守（置信度下降），整体反而变慢；AR 模型则可以靠长思维链自行纠正<span class="src">LLaDA2.1 §2</span>。LLaDA2.1 因此在每一步同时计算两个集合：</p>
+<div class="formula">$$\Gamma_t=\{i: x_t^i=[\mathrm{M}],\ p_\theta(v_t^i\mid x_t)>\tau_{\text{mask}}\},\qquad \Delta_t=\{i: x_t^i\neq v_t^i,\ p_\theta(v_t^i\mid x_t)>\tau_{\text{edit}}\},$$</div>
+<p>其中 \(v_t^i=\arg\max_v p_\theta(v\mid x_t)\)，然后只在 \(\Gamma_t\cup\Delta_t\) 上更新<span class="src">LLaDA2.1 式 (1)–(3)</span>。S 模式压低 \(\tau_{\text{mask}}\)，依靠 T2T 收拾残局；Q 模式用保守阈值换分数<span class="src">LLaDA2.1 摘要</span>。训练上，CPT 与 SFT 都混合两路监督：drafting 流从 [M] 预测正确 token，editing 流从随机扰动的 token 恢复原文，另用 Multi-turn Forward（MTF）增强覆盖更多编辑场景<span class="src">LLaDA2.1 §3.1</span>。RL 用 EBPO：裁剪代理目标中的概率比 \(\rho\) 用离散时间点上的块级 ELBO 差估计，借助 BD3-LM 的向量化似然在一次前向中算出所有块条件项<span class="src">LLaDA2.1 §3.2 式 (4)(5)</span>。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>① 式 (2) 只写了 \(x_t^i\neq v_t^i\)，[M] 位置也满足这一条件；HF <code>generate()</code> 把编辑限制在当前块内非 [M]、非 prompt 的位置，并以本步更新前的 token 判断“是否改变”。② 论文没有给出 S / Q 模式的阈值数值；模型卡推荐 S：<code>threshold=0.5, editing_threshold=0.0</code>，Q：<code>0.7 / 0.5</code>，<code>max_post_steps=16</code>。③ <code>generate()</code> 的签名默认 <code>editing_threshold=0.9</code>，docstring 却写默认 0.5。复现时请显式传参。<span class="src">LLaDA2.1 式 (2)；HF LLaDA2.1-flash 模型卡与 modeling_llada2_moe.py</span></div>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>LLaDA-MoE（7B-A1B）</th><th>LLaDA2.0（16B / 100B）</th><th>LLaDA2.1（16B / 100B）</th><th>同规模 AR（参照：Ling-flash-2.0、Qwen3-30B-A3B）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>从零训练，全序列掩码 ELBO（\(1/t\) 加权 CE），约 20T tokens<span class="src">LLaDA-MoE 式 (2)、摘要</span></td><td>AR 初始化 → 块扩散 ELBO（WSD 块长课程）；SFT + CAP + 以 ELBO 代替似然的 DPO<span class="src">§4–5</span></td><td>同上，CPT / SFT 混合 M2T 与 T2T 两路；EBPO 强化学习<span class="src">§3</span></td><td>next-token CE，精确似然</td></tr>
+    <tr><td>注意力与 KV cache</td><td>全序列双向；半自回归块采样只改变解码顺序，不提供精确 KV<span class="src">§3.2</span></td><td>块内双向、块间因果；已定稿块可复用 KV（dInfer / SGLang）<span class="src">§4.2、§7.3</span></td><td>同 2.0，另加 radix cache、batching 与 FP8 量化<span class="src">§4.2</span></td><td>因果注意力，精确 KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>论文未报告 TPF</td><td>flash 33 项平均 3.08 TPF（2.1 论文重测）；mini 阈值 0.95、B = 32 时 2.55<span class="src">LLaDA2.1 Tab. 1；LLaDA2.0 §6.3</span></td><td>flash S 5.93 / Q 3.64；mini S 5.34 / Q 3.12（33 项平均）<span class="src">LLaDA2.1 Tab. 1–2</span></td><td>1（无推测解码时）</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>块内任意顺序填空、并行定稿</td><td>同一块内多 token 并行定稿；块长可在推理时调</td><td>已写 token 可回头改写；MBE 可修改已定稿的块</td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>Base 平均 46.94，仍低于 Qwen2.5-3B Base 的 50.34<span class="src">Tab. 1</span>；训练定长、推理变长的失配需要专门处理</td><td>阈值从 0.95 降到 0.85，TPF 2.55 → 3.31，分数 70.15 → 67.90（mini）<span class="src">§6.3</span></td><td>S 模式在通用对话中可能出现 n-gram 重复（stuttering），需按领域调阈值；mini S 平均 62.07，低于 2.0-mini 的 63.39<span class="src">§6；Tab. 2</span></td><td>一次只出一个 token；低并发时访存受限</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、块与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 取值</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>CPT 输入（块扩散阶段）</td><td>\([x_t\oplus x_0]\)，长 \(2L\)，\(L=4096\)</td><td>噪声副本只看同块，clean 副本块因果；掩码由 \(M_{\mathrm{BD}}, M_{\mathrm{OBC}}, M_{\mathrm{BC}}\) 组成<span class="src">LLaDA2.0 式 (3)</span></td></tr>
+    <tr><td>CPT 输入（稳定期 \(B=4096\)）</td><td>长 \(L\)，文档内全双向</td><td>不再需要 clean 副本，注意力成本约减半（作者定性描述）<span class="src">LLaDA2.0 §4.1 Phase-2、式 (4)</span></td></tr>
+    <tr><td>当前块画布</td><td>\([1, B]\)，\(B=32\)</td><td>gen_length 被补齐到 \(B\) 的整数倍<span class="src">官方代码</span></td></tr>
+    <tr><td>一步前向（HF 参考实现）</td><td>输入 \([1, P+kB]\)，取后 \(B\) 个 logits</td><td>不用缓存，每步重算整个前缀；服务端换成只算当前块、读缓存<span class="src">官方代码；LLaDA2.1 §4.2</span></td></tr>
+    <tr><td>logits</td><td>\([1, 32, 157184]\)</td><td>词表 157,184<span class="src">2.1-flash config.json</span></td></tr>
+    <tr><td>flash 骨干</td><td>32 层 × hidden 4096；32 头、4 个 KV 头、head_dim 128</td><td>MoE：256 专家取 8 + 1 共享；首层为稠密层（first_k_dense_replace = 1）<span class="src">config.json</span></td></tr>
+    <tr><td>上下文</td><td>32,768 tokens；RULER 测到 32k，64k 需 YaRN ×2</td><td>flash 在 4k–32k 上保持 93 分以上；mini 从 93.29 降到 83.94<span class="src">LLaDA2.0 §6.3</span></td></tr>
+  </tbody>
+</table></div>
+<p>一块 32 个 token 若平均 3–6 TPF，约需 6–11 次块内前向，外加块与块之间的缓存更新。每次前向的计算量比 AR 的一步大，因此墙钟速度取决于 TPF 与单步开销之比。这是推断，论文没有给出单步耗时拆解。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>LLaDA2.0 的块扩散目标（Warmup 与 Decay 阶段；\(K=L/B\) 个块，\(x_0^{\lt k}\) 为前面的干净块）：</p>
+<div class="formula">$$\mathcal L_{\text{BDLM}}(\theta)=\mathbb E_{t,x_0,x_t}\Big[w(t)\sum_{k=1}^{K}\sum_{i=1}^{B}\mathbb 1[x_{t,k}^i=[\mathrm M]]\,\big(-\log p_\theta(x_{0,k}^i\mid x_0^{\lt k},x_{t,k})\big)\Big],\qquad w(t)=-\frac{\alpha_t'}{1-\alpha_t}.$$</div>
+<p>\(K=1\) 时退化为 MDLM 目标；线性调度 \(\alpha_t=1-t\) 下 \(w(t)=1/t\)，与 LLaDA-MoE 的式 (2) 一致。SFT 只把 prompt \(c\) 加进条件；CAP 为 \(\mathcal L=\mathcal L_{\text{SFT}}+\lambda\mathcal L_{\text{conf}}\)（\(\lambda\) 未给）；DPO 把 \(\log\pi\) 换成单样本块扩散 ELBO \(B_{\text{BDLM}}\)：</p>
+<div class="formula">$$\mathcal L_{\text{DPO}}=-\mathbb E\Big[\log\sigma\big(\beta[\Delta B(x_w\mid c)-\Delta B(x_l\mid c)]\big)\Big],\quad \Delta B=B_{\text{BDLM}}(\theta)-B_{\text{BDLM}}(\theta_{\text{ref}}),\ \beta=0.1.$$</div>
+<p>LLaDA2.1 的 EBPO 用 \(N\) 个时间点、权重 \(w_n\) 近似 \(\log\rho\approx\sum_n w_n\sum_b[\log p_\theta(y^b\mid z_n,x)-\log p_{\theta_{\text{old}}}(y^b\mid z_n,x)]\)，其中 \(z_n=y_{t_n}\oplus y_0\)，再代入 PPO 式的裁剪目标<span class="src">LLaDA2.1 式 (4)(5)</span>。所有这些都只是似然的下界或代理，不是精确似然。</p>
+<div class="callout code-note"><span class="callout-title">符号提示</span>LLaDA2.0 式 (1)(2) 在期望前写了负号，同时权重写作 \(\alpha_t'/(1-\alpha_t)\)；由于 \(\alpha_t'\lt 0\)，按字面计算会得到负的损失。正文说明“时间权重为 \(-\alpha_t'/(1-\alpha_t)\)”，本页按此写成正的 \(w(t)\)。另外，§6.3 正文引用的“Figure 5”实为 Fig. 4（阈值 / 块长分析）；引言称“两阶段 CPT”，§3 称“三阶段流程”，摘要称“三相 WSD”，指的是同一流程的不同切分。<span class="src">LLaDA2.0 式 (1)(2)、§1、§3、§6.3</span></div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">llada21_generate.py（按 HF 官方 generate() 改写，batch = 1）</div>
+<pre><code class="lang-py">def generate(model, prompt, gen_len, B=32, tau_mask=0.5, tau_edit=0.0,
+             max_post_steps=16, min_accept=1):
+    # S 模式：tau_mask=0.5, tau_edit=0.0；Q 模式：0.7 / 0.5（模型卡推荐）
+    P = len(prompt)
+    n_blocks = ceil((P + gen_len) / B)
+    x = [MASK] * (n_blocks * B); x[:P] = prompt
+    attn = block_causal(n_blocks, B)               # 块内双向，块间因果
+    for k in range(P // B, n_blocks):              # prompt 占满的块直接预填
+        lo, hi = k * B, (k + 1) * B
+        post = 0
+        while True:
+            masked = [i for i in range(lo, hi) if x[i] == MASK]
+            if not masked:
+                post += 1                          # 无 [M]：纯编辑阶段
+                if post > max_post_steps:
+                    break
+            logits = model(x[:hi], attn[:hi, :hi])[lo:hi]   # 服务端：只算当前块 + 读 KV
+            v, p = top1(logits, temperature=0.0)            # 候选 token 及其概率
+            # M2T：过阈值的 [M]；不足 min_accept 个时取置信最高者
+            gamma = [i for i in masked if p[i - lo] > tau_mask]
+            if masked and len(gamma) < min_accept:
+                gamma = top_k(masked, key=lambda i: p[i - lo], k=min_accept)
+            # T2T：本步更新前已写、非 prompt、候选改变且置信 > tau_edit
+            delta = [i for i in range(max(lo, P), hi)
+                     if x[i] != MASK and v[i - lo] != x[i] and p[i - lo] > tau_edit]
+            for i in gamma + delta:
+                x[i] = v[i - lo]
+            if not masked and not delta:            # 块收敛
+                break
+        # 块定稿：服务端在此把块 k 的 K/V 追加进缓存（MBE 允许之后再回改）
+        if eos_early_stop and EOS in x[P:hi] and MASK not in x[P:hi]:
+            break
+    return cut_after_first_eos(x[P:P + gen_len])</code></pre>
+<p>LLaDA2.0 的解码是 <code>tau_edit = +inf</code>（无 T2T）、<code>tau_mask = 0.95</code> 的特例；它的回退规则是“按固定个数接受最可能的 token”，具体个数由 steps 与块长决定<span class="src">LLaDA2.0 §5.4；官方代码 _get_num_transfer_tokens</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>LLaDA-MoE 训练 tokens</td><td>10T + 10T + 500B + 500B（8k 上下文）+ SFT</td><td>LLaDA-MoE §3.1、Fig. 3</td></tr>
+    <tr><td>LLaDA-MoE 评测解码</td><td>半自回归，生成长度 1024，块长 64</td><td>LLaDA-MoE §4</td></tr>
+    <tr><td>LLaDA2.0 起点</td><td>Ling-mini-2.0 → mini（16B，激活 1.4B）；Ling-flash-2.0 → flash（100B，激活 6.1B）</td><td>LLaDA2.0 §4.1；模型卡</td></tr>
+    <tr><td>WSD 块长</td><td>1 → 4 → 32 → 64 → 4096 → 2048 → … → 32</td><td>LLaDA2.0 §4.1</td></tr>
+    <tr><td>LLaDA2.0 评测解码</td><td>温度 0，块长 32，阈值 0.95</td><td>LLaDA2.0 §6.1</td></tr>
+    <tr><td>DPO</td><td>1.5M 偏好对，\(\beta=0.1\)，学习率接续 SFT 末值</td><td>LLaDA2.0 §5.3</td></tr>
+    <tr><td>CPT 用的 tokens 数</td><td><span class="unverified">论文未给出</span>；模型卡写“在 Ling2.0 系列上继续训练、约 20T tokens”，表述无法区分是 Ling 的预训练量还是转换量</td><td>LLaDA2.0 全文；HF 模型卡</td></tr>
+    <tr><td>LLaDA2.1 S / Q 阈值</td><td>S：τ_mask 0.5、τ_edit 0.0；Q：0.7 / 0.5；max_post_steps 16；推荐输出长度 16,384</td><td>LLaDA2.1 模型卡（论文未给）</td></tr>
+    <tr><td>LLaDA2.1 服务</td><td>定制 SGLang；Alpha-MoE megakernel；按块 FP8 量化</td><td>LLaDA2.1 §4.2</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>LLaDA-MoE Instruct</b>（半自回归，生成长度 1024、块长 64；其他 MDM 的数字直接引自各自论文，评测协议并不完全相同）<span class="src">LLaDA-MoE §4、Tab. 3</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型（激活参数）</th><th class="num">MMLU</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">HumanEval</th><th class="num">MBPP</th><th class="num">平均（17 项）</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>LLaDA-MoE-7B-A1B-Instruct（1.4B）</td><td class="num">67.18</td><td class="num">82.41</td><td class="num">58.68</td><td class="num">61.59</td><td class="num">70.02</td><td class="num">53.12</td></tr>
+    <tr><td>LLaDA-8B-Instruct（8B）</td><td class="num">65.50</td><td class="num">78.60</td><td class="num">42.20</td><td class="num">49.40</td><td class="num">41.00</td><td class="num">42.65</td></tr>
+    <tr><td>Dream-v0-Instruct-7B（7B）</td><td class="num">67.00</td><td class="num">81.00</td><td class="num">39.20</td><td class="num">55.50</td><td class="num">58.80</td><td class="num">46.51</td></tr>
+    <tr><td>Qwen2.5-3B-Instruct（AR，3B）</td><td class="num">69.11</td><td class="num">86.28</td><td class="num">67.02</td><td class="num">60.37</td><td class="num">65.81</td><td class="num">53.51</td></tr>
+  </tbody>
+</table></div>
+<p><b>LLaDA2.0-flash</b>（温度 0、块长 32、阈值 0.95；47 项平均）<span class="src">LLaDA2.0 §6.1、Tab. 2</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">平均</th><th class="num">MMLU-Pro</th><th class="num">GPQA</th><th class="num">HumanEval</th><th class="num">LiveCodeBench</th><th class="num">AIME 2025</th><th class="num">BFCL v3</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen3-30B-A3B-Instruct-2507（AR）</td><td class="num">73.60</td><td class="num">74.23</td><td class="num">57.34</td><td class="num">93.29</td><td class="num">41.63</td><td class="num">61.88</td><td class="num">73.19</td></tr>
+    <tr><td>Ling-flash-2.0（AR，转换起点）</td><td class="num">72.15</td><td class="num">76.84</td><td class="num">67.12</td><td class="num">85.98</td><td class="num">44.11</td><td class="num">55.89</td><td class="num">67.57</td></tr>
+    <tr class="hl"><td>LLaDA2.0-flash</td><td class="num">73.18</td><td class="num">73.36</td><td class="num">61.98</td><td class="num">94.51</td><td class="num">42.29</td><td class="num">60.00</td><td class="num">75.43</td></tr>
+  </tbody>
+</table></div>
+<p><b>LLaDA2.1 的两种模式</b>（分数 | TPF；33 项；AR 只报分数，TPF 记为 1）<span class="src">LLaDA2.1 Tab. 1、Tab. 2</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型 / 模式</th><th class="num">平均</th><th class="num">HumanEval+</th><th class="num">AIME 2025</th><th class="num">ZebraLogic</th><th class="num">IFEval</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen3-30B-A3B-Inst-2507（AR）</td><td class="num">73.09</td><td class="num">87.88</td><td class="num">61.88</td><td class="num">90.97</td><td class="num">83.73</td></tr>
+    <tr><td>LLaDA2.0-flash</td><td class="num">72.43 | 3.08</td><td class="num">88.41 | 6.45</td><td class="num">60.00 | 4.57</td><td class="num">82.30 | 2.74</td><td class="num">82.62 | 1.47</td></tr>
+    <tr class="hl"><td>LLaDA2.1-flash S</td><td class="num">72.34 | 5.93</td><td class="num">89.63 | 13.81</td><td class="num">63.33 | 5.36</td><td class="num">84.20 | 5.80</td><td class="num">83.36 | 2.24</td></tr>
+    <tr class="hl"><td>LLaDA2.1-flash Q</td><td class="num">73.54 | 3.64</td><td class="num">89.63 | 9.18</td><td class="num">63.33 | 3.46</td><td class="num">88.90 | 3.26</td><td class="num">83.55 | 1.41</td></tr>
+    <tr><td>LLaDA2.0-mini / 2.1-mini S / Q（平均）</td><td class="num">63.39 | 2.60 → 62.07 | 5.34 / 63.90 | 3.12</td><td colspan="4">mini 的 S 模式平均分低于 2.0-mini，Q 模式略高</td></tr>
+  </tbody>
+</table></div>
+<p>多块编辑（MBE，S 模式）：flash 平均从 70.69 | 5.82 提高到 72.67 | 5.14，AIME 2025 从 63.33 提高到 70.00；代价是 TPF 下降<span class="src">LLaDA2.1 Tab. 4</span>。</p>
+<p><b>速度数字及其条件</b>。三组数字的测量条件各不相同，不能放在同一张榜上比较：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>来源</th><th>数字</th><th>条件（已写明 / 缺失）</th></tr></thead>
+  <tbody>
+    <tr><td>LLaDA2.0 §7.3、Fig. 3</td><td>flash-CAP 535 TPS，flash 383 TPS，AR 基线 256 / 237 TPS，“最多 2.1×”</td><td>TPS = 解码 token 数 / 总时间；HumanEval、MBPP、GSM8K、CRUXEval 四项平均；dLLM 用 dInfer、阈值 0.95，AR 用 SGLang。<span class="unverified">硬件、batch、并发未写明</span></td></tr>
+    <tr><td>LLaDA2.1 Tab. 3</td><td>flash S 模式 HumanEval+ 746.66 → 891.74 TPS（FP8 后，分数 −3.04）；BigCodeBench 691.14 → 801.48（+1.06）；IFEval 219.37 → 248.25；mini HumanEval+ 1496.67 → 1586.93</td><td>S 模式、定制 SGLang、按块 FP8。<span class="unverified">硬件、batch 未写明</span>；表中 PrOntoQA 的 912.16 TPS 高于正文所称的“峰值” 891.74</td></tr>
+    <tr><td>DiffusionGemma 报告 Tab. 3（第三方）</td><td>LLaDA2.1 Flash S 模式：375 TPS，平均 4.63 TPF</td><td>8 × B200、BF16、batch 1；7 个基准平均，TPS 不含 prefill。见 <a href="10-industrial.html">工业 dLLM 页</a></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">表间不一致：不要跨论文拼接</span>LLaDA2.1 Tab. 1 中 LLaDA2.0-flash 的成绩是重新评测的：GPQA 为 62.31（2.0 论文为 61.98），HumanEval+ 为 88.41（2.0 论文为 87.80），平均分基于 33 项而非 47 项。Tab. 2 的标题写作“LLaDA2.0-mini”，实际内容是 LLaDA2.1-mini。<span class="src">LLaDA2.0 Tab. 2；LLaDA2.1 Tab. 1–2</span></div>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul>
+    <li>相对 <a href="06-llada.html">LLaDA</a>：先换成稀疏 MoE（LLaDA-MoE），再改走 AR 转换，规模到 100B。</li>
+    <li>相对 <a href="07-dream.html">Dream</a> 的注意力掩码退火：LLaDA2.0 用块长课程完成 AR → 双向的过渡，终点是块扩散而非全序列扩散，因此推理可以复用 KV。</li>
+    <li>相对吸收态采样：LLaDA2.1 让已写 token 可改，把阈值做成用户可调的速度 – 质量旋钮。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>目标函数来自 <a href="11-block-diffusion.html">BD3-LM 块扩散</a>；同一时期其他 AR → 块扩散的配方见 <a href="12-ar-to-block.html">SDAR / Fast-dLLM v2 / WeDLM</a>。</li>
+    <li>速度数字缺少硬件与并发条件；工业模型如何报告速度、如何以 LLaDA2.1 为对照，见 <a href="10-industrial.html">工业 dLLM</a>。</li>
+    <li>CAP 属于“学出来的并行”，见 <a href="15-learned-parallel.html">dParallel 等</a>；EBPO 属于 dLLM 的 RL 似然估计，见 <a href="17-rl.html">RL 页</a>；缓存问题见 <a href="14-kv-cache.html">KV cache 页</a>。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q17"><span class="qid">Q17</span>LLaDA2.0 为什么不直接用目标块长 32 做 AR → 扩散的持续预训练，而要先把块长从 1 升到 4096、再降回 32？三个阶段各解决什么问题？</h3>
+  <div class="ans"><p class="short">AR 模型就是块长为 1 的块扩散模型。一下子换成块长 32 的目标，会同时改变注意力模式与训练分布，作者称这会导致优化不稳、知识退化。Warmup 逐级放大“联合去噪”的范围，让表示平滑适应；Stable 在块长 = 序列长（即 MDLM）时训练，不需要 clean 副本，单位 token 成本更低，适合承载大规模数据；Decay 再缩回小块，换回 KV cache 复用与变长生成。</p>
+    <ul>
+      <li>Warmup：1 → 4 → 32 → 64 → 4096，每次转换都用中等规模数据，序列长度需能被块长整除。</li>
+      <li>Stable：块长 4096，全序列双向；文档级掩码防止 packing 后跨文档的虚假依赖。</li>
+      <li>Decay：4096 → 2048 → … → 32，逐级而非一步缩小；推理块长 32 是在 B = 16 / 32 / 64 的分数与 TPF 之间权衡后选定的。</li>
+      <li>工程细节同样关键：AR 中 [M] 嵌入衰减到接近 0，高掩码率时会梯度爆炸，因此在训练初期给 [M] 的嵌入输出加高斯噪声。</li>
+      <li>需要说明的是：论文没有给出“直接用块长 32 转换”的对照数字，所以“WSD 更好”是作者的论证，本页无法核实其增益大小。</li>
+    </ul>
+    <p class="cite">依据：LLaDA2.0 §4、§4.1、§4.2、§6.3、§7.1。</p>
+  </div>
+  <h3 id="q18"><span class="qid">Q18</span>LLaDA2.1 的 T2T 编辑为什么能让 M2T 阈值大幅降低而不崩？S / Q 两种模式各换来多少 TPF、付出多少分数，速度数字又是在什么条件下测的？</h3>
+  <div class="ans"><p class="short">吸收态掩码扩散中，token 一旦从 [M] 落定就无法更改，低阈值带来的错误会永久保留，还会拉低后续步骤的置信度，使解码变慢。T2T 让候选已改变且足够自信的位置被改写，于是 M2T 可以先粗糙起草（S 模式 τ_mask 0.5），错误由后续步骤回收。训练时同时监督“从 [M] 预测”和“从随机替换的噪声复原”两路，模型才学会识别错字。</p>
+    <ul>
+      <li>flash：2.0 为 72.43 | 3.08 TPF；2.1 S 为 72.34 | 5.93；Q 为 73.54 | 3.64。mini：63.39 | 2.60 → S 62.07 | 5.34 / Q 63.90 | 3.12。S 模式约把 TPF 提高到 1.9–2.1 倍，分数持平或略降。</li>
+      <li>摘要中的“892 TPS（HumanEval+）”是 S 模式 + 按块 FP8 量化 + Alpha-MoE megakernel + 定制 SGLang 下的数字；不量化时为 746.66。论文未写硬件与 batch。</li>
+      <li>DiffusionGemma 报告在 8 × B200、BF16、batch 1 下测得 LLaDA2.1 Flash S 模式为 375 TPS、4.63 TPF，与作者自报的条件不同。</li>
+      <li>局限：S 模式在通用对话中可能出现 n-gram 重复，作者建议改用 Q 模式；代码、数学等结构化任务的提速最明显，IFEval 只有约 219–248 TPS。</li>
+    </ul>
+    <p class="cite">依据：LLaDA2.1 §1–3、§4.2、§6、Tab. 1–3；HF 模型卡；DiffusionGemma 报告 Tab. 3。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zhu, You, Xing, … Li, Li, Wen. <i>LLaDA-MoE: A Sparse MoE Diffusion Language Model.</i> arXiv 2509.24389（v1，2025-09）。<a href="https://arxiv.org/abs/2509.24389">论文</a> · <a href="https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct">权重</a>。</li>
+  <li>Bie, Cao, Chen, … Zhuang. <i>LLaDA2.0: Scaling Up Diffusion Language Models to 100B.</i> arXiv 2512.15745（本页读 v2，2025-12）。<a href="https://arxiv.org/abs/2512.15745">论文</a> · <a href="https://github.com/inclusionAI/LLaDA2.X">代码</a> · <a href="https://huggingface.co/inclusionAI/LLaDA2.0-flash">权重（flash）</a> · <a href="https://huggingface.co/inclusionAI/LLaDA2.0-mini">权重（mini）</a>。</li>
+  <li>Bie, Cao, Cao, … Zhuang. <i>LLaDA2.1: Speeding Up Text Diffusion via Token Editing.</i> arXiv 2602.08676（本页读 v3，2026-02）。<a href="https://arxiv.org/abs/2602.08676">论文</a> · <a href="https://huggingface.co/inclusionAI/LLaDA2.1-flash">权重与参考代码（flash）</a> · <a href="https://huggingface.co/inclusionAI/LLaDA2.1-mini">权重（mini）</a>。</li>
+  <li>推理与训练框架：<a href="https://github.com/inclusionAI/dInfer">dInfer</a> · <a href="https://github.com/inclusionAI/dFactory">dFactory</a>（LLaDA2.0 §7.2–7.3 引用）。</li>
+  <li>DiffusionGemma Team. <i>DiffusionGemma Technical Report.</i> arXiv 2608.00146（对 LLaDA2.1 的第三方测速）。<a href="https://arxiv.org/abs/2608.00146">论文</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

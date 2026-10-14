@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MDLM 与 MD4：掩码扩散目标的化简</title>
+<meta name="description" content="掩码扩散的连续时间 ELBO 如何化简成按掩码率加权的交叉熵；SUBS 参数化的零掩码概率与照抄；MD4 的同期推导与状态相关调度；对 SEDD 与 AR 的困惑度，以及它为何成为 LLaDA 等模型的默认训练目标。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="mdlm">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：掩码扩散本来就不差，只是写得太复杂</h2>
+<p>2024 年上半年，离散扩散在困惑度上的最好成绩属于 <a href="02-sedd.html">SEDD</a>：它学的是相邻状态的概率比，目标函数要用 CTMC 理论推导，网络还要输入时间 \(t\)。D3PM 的 absorbing（掩码）版本早就存在，却一直被当成弱基线。MDLM 与 MD4 在一周之内先后挂上 arXiv（MD4 2024-06-06，MDLM 2024-06-11），各自证明了同一件事：只看掩码这一种前向过程，连续时间 ELBO 就是<b>按掩码率加权的掩码语言模型（MLM）交叉熵</b>，不需要转移矩阵，也不需要概率比。<span class="src">MDLM §3.4–3.5；MD4 §3</span></p>
+<p>本页记号：干净序列 \(x_0\)，长度 \(L\)；加噪序列 \(x_t\)，\(t\in[0,1]\)，\(t=1\) 时全为 \([\mathrm{M}]\)；去噪网络 \(p_{\theta}(x_0^i\mid x_t)\)；\(\alpha_t\) 是 token 保持干净的概率（单调下降，\(\alpha_0\approx1,\ \alpha_1\approx0\)）。MDLM 原文把干净数据写作 \(\mathbf{x}\)、加噪写作 \(\mathbf{z}_t\)，把网络写作 \(\mathbf{x}_{\theta}\)；MD4 写作 \(x_0,x_t,\mu_{\theta}\)。两篇的时间方向都与本站一致。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  把每个 token 以概率 \(1-\alpha_t\) 换成 \([\mathrm{M}]\)，让双向网络只在被遮位置做交叉熵，再乘上 \(-\alpha_t'/(1-\alpha_t)\)（线性调度下就是 \(1/t\)）对 \(t\) 积分——这就是负 ELBO。BERT 的 MLM 是它固定掩码率、去掉权重的特例；LLaDA 的式 (3) 是它的原样照搬。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：MDLM 的一次训练步</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw mask"></i>[M] 掩码 token</span>
+  <span><i class="sw enc"></i>去噪网络（可训练）</span><span><i class="sw loss"></i>损失</span>
+  <span>白框：确定性运算（无参数）</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="MDLM 训练步：采样 t，独立掩码，双向网络预测，SUBS 替换，在掩码位置做按 1/t 加权的交叉熵">
+    <g class="data" data-part="x0" data-step="1">
+      <rect class="box" x="20" y="30" width="240" height="100" rx="10"/>
+      <text class="t-c t-b" x="140" y="52">干净序列 x₀</text>
+      <rect class="tk data" x="36" y="70" width="22" height="22"/><rect class="tk data" x="62" y="70" width="22" height="22"/><rect class="tk data" x="88" y="70" width="22" height="22"/><rect class="tk data" x="114" y="70" width="22" height="22"/><rect class="tk data" x="140" y="70" width="22" height="22"/><rect class="tk data" x="166" y="70" width="22" height="22"/><rect class="tk data" x="192" y="70" width="22" height="22"/><rect class="tk data" x="218" y="70" width="22" height="22"/>
+      <text class="t-c t-sm" x="140" y="114">长度 L，one-hot 词表 K</text>
+    </g>
+    <path class="edge" d="M260,80 H296" data-step="2"/>
+    <g data-part="t" data-step="2">
+      <rect class="box" x="300" y="30" width="150" height="100" rx="10"/>
+      <text class="t-c t-b" x="375" y="58">采样 t ~ U[0,1]</text>
+      <text class="t-c t-sm" x="375" y="84">每个 token 独立掩码</text>
+      <text class="t-c t-sm" x="375" y="106">概率 1−α_t = t</text>
+    </g>
+    <path class="edge" d="M450,80 H486" data-step="2"/>
+    <g class="data" data-part="xt" data-step="2">
+      <rect class="box" x="490" y="30" width="240" height="100" rx="10"/>
+      <text class="t-c t-b" x="610" y="52">加噪序列 x_t</text>
+      <rect class="tk data" x="506" y="70" width="22" height="22"/><rect class="tk mask" x="532" y="70" width="22" height="22"/><rect class="tk data" x="558" y="70" width="22" height="22"/><rect class="tk mask" x="584" y="70" width="22" height="22"/><rect class="tk mask" x="610" y="70" width="22" height="22"/><rect class="tk data" x="636" y="70" width="22" height="22"/><rect class="tk mask" x="662" y="70" width="22" height="22"/><rect class="tk data" x="688" y="70" width="22" height="22"/>
+      <text class="t-c t-sm" x="610" y="114">斜线格 = [M]（吸收态）</text>
+    </g>
+    <path class="edge" d="M610,130 V176" data-step="3"/>
+    <g class="enc" data-part="denoiser" data-step="3">
+      <rect class="box" x="490" y="180" width="240" height="80" rx="10"/>
+      <text class="t-c t-b" x="610" y="206">双向 Transformer 去噪器</text>
+      <text class="t-c t-sm" x="610" y="232">x_θ(x_t)：MDLM 可不输入 t</text>
+    </g>
+    <path class="edge enc" d="M730,220 H766" data-step="4"/>
+    <g data-part="subs" data-step="4">
+      <rect class="box" x="770" y="180" width="170" height="80" rx="10"/>
+      <text class="t-c t-b" x="855" y="204">SUBS 参数化</text>
+      <text class="t-c t-sm" x="855" y="226">[M] 的 logit 置 −∞</text>
+      <text class="t-c t-sm" x="855" y="244">已揭示位置照抄输入</text>
+    </g>
+    <path class="edge" d="M855,260 V296" data-step="5"/>
+    <path class="edge" d="M375,130 V325 H766" data-step="5"/>
+    <text class="t-sm" x="390" y="316" data-step="5">t → 权重 1/t</text>
+    <path class="edge" d="M240,130 V355 H766" data-step="5"/>
+    <text class="t-sm" x="252" y="346" data-step="5">目标 x₀（交叉熵的标签）</text>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="770" y="300" width="170" height="80" rx="10"/>
+      <text class="t-c t-b" x="855" y="326">加权交叉熵</text>
+      <text class="t-c t-sm" x="855" y="350">只在 [M] 位置计分</text>
+      <text class="t-c t-sm" x="855" y="368">权重 1/t（α_t=1−t 时）</text>
+    </g>
+    <g data-part="sampler" data-step="6">
+      <rect class="panel" x="20" y="180" width="200" height="90" rx="10"/>
+      <text class="t-c t-b" x="120" y="204">推理：从全 [M] 出发</text>
+      <text class="t-c t-sm" x="120" y="228">每步按 (t−s)/t 揭示</text>
+      <text class="t-c t-sm" x="120" y="250">画布未变则复用 x_θ</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="x0"><h4>干净序列</h4><p>OWT 实验 \(L=1024\)、GPT-2 分词器；LM1B 实验 \(L=128\)、bert-base-uncased 分词器。官方代码在词表末尾追加一个 \([\mathrm{M}]\) id（GPT-2 词表没有 mask token）。<span class="src">MDLM §5.1、App. D.4；官方代码 diffusion.py</span></p></div>
+    <div data-note="t"><h4>每条序列一个 t</h4><p>一个 batch 内用低差异采样：第 \(i\) 条序列的 \(t_i\sim U[\tfrac{i-1}{N},\tfrac{i}{N}]\)，降低 ELBO 估计方差。log-linear 调度 \(\sigma(t)=-\log(1-t)\)，即 \(\alpha_t=1-t\)；代码里 \(t\) 下限截到 \(10^{-3}\)。<span class="src">MDLM App. D.3、E.1；官方代码 noise_schedule.py</span></p></div>
+    <div data-note="xt"><h4>吸收态</h4><p>掩码一旦发生就不会再回到原 token。被遮比例的期望是 \(t\)，所以 MDLM 把 \(\mathbb{E}[t]=0.5\) 乘进“训练见过的 token 数”——这正是同一训练量既被写成 262B 又被写成 524B 的原因（见 §5 callout）。<span class="src">MDLM §3.2.1、App. D.2</span></p></div>
+    <div data-note="denoiser"><h4>DiT 骨干</h4><p>沿用 SEDD 的 DiT（12 层、隐藏 768、12 头、RoPE、输入输出嵌入不共享）。时间条件可去掉：OWT 上带 / 不带 \(t\) 的困惑度为 23.21 / 23.05。<span class="src">MDLM App. D.4、Tab. 12</span></p></div>
+    <div data-note="subs"><h4>两条“替换”</h4><p>零掩码概率：干净数据不可能是 \([\mathrm{M}]\)，把对应 logit 设为 \(-\infty\)。照抄：输入里已揭示的位置直接输出该 token。两条都把模型本来要学的事实写死，使 ELBO 中相应项解析地为 0。<span class="src">MDLM §3.2.3、§3.3</span></p></div>
+    <div data-note="loss"><h4>只有被遮位置贡献损失</h4><p>负 ELBO 的每一项是 \(\frac{\alpha_s-\alpha_t}{1-\alpha_t}\log\langle x_{\theta}, x_0\rangle\)，连续时间极限下权重为 \(\alpha_t'/(1-\alpha_t)\)。官方代码写成 <code>-log_p * dsigma / expm1(sigma)</code>，在 log-linear 调度下化简为 \(1/t\)（推算）。<span class="src">MDLM Eq. 10、12；官方代码 diffusion.py</span></p></div>
+    <div data-note="sampler"><h4>与训练对应的祖先采样</h4><p>从全 \([\mathrm{M}]\) 出发，每个被遮位置以 \(\frac{\alpha_s-\alpha_t}{1-\alpha_t}=\frac{t-s}{t}\) 的概率揭示为 \(x_{\theta}\) 中采到的 token；网络不看 \(t\) 时，一步没有新 token 就不必重算，NFE 至多为 \(L\)。<span class="src">MDLM §4.1；DFM App. B（同一论证）</span></p></div>
+    <div data-step-note="1"><h4>① 取一条干净序列</h4><p>\(x_0\) 是 \(L\) 个 one-hot token。</p></div>
+    <div data-step-note="2"><h4>② 采样 t 并独立掩码</h4><p>每个位置独立地以概率 \(1-\alpha_t\) 变成 \([\mathrm{M}]\)。前向过程按位置分解，所以反向模型也按位置分解（在连续时间极限下这一分解是精确的）。</p></div>
+    <div data-step-note="3"><h4>③ 双向网络一次前向</h4><p>整张画布同时进入网络，每个位置输出一个词表分布。</p></div>
+    <div data-step-note="4"><h4>④ SUBS 改写输出</h4><p>\([\mathrm{M}]\) 概率归零、已揭示位置照抄。去掉照抄会让 LM1B 困惑度上界从 27.19 升到 28.56。<span class="src">MDLM Tab. 8</span></p></div>
+    <div data-step-note="5"><h4>⑤ 加权交叉熵</h4><p>只在 \([\mathrm{M}]\) 位置对 \(x_0\) 计交叉熵，乘以 \(1/t\)。同一个 \(t\) 既决定遮多少，也决定这一样本的权重。</p></div>
+    <div data-step-note="6"><h4>⑥ 推理</h4><p>训练与采样共享同一个后验 \(q(x_s\mid x_t,x_0)\)，只是把 \(x_0\) 换成网络预测；已揭示 token 永不再改。</p></div>
+  </div>
+  <figcaption>图 1　MDLM 的连续时间训练步与对应的祖先采样器。依据 MDLM §3–4、Alg. 1 与官方实现 <code>diffusion.py</code>（<code>_forward_pass_diffusion</code>、<code>_subs_parameterization</code>、<code>_ddpm_caching_update</code>）。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-elbo">3.1 从 D3PM 的 KL 到加权交叉熵</h3>
+<p>MDLM 只考虑“插值式”前向过程 \(q(x_t\mid x_0)=\mathrm{Cat}(\alpha_t x_0+(1-\alpha_t)\pi)\)；取 \(\pi=[\mathrm{M}]\) 即掩码扩散。真实后验很简单：\(x_t\) 已揭示就原样保留；\(x_t=[\mathrm{M}]\) 时以 \(\frac{\alpha_s-\alpha_t}{1-\alpha_t}\) 跳回 \(x_0\)，否则保持 \([\mathrm{M}]\)。把 \(x_0\) 换成网络预测 \(x_{\theta}(x_t)\) 就得到反向模型，于是每一步的 KL 只剩一项：<span class="src">MDLM Eq. 8–10；MD4 §2–3</span></p>
+<div class="formula">$$\mathrm{KL}\big(q(x_s\mid x_t,x_0)\,\|\,p_{\theta}(x_s\mid x_t)\big)=-\frac{\alpha_s-\alpha_t}{1-\alpha_t}\,\mathbf{1}[x_t=[\mathrm{M}]]\,\log p_{\theta}(x_0\mid x_t).$$</div>
+<p>对 \(T\) 步求和是一个黎曼和；MD4 证明它被连续积分从下方界住，所以 \(T\to\infty\) 的 ELBO 比任何有限 \(T\) 都紧。MDLM 的消融印证了这一点：离散 \(T=1000\) 训练比连续时间差约 0.15（27.19 vs 27.04）。<span class="src">MD4 App. D；MDLM Tab. 8</span></p>
+<p><b>为什么叫 Rao-Blackwell 化。</b>如果按 D3PM 的方式把后验整体代入（MDLM Eq. 11），损失里会出现 \(\langle x_{\theta},[\mathrm{M}]\rangle\) 这类项，网络得自己学会把它们压到 0；SUBS 把它们解析地设为 0，等价于对这些量求了期望，方差也随之下降（作者承认这是对术语的“借用”）。<span class="src">MDLM §3.3</span></p>
+<h3 id="c-subs">3.2 SUBS 参数化：两条约束，作用不同</h3>
+<p><b>零掩码概率</b>：输出分布在 \([\mathrm{M}]\) 上的质量置零。<b>照抄（carry-over）</b>：已揭示位置的输出等于输入。照抄让未遮位置的损失恒为 0，网络的容量全部用于被遮位置；零掩码概率主要是数值上的整洁。消融显示：去掉照抄使 LM1B 上界从 27.19 升到 28.56，再去掉零掩码概率几乎不变（28.51，这一行在数学上等价于 D3PM 的写法）。作者的另一个结论更值得注意：比起 SUBS，<b>工程配方</b>（分词器、DiT 骨干、数值稳定的实现、低差异采样）贡献最大。<span class="src">MDLM Tab. 8、§3.5.1、§6</span></p>
+<p>照抄也有代价：它把“揭示后不可修改”写进了模型，这正是后来 <a href="05-uniform.html">均匀态扩散</a>、DFM 的 corrector（<a href="04-discrete-flow.html">下一页</a>）和 LLaDA 2.1 的 T2T 编辑要绕开的约束。</p>
+<p><b>调度不变性。</b>做变量替换 \(\gamma=\log(1-\alpha_t)\)，负 ELBO 变成 \(-\mathbb{E}\int_{-\infty}^{0}\log p_{\theta}\,d\gamma\)，与 \(\alpha_t\) 的函数形式无关，只取决于端点；但不同调度下单样本估计的方差不同。OWT 上四种调度的 BPD 都是 3.30，每样本方差分别为 1.81（log-linear）、3.30（cosine）、3.30（cosine²）、7.57（linear \(\sigma\)）。<span class="src">MDLM §3.4、App. E.1、Tab. 9</span></p>
+<h3 id="md4">3.3 MD4：同一个目标，另一套推导与一个推广</h3>
+<p>MD4（Google DeepMind）从离散时间转移矩阵 \(Q_i=(1-\beta_i)I+\beta_i\mathbf{1}e_m^{\top}\) 出发取极限，得到同一个积分（MD4 Eq. 5），并补充了 MDLM 没有强调的三点：<span class="src">MD4 §2–5</span></p>
+<ul>
+  <li><b>SNR 形式的不变性</b>：令 \(\alpha_t=\sigma(\lambda_t)\)，损失化为对 log-SNR \(\lambda\) 的积分，调度只通过端点 SNR 起作用——与连续扩散 VDM 的结论同构。<span class="src">MD4 §3</span></li>
+  <li><b>与 score 参数化的关系</b>：掩码状态的离散 score 满足 \(s(m,t)_j=\frac{\alpha_t}{1-\alpha_t}\mathbb{E}[x_0\mid x_t=m]_j\)，且 \(\sum_j s=\frac{\alpha_t}{1-\alpha_t}\)。SEDD 让网络自由输出 score，不强制这个约束，作者认为这是 SEDD 训练不稳的原因（参见 <a href="02-sedd.html#radd">RADD</a> 的同一结论）。<span class="src">MD4 Prop. 1、§7.1</span></li>
+  <li><b>与任意顺序 AR（AO-ARM）的关系</b>：所有位置的揭示时间同分布，揭示顺序是均匀随机排列；调度 \(\alpha_t\) 是 AO-ARM 没有的新自由度——它决定每步同时揭示多少个 token。<span class="src">MD4 §5</span></li>
+</ul>
+<p><b>调度影响的是采样，不是似然。</b>线性调度给出最好的 ELBO，但在均匀时间网格上前期一次揭示太多 token，相关位置同步采样会冲突；改用余弦调度（或线性调度 + 余弦网格 \(t(i)=\cos(\frac{\pi}{2}(1-\frac{i}{T}))\)）后，ImageNet 64×64 在 \(T=256\) 时 FID 从 70 降到 17。这是 <a href="01-foundations.html">因子分解误差</a> 的一个早期实证。<span class="src">MD4 §4、Fig. 2</span></p>
+<p><b>GenMD4：状态相关调度。</b>让每个词值 \(i\) 有自己的调度 \(\alpha_{t,i}=1-t^{w_i}\)，希望“重要的 token 先揭示”。ELBO 推广为 MD4 Eq. 12；\(w\) 的梯度要穿过离散采样，作者用 REINFORCE leave-one-out 估计。GenMD4 在 OWT 验证集与 text8 上更好（≤21.80 vs ≤22.13；BPC 1.34 vs 1.37），但学到的 \(w\) 会过拟合数据集统计，零样本迁移反而变差，推理也更复杂。<span class="src">MD4 §6、Tab. 2、Tab. 5、§8</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>MDLM</th><th>MD4</th></tr></thead>
+  <tbody>
+    <tr><td>推导路线</td><td>插值前向 + SUBS 后验，变分视角</td><td>转移矩阵取连续极限 + 均值参数化</td></tr>
+    <tr><td>默认调度</td><td>log-linear（即 \(\alpha_t=1-t\)）</td><td>linear \(\alpha_t=1-t\)（加 \(\epsilon=10^{-4}\) 平移），采样用余弦网格</td></tr>
+    <tr><td>时间条件</td><td>可去掉，带来缓存采样（约 2× 推理加速）</td><td>可取时间无关参数化（引 Ou et al.）</td></tr>
+    <tr><td>独有内容</td><td>半自回归（SAR）变长生成；BERT 微调成生成模型；DNA</td><td>SNR 不变性；score↔均值参数化；GenMD4；像素级图像</td></tr>
+    <tr><td>代码</td><td>PyTorch，kuleshov-group/mdlm（BD3-LM、Duo、Eso-LM 复用）</td><td>JAX，google-deepmind/md4</td></tr>
+  </tbody>
+</table></div>
+<p class="src">MDLM §3.2.2、§4.2、§5、App. E.2；MD4 §3、§4、§6、App. J</p>
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>MDLM</th><th>MD4</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>负 ELBO = 按 \(-\alpha_t'/(1-\alpha_t)\) 加权的 [M] 位置交叉熵；log-linear 下权重 \(1/t\)。<span class="src">Eq. 13</span></td><td>同一积分（Eq. 5）；GenMD4 改为逐词值调度。<span class="src">§3、§6</span></td><td>下一 token 交叉熵，即精确 NLL</td></tr>
+    <tr><td>注意力与 KV cache</td><td>双向 DiT，无 KV cache；不输入 \(t\) 时可在画布不变的步之间复用整份输出（不是 KV cache）。<span class="src">§4.1</span></td><td>双向 Transformer（GPT-2 S/M 尺寸），无 KV cache。<span class="src">App. J.2</span></td><td>因果注意力 + KV cache，每步只算新 token</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>\(T\) 步祖先采样平均每步揭示 \(L/T\) 个；论文生成实验用 \(T\in\{100,\dots,10^4\}\)、\(L=1024\)，缓存使 NFE \(\le L\)。<span class="src">Fig. 2、§4.1</span></td><td>默认 1000 步采样 \(L=1024\)（TPF≈1）；余弦网格让前期揭示更慢。<span class="src">App. J、Fig. 2</span></td><td>1（TPF = 1）</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>把 BERT 微调成生成模型而 GLUE 不降（82.06 vs 81.62）；双向条件；SAR 变长生成。<span class="src">Tab. 4、§4.2</span></td><td>原地填空（条件 token 全程保持揭示）；像素级图像 BPD 与同尺寸或更大 AR 持平或更好。<span class="src">§4、Tab. 3</span></td><td>—（只能向右追加）</td></tr>
+    <tr><td>代价与失效情形</td><td>只得到困惑度上界；LM1B 33B token 时 ≤27.04 vs AR 22.32；已揭示 token 不可改；定长画布。<span class="src">Tab. 1</span></td><td>FineWeb-Edu 上 HellaSwag 达到同精度约需 AR 的 4× 训练步（S：200k vs 50k）；均匀网格下并行冲突；GenMD4 过拟合。<span class="src">§7.1、Fig. 5、§4</span></td><td>每 token 一次前向；不能回改、不能双向填空</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、批次与张量形状（MDLM-OWT 配置）</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>干净序列 \(x_0\)</td><td>[512, 1024] int</td><td>全局 batch 512、上下文 1024，文档拼接后切块，块间插 eos。<span class="src">App. D.2、D.4</span></td></tr>
+    <tr><td>\(t\)、掩码率</td><td>[512] → [512, 1]</td><td>低差异采样，每条序列一个 \(t\)。<span class="src">App. D.3</span></td></tr>
+    <tr><td>\(x_t\)</td><td>[512, 1024] int</td><td>\([\mathrm{M}]\) 是追加的第 \(K+1\) 个 id（\(K\) = GPT-2 词表）。<span class="src">官方代码 diffusion.py</span></td></tr>
+    <tr><td>隐藏状态</td><td>[512, 1024, 768]</td><td>12 层 DiT、12 头；不条件化时时间嵌入置零。<span class="src">App. D.4；官方 config time_conditioning</span></td></tr>
+    <tr><td>logits → SUBS</td><td>[512, 1024, K+1]</td><td>\([\mathrm{M}]\) 列加 \(-10^6\)；已揭示行改成 one-hot 的 log 概率。<span class="src">官方代码 _subs_parameterization</span></td></tr>
+    <tr><td>\(\log p_{\theta}(x_0^i\mid x_t)\)</td><td>[512, 1024]</td><td>按 \(x_0\) gather；未遮位置恒为 0。</td></tr>
+    <tr><td>损失</td><td>标量</td><td>乘 \(1/t\)（广播 [512, 1]）后求均值；评测困惑度时用单个 \(t\) 的 MC 估计。<span class="src">App. D.1</span></td></tr>
+  </tbody>
+</table></div>
+<p>每步的计算量与同尺寸 AR 训练相当（同样是 \(B\times L\) 个位置过一次网络），但只有约一半位置产生损失信号；MDLM 因此让 AR 基线只训一半步数来“对齐见过的 token 数”。这种记账方式本身就是一种选择，见下文。<span class="src">MDLM §5.1、App. D.2</span></p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<div class="formula">$$\mathcal{L}_{\infty}(\theta)=\mathbb{E}_{x_0}\int_0^1\frac{\alpha_t'}{1-\alpha_t}\;\mathbb{E}_{q(x_t\mid x_0)}\Big[\sum_{i:\,x_t^i=[\mathrm{M}]}\log p_{\theta}(x_0^i\mid x_t)\Big]\,dt\ \ \ge\ -\log p_{\theta}(x_0).$$</div>
+<p>\(\alpha_t'<0\)，所以积分号前的权重为正。取 \(\alpha_t=1-t\)：</p>
+<div class="formula">$$\mathcal{L}(\theta)=\mathbb{E}_{t\sim U[0,1]}\,\mathbb{E}_{x_0,x_t}\Big[\frac{1}{t}\sum_{i=1}^{L}\mathbf{1}[x_t^i=[\mathrm{M}]]\,\big(-\log p_{\theta}(x_0^i\mid x_t)\big)\Big].$$</div>
+<p>这正是 LLaDA 的式 (3)，LLaDA 为它引用的三篇来源就是 MD4、MDLM 与 RADD。<span class="src">LLaDA §2.1 Eq. 3、App. A.1</span>它成为默认目标的原因可以归结为三条：① 实现就是“随机掩码率的 BERT 损失乘一个标量”，任何 Transformer 训练栈都能直接跑；② 它是似然的上界，困惑度、扩展律和 MC-ELBO 评测（LLaDA 用它做选择题打分）都有了依据；③ 不需要时间输入（RADD / MDLM），网络与 AR 骨干结构相同，便于放大与从 AR 权重初始化。<span class="src">MDLM §3.5、Tab. 12；LLaDA §2.1–2.4</span></p>
+<p>与 BERT 的差别只在两处：掩码率随机采自 \([0,1]\) 而非固定 15%，损失乘 \(1/t\)。去掉 \(1/t\)（即 MaskGIT 式目标）就不再是 ELBO；但 2026 年的 <a href="05-uniform.html#uniform-scaling">Beyond-Masked</a> 发现，<b>训练时</b>去掉权重、<b>评测时</b>仍用 ELBO，可把 MDLM 的计算效率提高约 12%。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部与论文 vs 官方代码</span>
+  <ul>
+    <li><b>“262B”与“524B”是同一次训练。</b>OWT 训练 1M 步 × batch 512 × 1024 = 524B 个 token 位置；App. D.2 只计被遮位置（期望占一半），把它记作 262B，Tab. 2 用 262B，而 Tab. 3、Fig. 3、Tab. 12 写 524B。AR 基线因此只训 0.5M 步。比较样本效率时要先统一口径。<span class="src">MDLM §5.1、App. D.2、Tab. 2–3、Tab. 12</span></li>
+    <li><b>正文的百分比与表格对不上。</b>正文称 MDLM 在 LM1B 上“距 AR 14% 以内”，但 Tab. 1 推算的比值是 27.04/22.32≈1.21（33B）或 23.00/20.86≈1.10（327B）；摘要又写“15–25%”。本页只引用表中原始数值。</li>
+    <li><b>时间条件。</b>Tab. 2 的 23.21 是带 \(t\) 条件的版本；官方 <code>config.yaml</code> 默认 <code>time_conditioning: False</code>，对应 Tab. 12 的 23.05。复现时以代码默认为准。</li>
+    <li><span class="unverified">MD4 Tab. 5（OWT 保留 2% 训练集作验证）与 MDLM Tab. 2（保留最后 10 万篇）各自重训的 SEDD 都报 ≤24.10，两者验证划分不同；是巧合还是沿用了同一数字，论文未说明。</span></li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">mdlm.py（依据 MDLM Alg. 1、§4.1 与官方 diffusion.py 改写的最小版本）</div>
+<pre><code class="lang-py">MASK = vocab_size                                  # extra id appended to the tokenizer
+
+def train_step(x0, model, opt, eps=1e-3):
+    B, L = x0.shape
+    u = (torch.rand(()) + torch.arange(B) / B) % 1.0    # low-discrepancy: one stratum per row
+    t = (1 - eps) * u + eps                           # mask prob = 1 - alpha_t = t
+    masked = torch.rand(B, L) &lt; t[:, None]
+    xt = torch.where(masked, MASK, x0)
+    logits = model(xt)                                # bidirectional; no t input (MDLM default)
+    logits[..., MASK] = -float("inf")                 # SUBS 1: zero masking probability
+    logp = logits.log_softmax(-1).gather(-1, x0[..., None]).squeeze(-1)
+    nll = -logp * masked                              # SUBS 2: carry-over -> unmasked terms are 0
+    loss = (nll.sum(-1) / t).mean() / L               # weight -alpha'_t / (1 - alpha_t) = 1 / t
+    loss.backward(); opt.step(); opt.zero_grad()
+    return loss                                       # per-token NELBO in nats (an upper bound)
+
+@torch.no_grad()
+def sample(model, L, T):
+    x = torch.full((1, L), MASK)
+    probs = None
+    for k in range(T, 0, -1):
+        t, s = k / T, (k - 1) / T
+        if probs is None:                             # cache: x_theta does not depend on t
+            logits = model(x)
+            logits[..., MASK] = -float("inf")
+            probs = logits.softmax(-1)
+        reveal = (x == MASK) &amp; (torch.rand(1, L) &lt; (t - s) / t)   # (alpha_s-alpha_t)/(1-alpha_t)
+        cand = torch.multinomial(probs[0], 1).T       # one draw per position from x_theta
+        x_new = torch.where(reveal, cand, x)          # revealed tokens are never changed again
+        if (x_new != x).any():
+            probs = None                              # canvas changed -> recompute next step
+        x = x_new
+    return x                                          # at k = 1, (t - s) / t = 1: all revealed</code></pre>
+<p>半自回归（SAR）生成：先生成 \(L\) 个 token，再把末尾 \(L-L'\) 个作为前缀照抄、只对新的 \(L'\) 个位置去噪，如此滚动。它没有 KV cache，每轮仍对整张画布做双向注意力——块间 KV cache 要等到 <a href="11-block-diffusion.html">BD3-LM</a>。<span class="src">MDLM §4.2</span></p>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>MDLM</th><th>MD4</th></tr></thead>
+  <tbody>
+    <tr><td>骨干</td><td>DiT 12 层 / 768 / 12 头，时间嵌入 128（启用时）；LM1B 表中记 110M<span class="src">App. D.4、Tab. 1</span></td><td>GPT-2 S / M 的层数、头数、宽度（同 SEDD）<span class="src">App. J.2</span></td></tr>
+    <tr><td>调度</td><td>log-linear \(\alpha_t=1-t\)（代码 \(\epsilon=10^{-3}\)）<span class="src">App. E.1；noise_schedule.py</span></td><td>\(\alpha_t=(1-2\epsilon)(1-t)+\epsilon\)，\(\epsilon=10^{-4}\)<span class="src">App. J.1</span></td></tr>
+    <tr><td>优化</td><td>AdamW，lr 3e-4，2500 步线性预热后恒定，dropout 0.1，batch 512<span class="src">App. D.4</span></td><td>AdamW，lr 3e-4，wd 0.03，2000 步预热 + 余弦，dropout 0.02（OWT），batch 512<span class="src">App. J.1–J.2</span></td></tr>
+    <tr><td>训练量</td><td>LM1B 1M / 10M 步（33B / 327B，按被遮 token 计）；OWT 1M 步<span class="src">§5.1、App. D.2</span></td><td>text8 1M 步；OWT“与 text8 相同”，未单列步数<span class="src">App. J</span></td></tr>
+    <tr><td>EMA</td><td>0.9999<span class="src">官方 config.yaml</span></td><td>0.9999<span class="src">App. J</span></td></tr>
+    <tr><td>评测</td><td>单个 \(t\) 的 MC 估计 + 低差异采样<span class="src">App. D.1</span></td><td>连续时间 ELBO；采样 1000 步<span class="src">App. J</span></td></tr>
+  </tbody>
+</table></div>
+<p>名称陷阱：MDLM 把 \(\sigma(t)=-\log(1-t)\)（即 \(\alpha_t=1-t\)）叫 log-linear，把 \(\sigma(t)=\sigma_{\max}t\) 叫 linear；MD4 把 \(\alpha_t=1-t\) 直接叫 linear。两篇的“默认调度”其实相同。<span class="src">MDLM App. E.1；MD4 Fig. 1、App. J.1</span></p>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>LM1B（MDLM Tab. 1）</b>：110M 模型、上下文 128；扩散模型报的是困惑度上界。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">训练 token</th><th class="num">PPL ↓</th></tr></thead>
+  <tbody>
+    <tr><td>D3PM absorb（原文，70M）</td><td class="num">—</td><td class="num">≤ 76.90</td></tr>
+    <tr><td>SEDD</td><td class="num">33B</td><td class="num">≤ 32.79</td></tr>
+    <tr class="hl"><td>MDLM</td><td class="num">33B</td><td class="num">≤ 27.04</td></tr>
+    <tr class="hl"><td>MDLM</td><td class="num">327B</td><td class="num">≤ 23.00</td></tr>
+    <tr><td>AR Transformer（重训）</td><td class="num">33B / 327B</td><td class="num">22.32 / 20.86</td></tr>
+  </tbody>
+</table></div>
+<p><b>OWT</b>：MDLM Tab. 2（保留最后 10 万篇文档）中 AR 17.54、SEDD ≤24.10、MDLM ≤23.21；零样本迁移（Tab. 3，OWT 训练）里 MDLM 在 7 个数据集上都优于重训的 SEDD，并在 Lambada、Pubmed、Arxiv 三个上低于 AR。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>MDLM Tab. 3</th><th class="num">PTB</th><th class="num">Wikitext</th><th class="num">LM1B</th><th class="num">Lambada</th><th class="num">AG News</th><th class="num">Pubmed</th><th class="num">Arxiv</th></tr></thead>
+  <tbody>
+    <tr><td>AR（重训）</td><td class="num">82.05</td><td class="num">25.75</td><td class="num">51.25</td><td class="num">51.28</td><td class="num">52.09</td><td class="num">49.01</td><td class="num">41.73</td></tr>
+    <tr><td>SEDD（重训）</td><td class="num">≤100.09</td><td class="num">≤34.28</td><td class="num">≤68.20</td><td class="num">≤49.86</td><td class="num">≤62.09</td><td class="num">≤44.53</td><td class="num">≤38.48</td></tr>
+    <tr class="hl"><td>MDLM</td><td class="num">≤95.26</td><td class="num">≤32.83</td><td class="num">≤67.01</td><td class="num">≤47.52</td><td class="num">≤61.15</td><td class="num">≤41.89</td><td class="num">≤37.37</td></tr>
+  </tbody>
+</table></div>
+<p><b>MD4 零样本（MD4 Tab. 1，GPT-2 small 尺寸，SEDD 的 5 个基准）</b>：作者在自己的代码里重训了 SEDD；GPT-2 行是在 WebText 上训练的官方权重，不是同数据对照。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>MD4 Tab. 1（S）</th><th class="num">LAMBADA</th><th class="num">WikiText2</th><th class="num">PTB</th><th class="num">WikiText103</th><th class="num">1BW</th></tr></thead>
+  <tbody>
+    <tr><td>GPT-2（WebText）</td><td class="num">45.04</td><td class="num">42.43</td><td class="num">138.43</td><td class="num">41.60</td><td class="num">75.20</td></tr>
+    <tr><td>SEDD Absorb（重训）</td><td class="num">≤49.73</td><td class="num">≤38.94</td><td class="num">≤107.54</td><td class="num">≤39.15</td><td class="num">≤72.96</td></tr>
+    <tr class="hl"><td>MD4</td><td class="num">≤48.43</td><td class="num">≤34.94</td><td class="num">≤102.26</td><td class="num">≤35.90</td><td class="num">≤68.10</td></tr>
+  </tbody>
+</table></div>
+<p>MD4 在 OWT 验证集（保留 2% 训练集）上：Gaussian diffusion ≤27.28、SEDD ≤24.10、MD4 ≤22.13、GenMD4 ≤21.80，medium 尺寸 MD4 ≤16.64；text8 BPC：MD4 ≤1.37、GenMD4 ≤1.34，AR Transformer 1.23。<span class="src">MD4 Tab. 2、Tab. 5</span>两篇的 OWT 验证划分与零样本基准集合不同，<b>MD4 的 22.13 与 MDLM 的 23.21 不能直接比较</b>。</p>
+<p><b>速度（MDLM）</b>：单张 A5000 生成 64 条 1024-token 样本，\(T=5000\) 时 SEDD 85.3 分钟、MDLM 70.3、MDLM + 缓存 40.1；\(T=10^4\) 时 155.2 / 127.9 / 60.4。SAR 生成 2048 token（单张 3090、200 条）：MDLM Gen PPL 27.18、89.3 秒/条，SSD-LM 35.43、2473.9 秒/条。<span class="src">MDLM Tab. 10、Tab. 5</span>这些步数远多于 token 数，表明 2024 年的掩码扩散并不以“少步”为卖点——少步要等蒸馏与采样器（<a href="15-learned-parallel.html">学习式并行</a>、<a href="05-uniform.html">Duo</a>）。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul>
+    <li><a href="02-sedd.html">SEDD</a>：score entropy 学概率比，需要 CTMC 推导与时间输入，训练有不稳定。</li>
+    <li>D3PM absorb：要物化转移矩阵，数值不稳，被当作弱基线。</li>
+    <li>BERT：会填空，但没有原则性的生成过程与似然。</li>
+  </ul></div>
+  <div class="now"><h4>之后 → 留下的问题</h4><ul>
+    <li>目标被 <a href="06-llada.html">LLaDA</a>（8B 从零训练）、<a href="07-dream.html">Dream</a> 等原样采用；MDLM 代码成为 <a href="11-block-diffusion.html">BD3-LM / Eso-LM</a> 与 <a href="05-uniform.html">Duo</a> 的底座。</li>
+    <li>揭示后不能改：<a href="04-discrete-flow.html">DFM 的 corrector</a>、<a href="05-uniform.html">均匀态扩散</a>、<a href="09-llada2.html#llada21">LLaDA 2.1 的 T2T 编辑</a>。</li>
+    <li>定长画布：<a href="04-discrete-flow.html#edit-flows">Edit Flows</a> 与 FlexMDM 的插入操作，<a href="11-block-diffusion.html">块扩散</a>的块间自回归。</li>
+    <li>没有 KV cache、并行冲突：<a href="14-kv-cache.html">近似缓存</a>与 <a href="16-order-limits.html">并行上限</a>的分析。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q5"><span class="qid">Q5</span>为什么掩码扩散的连续时间 ELBO 能化简成“按 1/t 加权、只在 [M] 位置计分的交叉熵”？SUBS 的两条约束各起什么作用，去掉会怎样？</h3>
+  <div class="ans"><p class="short">吸收态让真实后验只剩“保持 [M]”或“跳回 \(x_0\)”两种结局，把 \(x_0\) 换成网络预测后，每步 KL 化为 \(\frac{\alpha_s-\alpha_t}{1-\alpha_t}\) 乘以被遮位置的交叉熵；步数趋于无穷时权重变为 \(-\alpha_t'/(1-\alpha_t)\)，线性调度下即 \(1/t\)。SUBS 的“照抄”让未遮位置的项解析为 0，“零掩码概率”让 \([\mathrm{M}]\) 相关项为 0，二者共同把 D3PM 的复杂 KL 变成纯交叉熵。</p>
+    <ul><li>去掉照抄：网络得自己学会复制未遮 token，LM1B 上界 27.19 → 28.56；再去掉零掩码概率几乎不变（28.51，等价于 D3PM 写法）。</li>
+    <li>连续时间比 \(T=1000\) 的离散 ELBO 略紧（27.04 vs 27.19），与 MD4 “黎曼和被积分从下方界住”的证明一致。</li>
+    <li>调度不改变 ELBO 的值（只依赖端点），但改变估计方差与采样时每步揭示多少 token。</li></ul>
+    <p class="cite">依据：MDLM §3.2–3.4、Eq. 10–13、Tab. 8–9；MD4 §3、App. D。</p>
+  </div>
+  <h3 id="q6"><span class="qid">Q6</span>MDLM 与 MD4 同期推出同一个目标，二者在推导、调度、参数化与实验上有何不同？为什么后来的大模型选它而不是 SEDD 的 score entropy？</h3>
+  <div class="ans"><p class="short">MDLM 走变分视角（插值前向 + SUBS），强调工程配方、时间无关的缓存采样、半自回归变长生成与 BERT 的联系；MD4 从转移矩阵取极限，给出 SNR 不变性、score 与均值参数化的换算，并推广到状态相关调度 GenMD4。二者的损失在 \(\alpha_t=1-t\) 下完全相同。大模型选它，是因为它只是“随机掩码率的 MLM 损失乘 \(1/t\)”，是似然上界，且不需要时间输入，骨干可与 AR 完全相同。</p>
+    <ul><li>MD4 发现线性调度似然最好、但均匀网格采样冲突大，余弦网格把 ImageNet64 FID 从 70 降到 17。</li>
+    <li>MD4 认为 SEDD 自由输出 score、不满足 \(\sum_j s=\alpha_t/(1-\alpha_t)\) 约束，导致前后向不一致与训练不稳。</li>
+    <li>LLaDA 式 (3) 与本页第二个公式相同，并同时引用 MD4、MDLM、RADD；两篇的 OWT 数字因验证划分不同不可直接比较。</li></ul>
+    <p class="cite">依据：MDLM §3–4、§6；MD4 §3–6、§7.1；LLaDA §2.1。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Sahoo, Arriola, Schiff, Gokaslan, Marroquin, Chiu, Rush, Kuleshov. <i>Simple and Effective Masked Diffusion Language Models.</i> NeurIPS 2024；本页读 arXiv v2。<a href="https://arxiv.org/abs/2406.07524">论文</a> · <a href="https://github.com/kuleshov-group/mdlm">代码</a> · <a href="https://huggingface.co/kuleshov-group/mdlm-owt">权重（OWT 1M 步）</a> · <a href="https://s-sahoo.com/mdlm">项目页</a>。</li>
+  <li>Shi, Han, Wang, Doucet, Titsias. <i>Simplified and Generalized Masked Diffusion for Discrete Data.</i> NeurIPS 2024；本页读 arXiv v4。<a href="https://arxiv.org/abs/2406.04329">论文</a> · <a href="https://github.com/google-deepmind/md4">代码</a>。</li>
+  <li>Ou et al. <i>Your Absorbing Discrete Diffusion Secretly Models the Conditional Distributions of Clean Data.</i> ICLR 2025。<a href="https://arxiv.org/abs/2406.03736">论文</a> · <a href="02-sedd.html#radd">本站拆解</a>。</li>
+  <li>Lou, Meng, Ermon. <i>Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution.</i> ICML 2024。<a href="https://arxiv.org/abs/2310.16834">论文</a> · <a href="02-sedd.html">本站拆解</a>。</li>
+  <li>Austin et al. <i>Structured Denoising Diffusion Models in Discrete State-Spaces (D3PM).</i> NeurIPS 2021。<a href="https://arxiv.org/abs/2107.03006">论文</a>。</li>
+  <li>Nie et al. <i>Large Language Diffusion Models (LLaDA).</i> <a href="https://arxiv.org/abs/2502.09992">论文</a> · <a href="06-llada.html">本站拆解</a>（式 3 的出处）。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

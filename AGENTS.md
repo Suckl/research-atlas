@@ -97,7 +97,7 @@ Prefer adding a milestone with `url` over leaving a gap in the timeline; promote
 
 A track may carry `questions[]`. Each entry maps a question id (`"Q7"`) and its text to one or more
 `{ node, anchor }` pairs. The track page renders the index with `<div data-render="questions">`; a node
-page's hero automatically shows "本页回答 Q7 Q16 …" badges linking to `#<anchor>`. Put the answers in a
+page's hero automatically shows "本页回答 Q7 Q16 …" badges linking to `#<anchor>` (for any node on that page file). Put the answers in a
 `<h2 id="questions">简答题</h2>` section using this markup (CSS in `atlas.css` §9):
 
 ```html
@@ -182,7 +182,9 @@ speedup curves + rejection-sampling demo), `collectives` (all-reduce / all-gathe
 all-to-all step-through; `data-ranks`), `fewstep-2d` (2-D toy for few-step generation with an exact GMM
 teacher: `data-focus="sampling|regress|dmd|drift"` — Euler NFE, regression coupling, DMD particles, drifting field),
 `memory-toy` (top-down toy world: four memory policies — window, frame retrieval, 3D map, recurrent state — recalling a
-demolished wall on revisit, change seen vs. unseen). Widget attributes must not be named `data-note` — that name is
+demolished wall on revisit, change seen vs. unseen),
+`dllm-decode` (parallel unmasking on a toy canvas with a correlated city pair; exact P(invalid) and E[NFE] for
+fixed steps / threshold τ / block size B vs. left-to-right; `data-focus="steps|threshold|block"`). Widget attributes must not be named `data-note` — that name is
 reserved for architecture-figure notes and the checker will flag it.
 New widget = new file registering `window.AtlasWidgets["<name>"] = (el, Atlas) => {…}`;
 helpers on `Atlas`: `h` (DOM), `s` (SVG), `rng(seed)`, `gauss(rand)`, `esc`, `typeset`.

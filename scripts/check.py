@@ -179,6 +179,7 @@ WIDGET_FILES = {
     "collectives": "collectives.js",
     "fewstep-2d": "fewstep2d.js",
     "memory-toy": "memorytoy.js",
+    "dllm-decode": "dllmdecode.js",
 }
 
 

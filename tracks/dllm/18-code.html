@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>代码扩散模型</title>
+<meta name="description" content="DiffuCoder、Dream-Coder 与 Stable-DiffCoder：解码的 AR 性及其随温度的变化、互补掩码的 coupled-GRPO、代码中的草图优先顺序，以及块扩散持续预训练对 Seed-Coder 的“同架构同数据源”对照到底控制了什么。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="diffucoder">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：代码不是严格从左到右写出来的</h2>
+<p>写代码时人们先定签名和控制流，再回头填细节；补全、改写、填空都需要右侧上下文。双向、可并行、可回改的 dLLM 看起来天然适合代码。但 2025 年中的开源 dLLM 在代码上明显落后同规模 AR：DiffuCoder 论文中 Dream-7B 与 LLaDA-8B 的 EvalPlus 分别为 53.7 与 36.3，而 Qwen2.5-Coder-7B 为 56.6<span class="src">DiffuCoder Tab. 1</span>。本页三篇论文各回答一个问题：</p>
+<ul>
+  <li><b>DiffuCoder</b>（Apple + 港大）：从 AR 改造来的 dLLM 解码时到底有多“自回归”？能否不用半自回归块解码就做 RL？</li>
+  <li><b>Dream-Coder</b>（港大 + 华为诺亚）：完全用公开数据的配方能做到什么程度？解码顺序会不会随任务自适应？</li>
+  <li><b>Stable-DiffCoder</b>（华中科大 + 字节 Seed）：把扩散训练插进一条成熟的 AR 代码模型流水线，能否胜过它自己的 AR 版本？</li>
+</ul>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  掩码扩散 dLLM 会保留不少左到右偏置，代码比数学更少受这种偏置约束，采样温度越高，解码顺序就越乱。DiffuCoder 利用这种多样性做 RL，用互补掩码降低 \(\log\pi\) 估计的方差。Stable-DiffCoder 则说明：在相同的模型骨架和数据来源上，把最后一段持续预训练换成块大小为 4 的扩散目标，多数代码基准会变好。但那个对照并没有控制住所有变量（见 <a href="#stable-diffcoder">§3.5</a>）。
+</div>
+<p>记号沿用本 track：干净序列 \(x_0\)（长度 \(L\)），腐蚀序列 \(x_t\)，\(t\in[0,1]\) 为掩码率（\(t=1\) 全为 \([\mathrm{M}]\)），去噪网络 \(p_\theta(x_0^i\mid x_t)\)，prompt \(c\)，块大小 \(B\)，步数 \(N\)，每次前向定稿 token 数 TPF。DiffuCoder 用离散步 \(t\in\{1,\dots,T\}\) 并令 \(t+\hat t=T\)；Stable-DiffCoder 在 §3.3 把掩码率写成 \(u(t)=1-t\)，与本页方向相反，下文统一改写。</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：coupled-GRPO 的一次更新</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw tgt"></i>冻结：旧策略 / 参考策略</span><span><i class="sw act"></i>条件：prompt、奖励</span>
+  <span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M]</span><span><i class="ln sg"></i>同一掩码的复用</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="DiffuCoder coupled-GRPO：rollout、奖励、互补掩码的三份输入、耦合 log π 估计、裁剪目标">
+    <g class="act" data-part="prompt" data-step="1">
+      <rect class="box" x="20" y="28" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="95" y="54">代码题 c</text>
+      <text class="t-c t-sm" x="95" y="78">AceCoder 难题子集</text>
+    </g>
+    <path class="edge" d="M170,64 H206" data-step="1"/>
+    <g class="enc" data-part="rollout" data-step="1">
+      <rect class="box" x="210" y="28" width="200" height="72" rx="10"/>
+      <text class="t-c t-b" x="310" y="54">π_old 采样 rollout</text>
+      <text class="t-c t-sm" x="310" y="78">G=10 · 温度 1.2 · 256 步</text>
+    </g>
+    <path class="edge enc" d="M410,64 H446" data-step="1"/>
+    <g data-part="completions" data-step="1">
+      <rect class="panel" x="450" y="28" width="230" height="72" rx="10"/>
+      <text class="t-c t-xs" x="565" y="40">补全 o_i（模型生成，L=256）</text>
+      <rect class="tk enc" x="462" y="52" width="22" height="22"/><rect class="tk enc" x="488" y="52" width="22" height="22"/><rect class="tk enc" x="514" y="52" width="22" height="22"/><rect class="tk enc" x="540" y="52" width="22" height="22"/><rect class="tk enc" x="566" y="52" width="22" height="22"/><rect class="tk enc" x="592" y="52" width="22" height="22"/><rect class="tk enc" x="618" y="52" width="22" height="22"/><rect class="tk enc" x="644" y="52" width="22" height="22"/>
+      <text class="t-c t-xs" x="565" y="88">每题 10 条，组内比较</text>
+    </g>
+    <path class="edge" d="M680,64 H716" data-step="2"/>
+    <g class="act" data-part="reward" data-step="2">
+      <rect class="box" x="720" y="28" width="220" height="72" rx="10"/>
+      <text class="t-c t-b" x="830" y="54">沙箱奖励 → 优势 A_i</text>
+      <text class="t-c t-sm" x="830" y="78">2.0·测试通过率 + 0.5·格式</text>
+    </g>
+    <path class="edge" d="M565,100 V120 H225 V136" data-step="3"/>
+    <g data-part="masks" data-step="3">
+      <rect class="panel" x="20" y="140" width="410" height="200" rx="10"/>
+      <text class="t-sm" x="36" y="156">同一条 o_i 构造三份输入（λ=1）</text>
+      <text class="t-xs" x="32" y="183">v0 全掩码</text>
+      <rect class="tk act" x="148" y="172" width="22" height="22"/><rect class="tk act" x="172" y="172" width="22" height="22"/>
+      <rect class="tk mask" x="206" y="172" width="22" height="22"/><rect class="tk mask" x="232" y="172" width="22" height="22"/><rect class="tk mask" x="258" y="172" width="22" height="22"/><rect class="tk mask" x="284" y="172" width="22" height="22"/><rect class="tk mask" x="310" y="172" width="22" height="22"/><rect class="tk mask" x="336" y="172" width="22" height="22"/><rect class="tk mask" x="362" y="172" width="22" height="22"/><rect class="tk mask" x="388" y="172" width="22" height="22"/>
+      <text class="t-xs" x="206" y="208">权重 1（即 d1 的单步估计）</text>
+      <text class="t-xs" x="32" y="239">v1 掩码率 t</text>
+      <rect class="tk act" x="148" y="228" width="22" height="22"/><rect class="tk act" x="172" y="228" width="22" height="22"/>
+      <rect class="tk enc" x="206" y="228" width="22" height="22"/><rect class="tk mask" x="232" y="228" width="22" height="22"/><rect class="tk enc" x="258" y="228" width="22" height="22"/><rect class="tk enc" x="284" y="228" width="22" height="22"/><rect class="tk mask" x="310" y="228" width="22" height="22"/><rect class="tk enc" x="336" y="228" width="22" height="22"/><rect class="tk mask" x="362" y="228" width="22" height="22"/><rect class="tk enc" x="388" y="228" width="22" height="22"/>
+      <text class="t-xs" x="206" y="264">被掩位置 ×1/t，t~U[0.2,0.8]</text>
+      <text class="t-xs" x="32" y="295">v2 互补 1−t</text>
+      <rect class="tk act" x="148" y="284" width="22" height="22"/><rect class="tk act" x="172" y="284" width="22" height="22"/>
+      <rect class="tk mask" x="206" y="284" width="22" height="22"/><rect class="tk enc" x="232" y="284" width="22" height="22"/><rect class="tk mask" x="258" y="284" width="22" height="22"/><rect class="tk mask" x="284" y="284" width="22" height="22"/><rect class="tk enc" x="310" y="284" width="22" height="22"/><rect class="tk mask" x="336" y="284" width="22" height="22"/><rect class="tk enc" x="362" y="284" width="22" height="22"/><rect class="tk mask" x="388" y="284" width="22" height="22"/>
+      <text class="t-xs" x="206" y="320">被掩位置 ×1/(1−t)，与 v1 恰好互补</text>
+    </g>
+    <path class="edge" d="M430,240 H486" data-step="4"/>
+    <g class="enc" data-part="denoiser" data-step="4">
+      <rect class="box" x="490" y="190" width="180" height="100" rx="10"/>
+      <text class="t-c t-b" x="580" y="216">去噪网络 p_θ</text>
+      <text class="t-c t-sm" x="580" y="240">3 份输入同批前向</text>
+      <text class="t-c t-xs" x="580" y="264">初始化：Instruct 模型</text>
+    </g>
+    <path class="edge enc" d="M670,240 H716" data-step="5"/>
+    <g data-part="estimate" data-step="5">
+      <rect class="box" x="720" y="190" width="220" height="100" rx="10"/>
+      <text class="t-c t-b" x="830" y="216">耦合 log π 估计</text>
+      <text class="t-c t-sm" x="830" y="240">½ [ v0 + 加权(v1 或 v2) ]</text>
+      <text class="t-c t-xs" x="830" y="264">每个 token：全掩一次 + 部分掩一次</text>
+    </g>
+    <path class="edge idx" d="M430,300 H460 V410 H486" data-step="5"/>
+    <g class="tgt" data-part="reference" data-step="5">
+      <rect class="box frozen" x="490" y="370" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="580" y="396">π_old 与 π_ref</text>
+      <text class="t-c t-sm" x="580" y="422">同一掩码种子，无梯度</text>
+    </g>
+    <path class="edge loss" d="M830,290 V366" data-step="6"/>
+    <path class="edge" d="M670,410 H716" data-step="6"/>
+    <path class="edge act" d="M930,100 V130 H952 V410 H944" data-step="6"/>
+    <g class="loss" data-part="loss" data-step="6">
+      <rect class="box" x="720" y="370" width="220" height="80" rx="10"/>
+      <text class="t-c t-b" x="830" y="396">裁剪代理目标 + KL</text>
+      <text class="t-c t-sm" x="830" y="422">ε=0.5 · β=0.01 · μ=2 次内循环</text>
+    </g>
+    <path class="edge grad" d="M730,370 V334 H600 V294" data-step="6"/>
+    <text class="t-c t-xs" x="665" y="324" data-step="6">梯度只更新 p_θ</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>RL 数据</h4><p>从 AceCoder-87K 中挑出参考解通过率低（后 20%）且方差高（前 40%）的题，得到 21K 道带测试用例的“难题”，只训 1 个 epoch。论文强调把难度筛到合适区间很重要。<span class="src">DiffuCoder §3、§B.1</span></p></div>
+    <div data-note="rollout"><h4>rollout 用高温度</h4><p>每题采样 \(G=10\) 条补全，最长 256 token，扩散步数 256，即一步定 1 个 token（TPF = 1）。论文用温度 1.2：§4.3 发现温度从 0.2 升到 1.0–1.2 时 pass@\(k\) 明显上升、解码顺序也更分散，为 RL 提供探索空间。官方配置文件写的是 <code>generation_temperature: 1.0</code>，与正文不一致（见 §5 的 code-note）。<span class="src">DiffuCoder §4.3、§B.1</span> <span class="src">官方 recipes/config_coupled_code.yaml</span></p></div>
+    <div data-note="completions"><h4>补全是“动作”</h4><p>论文把去噪过程看成 MDP：状态 \((c,t,x_t)\)，动作是下一步的 \(x_{t-1}\)，奖励只在最后一步给出。实际计算时，不会回放 256 步轨迹，而是把整条补全 \(o_i\) 当作一个序列来估计每个 token 的 \(\log\pi\)。<span class="src">DiffuCoder §2.2、§5</span></p></div>
+    <div data-note="reward"><h4>可验证奖励</h4><p>\(r=2.0\,r_{\text{code}}+0.5\,r_{\text{format}}\)：\(r_{\text{code}}\) 是在 E2B 沙箱中执行得到的测试通过率，格式分对合法代码块、语法错误、格式不符分别给 0.5 / 0.25 / 0。优势 \(A_i=r_i-\bar r\)（不除以标准差，配置 <code>scale_rewards: false</code>），也可以用 leave-one-out 基线。<span class="src">DiffuCoder §5、§B.1</span> <span class="src">官方 config</span></p></div>
+    <div data-note="masks"><h4>互补掩码</h4><p>官方实现每个内循环先抽一个掩码率 \(t\sim\mathcal U[0.2,0.8]\)（避开两端的极端加权损失），再抽一张随机矩阵 \(u\)。v1 掩掉 \(u&lt;t\) 的位置，v2 掩掉 \(u&gt;t\) 的位置，两份恰好互补。另外保留一份全掩码的 v0。prompt 不加噪。<span class="src">DiffuCoder §5、§B.1、Fig. 8</span> <span class="src">官方 coupled_grpo.py <code>forward_process</code></span></p></div>
+    <div data-note="denoiser"><h4>三份输入一起前向</h4><p>同一模型对 v0/v1/v2 做一次批量前向，只取补全位置的 logits。与 d1 的“全掩码单次前向”相比，每次更新多 2 次前向。论文报告端到端 GRPO 训练时间是同规模 AR（Qwen2.5-Coder）的 2 倍。<span class="src">DiffuCoder §A.3(iii)、§C.4</span></p></div>
+    <div data-note="estimate"><h4>每个 token 恰好两份信号</h4><p>token \(k\) 在 v0 中一定被掩，在 v1、v2 中恰好被掩一次，所以每个 token 都有非零的学习信号，而且至少有一次是在“部分可见”的真实上下文中被评估的，不再总是从全掩码状态去猜。这部分的方差下降可以用对偶变量（antithetic variates）证明（§5）。<span class="src">DiffuCoder §5、§A.4</span></p></div>
+    <div data-note="reference"><h4>同种子重算</h4><p>每批 rollout 为 \(\mu\) 次内循环各抽一个掩码种子；\(\pi_{\text{old}}\)、\(\pi_{\text{ref}}\) 与当前策略在同一组掩码下计算，比值才可比。参考模型每 64 步同步一次。<span class="src">官方 coupled_grpo.py <code>mask_seeds</code></span> <span class="src">官方 config <code>ref_model_sync_steps: 64</code></span></p></div>
+    <div data-note="loss"><h4>GRPO 目标</h4><p>逐 token 比值 \(\rho=\exp(\widehat{\log\pi}_\theta-\widehat{\log\pi}_{\text{old}})\)，PPO 式裁剪，\(\varepsilon=0.5\)，KL 系数 \(\beta=0.01\)，每批 \(\mu=2\) 次内循环，学习率 1e-6。<span class="src">DiffuCoder §B.1</span> <span class="src">官方 config</span></p></div>
+    <div data-step-note="1"><h4>① rollout</h4><p>旧策略对每道题以温度 1.2 采样 10 条补全，扩散步数等于长度。</p></div>
+    <div data-step-note="2"><h4>② 奖励与优势</h4><p>在沙箱中跑测试用例，组内减均值得到 \(A_i\)。</p></div>
+    <div data-step-note="3"><h4>③ 互补掩码</h4><p>对每条补全构造全掩码 v0、按 \(t\) 掩的 v1、互补的 v2。</p></div>
+    <div data-step-note="4"><h4>④ 三份前向</h4><p>同一 \(p_\theta\) 一次批量前向，取补全位置的 token 对数概率。</p></div>
+    <div data-step-note="5"><h4>⑤ 估计 \(\log\pi\)</h4><p>v0 与加权的 v1/v2 求平均；旧策略、参考策略用同一掩码种子重算。</p></div>
+    <div data-step-note="6"><h4>⑥ 更新</h4><p>裁剪代理目标加 KL，梯度只回传到当前策略；换一组掩码再做第 2 次内循环。</p></div>
+  </div>
+  <figcaption>图 1　DiffuCoder 的 coupled-GRPO（\(\lambda=1\)）。依据论文 §5、Alg. 1 与官方实现 <code>src/open_r1/coupled_grpo.py</code>；token 方块只画 8 个位置示意，实际补全长度为 256。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="diffucoder">3.1 AR 性：dLLM 解码到底有多“自回归”</h3>
+<p>论文在“一步只揭开一个 [M]”的设定下（步数 = 生成长度，低置信度重掩码），记第 \(n\) 步揭开的位置为 \(p_n\)，定义两个指标<span class="src">DiffuCoder §4.1、§A.2</span>：<b>局部 AR 性</b> Local@\(k\)：新揭开的位置与前 \(k\) 步恰好构成连续递增序列的比例，衡量“接着写下一个”；<b>全局 AR 性</b> Global@\(k\)：新揭开的位置落在剩余 [M] 中最靠左的 \(k\) 个之内的比例，衡量“总是先填最左边”。纯 AR 解码两者都恒为 1。</p>
+<div class="formula">$$\mathrm{Local@}k=\frac{1}{N}\sum_{n=1}^{N}\mathbf{1}\Big[\{p_{n-i}\}_{i=1}^{k}=\{p_n-i\}_{i=1}^{k}\Big],\qquad \mathrm{Global@}k=\frac{1}{N}\sum_{n=1}^{N}\mathbf{1}\Big[p_n\in\{m^{(1)}_{n-1},\dots,m^{(k)}_{n-1}\}\Big]$$</div>
+<p>其中 \(m^{(1)}_{n-1}&lt;m^{(2)}_{n-1}&lt;\dots\) 是第 \(n\) 步之前仍被掩的位置（论文用 \(t\) 记步号，这里改用 \(n\)，避免与掩码率混淆）。举一个自己构造的例子：6 个位置的揭开顺序为 1, 2, 5, 3, 4, 6。第 3 步跳到位置 5，之后再回填 3、4。Global@1 = 5/6，只有第 3 步不是最左；而 Local@1 在第 2–6 步中只有 2 步（2 接 1、4 接 3）满足，为 2/5。可见“先写后面一行”对局部指标的影响远大于全局指标。</p>
+<ul>
+  <li><b>dLLM 并不纯 AR，但离 1 更近。</b>不论 LLaDA（从零训练）还是 Dream / DiffuCoder（AR 改造），两种 AR 性都更接近 1 而非 0；AR 改造来的模型 AR 性更高，论文认为是继承了 AR 权重的左到右依赖。<span class="src">DiffuCoder §4.2、Fig. 3</span></li>
+  <li><b>代码比数学“更不 AR”。</b>代码生成的全局 AR 性均值更低、方差更大，即常常先生成后面的 token，把前面的 [M] 留到很晚再填。数学推导本质上是顺序计算。<span class="src">DiffuCoder §4.2、Fig. 3、App. C.2</span></li>
+  <li><b>熵汇（entropy sink）。</b>条件生成的第一步，各位置置信度呈“L 形”：紧挨 prompt 的位置置信度明显更高。论文把它视为 AR 性的来源，并推测与 attention sink 相关（未验证）。<span class="src">DiffuCoder §4.2、Fig. 3(a)</span></li>
+  <li><b>训练阶段会改变 AR 性。</b>Stage 1 训到 65B token 时 AR 性已较低；延长到 700B 后 AR 性上升而下游性能下降，论文怀疑数据质量是原因，因此选用 65B 的检查点。中期训练和 SFT 的第一个 epoch 会学到很强的因果偏置，之后随训练继续而回落；GRPO 之后全局 AR 性进一步下降。<span class="src">DiffuCoder §4.2、Fig. 4、Tab. 4</span></li>
+</ul>
+
+<h3 id="c-temp">3.2 温度同时改变“写什么”和“先写哪”</h3>
+<p>对 AR 模型，温度只影响每个位置选哪个 token。DiffuCoder 观察到，把温度从默认的 0.2 升到 1.2，base 与 instruct 模型的 AR 性都显著下降，生成顺序更随机：模型常先确定右侧（包括决定长度的 pad），关键逻辑反而最后才填。<span class="src">DiffuCoder §4.3、Fig. 1(a)、Fig. 5、App. C.2</span>机制上，下一步揭开哪个位置由温度缩放后的置信度或熵决定，采到的 token 又会改变后续各位置的条件分布，所以温度会通过两条路径影响顺序（本页推论）。</p>
+<p>这种多样性正是 RL 需要的：低温下 pass@1 高但 pass@\(k\) 几乎不随 \(k\) 增长，温度 1.0–1.2 时 pass@\(k\) 明显上升<span class="src">DiffuCoder §4.3、Fig. 5–6</span>。RL 之后，最优评测温度从 0.2 移到 0.3–0.4，说明训练让逐 token 分布变尖锐；把扩散步数减半（TPF 从 1 变为 2）时，RL 后模型的掉分也更小，论文据此认为模型变得更不依赖 AR 顺序、更可并行<span class="src">DiffuCoder §5、Fig. 1(c)、App. C.3</span>。这些结论都只来自图，论文正文没有给出 AR 性的具体数值。</p>
+
+<h3 id="c-coupled">3.3 coupled-GRPO：给每个 token 一份部分可见的似然估计</h3>
+<p>dLLM 没有逐 token 的 \(\log\pi\)。d1 的做法是把补全全部掩掉、做一次前向，相当于只在 \(t=1\) 处采样一次 ELBO 项（详见 <a href="17-rl.html">17 页</a>）。d1 还随机掩掉 15% 的 prompt 来增加多样性，但 DiffuCoder 在代码上发现这样奖励不能稳定上升，于是以“全掩码补全、不掩 prompt”的 \(\mathcal P_{t=T}\) 作为基线。论文同时指出，这个基线有偏：熵汇使高熵 token 集中在左侧，RL 会更激进地更新前面的 token。<span class="src">DiffuCoder §5、Fig. 7</span></p>
+<p>coupled-GRPO 取 \(\lambda\) 对时间 \((t,\hat t)\)，\(t+\hat t=T\)，配一对互补掩码，并保留全掩码项，再求平均；实践中 \(\lambda=1\)。官方实现中的逐 token 估计如下，<a href="#objective">§5</a> 给出方差分析：</p>
+<div class="formula">$$\widehat{\log\pi}_\theta(o^k)=\tfrac12\Big[\log p_\theta(o^k\mid c,x_1)+\tfrac{\mathbf{1}[k\in M]}{t}\log p_\theta(o^k\mid c,x^{M})+\tfrac{\mathbf{1}[k\notin M]}{1-t}\log p_\theta(o^k\mid c,x^{\bar M})\Big]$$</div>
+<p>其中 \(x_1\) 为全掩码补全，\(x^{M}\) 掩掉集合 \(M\)，\(x^{\bar M}\) 掩掉其补集。消融在同样采样次数下比较“互补”与“独立随机掩码”（decoupled），并比较只用全掩码的版本。在论文的设置下，只有 coupled 版本的奖励稳定上升，最终分数也最好（见 <a href="#results">§8</a> 表 2）。<span class="src">DiffuCoder §5、Fig. 7、Tab. 2</span></p>
+
+<h3 id="dream-coder">3.4 Dream-Coder：开放配方与自适应的生成顺序</h3>
+<p>Dream-Coder 7B 同样从 Qwen2.5-Coder-7B 初始化，沿用 Dream 的 shift 参数化（位置 \(i\) 的输出预测位置 \(i+1\) 的 token，以保留 AR 头）和上下文自适应的 token 级噪声重排（见 <a href="07-dream.html">07 页</a>）。预训练使用 322B token 的公开数据（OpenCoder、Stack-Edu、Dolmino、DCLM），官方 README 给出通用文本 : 代码 : 数学 = 2 : 7 : 1。<span class="src">Dream-Coder §2.2、§3</span> <span class="src">官方 base/README.md</span></p>
+<ul>
+  <li><b>SFT</b>：使用 Ling-Coder-SFT 中的 500 万条样本。为避免大量 [PAD] 浪费计算并带偏损失，训练时把每条回答随机截断到同批另一条样本的长度（random truncation）；推理时对 [PAD] logit 施加逐渐衰减的惩罚，防止高温下过早结束。<span class="src">Dream-Coder §4.1、Fig. 1</span></li>
+  <li><b>RL</b>：从 KodCode、DeepCoder、Guru 中筛出 17k 道题，要求至少 5 个单元测试，经过去重，并剔除 Qwen2.5-Coder-7B-Instruct 8 次采样全对的简单题。用 GRPO 训练，不加 KL 与熵项，采用 clip-higher（\(\varepsilon_{\text{low}}=0.2,\varepsilon_{\text{high}}=0.28\)），沿用 DiffuCoder 的互补掩码；零优势样本替换为高优势样本的副本；rollout 用 Fast-dLLM 加速（见 <a href="14-kv-cache.html">14 页</a>）。<span class="src">Dream-Coder §4.2</span></li>
+  <li><b>三种生成模式</b>：在需要完整程序结构的题上（LiveCodeBench）先写签名、控制流等骨架，再填细节（sketch-first）；在独立函数补全上接近左到右；在 CRUXEval 这类推理题上交错生成。<span class="src">Dream-Coder §5.4、Fig. 3</span></li>
+</ul>
+<div class="callout code-note">
+  <span class="callout-title">论文内部：生成顺序只有定性证据</span>
+  “草图优先”等模式只来自 Fig. 3 中的单个可视化样例，论文没有像 DiffuCoder 那样给出顺序指标的统计。“各模式在对应基准上表现好”只是相关性陈述，并没有做固定顺序的消融。正文写“Left-to-Right Completion（Figure 3(c)）”且以 HumanEval/MBPP 举例，但图注中左到右样例是 3(b)、取自 BigCodeBench。官方演示统一使用 <code>temperature=0.1, diffusion_steps=512, max_new_tokens=512, alg="entropy"</code>，也是一步一 token。<span class="src">Dream-Coder §5.4、Fig. 3</span> <span class="src">官方 README.md</span>
+</div>
+
+<h3 id="stable-diffcoder">3.5 Stable-DiffCoder：在 AR 流水线中插入块扩散 CPT</h3>
+<p>起点是 Seed-Coder-8B 退火前的检查点（Llama-3 结构，8.2B 参数）。在 8192 上下文的打包序列上，用块大小 \(B=4\) 的块扩散目标持续预训练 1.3T token。这些数据由 Seed-Coder 多阶段持续预训练语料子采样得到。之后完全复用 Seed-Coder 的 SFT 数据做 SFT，没有偏好优化或 RL。最终采用不做 logit shift 的参数化（同 LLaDA、SDAR），并让同一打包序列中的不同样本互相可见，以便复用 flex attention 的编译结果。<span class="src">Stable-DiffCoder §1、§4.1</span> <span class="src">Seed-Coder §2.3</span></p>
+<p><b>为什么选小块。</b>论文用“token 推理知识”来解释：一个被掩 token 的上下文 \(c\) 所对应的候选集越小（\(K(c)\) 小），梯度方向越一致，越像在学规则。全双向或大块随机掩码常常制造证据被抹掉的上下文，模型只能学到共现关系，甚至学到错误关联。小块扩散与 AR 都有长而干净的左侧证据，训练时的上下文分布也更接近块式推理。2.5B 规模的同算力对照中，“AR → 双向 dLLM”优于“因果 dLLM → 双向 dLLM”，后者又优于“直接双向 dLLM”（只有图）。由此得到的配方是：先用 AR 压缩新知识，再用小块扩散做 CPT，需要更大块时再继续 CPT。<span class="src">Stable-DiffCoder §3.1、Fig. 2–3</span></p>
+<p><b>两个稳定性技巧。</b>(1) Warmup：从 AR 切到 dLLM 时，损失与梯度范数都会尖峰。论文不对注意力掩码做退火（不便使用 FlashAttention），而是对腐蚀程度做退火：掩码率上限从 \(10^{-3}\) 线性升到 1，并在 warmup 期间去掉 \(w(t)=1/t\)（掩码率 10% 时权重约为 10，相当于放大损失）。(2) 块级截断噪声：块内只有 \(B\) 个 token 时，线性调度下“整块一个都没被掩”的概率为 \(1/(B+1)\)，\(B=4\) 时为 1/5，这些步没有监督信号。于是把块内掩码率截断到 \(\ge 1/B\)，并在没有任何位置被掩时强制掩掉一个。<span class="src">Stable-DiffCoder §3.2–3.3、Fig. 4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>“同数据、同架构”对照中的变量</th><th>Stable-DiffCoder-8B</th><th>Seed-Coder-8B（AR 对照）</th><th>是否受控</th></tr></thead>
+  <tbody>
+    <tr><td>参数与骨架</td><td>同一 8.2B Llama-3 式结构；注意力改为块内双向、块间因果，去掉 logit shift</td><td>因果注意力，next-token 头</td><td>参数形状相同；注意力模式与参数化正是被改动的变量 <span class="src">SDC §3.2、§4.1</span></td></tr>
+    <tr><td>共同前缀</td><td>从退火前检查点出发</td><td>同一检查点继续 AR 训练</td><td>✅ 共享 <span class="src">SDC §4.1</span></td></tr>
+    <tr><td>最后一段预训练</td><td>块扩散 CPT 1.3T token（从多阶段 CPT 语料子采样），上下文 8192</td><td>AR 持续预训练 400B + 600B token，上下文 8K→32K</td><td>⚠ 数据来源相同，但 token 数、配比和上下文长度不同 <span class="src">SDC §4.1</span> <span class="src">Seed-Coder §2.3</span></td></tr>
+    <tr><td>后训练</td><td>只用 Seed-Coder 的 SFT 数据做 SFT</td><td>约 300 万条 SFT（3 epoch）+ 约 2 万对 DPO</td><td>⚠ AR 侧多了 DPO <span class="src">SDC §1</span> <span class="src">Seed-Coder §3.1</span></td></tr>
+    <tr><td>评测</td><td>base 用 EvalPlus 的 chat 式模板</td><td>数字与 Seed-Coder 报告逐项相同；该报告中 Seed-Coder base 使用普通 base 提示</td><td>⚠ base 对比的提示模板不同；没有重跑 AR 基线 <span class="src">SDC §4.3.1、Tab. 1</span> <span class="src">Seed-Coder §5.1.1</span></td></tr>
+    <tr><td>同 token 数 AR CPT 对照</td><td colspan="2">8B 规模没有“用同一 1.3T 子采样继续 AR 训练”的对照；只有 2.5B 规模的同算力课程对照（仅有图）</td><td>✗ <span class="src">SDC §3.1.2</span></td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>DiffuCoder-7B</th><th>Dream-Coder-7B</th><th>Stable-DiffCoder-8B</th><th>同规模 AR（参照：Qwen2.5-Coder-7B / Seed-Coder-8B）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>由 Qwen2.5-Coder-7B 按 DiffuLLaMA 方式改造（注意力掩码退火 1 万步），掩码扩散加权交叉熵 \(1/t\)，65B + 65B token；带条件掩码的 SFT 用 43.6 万条；coupled-GRPO 用 21K 题 <span class="src">DiffuCoder §3、§B.1</span></td><td>由 Qwen2.5-Coder-7B 改造，shift 参数化 + 上下文自适应噪声重排，322B token；SFT 500 万条；GRPO 17k 题 <span class="src">Dream-Coder §2–4</span></td><td>由 Seed-Coder 退火前检查点出发，块扩散（\(B=4\)）CPT 1.3T token；SFT <span class="src">SDC §4.1</span></td><td>next-token 交叉熵，可精确计算序列似然；RL 时直接用逐 token \(\log\pi\)</td></tr>
+    <tr><td>注意力与 KV cache</td><td>prompt 与画布全双向，没有精确 KV cache；与 Dream-7B 共用推理实现 <span class="src">DiffuCoder §B.2</span></td><td>全双向；RL rollout 用 Fast-dLLM 的近似缓存 <span class="src">Dream-Coder §4.2</span></td><td>块内双向、块间因果，结构上允许按块缓存；<span class="unverified">官方 <code>generate</code> 是否实现缓存未核验</span> <span class="src">SDC §4.1</span></td><td>因果注意力，精确 KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>论文默认步数 = 长度（TPF = 1）；把步数减半（TPF = 2）会掉分，RL 后掉得更少 <span class="src">DiffuCoder §4、App. C.3</span></td><td>官方评测脚本中步数 = 最大新 token 数（512/768/1024），TPF = 1 <span class="src">官方 instruct/code_eval/README.md</span></td><td>README 示例为 <code>steps=512, gen_length=512, block_length=4</code>，TPF = 1；<span class="unverified">论文没有写评测时的步数与阈值</span> <span class="src">官方 README.md</span></td><td>1 token / 前向（无投机解码时）</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>温度同时改变 token 与顺序，rollout 更多样 <span class="src">§4.3</span></td><td>按任务自适应顺序（定性） <span class="src">§5.4</span></td><td>代码编辑 CanItEdit 60.0 vs 50.5；低资源语言（MultiPL-E base 的 C# 70.3 vs 53.8），作者归因于随机掩码起到数据增强作用 <span class="src">SDC Tab. 2、Tab. 9</span></td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>需要用蒙特卡洛估计 \(\log\pi\)，每次更新 3 次前向，GRPO 端到端耗时为 AR 的 2 倍；SFT 后提升远小于 AR（EvalPlus +3.0 vs +14.3） <span class="src">§C.4、Tab. 1</span></td><td>需要截断与 [PAD] 惩罚来应对定长画布 <span class="src">§4.1</span></td><td>Aider 长上下文超出 8192 训练窗口时掉分；LiveCodeBench 23.5 &lt; 24.7 <span class="src">SDC §4.4</span></td><td>不能直接填空或任意顺序生成</td></tr>
+  </tbody>
+</table></div>
+<p>表中三篇报告的质量数字都是在一步一个 token 的条件下测得的，也就是说，它们都不能直接说明“同等质量下更快”。速度问题见 <a href="14-kv-cache.html">14 页</a>、<a href="15-learned-parallel.html">15 页</a>；工业代码 dLLM 的速度口径见 <a href="10-industrial.html#mercury">Mercury</a> 与 <a href="10-industrial.html#seed-diffusion">Seed Diffusion</a>。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、块与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 设置</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>DiffuCoder Stage 1 批</td><td>[2, 4096] / GPU × 80 卡</td><td>10 个节点 × 8 张 H100，10 万步约 40 小时；2×4096×80×10⁵ ≈ 65.5B，与报告的 65B token 吻合（本页推算）<span class="src">§B.1</span></td></tr>
+    <tr><td>DiffuCoder SFT 画布</td><td>[B, 2048]，用新训练的 pad 补齐</td><td>固定长度画布决定生成长度；第 1 个 epoch 逐步加入条件掩码 <span class="src">§B.1</span></td></tr>
+    <tr><td>coupled-GRPO 输入</td><td>[3·B, ≤200+256]</td><td>prompt 最长 200（从左截断），补全 256；logits 只取补全的 256 个位置 <span class="src">官方 config、coupled_grpo.py</span></td></tr>
+    <tr><td>每批 rollout 的前向次数</td><td>G × 256 次（无缓存）</td><td>每题 10 条 × 256 步，每步对 [c; 256] 全量前向（推算）<span class="src">§B.1</span></td></tr>
+    <tr><td>每个内循环的似然估计</td><td>π_θ 3 次前向；π_old、π_ref 各 3 次（无梯度）</td><td>d1 基线各 1 次；λ=1 时多 2 次 <span class="src">§A.3</span></td></tr>
+    <tr><td>Stable-DiffCoder CPT 序列</td><td>[B, 8192] 打包，块长 4 → 2048 块</td><td>论文按“每步只腐蚀一个连续块”描述 §3.3；<span class="unverified">整条序列的所有块是否像 BD3-LM 那样用双拷贝同时训练，没有写明</span></td></tr>
+    <tr><td>Stable-DiffCoder 推理（README）</td><td>gen 512 = 128 块 × 4，steps 512</td><td>每块 4 步，TPF = 1；低置信度重掩码，阈值为 None <span class="src">官方 README.md</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标、似然估计与方差</h2>
+<p><b>预训练 / SFT 目标。</b>三篇都使用掩码扩散的加权交叉熵（Dream-Coder 把 \(1/t\) 推广为依赖上下文的 \(w(t,x_t,i)\)），它是负对数似然的上界：</p>
+<div class="formula">$$\mathcal L(\theta)=\mathbb E_{t\sim\mathcal U(0,1),\,x_t\sim q(x_t\mid x_0)}\Big[\frac{1}{t}\sum_{i=1}^{L}\mathbf{1}\big[x_t^i=[\mathrm M]\big]\big(-\log p_\theta(x_0^i\mid c,x_t)\big)\Big]\ \ge\ -\log p_\theta(x_0\mid c)$$</div>
+<p><b>对偶变量为什么降方差。</b>记逐 token 打分 \(g(t,M,k)=M_k\,\tfrac1t\,\ell(o^k\mid c,o_{\bar M})\)，目标 \(v_k=\mathbb E[g]\)。耦合估计 \(\hat v_{\text{AV}}=\tfrac1N\sum_i\tfrac12[g(t_i,M_i,k)+g(1-t_i,\mathbf 1-M_i,k)]\)。两项中恰有一项非零，所以乘积恒为 0，协方差为 \(-v_k^2&lt;0\)：</p>
+<div class="formula">$$\mathrm{Var}(\hat v_{\text{MC}})-\mathrm{Var}(\hat v_{\text{AV}})=\frac{\sigma_g^2}{2N}-\frac{\sigma_g^2-v_k^2}{2N}=\frac{v_k^2}{2N}&gt;0$$</div>
+<p>这里比较的是“\(2N\) 个独立样本”与“\(N\) 对互补样本”，前向次数相同。<span class="src">DiffuCoder §A.4、Eq. 14–28</span></p>
+<p><b>Stable-DiffCoder 的块级掩码率</b>（改写为本 track 记号，掩码率 = \(t\)）：</p>
+<div class="formula">$$\Pr[\text{块内无 }[\mathrm M]]=\mathbb E_t\big[(1-t)^B\big]=\frac{1}{B+1},\qquad t_{\text{blk}}=\min\!\big(1,\max(t,\tfrac1B)\big),\qquad w=\frac{1}{t_{\text{blk}}}$$</div>
+<p>warmup 阶段 \(t\sim\mathcal U(0,u_{\max}(s))\)，\(u_{\max}\) 从 \(10^{-3}\) 线性升到 1，且不乘 \(w\)。<span class="src">Stable-DiffCoder §3.2–3.3、Eq. 10–11</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码 / 论文内部不一致</span>
+  <ul>
+    <li><b>符号</b>：DiffuCoder Eq. 4 / Eq. 13 把加权交叉熵 \(\mathcal L_t\)（正的损失）直接写成 \(\log\pi\)。官方代码对加权的 log-softmax 取平均，符号是对的：\(\widehat{\log\pi}=\tfrac12[\log p_0+w\log p_{1|2}]\)，\(w\in\{1/t,1/(1-t)\}\subset[1.25,5]\)。因此比值 \(\rho=(p_0/p_{0,\text{old}})^{1/2}\,(p_{\text{part}}/p_{\text{part,old}})^{w/2}\) 是两种上下文下概率比的加权几何平均，指数 \(w/2\) 会放大部分可见那一项，它并不是真实的 token 概率比（本页推论）。<span class="src">coupled_grpo.py <code>selective_log_softmax</code></span></li>
+    <li><b>证明与实现的差别</b>：§A.4 的无偏性与方差证明针对 \(t\sim\mathcal U(0,1)\) 的互补对；实现中 \(t\sim\mathcal U[0.2,0.8]\)，并额外加上全掩码项求平均。全掩码项与截断区间不在证明范围内。</li>
+    <li><b>rollout 温度</b>：正文 §B.1 和 Fig. 7 写 1.2，官方配置 <code>generation_temperature: 1.0</code>。复现以哪一个为准不明。</li>
+    <li><b>Stage 1 token 数与硬件</b>：§3 写 700B，Tab. 4 写 720B。§3 称“所有实验在 8–10 个节点的 H100 上进行”，而 §B.1 的中期训练写的是 8×8 A100、90 小时。</li>
+    <li><b>Stable-DiffCoder 记号</b>：§3.2 混用 \(u_{\max}\) 与 \(q_{\max}\)，§3.3 混用 \(u_{\text{blk}}\) 与 \(q_{\text{blk}}\)；§3.2 的腐蚀程度 \(t\) 与 §3.3 的 \(u(t)=1-t\) 方向相反。</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">coupled_grpo_step.py（据 apple/ml-diffucoder 改写，λ=1；末尾附 Stable-DiffCoder 的块级掩码）</div>
+<pre><code class="lang-py">def coupled_logp(model, c, o, seed):
+    rng = Random(seed)                       # 同一种子：π_θ / π_old / π_ref 使用同一组掩码
+    t = rng.uniform(0.2, 0.8)                # 掩码率，避开两端的极端权重（§B.1）
+    u = rng.rand(len(o))
+    m1 = u &lt; t                               # v1：按 t 掩
+    m2 = u &gt; t                               # v2：互补掩码
+    x0 = c + [MASK] * len(o)                 # v0：d1 式全掩码
+    x1 = c + where(m1, MASK, o)
+    x2 = c + where(m2, MASK, o)
+    lp0, lp1, lp2 = model.batch([x0, x1, x2]).log_softmax(-1).gather(o)
+    part = where(m1, lp1 / t, lp2 / (1 - t)) # 每个 token 恰在 v1、v2 之一中被掩
+    return (lp0 + part) / 2
+
+def grpo_step(policy, ref, c, G=10, mu=2, eps=0.5, beta=0.01):
+    outs = [policy.diffusion_generate(c, max_new=256, steps=256, temperature=1.2)
+            for _ in range(G)]               # 一步定 1 个 token
+    r = [2.0 * code_reward(o) + 0.5 * format_reward(o) for o in outs]
+    A = [ri - mean(r) for ri in r]           # 不除以 std
+    seeds = [randint(0, 4096) for _ in range(mu)]
+    old = {(i, j): coupled_logp(policy, c, o, s).detach()
+           for i, o in enumerate(outs) for j, s in enumerate(seeds)}
+    rf = {(i, j): coupled_logp(ref, c, o, s).detach()
+          for i, o in enumerate(outs) for j, s in enumerate(seeds)}
+    for j in range(mu):                      # 每次内循环换一组掩码
+        loss = 0
+        for i, o in enumerate(outs):
+            lp = coupled_logp(policy, c, o, seeds[j])
+            ratio = exp(lp - old[i, j])
+            pg = -minimum(ratio * A[i], clip(ratio, 1 - eps, 1 + eps) * A[i])
+            kl = exp(rf[i, j] - lp) - (rf[i, j] - lp) - 1
+            loss = loss + mean(pg + beta * kl)
+        loss.backward(); opt.step(); opt.zero_grad()
+
+def block_mask(B=4, warm_cap=None):          # Stable-DiffCoder §3.2–3.3（掩码率 = t）
+    t = uniform(0, warm_cap if warm_cap else 1.0)
+    rate = min(1.0, max(t, 1.0 / B))         # 块内掩码率至少 1/B
+    m = rand(B) &lt; rate
+    if not m.any(): m[randint(0, B)] = True  # 兜底：每块至少一个被监督的位置
+    return m, (1.0 if warm_cap else 1.0 / rate)  # warmup 期间不乘 w</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>阶段</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>DiffuCoder Stage 1 改造</td><td>约 400B 语料（代码 78% / 文本 20% / 数学 2%）中训 65B 后早停；lr 2e-5，warmup 2 万步，余弦衰减到 10%；注意力掩码退火 1 万步；上下文 4096</td><td>§3、§B.1、Tab. 3</td></tr>
+    <tr><td>DiffuCoder Stage 2 中期训练</td><td>16B 退火代码数据 × 4 epoch ≈ 65B；lr 1e-5，warmup 2000 步</td><td>§B.1</td></tr>
+    <tr><td>DiffuCoder SFT</td><td>OpenCoder 的 43.6 万条，共 5 epoch（第 1 个 epoch 逐步加入条件掩码），固定长度 2048，lr 1e-5</td><td>§B.1、Tab. 4</td></tr>
+    <tr><td>coupled-GRPO</td><td>21K 题、1 epoch；G=10，μ=2，β=0.01，ε=0.5，lr 1e-6；补全 256、步数 256；单节点 8×H100 约 40 小时</td><td>§B.1、官方 config</td></tr>
+    <tr><td>Dream-Coder</td><td>预训练 322B；SFT 500 万条；RL 17k 题，ε<sub>low</sub>/ε<sub>high</sub> = 0.2/0.28，不加 KL；评测温度 0.1，步数 = 长度</td><td>§3–4、官方评测脚本</td></tr>
+    <tr><td>Stable-DiffCoder</td><td>CPT 1.3T token，B=4，上下文 8192，warmup 掩码率上限初值 \(10^{-3}\)（warmup 步数未给出）；SFT 复用 Seed-Coder 数据，每条样本后随机追加 1–4 个 &lt;eos&gt;</td><td>§3.2、§4.1</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>表 1</b>：DiffuCoder 自己的评测（EvalPlus = HE+ 与 MBPP+ 的平均；BigCodeBench 为补全版）。带 SFT 的 AR 行使用与 DiffuCoder-Instruct 相同的 SFT 数据。<span class="src">DiffuCoder Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">HE</th><th class="num">HE+</th><th class="num">MBPP</th><th class="num">MBPP+</th><th class="num">EvalPlus</th><th class="num">BCB-C 全</th><th class="num">BCB-C 难</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-Coder-7B（AR base）</td><td class="num">61.6</td><td class="num">51.8</td><td class="num">75.9</td><td class="num">61.4</td><td class="num">56.6</td><td class="num">46.1</td><td class="num">16.2</td></tr>
+    <tr><td>Dream-7B base</td><td class="num">56.7</td><td class="num">50.0</td><td class="num">68.7</td><td class="num">57.4</td><td class="num">53.7</td><td class="num">23.6</td><td class="num">4.1</td></tr>
+    <tr><td>DiffuCoder base（130B）</td><td class="num">67.1</td><td class="num">60.4</td><td class="num">74.2</td><td class="num">60.9</td><td class="num">60.6</td><td class="num">40.2</td><td class="num">12.8</td></tr>
+    <tr><td>Qwen2.5-Coder + 同数据 SFT</td><td class="num">82.9</td><td class="num">75.6</td><td class="num">80.1</td><td class="num">66.1</td><td class="num">70.9</td><td class="num">46.9</td><td class="num">16.2</td></tr>
+    <tr><td>DiffuCoder-Instruct</td><td class="num">72.0</td><td class="num">65.2</td><td class="num">75.1</td><td class="num">61.9</td><td class="num">63.6</td><td class="num">35.7</td><td class="num">12.2</td></tr>
+    <tr class="hl"><td>+ coupled-GRPO</td><td class="num">73.2</td><td class="num">68.3</td><td class="num">78.6</td><td class="num">67.5</td><td class="num">67.9</td><td class="num">40.4</td><td class="num">10.8</td></tr>
+  </tbody>
+</table></div>
+<p>相对 Instruct，EvalPlus 从 63.55 升到 67.9，即摘要中的 +4.4；BCB-C 难题集反而下降 1.4。<b>表 2</b> 是 RL 消融，评测温度取 \(\{0.2,0.3,0.4\}\) 中的最好值，并包含同协议下的 AR GRPO：<span class="src">DiffuCoder Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>设置</th><th class="num">HE</th><th class="num">HE+</th><th class="num">MBPP</th><th class="num">MBPP+</th><th class="num">BCB-C 全/难</th><th class="num">BCB-I 全/难</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-Coder+SFT</td><td class="num">82.9</td><td class="num">75.6</td><td class="num">80.1</td><td class="num">66.1</td><td class="num">46.9 / 16.2</td><td class="num">39.5 / 14.9</td></tr>
+    <tr><td>　+ GRPO（AR）</td><td class="num">80.5</td><td class="num">75.0</td><td class="num">84.4</td><td class="num">72.8</td><td class="num">49.7 / 16.2</td><td class="num">40.0 / 10.2</td></tr>
+    <tr><td>DiffuCoder-Instruct</td><td class="num">72.0</td><td class="num">65.2</td><td class="num">75.1</td><td class="num">61.9</td><td class="num">35.7 / 12.2</td><td class="num">34.0 / 8.8</td></tr>
+    <tr class="hl"><td>　+ coupled GRPO</td><td class="num">73.2</td><td class="num">68.3</td><td class="num">78.6</td><td class="num">67.5</td><td class="num">40.4 / 10.8</td><td class="num">37.5 / 10.8</td></tr>
+    <tr><td>　+ coupled GRPO（LOO 基线）</td><td class="num">70.7</td><td class="num">62.2</td><td class="num">79.6</td><td class="num">68.5</td><td class="num">41.2 / 13.5</td><td class="num">37.6 / 12.8</td></tr>
+    <tr><td>　只用全掩码补全</td><td class="num">66.5</td><td class="num">59.1</td><td class="num">77.0</td><td class="num">65.1</td><td class="num">38.0 / 8.8</td><td class="num">35.6 / 13.5</td></tr>
+    <tr><td>　独立随机掩码（同采样数）</td><td class="num">68.9</td><td class="num">62.8</td><td class="num">78.3</td><td class="num">66.4</td><td class="num">40.4 / 10.8</td><td class="num">36.5 / 10.8</td></tr>
+  </tbody>
+</table></div>
+<p><b>表 3</b>：Dream-Coder 论文中的 instruct 对比（Dream-Coder 自己的评测；BCB 列的 DiffuCoder 值与 DiffuCoder 论文中 BCB-I 的数字相同，官方脚本使用 <code>--split instruct</code>，因此这一列应读作 instruct 子集）。<span class="src">Dream-Coder Tab. 4–5</span> <span class="src">官方 code_eval/README.md</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">HE</th><th class="num">MBPP</th><th class="num">EvalPlus</th><th class="num">BCB 全/难</th><th class="num">LiveCodeBench 2410–2505</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-Coder-7B-Instruct（AR）</td><td class="num">88.4</td><td class="num">83.5</td><td class="num">77.9</td><td class="num">41.0 / 18.2</td><td class="num">19.3</td></tr>
+    <tr><td>Seed-Coder-8B-Instruct（AR）</td><td class="num">84.8</td><td class="num">85.2</td><td class="num">75.0</td><td class="num">44.5 / 26.4</td><td class="num">20.9</td></tr>
+    <tr><td>DiffuCoder-7B-cpGRPO</td><td class="num">73.2</td><td class="num">78.6</td><td class="num">67.9</td><td class="num">37.5 / 10.8</td><td class="num">10.3</td></tr>
+    <tr class="hl"><td>Dream-Coder-7B-Instruct</td><td class="num">82.9</td><td class="num">79.6</td><td class="num">73.1</td><td class="num">37.1 / 17.6</td><td class="num">21.4</td></tr>
+    <tr><td>Mercury Coder Small（商用 dLLM）</td><td class="num">90.0</td><td class="num">80.4</td><td class="num">76.4</td><td class="num">45.3 / 22.3</td><td class="num">22.9</td></tr>
+  </tbody>
+</table></div>
+<p><b>表 4</b>：Stable-DiffCoder 与它的 AR 对照。Seed-Coder 的数字与 Seed-Coder 报告逐项相同，应是直接引用而非重跑；LiveCodeBench 为 v5（2410–2502）。<span class="src">SDC Tab. 1–9</span> <span class="src">Seed-Coder Tab. 1、Tab. 7</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>基准</th><th class="num">Seed-Coder-8B（AR）</th><th class="num">Stable-DiffCoder-8B</th><th class="num">差</th></tr></thead>
+  <tbody>
+    <tr><td>Base：HE / HE+</td><td class="num">77.4 / 68.3</td><td class="num">79.3 / 73.8</td><td class="num">+1.9 / +5.5</td></tr>
+    <tr><td>Base：MBPP / MBPP+</td><td class="num">82.0 / 69.0</td><td class="num">83.6 / 67.7</td><td class="num">+1.6 / −1.3</td></tr>
+    <tr><td>Base：MultiPL-E 8 种语言平均</td><td class="num">67.6</td><td class="num">71.2</td><td class="num">+3.6</td></tr>
+    <tr><td>Base：CRUXEval I / O（CoT）</td><td class="num">52.0 / 54.8</td><td class="num">53.8 / 60.0</td><td class="num">+1.8 / +5.2</td></tr>
+    <tr class="hl"><td>Instruct：HE / HE+ / MBPP / MBPP+</td><td class="num">84.8 / 78.7 / 85.2 / 71.2</td><td class="num">86.6 / 82.3 / 85.7 / 72.8</td><td class="num">全部为正</td></tr>
+    <tr class="hl"><td>Instruct：MHPP / BCB 全 / BCB 难</td><td class="num">36.2 / 53.3 / 26.4</td><td class="num">42.4 / 54.8 / 31.8</td><td class="num">+6.2 / +1.5 / +5.4</td></tr>
+    <tr><td>Instruct：LiveCodeBench v5</td><td class="num">24.7</td><td class="num">23.5</td><td class="num">−1.2</td></tr>
+    <tr><td>Instruct：MBXP 13 种语言平均 / NaturalCodeBench</td><td class="num">75.3 / 49.6</td><td class="num">75.3 / 48.6</td><td class="num">0 / −1.0</td></tr>
+    <tr><td>Instruct：CRUXEval I / O</td><td class="num">63.3 / 67.1</td><td class="num">62.1 / 69.0</td><td class="num">−1.2 / +1.9</td></tr>
+    <tr class="hl"><td>Instruct：CanItEdit / Aider（tries=2）</td><td class="num">50.5 / 57.1</td><td class="num">60.0 / 54.9</td><td class="num">+9.5 / −2.2</td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note">
+  <span class="callout-title">协议不能混用</span>
+  同一个 Qwen2.5-Coder-7B base 的 HumanEval，在 DiffuCoder 表中为 61.6 / 51.8（HE / HE+），在 Stable-DiffCoder / Seed-Coder 表中为 72.0 / 67.1。后者是套用 chat 模板后的 EvalPlus 分数（Seed-Coder §5.1.1 说明了这一点），Dream-Coder 表中又是 61.6 / 53.0。跨论文比较代码分数时，必须看清提示模板与评测套件。Stable-DiffCoder §4.3.1 称 base 模型“在所有 HumanEval 与 MBPP 设置上大幅超过 Seed-Coder-8B-Base”，与它自己表 1 中的 MBPP+（67.7 &lt; 69.0）矛盾。表 4 的标题写的是“base models”，实际内容是 instruct 模型。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前：通用 dLLM 与依赖半 AR 的 RL</h4><ul>
+    <li><a href="06-llada.html">LLaDA</a>、<a href="07-dream.html">Dream</a> 在代码上落后同规模 AR；LLaDA 常常需要半自回归块解码才能拿到好分数。</li>
+    <li><a href="17-rl.html">d1</a> 的 diffu-GRPO 用全掩码单步估计 \(\log\pi\)，并依赖小块解码。</li>
+    <li><a href="07-dream.html#diffullama">DiffuLLaMA</a> 给出了 AR→扩散的改造配方（注意力掩码退火 + shift）。</li>
+  </ul></div>
+  <div class="now"><h4>本页之后 / 仍未解决</h4><ul>
+    <li>用 AR 性这个视角看解码顺序；顺序灵活是否真的有利于推理，<a href="16-order-limits.html#flexibility-trap">Flexibility Trap</a> 给出了反面证据。</li>
+    <li>RL 中的似然估计继续演进：VRPO、TraceRL 等见 <a href="17-rl.html#llada-15">17 页</a>、<a href="17-rl.html#tracerl">TraceRL</a>。</li>
+    <li>Stable-DiffCoder 代表“AR 权重 + 小块扩散 CPT”路线，与 <a href="11-block-diffusion.html">块扩散</a>、<a href="12-ar-to-block.html">AR→块扩散</a>一脉相承。</li>
+    <li>三篇的质量数字都在 TPF≈1 下取得，并行解码能保住多少质量，要看 <a href="14-kv-cache.html">14 页</a>、<a href="15-learned-parallel.html">15 页</a>。多模态骨干见 <a href="19-multimodal.html">19 页</a>。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q35"><span class="qid">Q35</span>coupled-GRPO 为什么用一对互补掩码来估计 token 似然？与 d1 的全掩码单次估计相比，它改变了什么，代价是什么？</h3>
+  <div class="ans"><p class="short">dLLM 没有逐 token 的 \(\log\pi\)，只能用掩码交叉熵的蒙特卡洛估计。只看全掩码状态，相当于只在 \(t=1\) 采一个点，信息少且有偏：熵汇使左侧高熵 token 主导更新。独立随机掩码会让一部分 token 在某次采样中没有信号。互补的一对掩码保证每个 token 恰好在一份部分可见的上下文中被评估一次，两项估计负相关，方差严格下降 \(v_k^2/2N\)。代价是每次更新多 2 次前向，端到端训练时间约为 AR 的 2 倍；而且估计的仍是加权的 ELBO 项，不是真实概率比。</p>
+    <ul><li>同采样数下，消融（Tab. 2）中 coupled 优于“只用全掩码”和“独立随机掩码”；后两者奖励曲线不稳定（Fig. 7）。</li>
+    <li>rollout 温度很关键：高温让 token 与生成顺序都更多样，pass@\(k\) 上升，RL 才有可以强化的对象。</li>
+    <li>RL 后，步数减半造成的掉分更小，说明模型对 AR 顺序的依赖减弱。</li></ul>
+    <p class="cite">依据：DiffuCoder §4.3、§5、§A.3–A.4、§C.4、Tab. 2、Fig. 1(c)、Fig. 7；官方 coupled_grpo.py。</p>
+  </div>
+  <h3 id="q36"><span class="qid">Q36</span>Stable-DiffCoder 的“同数据、同架构”对照到底控制了哪些变量、没有控制哪些？它能否证明扩散目标本身优于 AR？</h3>
+  <div class="ans"><p class="short">受控的是：参数形状（同一 8.2B Llama-3 式骨架）、共享的退火前检查点、预训练语料来源与 SFT 数据。没有受控的是：最后一段预训练的 token 数与上下文长度（1.3T@8K 子采样 vs Seed-Coder 的 400B+600B，上下文 8K→32K）、AR 侧额外的 DPO、base 评测的提示模板；AR 基线数字直接取自 Seed-Coder 报告，8B 规模也没有在同一 1.3T 数据上继续做 AR 训练的对照。因此结论只能表述为：在这条流水线上，把最后一段换成小块扩散 CPT 后，多数代码基准变好；不能说明扩散目标在等算力下普遍优于 AR。</p>
+    <ul><li>胜负并非一边倒：LiveCodeBench、Aider、NaturalCodeBench、MBPP+（base）更低，CanItEdit 与 MHPP 提升最大。</li>
+    <li>作者的机制解释（小块扩散 = 左侧证据充分 + 随机掩码带来数据增强）有 2.5B 规模的课程对照支持，但只有图。</li>
+    <li>选择 \(B=4\) 意味着它更接近 AR，这本身就是论文的论点：扩散的收益依赖于把上下文保持在“推理区”。</li></ul>
+    <p class="cite">依据：Stable-DiffCoder §3.1、§4.1、§4.3–4.4、Tab. 1–9；Seed-Coder §2.3、§3.1、§5.1.1。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Gong, Zhang, Zheng, Gu, Jaitly, Kong, Zhang. <i>DiffuCoder: Understanding and Improving Masked Diffusion Models for Code Generation.</i> ICLR 2026；本页读 arXiv v2。<a href="https://arxiv.org/abs/2506.20639">论文</a> · <a href="https://github.com/apple/ml-diffucoder">代码</a> · <a href="https://huggingface.co/apple/DiffuCoder-7B-cpGRPO">权重</a>。</li>
+  <li>Xie, Ye, Zheng, Gao, Dong, Wu, Zhao, Gong, Jiang, Li, Kong. <i>Dream-Coder 7B: An Open Diffusion Language Model for Code.</i> arXiv v1, 2025。<a href="https://arxiv.org/abs/2509.01142">论文</a> · <a href="https://github.com/DreamLM/Dream-Coder">代码</a> · <a href="https://huggingface.co/collections/Dream-org/dream-coder-7b-68761cfa0e218f0776a84ee7">权重</a>。</li>
+  <li>Fan, Heng, Li, Liu, Song, Su, Qu, Shen, Wei. <i>Stable-DiffCoder: Pushing the Frontier of Code Diffusion Large Language Model.</i> 华中科技大学 + ByteDance Seed，2026；本页读 arXiv HTML v1（v2 的 HTML 不可用）。<a href="https://arxiv.org/abs/2601.15892">论文</a> · <a href="https://github.com/ByteDance-Seed/Stable-DiffCoder">代码</a> · <a href="https://huggingface.co/collections/ByteDance-Seed/stable-diffcoder">权重</a>。</li>
+  <li>ByteDance Seed. <i>Seed-Coder: Let the Code Model Curate Data for Itself.</i> 2025（Stable-DiffCoder 的 AR 对照）。<a href="https://arxiv.org/abs/2506.03524">论文</a>。</li>
+  <li>Gong et al. <i>Scaling Diffusion Language Models via Adaptation from Autoregressive Models</i>（DiffuLLaMA）. ICLR 2025。<a href="https://arxiv.org/abs/2410.17891">论文</a> · <a href="07-dream.html#diffullama">本 track 拆解</a>。</li>
+  <li>Zhao et al. <i>d1: Scaling Reasoning in Diffusion Large Language Models via Reinforcement Learning.</i> 2025。<a href="https://arxiv.org/abs/2504.12216">论文</a> · <a href="17-rl.html">本 track 拆解</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>数据受限下的扩散与 AR：交叉点之争</title>
+<meta name="description" content="重复数据多 epoch 训练时掩码扩散反超 AR：数据受限扩展律与 R_D*、临界计算量 C_crit ∝ U^2.174、“任意顺序 = 隐式数据增强”的解释，Super Data Learners 的交叉点实验，以及两篇论文与 SMDM 16× 之间的方法学分歧。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="data-constrained">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：16× 计算，还是 16× 数据？</h2>
+<p><a href="06-llada.html#smdm">SMDM</a> 的“掩码扩散约需 16 倍计算”是在数据充足、每个 token 只看一遍的设定下测得的：计算增加时，模型和独特数据同比放大。Prabhudesai 等指出这把两件事混在了一起——扩散到底是<b>计算效率</b>低，还是<b>样本效率</b>低？如果独特数据有限、只能重复训练，结论可能相反。<span class="src">Data-Constrained §1、§3.1</span>这个问题并非学术游戏：高质量公开文本被预测将在几年内耗尽，机器人、医疗等领域一开始就是数据稀缺。<span class="src">Data-Constrained §1</span></p>
+<p>两篇论文给出同一方向的结论：<b>Diffusion Beats Autoregressive in Data-Constrained Settings</b>（CMU，2025-07，NeurIPS 2025）拟合了数据受限扩展律并给出扩散反超 AR 的临界计算量闭式；<b>Diffusion Language Models are Super Data Learners</b>（NUS / Sea AI Lab 等，博客 2025-08-09，arXiv 2025-11）在更大规模上观察到下游任务的“交叉点”，并公开批评前者的方法学。两者给出的数字不能合并，本页把它们并列。<span class="src">两篇论文摘要；Super Data 官方博客</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  同一条序列，AR 每个 epoch 做的都是同一套“从左往右猜下一个”的题，重复几遍就背熟了；掩码扩散每个 epoch 重新抽掩码比例和位置，等于从同一数据里出新题。代价是单位计算学得更慢——所以数据充足时 AR 赢，数据稀缺、计算充裕时扩散赢。
+</div>
+<p>记号：独特 token 数 \(U\)，epoch 数 \(E\)，总训练 token \(D=UE\)，非嵌入参数 \(N\)，计算 \(C\approx6ND\)。掩码比例在 Data-Constrained 论文中记为 \(r\)，等同于本 track 的 \(t\)（\(t=1\) 全掩）。<span class="src">Data-Constrained §2</span></p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：多 epoch 对照实验的一轮</h2>
+<div class="legend">
+  <span><i class="sw data"></i>数据 / token 画布</span><span><i class="sw enc"></i>被训练的网络（AR 或 MDM）</span>
+  <span><i class="sw loss"></i>损失 / 评测</span><span><i class="sw mask"></i>[M] token</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="数据受限对照：同一份独特数据重复多个 epoch，AR 每轮看到同一任务，MDM 每轮看到新的掩码；验证损失进入数据受限扩展律拟合，求出临界计算量；左下为给 AR 加多种顺序的对照实验">
+    <g class="data" data-part="pool" data-step="1">
+      <rect class="box" x="20" y="24" width="230" height="226" rx="10"/>
+      <text class="t-c t-b" x="135" y="50">独特数据 U</text>
+      <text class="t-c t-sm" x="135" y="74">重复 E 个 epoch</text>
+      <text class="t-xs" x="34" y="108">×E</text>
+      <rect class="tk data" x="60" y="92" width="22" height="22"/><rect class="tk data" x="88" y="92" width="22" height="22"/><rect class="tk data" x="116" y="92" width="22" height="22"/><rect class="tk data" x="144" y="92" width="22" height="22"/><rect class="tk data" x="172" y="92" width="22" height="22"/>
+      <rect class="tk data" x="60" y="120" width="22" height="22"/><rect class="tk data" x="88" y="120" width="22" height="22"/><rect class="tk data" x="116" y="120" width="22" height="22"/><rect class="tk data" x="144" y="120" width="22" height="22"/><rect class="tk data" x="172" y="120" width="22" height="22"/>
+      <rect class="tk data" x="60" y="148" width="22" height="22"/><rect class="tk data" x="88" y="148" width="22" height="22"/><rect class="tk data" x="116" y="148" width="22" height="22"/><rect class="tk data" x="144" y="148" width="22" height="22"/><rect class="tk data" x="172" y="148" width="22" height="22"/>
+      <text class="t-c t-sm" x="135" y="194">D = U · E</text>
+      <text class="t-c t-xs" x="135" y="214">C4，U ∈ {25, 50, 100}M</text>
+      <text class="t-c t-xs" x="135" y="234">最多 800 epoch（80B token）</text>
+    </g>
+    <path class="edge" d="M250,74 H296" data-step="2"/>
+    <path class="edge" d="M250,200 H296" data-step="3"/>
+    <g class="enc" data-part="ar" data-step="2">
+      <rect class="box" x="300" y="24" width="260" height="100" rx="10"/>
+      <text class="t-c t-b" x="430" y="50">AR：因果 decoder</text>
+      <text class="t-c t-sm" x="430" y="74">下一 token 交叉熵</text>
+      <text class="t-c t-xs" x="430" y="96">每个 epoch 都是同一套题</text>
+      <text class="t-c t-xs" x="430" y="114">过了 Chinchilla 点很快过拟合</text>
+    </g>
+    <path class="edge enc" d="M560,74 H576" data-step="2"/>
+    <g data-step="2">
+      <text class="t-xs" x="586" y="48">e1</text><text class="t-xs" x="586" y="74">e2</text><text class="t-xs" x="586" y="100">e3</text>
+      <rect class="tk data" x="610" y="36" width="16" height="16"/><rect class="tk data" x="630" y="36" width="16" height="16"/><rect class="tk data" x="650" y="36" width="16" height="16"/><rect class="tk data" x="670" y="36" width="16" height="16"/><rect class="tk data" x="690" y="36" width="16" height="16"/><rect class="tk data" x="710" y="36" width="16" height="16"/>
+      <rect class="tk data" x="610" y="62" width="16" height="16"/><rect class="tk data" x="630" y="62" width="16" height="16"/><rect class="tk data" x="650" y="62" width="16" height="16"/><rect class="tk data" x="670" y="62" width="16" height="16"/><rect class="tk data" x="690" y="62" width="16" height="16"/><rect class="tk data" x="710" y="62" width="16" height="16"/>
+      <rect class="tk data" x="610" y="88" width="16" height="16"/><rect class="tk data" x="630" y="88" width="16" height="16"/><rect class="tk data" x="650" y="88" width="16" height="16"/><rect class="tk data" x="670" y="88" width="16" height="16"/><rect class="tk data" x="690" y="88" width="16" height="16"/><rect class="tk data" x="710" y="88" width="16" height="16"/>
+      <text class="t-c t-xs" x="676" y="120">同序列 · 同顺序</text>
+    </g>
+    <g class="enc" data-part="mdm" data-step="3">
+      <rect class="box" x="300" y="150" width="260" height="100" rx="10"/>
+      <text class="t-c t-b" x="430" y="176">MDM：双向 + [M]</text>
+      <text class="t-c t-sm" x="430" y="200">被掩位置交叉熵 ÷ r</text>
+      <text class="t-c t-xs" x="430" y="222">每个 epoch 重新抽 r 与掩码</text>
+      <text class="t-c t-xs" x="430" y="240">100M 时 500 epoch 仍在变好</text>
+    </g>
+    <path class="edge enc" d="M560,200 H576" data-step="3"/>
+    <g class="data" data-part="masks" data-step="3">
+      <rect class="box" x="580" y="150" width="190" height="100" rx="10"/>
+      <text class="t-xs" x="586" y="174">e1</text><text class="t-xs" x="586" y="200">e2</text><text class="t-xs" x="586" y="226">e3</text>
+      <rect class="tk data" x="610" y="162" width="16" height="16"/><rect class="tk mask" x="630" y="162" width="16" height="16"/><rect class="tk data" x="650" y="162" width="16" height="16"/><rect class="tk data" x="670" y="162" width="16" height="16"/><rect class="tk mask" x="690" y="162" width="16" height="16"/><rect class="tk data" x="710" y="162" width="16" height="16"/>
+      <rect class="tk mask" x="610" y="188" width="16" height="16"/><rect class="tk mask" x="630" y="188" width="16" height="16"/><rect class="tk data" x="650" y="188" width="16" height="16"/><rect class="tk mask" x="670" y="188" width="16" height="16"/><rect class="tk mask" x="690" y="188" width="16" height="16"/><rect class="tk data" x="710" y="188" width="16" height="16"/>
+      <rect class="tk data" x="610" y="214" width="16" height="16"/><rect class="tk data" x="630" y="214" width="16" height="16"/><rect class="tk mask" x="650" y="214" width="16" height="16"/><rect class="tk data" x="670" y="214" width="16" height="16"/><rect class="tk data" x="690" y="214" width="16" height="16"/><rect class="tk data" x="710" y="214" width="16" height="16"/>
+      <text class="t-c t-xs" x="676" y="244">同序列 · 新掩码 = 新题</text>
+    </g>
+    <path class="edge" d="M770,74 H796" data-step="4"/>
+    <path class="edge" d="M770,200 H796" data-step="4"/>
+    <g class="loss" data-part="loss" data-step="4">
+      <rect class="box" x="800" y="24" width="140" height="226" rx="10"/>
+      <text class="t-c t-b" x="870" y="54">验证损失</text>
+      <text class="t-c t-sm" x="870" y="82">AR：精确 NLL</text>
+      <text class="t-c t-sm" x="870" y="104">MDM：ELBO</text>
+      <text class="t-c t-xs" x="870" y="126">（上界，非同一量）</text>
+      <text class="t-c t-xs" x="870" y="160">单 epoch 最优点</text>
+      <text class="t-c t-xs" x="870" y="178">10.65 vs 7.07</text>
+      <text class="t-c t-xs" x="870" y="206">多 epoch 最优</text>
+      <text class="t-c t-xs" x="870" y="224">3.55 vs 3.71</text>
+    </g>
+    <path class="edge" d="M135,250 V286" data-step="7"/>
+    <g data-part="perm" data-step="7">
+      <rect class="box" x="20" y="290" width="280" height="166" rx="10"/>
+      <text class="t-c t-b" x="160" y="314">对照：AR + N 种顺序</text>
+      <text class="t-c t-sm" x="160" y="338">位置加高斯噪声后 argsort</text>
+      <text class="t-c t-xs" x="160" y="362">N = 1 即标准左到右</text>
+      <text class="t-c t-xs" x="160" y="382">N = 16：100 epoch 时接近扩散</text>
+      <text class="t-c t-xs" x="160" y="402">注意力 dropout、token 掩码：无效</text>
+      <text class="t-c t-xs" x="160" y="422">评测仍按左到右</text>
+      <text class="t-c t-xs" x="160" y="442">Ni 等：输入掩码 / dropout 有帮助</text>
+    </g>
+    <path class="edge loss" d="M870,250 V270 H480 V286" data-step="5"/>
+    <g data-part="fit" data-step="5">
+      <rect class="box" x="340" y="290" width="280" height="166" rx="10"/>
+      <text class="t-c t-b" x="480" y="314">数据受限扩展律</text>
+      <text class="t-c t-sm" x="480" y="340">L = A/N′^α + B/D′^β + E₀</text>
+      <text class="t-c t-sm" x="480" y="364">D′ = U + U·R_D*·(1 − e^−(E−1)/R_D*)</text>
+      <text class="t-c t-xs" x="480" y="390">R_D*：扩散约 500，AR 约 31</text>
+      <text class="t-c t-xs" x="480" y="410">（同一论文中三处数值不一）</text>
+      <text class="t-c t-xs" x="480" y="434">重复≈新数据：扩散约 100 epoch，AR 约 4</text>
+    </g>
+    <path class="edge" d="M620,372 H656" data-step="6"/>
+    <g data-part="crit" data-step="6">
+      <rect class="box" x="660" y="290" width="280" height="166" rx="10"/>
+      <text class="t-c t-b" x="800" y="314">临界计算量</text>
+      <text class="t-c t-sm" x="800" y="340">ΔL(C_crit, U) = 0</text>
+      <text class="t-c t-sm" x="800" y="364">C_crit(U) ∝ U^2.174</text>
+      <text class="t-c t-xs" x="800" y="390">低于它用 AR，高于它用扩散</text>
+      <text class="t-c t-xs" x="800" y="410">U = 100M → 约 4.7×10¹⁹ FLOPs</text>
+      <text class="t-c t-xs" x="800" y="430">（由拟合式推算）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="pool"><h4>固定独特数据，重复训练</h4><p>英文 C4，GPT-2 BPE，每条截断或补齐到 2048；\(U\in\{25,50,100\}\)M，最多 800 epoch（80B token）；模型 7M–2.5B，宽深同比放大；共 200 个模型（扩散、AR 各 100）。<span class="src">Data-Constrained §2.4、§3</span>两族共享 GPT-2 式 Transformer + RoPE（附录描述为 RoPE、SwiGLU、RMSNorm、无 bias），超参沿用 Muennighoff 等为 AR 调好的配置——作者承认这可能略偏向 AR。<span class="src">§2.2、§2.4、App. 9</span></p></div>
+    <div data-note="ar"><h4>AR：同一任务反复做</h4><p>因果掩码、下一 token 交叉熵。100M 独特 token 时 AR 在约 50 epoch 达到最好，之后验证损失回升；在 Chinchilla 最优的单 epoch 点上 AR 明显领先。<span class="src">Data-Constrained §3.1、Fig. 2</span></p></div>
+    <div data-note="mdm"><h4>MDM：每个 epoch 一套新题</h4><p>抽 \(r\sim U(0,1)\)，每个 token 以概率 \(r\) 掩掉，被掩位置交叉熵乘 \(1/r\)。100M 独特 token 时最好结果出现在 500 epoch（所测最大值），尚无过拟合迹象。<span class="src">Data-Constrained §2.2、§3.1</span></p></div>
+    <div data-note="masks"><h4>为什么“新掩码 = 新题”</h4><p>每个 epoch 同一序列的掩码比例与位置都重新采样，模型被要求在不同的已知子集下预测不同的位置，相当于对大量“条件预测任务”求平均。Ni 等的说法是：长 \(L\) 的序列有 \(2^{L}\) 种掩码，而 AR 只有 \(L\) 个前缀。<span class="src">Data-Constrained §2.1；Super Data §3.4、§7.1</span></p></div>
+    <div data-note="loss"><h4>验证损失：两个不同的量</h4><p>AR 报告精确 NLL，MDM 报告 ELBO（NLL 的上界）。100M 独特 token：单 epoch 计算最优点 MDM 10.65、AR 7.07；多 epoch 最优 MDM 3.55、AR 3.71（降幅 67% vs 48%）。<span class="src">Data-Constrained Fig. 2 图注</span>Ni 等的博客认为用验证损失比较两族本身就有问题（见 <a href="#c-disagree">§3.6</a>）。</p></div>
+    <div data-note="fit"><h4>数据受限扩展律</h4><p>沿用 Muennighoff 等：第 \(k\) 次重复的数据价值按几何级数衰减，汇总成“有效数据量”\(D'\)，\(R_D^{*}\) 是数据复用的半衰期；参数侧同理得 \(N'\)。拟合 \(R^2\)：扩散 0.9784，AR 0.7628。<span class="src">Data-Constrained §2.3、Tab. 1(b)</span></p></div>
+    <div data-note="crit"><h4>临界计算量</h4><p>令两族拟合损失相等，得到 \(C_{\mathrm{crit}}(U)\)；在 log–log 中 \(\log_{10}U=0.460\log_{10}C-1.050\)。经验交叉点（蓝星）落在拟合曲线附近。<span class="src">Data-Constrained §3.3、Fig. 6</span>右下数值为本页按该式推算（\(U\) 以 token、\(C\) 以 FLOPs 计）。</p></div>
+    <div data-note="perm"><h4>给 AR 加顺序多样性</h4><p>278M、100 epoch 的 AR，\(N\) 种预先固定的顺序（第一种为左到右，其余为在位置上加标准差递增的高斯噪声后排序），每条序列随机选一种；\(N=16\) 时验证损失接近扩散。140M、50 epoch 的 AR 加注意力 dropout（25 / 50 / 75%）或 token 掩码均无改善。<span class="src">Data-Constrained §3.5、App. 7、App. 12</span>Ni 等的对照则显示输入掩码与 dropout 对 AR 有帮助，只是追不上扩散。<span class="src">Super Data §3.6</span></p></div>
+    <div data-step-note="1"><h4>① 固定独特数据</h4><p>取 \(U\) 个 token，准备重复 \(E\) 遍。</p></div>
+    <div data-step-note="2"><h4>② 训练 AR</h4><p>每个 epoch 看到完全相同的输入与目标。</p></div>
+    <div data-step-note="3"><h4>③ 训练 MDM</h4><p>每个 epoch 对同一序列重新采样掩码。</p></div>
+    <div data-step-note="4"><h4>④ 评测</h4><p>两族的验证损失（NLL vs ELBO）。</p></div>
+    <div data-step-note="5"><h4>⑤ 拟合扩展律</h4><p>对两族分别拟合 \(A,B,\alpha,\beta,E_0,R_N^{*},R_D^{*}\)。</p></div>
+    <div data-step-note="6"><h4>⑥ 求临界计算量</h4><p>解 \(\Delta\mathcal{L}=0\)，得到随 \(U\) 变化的分界线。</p></div>
+    <div data-step-note="7"><h4>⑦ 解释性对照</h4><p>给 AR 加顺序扰动或噪声，检验“数据增强”解释。</p></div>
+  </div>
+  <figcaption>图 1　Prabhudesai 等的实验流程（主路径）与解释性对照（左下）。<span class="src">依据 Data-Constrained §2–3、App. 12。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-setup">3.1 实验设定：把计算和数据拆开</h3>
+<p>以往比较（SMDM，以及多模态上的 Swerdlow 等）都在单 epoch 下按 \(C\sim6ND\) 同时放大 \(N\) 与 \(D\)，所以分不清扩散是缺计算还是缺数据。这里固定 \(U\)、变化 \(N\) 与 \(E\)，让总计算可以在不增加独特数据的情况下继续增长。<span class="src">Data-Constrained §3.1</span>超参：batch 256 条序列，AdamW \((0.9,0.95)\)、\(\epsilon=10^{-8}\)，峰值学习率 2e-4、最低 2e-5，1% warmup，余弦衰减，wd 0.1，梯度裁剪 1.0；随 epoch 数调整学习率调度；Megatron-DeepSpeed 实现。<span class="src">Data-Constrained §2.2、App. 8–9</span></p>
+<h3 id="c-law">3.2 数据受限扩展律：重复数据还值多少</h3>
+<p>Muennighoff 等对 AR 的结论是：重复约 4 个 epoch 与新数据几乎一样好，之后迅速贬值。本文对扩散拟合同一形式，结论是扩散的重复数据在约 100 个 epoch 内都接近新数据，\(R_D^{*}\) 比 AR 大一个数量级以上。<span class="src">Data-Constrained §3.2、Fig. 5</span>在固定计算（\(10^{19}\)、\(3\times10^{19}\)、\(10^{20}\) FLOPs）下改变“独特数据 × epoch”的组合，AR 的验证损失随 epoch 增加而上升，扩散的几条曲线几乎重合。<span class="src">Data-Constrained Fig. 3–4</span></p>
+<div class="callout code-note"><span class="callout-title">同一论文中的三组 \(R_D^{*}\)</span>引言写扩散约 500、AR 约 15（AR 的 15 引自 Muennighoff 等）；§3.2 正文写 512.85 vs 31.93；Tab. 1(b) 写 493.89 vs 31.19。三处出自不同的拟合轮次或来源，论文没有统一说明；本页图中取“约 500 vs 约 31”的量级。<span class="src">Data-Constrained §1、§3.2、Tab. 1(b)；读 arXiv v7</span></div>
+<h3 id="c-crit">3.3 临界计算量的闭式</h3>
+<p>由拟合式 \(\log_{10}U=0.460\log_{10}C-1.050\) 反解：</p>
+<div class="formula">$$C_{\mathrm{crit}}(U)=10^{1.050/0.460}\,U^{1/0.460}\approx 1.9\times10^{2}\,U^{2.174},$$</div>
+<p>论文写作 \(2.12\times10^{1.956}\cdot U^{2.174}\)，数值相同。<span class="src">Data-Constrained §3.3</span>按此推算（\(U\) 为 token 数）：\(U=25\)M 时约 \(2.3\times10^{18}\)，50M 约 \(1.0\times10^{19}\)，100M 约 \(4.7\times10^{19}\) FLOPs——独特数据翻倍，临界计算约增 4.5 倍。这只在拟合范围（25–100M）内可靠，作者也承认外推到大数据规模需要更多实验。<span class="src">Data-Constrained App. 11；推算</span>致谢中提到 Stella Biderman 指出过该式的单位不一致，说明早期版本有改动。<span class="src">Data-Constrained §5</span></p>
+<h3 id="c-why">3.4 “任意顺序 = 隐式数据增强”</h3>
+<p>作者的解释：掩码目标让模型在大量随机的条件预测任务上训练，等于对数据做了增强；AR 的固定左到右分解没有这种多样性。证据是 §2 图中的对照：常见的扰动（注意力 dropout、token 掩码）不能阻止 AR 过拟合，而让 AR 在多种 token 顺序上训练能持续降低验证损失、推迟过拟合。<span class="src">Data-Constrained §3.5、Fig. 7–8</span>附录还讨论了反面——AR 为什么更省计算：每次更新都强化同一种顺序，便于“专精”；每个 token 都是监督目标、梯度稠密，而扩散每条序列只在被掩的部分算损失。<span class="src">Data-Constrained App. 10</span></p>
+<p>需要注意：主文说“随机排列”，附录的实现是在左到右位置上加噪声后排序，噪声越大越乱，因此 \(N=16\) 的顺序集合仍偏向近似左到右；评测也只按左到右。<span class="src">Data-Constrained App. 12、Alg. 1–2</span>它支持“顺序多样性有用”，但没有分离出“任意顺序”与“随机正则”各占多少。</p>
+
+<h3 id="super-data">3.5 Super Data Learners：更大规模的交叉点</h3>
+<p>Ni 等在 Megatron-LM 上训练，交叉点实验用 Nemotron-CC 子集；batch 256、长度 2048，WSD 学习率峰值 2e-4、1000 步 warmup、最后 10% 指数衰减到 2e-5；GPT-2 tokenizer、RoPE、SwiGLU、RMSNorm、无 bias、qk-norm；扩散目标与 LLaDA 相同。超参主要为 AR 调过，作者认为这低估了扩散。<span class="src">Super Data §3.1</span></p>
+<ul>
+  <li><b>独特数据</b>：1B 模型、总 96B token，独特 token 从 0.5B 到 96B。数据少时扩散反超，\(U\) 越大交叉点越晚，1.5B 以上在 96B token 内没出现。0.5B 独特 token 的扩散（未收敛）与 1.5B 独特 token 的 AR（已收敛）相当，作者据此称扩散有超过 3 倍的“数据潜力”。<span class="src">Super Data §3.2、Fig. 1</span></li>
+  <li><b>质量、规模、稀疏</b>：1B 独特 token × 96 epoch 下，数据质量越高交叉点越晚；模型越大（1B→8B）交叉点越早，且最小的扩散模型也胜过所有尺寸的 AR；8B 总参 / 1B 激活的 MoE 下扩散同样领先。<span class="src">Super Data §3.3–3.5</span></li>
+  <li><b>噪声注入</b>：给 AR 输入随机掩码 10–90% 或 dropout 10–90%，低噪声时有明显帮助（掩码 10% 最好），但都追不上扩散。<span class="src">Super Data §3.6、Fig. 5–6</span></li>
+  <li><b>代码规模实验</b>：1.7B，独特数据 10B Python token（9B + 1B 退火数据），约 150 epoch、总计约 1.5T token 的计算，长度 4096、batch 1024；MBPP 上交叉点出现得早，HumanEval 只在退火末尾才相交，作者认为与 3-shot / 0-shot 协议有关。<span class="src">Super Data §4、Fig. 7、Fig. 13</span></li>
+  <li><b>扩散也会过拟合</b>：1B 模型在 1B token 上训 480 epoch，HellaSwag 56%、MMLU 33%（AR 为 41%、29%），仍未饱和；但数据更少、模型更大时，最多到 1000 epoch 会出现验证损失回升。<span class="src">Super Data §6、Fig. 10–11</span></li>
+  <li><b>验证损失上升 ≠ 能力下降</b>：AR 在验证集上“过拟合”后，选择题中正确与错误选项的 NLL 差仍在扩大，下游准确率继续升。<span class="src">Super Data §5、Fig. 8–9</span></li>
+</ul>
+<p>他们把扩散的优势拆成三部分：任意顺序建模减少归纳偏置；“超稠密”计算——训练与推理都花更多 FLOPs；以及目标中的期望让每条数据被多次以不同掩码使用（MC 增强）。代价也很直白：初步实验显示扩散需要至少约 100 倍于 AR 的训练 FLOPs 才发挥全部潜力；推理在步数等于长度时，FLOPs 是带 KV cache 的 AR 的 16–4700 倍（长度 16–4096）。<span class="src">Super Data §7.1、Fig. 12</span></p>
+
+<h3 id="c-disagree">3.6 方法学分歧：两篇论文、16× 与 2026 的复核</h3>
+<p>Super Data 的官方博客（2025-08-09 发布，针对 Prabhudesai 等的 arXiv v2）列出五点批评：<span class="src">Super Data 官方博客 §3</span></p>
+<ol>
+  <li><b>损失缺 \(1/t\) 权重</b>：博客认为 v2 的实验用的是不加权的掩码交叉熵，它不是似然的上界；Prabhudesai 等之后在 v3 中加入了按时间的权重，并于 8 月底公开代码。当前 v7 正文的目标含 \(1/r\)。<span class="src">博客 §3.1a 及其更新；Data-Constrained v7 §2.2</span></li>
+  <li><b>验证损失不可比</b>：AR 是精确 NLL，扩散是上界；且损失更低不代表能力更强。</li>
+  <li><b>AR 下游结果取了早期检查点</b>：Tab. 2 按“最佳验证损失”选模型，AR 因早早过拟合被选在早期，而其下游指标此后仍在上升。</li>
+  <li><b>过拟合对比不公平</b>：博客称 Fig. 4–5 中 AR 用了更大的模型和更少的独特数据，二者都会让过拟合提前。</li>
+  <li><b>扩展律形式</b>：Chinchilla 式损失对 \(N\)、\(D\) 单调不增，无法描述过拟合导致的损失回升，外推（Fig. 5–6）可能偏乐观。</li>
+</ol>
+<p>反过来看，Super Data 的“3 倍数据潜力”也只来自 1B 模型、96B 总 token 的一组对比，没有拟合扩展律。第三方的 <i>What Makes Diffusion Language Models Super Data Learners?</i>（2510.04071）在消融后认为主要来源是输入 token 的随机掩码，而 MLP dropout 与 weight decay 也能带来类似收益——这更像“随机正则化”而非“任意顺序”本身。<span class="src">2510.04071 摘要</span>它与 Super Data“噪声帮助 AR 但追不上扩散”的结论并不一致。</p>
+<p>与 SMDM 的关系：两篇数据受限论文都不否认单 epoch 下扩散更费计算，只是认为“16×”不是固有常数。2026-10-13 的 <a href="https://arxiv.org/abs/2610.17590">Revisiting the 16x Compute Gap</a> 从另一个方向复核：沿用 SMDM 的数据与超参、约 1700 个模型，ELBO 读数为 17.8×，同一批模型改用“按置信度解码顺序的精确似然”降到 12.8×，再换成块扩散 / 编码器-解码器，块长 32 时 7.8×、块长 4 时 3.0×。<span class="src">2610.17590 摘要、§4</span>这篇结论太新，尚无复现。</p>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>Data-Constrained 的 MDM</th><th>Super Data 的 DLM</th><th>同设定的 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>掩码交叉熵 × \(1/r\)（v7）；早期版本是否加权有争议 <span class="src">§2.2；博客</span></td><td>LLaDA 同款目标 <span class="src">§3.1、Eq. 3</span></td><td>下一 token 交叉熵（精确 NLL）</td></tr>
+    <tr><td>注意力与 KV cache</td><td>全双向；只做训练与似然评测，不涉及缓存</td><td>全双向 + qk-norm；推理 FLOPs 为带 cache 的 AR 的 16–4700 倍（步数 = 长度）<span class="src">Fig. 12</span></td><td>因果；推理用 KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>不适用：下游按似然打分，未做生成评测 <span class="src">§3.4</span></td><td>代码基准需生成，论文未报告步数 / TPF <span class="unverified">未核实</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>数据受限时更低的验证损失（100M：3.55 vs 3.71），重复约 100 epoch 仍接近新数据 <span class="src">Fig. 2、Fig. 5</span></td><td>1B token × 480 epoch：HellaSwag 56% / MMLU 33% vs AR 41% / 29% <span class="src">§6</span></td><td>数据充足、计算受限时更快收敛</td></tr>
+    <tr><td>代价与失效情形</td><td>单 epoch 最优点明显更差（10.65 vs 7.07）；\(C_{\mathrm{crit}}\propto U^{2.174}\) <span class="src">Fig. 2、§3.3</span></td><td>约 100 倍训练 FLOPs 才发挥潜力（初步）；数据极少、模型很大时也过拟合 <span class="src">§6、§7.1</span></td><td>约 4 epoch 后收益递减并过拟合 <span class="src">Muennighoff 等，经两文引用</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、epoch 与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>量</th><th>Data-Constrained</th><th>Super Data</th></tr></thead>
+  <tbody>
+    <tr><td>序列</td><td>2048 token，GPT-2 BPE <span class="src">§2.4</span></td><td>2048（代码实验 4096），GPT-2 / GPT-NeoX tokenizer <span class="src">§3.1、§4</span></td></tr>
+    <tr><td>独特数据 \(U\)</td><td>25 / 50 / 100M；附加实验 500M <span class="src">§2.4、App. 7</span></td><td>0.5B–96B；代码 10B <span class="src">§3.2、§4</span></td></tr>
+    <tr><td>epoch \(E\)</td><td>最多 800（80B token）</td><td>96（1B 独特）、480、最多 1000；代码约 150</td></tr>
+    <tr><td>模型</td><td>7M–2.5B，200 个；500M 实验 2.3B 扩散训 130 epoch <span class="src">App. 7</span></td><td>1B–8B，含 8B 总 / 1B 激活 MoE；代码 1.7B</td></tr>
+    <tr><td>每条序列的监督位置</td><td colspan="2">AR：全部 \(L\) 个；MDM：期望 \(\mathbb{E}[r]L=L/2\) 个，即每步监督信号约为 AR 的一半 <span class="src">Super Data §7.2</span></td></tr>
+    <tr><td>同一序列的不同任务数</td><td colspan="2">AR：\(L\) 个前缀；MDM：\(2^{L}\) 种掩码（并非都有区别）<span class="src">Super Data §3.4</span></td></tr>
+    <tr><td>计算</td><td colspan="2">\(C\approx6ND\)，\(D=UE\)；例：100M × 500 epoch = 50B token</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>两族的训练目标（\(\mathcal{M}\) 为被掩位置集合，\(\tilde x\) 为掩码后序列）：<span class="src">Data-Constrained §2.2</span></p>
+<div class="formula">$$\mathcal{L}_{\mathrm{AR}}=-\sum_{j=1}^{L}\log p_{\theta}(x_j\mid x_{&lt;j}),\qquad \mathcal{L}_{\mathrm{Diff}}=-\mathbb{E}_{r\sim U(0,1),\,\tilde x\sim q_r}\Big[\frac{1}{r}\sum_{i\in\mathcal{M}}\log p_{\theta}(x_i\mid\tilde x)\Big].$$</div>
+<p>数据受限扩展律（Muennighoff 等的形式，\(R_N^{*}\) 对参数侧同理）：<span class="src">Data-Constrained §2.3</span></p>
+<div class="formula">$$D'=U+U R_D^{*}\big(1-e^{-(E-1)/R_D^{*}}\big),\qquad \mathcal{L}(N,D)=\frac{A}{(N')^{\alpha}}+\frac{B}{(D')^{\beta}}+E_0,\qquad \Delta\mathcal{L}(C_{\mathrm{crit}},U)=\mathcal{L}_{\mathrm{Diff}}-\mathcal{L}_{\mathrm{AR}}=0.$$</div>
+<p>当 \(E\to\infty\) 时 \(D'\to(1+R_D^{*})U\)：无论重复多少次，有效数据有上限。扩散的 \(R_D^{*}\) 大一个数量级，意味着这个上限高得多。由于两族的 \(E_0\)（不可约熵项）不同，外推得到的损失值不能直接互比，论文在比较时忽略了这一项。<span class="src">Data-Constrained §2.3、Fig. 5 图注</span></p>
+<div class="callout code-note"><span class="callout-title">版本与口径</span>
+  <b>① 损失版本。</b>Super Data 博客指出 Prabhudesai 等 v2 的实验损失缺少时间权重；v3 起正文加入了加权，v7 为 \(1/r\)。读该论文的数字时应注意版本（本页读 v7）。<span class="src">博客 §3.1a；Data-Constrained v7</span>
+  <b>② 似然口径。</b>两篇都用 ELBO 与 AR 的精确 NLL 比；Tab. 4 的下游 NLL（如 WikiText 4.50 vs 4.94）也是这种比较。2610.17590 表明同一扩散模型的 ELBO 与按解码顺序的精确似然会给出不同的计算倍数。<span class="src">Data-Constrained Tab. 4；2610.17590 §4</span>
+  <b>③ 顺序扰动。</b>正文称 AR 的 \(N\) 种顺序为“随机排列”，附录实现为“左到右位置 + 递增高斯噪声后排序、首 token 固定”。<span class="src">Data-Constrained §3.5、App. 12</span>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">data_constrained_grid.py（实验流程示意，依 Data-Constrained §2–3、App. 12）</div>
+<pre><code class="lang-py">def train(family, N, data, E, n_orders=1):
+    model = init_transformer(N, causal=(family == "ar"))
+    orders = make_orders(L, n_orders)          # 第 0 个为左到右，其余加噪声 argsort
+    for epoch in range(E):                     # 同一份 U 个 token 重复 E 遍
+        for x0 in shuffle(data):
+            if family == "ar":
+                pi = choice(orders)            # n_orders = 1 即标准 AR
+                x, pos = permute_keep_first(x0, pi)
+                loss = cross_entropy(model(x[:-1], pos[:-1]), x[1:]).sum()
+            else:                              # MDM：每个 epoch 重新抽掩码
+                r = uniform(0, 1)
+                m = rand(L) &lt; r
+                logits = model(where(m, MASK, x0))
+                loss = cross_entropy(logits[m], x0[m]).sum() / r
+            step(loss)
+    return val_loss(model)                     # AR：精确 NLL；MDM：ELBO 的 MC 估计
+
+records = []
+for U in [25e6, 50e6, 100e6]:
+    data = sample_unique_tokens("c4-en", U)
+    for N in model_sizes:                      # 7M ... 2.5B
+        for E in epoch_grid:                   # 1 ... 800
+            for fam in ["ar", "mdm"]:
+                records.append((fam, U, N, E, train(fam, N, data, E)))
+
+law = {fam: fit_muennighoff(records, fam)      # A, B, alpha, beta, E0, R_N*, R_D*
+       for fam in ["ar", "mdm"]}
+C_crit = {U: solve(lambda C: law["mdm"](C, U) - law["ar"](C, U), 0)
+          for U in U_grid}                     # 论文拟合：C_crit ∝ U ** 2.174</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>Data-Constrained</th><th>Super Data</th></tr></thead>
+  <tbody>
+    <tr><td>语料</td><td>C4 英文 <span class="src">§2.4</span></td><td>Nemotron-CC 子集；部分实验 c4-en；代码 RefineCode <span class="src">§3.1</span></td></tr>
+    <tr><td>学习率</td><td>余弦，峰值 2e-4 → 2e-5，1% warmup <span class="src">App. 8</span></td><td>WSD，峰值 2e-4，1000 步 warmup，末 10% 指数衰减到 2e-5 <span class="src">§3.1</span></td></tr>
+    <tr><td>batch / 长度</td><td>256 × 2048</td><td>256 × 2048；代码 1024 × 4096 <span class="src">§3.1、§4</span></td></tr>
+    <tr><td>优化器</td><td>AdamW (0.9, 0.95)，wd 0.1，clip 1.0</td><td>wd 0.1（代码实验）；初始化 std 0.02</td></tr>
+    <tr><td>架构</td><td>RoPE、SwiGLU、RMSNorm、无 bias <span class="src">App. 9</span></td><td>RoPE、SwiGLU、RMSNorm、无 bias、qk-norm；MoE 用 token-choice <span class="src">§3.1</span></td></tr>
+    <tr><td>验证集</td><td>C4 验证（具体规模未写）</td><td>c4-en 验证，每次评测取不同的 100M token <span class="src">§3.1</span></td></tr>
+    <tr><td>代码与硬件</td><td>Megatron-DeepSpeed；代码已开源 <span class="src">App. 9；项目页</span></td><td>改造的 Megatron-LM；<span class="unverified">硬件与 GPU 小时未公开</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>下游（100M 独特 token）</b>：按最佳验证损失选模型，另加一个与扩散同 FLOPs、已过拟合的 AR。<span class="src">Data-Constrained Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>基准（准确率 %）</th><th class="num">随机</th><th class="num">AR（最佳损失）</th><th class="num">AR（同 FLOPs）</th><th class="num">扩散</th></tr></thead>
+  <tbody>
+    <tr><td>ARC-Easy</td><td class="num">25.00</td><td class="num">35.63</td><td class="num">35.35</td><td class="num">37.84</td></tr>
+    <tr><td>HellaSwag</td><td class="num">25.00</td><td class="num">27.37</td><td class="num">29.03</td><td class="num">30.24</td></tr>
+    <tr><td>PIQA</td><td class="num">50.00</td><td class="num">60.94</td><td class="num">61.64</td><td class="num">60.72</td></tr>
+    <tr class="hl"><td>SciQ</td><td class="num">25.00</td><td class="num">58.05</td><td class="num">50.50</td><td class="num">68.67</td></tr>
+    <tr class="hl"><td>Lambada</td><td class="num">0.00</td><td class="num">10.91</td><td class="num">5.53</td><td class="num">15.19</td></tr>
+  </tbody>
+</table></div>
+<p>这些分数离随机基线很近（WinoGrande、BoolQ 的 AR 甚至低于随机），差异的统计显著性没有报告。500M 独特 token 时（扩散 2.3B、130 epoch 且未收敛），SciQ 79.13 vs 67.82、Lambada 22.30 vs 15.07，COPA 与 PIQA 则 AR 略高。<span class="src">Data-Constrained Tab. 2–3</span>2026-10 的复核为排除噪声，就把 WinoGrande、BoolQ、COPA 从这类小模型评测中剔除。<span class="src">2610.17590 §4.4</span></p>
+<p><b>下游 NLL（100M 独特 token）</b>：最佳 ARM（\(4.32\times10^{18}\) FLOPs）vs 最佳 MDM（\(1.24\times10^{20}\) FLOPs）：OSCAR 3.98 vs 3.83，TinyStories 2.96 vs 2.93，WikiText 4.94 vs 4.50，IndustryCorpus2 3.58 vs 3.44。扩散多用了约 29 倍计算，且一侧是精确 NLL、一侧是上界。<span class="src">Data-Constrained Tab. 4；倍数为推算</span></p>
+<p><b>16× 复核（单 epoch，SMDM 数据与超参）</b>：<span class="src">2610.17590 摘要、§4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>变体（\(10^{20}\) FLOPs 处读数）</th><th class="num">相对 AR 的计算倍数</th></tr></thead>
+  <tbody>
+    <tr><td>全序列 MDM，ELBO 打分</td><td class="num">17.8×</td></tr>
+    <tr><td>同一批模型，按置信度解码顺序的精确似然</td><td class="num">12.8×</td></tr>
+    <tr><td>块扩散 BD3-LM，块长 32</td><td class="num">9.6×</td></tr>
+    <tr><td>编码器-解码器 E2D2，块长 32 / 8</td><td class="num">7.8× / 4.6×</td></tr>
+    <tr class="hl"><td>E2D2，块长 4</td><td class="num">3.0×</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul>
+    <li>把 <a href="06-llada.html#smdm">SMDM</a> 的“16× 计算”拆成计算效率与样本效率两件事，给出“计算受限用 AR、数据受限用扩散”的经验规则与 \(C_{\mathrm{crit}}(U)\)。</li>
+    <li>为从零训练路线（<a href="06-llada.html#illada">iLLaDA</a> 12T、多 epoch SFT）提供了数据侧的理由——iLLaDA 正是引用这两篇来解释多 epoch SFT 的收益。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>扩展律只拟合到 100M 独特 token、验证损失口径有争议；Super Data 只有经验交叉点。真正大规模、同口径（精确似然或下游）的对比仍缺。</li>
+    <li>“任意顺序”与“随机正则”的贡献没有分开；块扩散（<a href="11-block-diffusion.html">第 11 页</a>）引入左到右偏置后在单 epoch 下更省计算，在数据受限下是否仍占优未见报告。</li>
+    <li>多 epoch 优势依赖更多训练 FLOPs；推理侧的计算代价见 <a href="14-kv-cache.html">第 14 页</a>与 <a href="16-order-limits.html">第 16 页</a>。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q15"><span class="qid">Q15</span>为什么在重复数据、多 epoch 训练时掩码扩散能反超 AR？“任意顺序 = 隐式数据增强”这个解释有哪些证据，又有哪些竞争解释？</h3>
+  <div class="ans"><p class="short">AR 每个 epoch 面对的是完全相同的输入与目标，几遍之后开始记忆、验证损失回升；掩码扩散每遍重新抽掩码比例与位置，同一序列变成不同的条件预测题，因此重复数据贬值得慢（\(R_D^{*}\) 约 500 vs 约 31）。支持“增强”解释的证据是：让 AR 在多种 token 顺序上训练能持续降损失，\(N=16\) 时接近扩散。</p>
+    <ul><li>竞争解释一：Ni 等认为还有“超稠密计算”（训练、推理都花更多 FLOPs）与 MC 增强两项；给 AR 加输入掩码或 dropout 有帮助但追不上。</li>
+    <li>竞争解释二：2510.04071 的消融认为主要是输入随机掩码这一正则，MLP dropout、weight decay 也能给出类似收益——这削弱了“任意顺序本身”的作用。</li>
+    <li>Prabhudesai 等的顺序集合是对左到右加噪声得到的、评测仍按左到右，且在 140M / 278M 小模型上做，无法区分两种解释在大规模下的比重。</li></ul>
+    <p class="cite">依据：Data-Constrained §3.2、§3.5、App. 10、App. 12；Super Data §3.6、§7.1；2510.04071 摘要。</p>
+  </div>
+  <h3 id="q16"><span class="qid">Q16</span>两篇数据受限论文的“交叉点”与 SMDM 的“16×”为什么不能合并成一个数字？比较这类结论时必须对齐哪些口径？</h3>
+  <div class="ans"><p class="short">三者测的不是同一个量：16× 是单 epoch、相同验证损失下的计算之比；Prabhudesai 等的 \(C_{\mathrm{crit}}(U)\) 是拟合损失曲线在固定独特数据下的相交点；Ni 等的交叉点是固定总 token、按训练过程画出的下游准确率曲线的相交。数据（SlimPajama / C4 / Nemotron-CC）、模型规模、学习率调度、检查点选择也都不同。</p>
+    <ul><li>指标：ELBO 与精确 NLL 不同量；验证损失与下游准确率可能背离（AR 损失回升时准确率仍升）。</li>
+    <li>选模：按“最佳验证损失”选 AR 会选到早期检查点；应同时报告最终检查点或按下游选择。</li>
+    <li>公平性：两族模型规模、独特数据量应一致；超参通常为 AR 调过；目标是否含 \(1/t\) 要看版本。</li>
+    <li>结构：2610.17590 显示改用精确似然与块扩散可把单 epoch 倍数从 17.8× 降到 3.0×，所以“扩散”本身也要说明是全序列还是块扩散。</li></ul>
+    <p class="cite">依据：SMDM §3；Data-Constrained §3.3、Tab. 2；Super Data §3.2、§5；Super Data 官方博客 §3；2610.17590 §4。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Prabhudesai, Wu, Zadeh, Fragkiadaki, Pathak. <i>Diffusion Beats Autoregressive in Data-Constrained Settings.</i> NeurIPS 2025；本页读 arXiv v7。<a href="https://arxiv.org/abs/2507.15857">论文</a> · <a href="https://diffusion-scaling.github.io">项目页与代码</a>。</li>
+  <li>Ni, Liu, Dou, Du, Wang, Yan, Pang, Shieh. <i>Diffusion Language Models are Super Data Learners.</i> arXiv v1（2025-11-05，作者注为初稿）。<a href="https://arxiv.org/abs/2511.03276">论文</a> · <a href="https://jinjieni.notion.site/Diffusion-Language-Models-are-Super-Data-Learners-239d8f03a866800ab196e49928c019ac">官方博客（2025-08-09）</a>。</li>
+  <li>Gao et al. <i>What Makes Diffusion Language Models Super Data Learners?</i> 2025-10。<a href="https://arxiv.org/abs/2510.04071">论文</a>。</li>
+  <li>Wang et al. <i>Revisiting the 16x Pretraining Compute Gap between Diffusion and Autoregressive Language Models.</i> 2026-10。<a href="https://arxiv.org/abs/2610.17590">论文</a>。</li>
+  <li>Nie et al. SMDM（16× 的出处）：见 <a href="06-llada.html#smdm">第 06 页</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

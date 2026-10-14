@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Duo 与均匀态扩散</title>
+<meta name="description" content="均匀态离散扩散是高斯扩散的 argmax：Duo 借此做低方差课程学习与离散一致性蒸馏（8–16 步生成）；2026 年 Beyond-Masked 的扩展律研究说明为什么跨噪声族比较困惑度会误导；与 DiffusionGemma 的均匀噪声及少步蒸馏路线的联系。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="duo">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：能改字的扩散，为什么一直输？</h2>
+<p>掩码扩散一旦揭示就定稿；把先验从 \([\mathrm{M}]\) 换成<b>词表上的均匀分布</b>（D3PM uniform、SEDD Uniform、UDLM），每个 token 在反向过程中都能被反复改写，天然具备自我修正，也更适合引导。但它的困惑度一直明显差于掩码扩散，而少步采样所依赖的蒸馏工具（一致性模型等）又建立在连续空间的概率流 ODE 上，离散扩散没有这样的确定性映射。<span class="src">Duo §1、§2.1</span></p>
+<p>Duo（Cornell Tech / EPFL，ICML 2025）的核心发现是：对一个定义在 one-hot 向量上的高斯扩散取 <b>argmax</b>，得到的离散边缘恰好是一个均匀态扩散。于是高斯一侧的工具可以搬过来——训练时用 softmax 松弛做低方差课程，采样时借高斯的确定性轨迹做一致性蒸馏。2026 年同一作者团队的 Beyond-Masked 把 MDLM、Duo、Eso-LM 放进同一套 IsoFLOP 扩展律实验，论证“困惑度最好的族未必最实用”。<span class="src">Duo 摘要；Beyond-Masked 摘要</span></p>
+<p>本页记号：干净 token \(x\)（Duo 原文记号，即本站的 \(x_0\)），离散加噪 \(z_t\)（本站的 \(x_t\)），高斯隐变量 \(w_t\in\mathbb{R}^K\)，词表大小 \(K\)；离散调度 \(\alpha_t\)、高斯调度 \(\tilde\alpha_t\)；时间方向与本站一致（\(t=1\) 为全噪声）。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  \(z_t=\operatorname{argmax}(\tilde\alpha_t x+\sqrt{1-\tilde\alpha_t^2}\,\epsilon)\) 的分布正是“以 \(\alpha_t\) 保留原 token、否则均匀换成任意 token”。训练时把 argmax 软化成 softmax，网络更容易学；蒸馏时固定同一个 \(\epsilon\)，相邻时刻的 \(z_s,z_t\) 就构成一条确定性轨迹，可以像一致性模型那样“把多步压成一步”。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：Duo 的课程训练步与一致性蒸馏</h2>
+<div class="legend">
+  <span><i class="sw data"></i>输入 / 隐变量</span><span><i class="sw enc"></i>学生去噪网络（可训练）</span>
+  <span><i class="sw tgt"></i>教师（冻结副本，DCD）</span><span><i class="sw loss"></i>损失</span><span>白框：确定性运算</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 410" role="img" aria-label="Duo：干净 token 加高斯噪声，argmax 得到均匀态离散隐变量用于计分，softmax 松弛作为课程输入送入去噪网络；DCD 用同一噪声得到更干净的 z_s 输入教师，最小化学生与教师的 KL">
+    <g class="data" data-part="x" data-step="1">
+      <rect class="box" x="20" y="30" width="160" height="90" rx="10"/>
+      <text class="t-c t-b" x="100" y="50">干净 token x</text>
+      <rect class="tk data" x="63" y="64" width="22" height="22"/><rect class="tk data" x="89" y="64" width="22" height="22"/><rect class="tk data" x="115" y="64" width="22" height="22"/>
+      <text class="t-c t-sm" x="100" y="104">one-hot，K 维</text>
+    </g>
+    <path class="edge" d="M180,75 H211" data-step="1"/>
+    <g class="data" data-part="gauss" data-step="1">
+      <rect class="box" x="215" y="30" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="320" y="52">高斯隐变量 w_t</text>
+      <text class="t-c t-sm" x="320" y="76">α̃_t·x + √(1−α̃_t²)·ε</text>
+      <text class="t-c t-sm" x="320" y="98">在 R^K（整个词表维）上</text>
+    </g>
+    <path class="edge" d="M425,75 H461" data-step="2"/>
+    <g data-part="argmax" data-step="2">
+      <rect class="box" x="465" y="30" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="570" y="52">argmax → z_t</text>
+      <text class="t-c t-sm" x="570" y="76">边缘恰为均匀态扩散</text>
+      <text class="t-c t-sm" x="570" y="98">α_t = T(α̃_t)</text>
+    </g>
+    <path class="edge" d="M675,75 H721" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="725" y="30" width="215" height="90" rx="10"/>
+      <text class="t-c t-b" x="832" y="52">Rao-Blackwell NELBO</text>
+      <text class="t-c t-sm" x="832" y="76">在离散 z_t 上计分</text>
+      <text class="t-c t-sm" x="832" y="98">评测用真 ELBO（τ=0）</text>
+    </g>
+    <path class="edge" d="M320,120 V166" data-step="3"/>
+    <g data-part="softmax" data-step="3">
+      <rect class="box" x="215" y="170" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="320" y="192">softmax(w_t / τ)</text>
+      <text class="t-c t-sm" x="320" y="216">课程：前 50 万步 τ=10⁻³</text>
+      <text class="t-c t-sm" x="320" y="238">之后 τ=0，即硬 argmax</text>
+    </g>
+    <path class="edge" d="M425,215 H461" data-step="4"/>
+    <g class="enc" data-part="denoiser" data-step="4">
+      <rect class="box" x="465" y="170" width="210" height="90" rx="10"/>
+      <text class="t-c t-b" x="570" y="192">去噪网络 x_θ（学生）</text>
+      <text class="t-c t-sm" x="570" y="216">双向 DiT，输入 t</text>
+      <text class="t-c t-sm" x="570" y="238">软输入 = 嵌入的凸组合</text>
+    </g>
+    <path class="edge enc" d="M675,215 H832 V124" data-step="5"/>
+    <path class="edge" d="M100,120 V350 H461" data-step="6"/>
+    <text class="t-sm" x="112" y="340" data-step="6">同一 x 与 ε，s = t − δ</text>
+    <g class="tgt" data-part="teacher" data-step="6">
+      <rect class="box" x="465" y="310" width="210" height="80" rx="10"/>
+      <text class="t-c t-b" x="570" y="334">教师 x_θ⁻（DCD）</text>
+      <text class="t-c t-sm" x="570" y="358">输入更干净的 z_s</text>
+      <text class="t-c t-sm" x="570" y="376">每轮开始复制学生权重</text>
+    </g>
+    <path class="edge tgt" d="M675,350 H721" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="6"/>
+    <path class="edge enc" d="M640,260 V285 H860 V306" data-step="6"/>
+    <g class="loss" data-part="kl" data-step="6">
+      <rect class="box" x="725" y="310" width="215" height="80" rx="10"/>
+      <text class="t-c t-b" x="832" y="334">KL(学生 ‖ 教师)</text>
+      <text class="t-c t-sm" x="832" y="358">5 轮，每轮 1 万步</text>
+      <text class="t-c t-sm" x="832" y="376">δ 从 1/512 起每轮 ×2</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="x"><h4>直接在 one-hot 上加噪</h4><p>与 Diffusion-LM、Plaid 在词嵌入上加高斯噪声不同，Duo 的高斯扩散定义在 \(K\) 维 one-hot 向量上（\(K\) 为词表大小），这样 argmax 才能映回 token。<span class="src">Duo §3.1、§6</span></p></div>
+    <div data-note="gauss"><h4>高斯一侧</h4><p>\(w_t\sim\mathcal{N}(\tilde\alpha_t x,(1-\tilde\alpha_t^2)I_K)\)，\(\tilde\alpha_t=1-t\)。每个位置是一个 \(K\) 维向量，显存开销随词表线性增长（见 §4）。<span class="src">Duo Eq. 7、§5</span></p></div>
+    <div data-note="argmax"><h4>对偶关系</h4><p>argmax 后的边缘是 \(\mathrm{Cat}(\mathcal{T}(\tilde\alpha_t)x+(1-\mathcal{T}(\tilde\alpha_t))\mathbf{1}/K)\)，且满足均匀态扩散的线性 ODE。\(\mathcal{T}\) 的积分代价高，训练时预计算并缓存 10 万个 \((\tilde\alpha,\mathcal{T}(\tilde\alpha))\) 对。<span class="src">Duo Eq. 10–13、§5</span></p></div>
+    <div data-note="softmax"><h4>课程 = 退火的 Gumbel 式松弛</h4><p>\(K\) 很大时，\(\tilde\alpha\in[0.85,1]\) 就几乎覆盖了离散 \(\alpha\in[0,1]\)，微小的高斯扰动就会让 argmax 跳变；softmax 输入保留了这部分信号，降低学习难度和方差，代价是损失有偏（不是合法 NELBO）。课程期 \(t\sim U[0.03,0.15]\)，对应 \(\alpha_t\in[0.05,0.95]\)。<span class="src">Duo §4.1.2、App. C.7</span></p></div>
+    <div data-note="denoiser"><h4>同时接受软 / 硬输入</h4><p>离散输入查嵌入表；连续输入（单纯形上的向量）与嵌入矩阵相乘，得到嵌入的凸组合。与掩码扩散不同，均匀态模型需要时间条件（AdaLN）。170M 参数的 DiT。<span class="src">Duo App. C.2、§5；Beyond-Masked §2.2.2</span></p></div>
+    <div data-note="loss"><h4>Rao-Blackwell 化的均匀态 NELBO</h4><p>Eq. 17 避免物化 one-hot、降低方差；单独这一项把 LM1B 困惑度从 36.7（UDLM）降到 35.0，课程再降到 33.7。评测永远用真 NELBO（Eq. 18），不用课程损失。<span class="src">Duo §3.3、Tab. 3、App. C.4</span></p></div>
+    <div data-note="teacher"><h4>确定性离散轨迹（DDT）</h4><p>固定 \(x\) 与 \(\epsilon\)，\(z_u=\operatorname{argmax}(\tilde\alpha_u x+\sqrt{1-\tilde\alpha_u^2}\epsilon)\) 随 \(u\) 确定地变化，替代离散空间里不存在的概率流 ODE。教师用每轮开始时的学生权重（不是 EMA）——作者消融表明这样更好。<span class="src">Duo §4.2、Alg. 1、Fig. 10</span></p></div>
+    <div data-note="kl"><h4>离散一致性蒸馏（DCD）</h4><p>学生在更噪的 \(z_t\) 上的输出去匹配教师在 \(z_s\) 上的输出（\(s=t-\delta\)），KL 沿用 SDTT 的做法；5 轮、每轮 \(M=10^4\) 步，\(\delta\) 从 1/512 起每轮翻倍。<span class="src">Duo Eq. 23、Alg. 1、§5.2</span></p></div>
+    <div data-step-note="1"><h4>① 在 one-hot 上加高斯噪声</h4><p>\(w_t=\tilde\alpha_t x+\sqrt{1-\tilde\alpha_t^2}\,\epsilon\)。</p></div>
+    <div data-step-note="2"><h4>② argmax 得到离散隐变量</h4><p>它的边缘就是均匀态扩散，参数 \(\alpha_t=\mathcal{T}(\tilde\alpha_t)\)；损失在它上面计算。</p></div>
+    <div data-step-note="3"><h4>③ 课程：软化输入</h4><p>前 50 万步网络看到 \(\mathrm{softmax}(w_t/\tau)\)，\(\tau=10^{-3}\)；之后 \(\tau=0\)，训练与推理一致。</p></div>
+    <div data-step-note="4"><h4>④ 去噪网络</h4><p>双向 DiT，输出每个位置的 \(K\) 维分布 \(x_{\theta}\)。</p></div>
+    <div data-step-note="5"><h4>⑤ 均匀态 NELBO</h4><p>用离散 \(z_t\)、网络输出与 \(\alpha_t\) 计算 Eq. 17。</p></div>
+    <div data-step-note="6"><h4>⑥ 蒸馏阶段（训练后）</h4><p>同一 \((x,\epsilon)\) 取更小的 \(s\)，教师给目标，学生学会在更噪处直接给出教师在更干净处的预测；配合 Greedy-tail 采样，8 步即可生成。</p></div>
+  </div>
+  <figcaption>图 1　上两行为 Duo 的课程训练步（Duo §4.1），第三行为离散一致性蒸馏（Duo §4.2、Alg. 1）；两阶段先后进行，共用同一个去噪网络。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-usdm">3.1 均匀态扩散：能改字，但更难学</h3>
+<p>前向：\(q_t(z_t\mid x)=\mathrm{Cat}(\alpha_t x+(1-\alpha_t)\mathbf{1}/K)\)。与掩码扩散的区别在于：被破坏的 token 看上去就是一个普通 token，网络必须同时判断“哪些位置是噪声”和“原来是什么”；反过来，反向过程的每一步都允许任何位置换值，所以早期的错误可以在后续步骤被改掉，不需要额外的 predictor-corrector 步。<span class="src">Duo §2.1、Eq. 1–5</span>这也解释了均匀态模型为何需要时间条件：只有知道噪声水平，网络才知道该怀疑多少个 token。<span class="src">Beyond-Masked §2.2.2</span></p>
+<h3 id="c-duality">3.2 对偶：均匀态 = 高斯的 argmax</h3>
+<p>Duo 给出了 argmax 推前分布的闭式（Eq. 10–11），并验证其时间演化满足均匀态扩散的特征 ODE（Eq. 12）。由此得到三条推论：<span class="src">Duo §3</span></p>
+<ul>
+  <li><b>边缘对应，轨迹不对应。</b>每个时刻的边缘相同，但离散化后的高斯轨迹不是一个马尔可夫离散扩散过程（App. A.3）。DCD 正是利用“边缘对、轨迹确定”这一点构造训练对。</li>
+  <li><b>离散似然更紧。</b>同一个去噪网络诱导的离散采样器，其对数似然不低于对应的高斯采样器（Thm. 3.2），所以训练与评测都留在离散一侧。</li>
+  <li><b>高斯工具可迁移。</b>作者在 v3 的“未来工作”中列出：借高斯侧做分类器引导、把 \(\epsilon\) / \(v\) 参数化搬进离散去噪器。</li>
+</ul>
+<h3 id="c-curriculum">3.3 课程学习：用有偏换低方差</h3>
+<p>直觉：词表 3 万级时，\(\tilde\alpha_t\) 只需在 [0.85, 1] 内变化，离散 \(\alpha_t\) 就扫过 [0, 1]；高斯隐变量里其实还留着大量信号，只是被 argmax 抹掉了。把 argmax 换成温度 \(\tau\) 的 softmax，网络能看到“哪个 token 的分量最大、领先多少”，任务变容易、梯度方差变小；\(\tau\to0\) 且 \(t\) 取满 [0,1] 时才回到合法 NELBO。在 LM1B 上的对比：训练 1 万步时，方差最大的 100 个权重的梯度方差合计为 0.30（有课程）vs 11.7（无课程）。课程期结束、再按离散模型微调 1 万步（第 51 万步）时，Duo 困惑度 35.2，已比训满 100 万步的 UDLM 低约 1.5，作者据此称训练至少快 2×。<span class="src">Duo §4.1.2、§5.1、Tab. 4、App. C.7</span></p>
+<h3 id="c-dcd">3.4 离散一致性蒸馏：没有 PF-ODE，就借一条</h3>
+<p>一致性蒸馏需要一条从噪声到数据的确定性路径（概率流 ODE），掩码扩散的先验是确定的全 \([\mathrm{M}]\)，没有这样的“隐式”性质（Duo §1）。Duo 用最优去噪器下高斯 PF-ODE 的解 \(\tilde\alpha_t x+\sqrt{1-\tilde\alpha_t^2}\epsilon\) 作轨迹，再逐时刻 argmax 投影成离散轨迹 \(\mathcal{P}_{\mathrm{DDT}}\)；相邻两点 \((z_s,z_t)\) 构成蒸馏对。这与 <a href="../few-step/03-consistency-models.html">一致性模型</a> 的“相邻两点输出一致”同构，区别是：轨迹来自最优（而非学到的）去噪器，距离换成 KL，并按 SDTT 的多轮方式逐步拉大 \(\delta\)。蒸馏 5 轮后，祖先采样 16 步即达到未蒸馏 1024 步的质量，Greedy-tail（最后一步取 argmax 而不采样）8 步即可，但熵略降。<span class="src">Duo §4.2、§5.2、Fig. 4</span></p>
+<p>为什么均匀态更适合少步：掩码模型少步时每步要独立揭示很多 token 且不能回改，冲突无法修复；均匀态模型下一步还能改。Duo 的数据里，未蒸馏时 8 步的 Duo 生成困惑度 198，MDLM 831；同样蒸馏 5 轮后为 112 vs 193。<span class="src">Duo §5.2、Tab. 7</span>后续 dLLM 的学习式并行解码见 <a href="15-learned-parallel.html">第 15 页</a>。</p>
+<h3 id="uniform-scaling">3.5 Beyond-Masked：扩展律与“困惑度为什么会误导”</h3>
+<p><b>设置。</b>AR、MDLM、Duo、Eso-LM（全扩散模式）共用 DiT 骨干、Llama-2 分词器（加 mask 共 32,001）、上下文 2048、batch 256，在 SlimPajama 上做 IsoFLOP 扫描（\(C\in\{6\times10^{18},\dots,10^{20}\}\)），训练 FLOPs 用 calflops 精确计算而非 \(6ND\)。每个预算拟合最优参数量与最优损失，再拟合幂律。<span class="src">Beyond-Masked §3、Eq. 14–16、Tab. 4</span></p>
+<p><b>结论一：各族斜率相近，常数差很大。</b>要达到 AR 的验证损失：MDLM（用 ELBO 训练）约需 16× 计算（复现 SMDM 的结论），把训练损失换成去掉时间权重的低方差版本后约 14×（约 12% 的改进），Duo 约 23×，Eso-LM 约 32×；各扩散族的计算最优模型都比 AR 小约 2×。<span class="src">§3.2</span></p>
+<p><b>结论二：困惑度只在族内可比。</b>理由有三：① 真实困惑度不可解，各族报的是各自前向过程诱导的不同上界，上界的松紧程度本身随族而变；② 困惑度不反映推理时行为——Duo 能少步、Eso-LM 有 KV cache；③ 下游任务未必跟随困惑度。作者用速度-质量前沿说明第②点：对每个预算的最优模型拟合“生成困惑度 / 吞吐 vs 步数”，在目标生成困惑度 40–200 区间取最大吞吐。结果是吞吐低于 200 tok/s 时 AR 占优，[200, 400] 与 ≥600 由 Duo 占优，[400, 600] 由 Eso-LM 占优。<span class="src">§1、§3.3、Fig. 1</span></p>
+<p><b>结论三：1.7B 上，困惑度更差的 Duo 在 GSM8K 上最好。</b>四个模型都在 Nemotron 预训练数据上训 2.1T token（64 张 H100），GSM8K 增强集（38.5 万条）SFT 5 个 epoch 后，Duo 65.8、AR 62.9、MDLM 58.8、Eso-LM 33.4；零样本似然基准则 AR 全面领先，扩散族内部 MDLM 与 Duo 各有胜负。<span class="src">§4、Tab. 1–2</span></p>
+<p><b>需要带着读的前提。</b>GSM8K 评测里所有模型都“一次一个 token、从左到右”生成（作者理由：置信度采样本来就会退化成左到右），所以 Duo 的优势与并行解码无关，吞吐也都在 25 tok/s 上下（batch 1）；Tab. 2 声称取各方法最好的学习率，但 Tab. 3 的网格里 MDLM 有 61.7、Duo 有 66.0，与 Tab. 2 不符（见 §5 callout）。同期的 von Rütte et al.（2512.10858）在掩码 ↔ 均匀的插值噪声上做扩展律，摘要的结论是：算力受限时各噪声类型收敛到相近损失，均匀态的计算最优配置需要更多参数、更少数据，并把均匀态模型做到 10B / \(10^{22}\) FLOPs——与 Beyond-Masked 的“23× 常数差”并不完全一致，两者实验协议不同。<span class="src">Beyond-Masked §4.2、Tab. 2–3；von Rütte et al. 摘要</span></p>
+<h3 id="c-gemma">3.6 均匀噪声走向工业：DiffusionGemma 与 Sumi</h3>
+<p><a href="10-industrial.html">DiffusionGemma</a> 的技术报告写明使用多项式（均匀）扩散而非掩码扩散：前向过程每个位置以 \(\kappa_t\) 保留原 token、否则均匀换成词表中任意 token，画布从均匀随机 token 初始化，理由正是“所有 token 都能互相转移，模型可以持续纠错”；但已经提交的前序画布（块自回归，每块 256 token）是冻结的。它采用 DFM 的 CTMC 写法与离散 Euler 步，并在采样器部分引用了 Duo 第二章（Ψ-samplers）。<span class="src">DiffusionGemma 报告 §2.1.1、§3.1–3.3</span>另一端，Sumi（2606.19005）是首个从零预训练的开放 7B 均匀态扩散 LM（1.5T token），摘要称在知识、推理、代码上与同 token 预算的 AR 相当、常识类基准较弱。<span class="src">Sumi 摘要</span></p>
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>Duo</th><th>Beyond-Masked（1.7B 研究）</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>均匀态 NELBO 的 Rao-Blackwell 形式（Eq. 17）；前 50 万步为高斯松弛输入的有偏课程损失，评测用真 NELBO。<span class="src">§3.3、§4.1、App. C.4</span></td><td>各族用各自目标在同 FLOPs 下比较；MDLM 训练时把权重换成常数（低方差），评测仍用 ELBO。<span class="src">§2.2.1、§3.2.2</span></td><td>下一 token 交叉熵（精确 NLL）</td></tr>
+    <tr><td>注意力与 KV cache</td><td>双向 DiT，用 AdaLN 输入 \(t\)（对均匀态有益）；无 KV cache。<span class="src">§5；Beyond-Masked §2.2.2</span></td><td>AR / MDLM / Duo 同骨干；只有 Eso-LM（打乱顺序上的因果注意力）在扩散族中支持 KV cache。<span class="src">§2.3、§3</span></td><td>因果注意力 + KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>未蒸馏：1024 步生成 1024 token（TPF≈1）；DCD 5 轮后 16 步（TPF 64），Greedy-tail 8 步（TPF 128）。<span class="src">Tab. 7、Fig. 4</span></td><td>前沿分析按目标质量反推步数；GSM8K 上所有模型逐 token 左到右（TPF = 1）。<span class="src">§3.3、§4.2</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>已生成 token 可在后续步改写；8–16 步仍有可用质量。<span class="src">§2.1、§5.2</span></td><td>吞吐 &gt; 200 tok/s 的区间由 Duo / Eso-LM 构成前沿；SFT 后 GSM8K Duo 65.8 vs AR 62.9。<span class="src">Fig. 1、Tab. 2</span></td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>OWT 困惑度上界 25.2，差于 MDLM 23.2、AR 17.5；课程有两个需调的超参；Greedy-tail 降低熵。<span class="src">Tab. 1、§7.1、Fig. 4</span></td><td>匹配 AR 验证损失 Duo 约需 23× 计算（MDLM 14–16×）；零样本似然基准全面落后 AR。<span class="src">§3.2.3、Tab. 1</span></td><td>前沿上只在吞吐 &lt; 200 tok/s 时占优</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、隐变量与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状（Duo-OWT）</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>干净序列 \(x\)</td><td>[512, 1024] int</td><td>batch 512、上下文 1024、GPT-2 分词器，100 万步，8×H100、bf16。<span class="src">Duo §5</span></td></tr>
+    <tr><td>高斯隐变量 \(w_t\)</td><td>[B, 1024, K]，K≈5 万</td><td>每条序列约 \(1024\times50257\approx5.1\times10^{7}\) 个数，fp32 约 206 MB（推算）；这是 Duo 第二章把课程显存降 33% 的动机之一。<span class="src">Duo Ψ-samplers 摘要</span></td></tr>
+    <tr><td>\(\mathcal{T}\) 查表</td><td>[100000, 2]</td><td>预计算 \((\tilde\alpha,\mathcal{T}(\tilde\alpha))\)，训练时插值。<span class="src">Duo §5</span></td></tr>
+    <tr><td>软输入 → 嵌入</td><td>[B, L, K] × [K, d] → [B, L, d]</td><td>“软查表”是一次稠密矩阵乘；硬输入退化为普通查表。<span class="src">Duo App. C.2</span></td></tr>
+    <tr><td>去噪器输出</td><td>[B, L, K]</td><td>12 层、768 宽、12 头的 DiT（共约 170M），时间嵌入 128。<span class="src">Duo §5、App. C.5</span></td></tr>
+    <tr><td>DCD 训练对</td><td>\(z_s,z_t\)：[B, L]</td><td>同一 \(\epsilon\)，两次 argmax；教师前向不求梯度。<span class="src">Duo Alg. 1</span></td></tr>
+    <tr><td>Beyond-Masked 扩展律</td><td>14M–1708M 非嵌入参数，L=2048，batch 256</td><td>28 个配置；1.7B 正式模型改用 12.8 万词表。<span class="src">Beyond-Masked Tab. 4、§4</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<div class="formula">$$q_t(z_t\mid x)=\mathrm{Cat}\Big(z_t;\ \alpha_t x+(1-\alpha_t)\tfrac{\mathbf{1}}{K}\Big),\qquad z_t=\operatorname{argmax}\big(\tilde\alpha_t x+\sqrt{1-\tilde\alpha_t^2}\,\epsilon\big)\ \Longrightarrow\ \alpha_t=\mathcal{T}(\tilde\alpha_t),$$</div>
+<div class="formula">$$\mathcal{T}(\tilde\alpha)=\frac{K}{K-1}\Big[\int_{-\infty}^{\infty}\phi\Big(z-\frac{\tilde\alpha}{\sqrt{1-\tilde\alpha^2}}\Big)\,\Phi^{K-1}(z)\,dz-\frac{1}{K}\Big].$$</div>
+<p>\(\phi,\Phi\) 为标准正态密度与分布函数。课程损失（Eq. 21）把网络输入换成软化的隐变量，计分仍在离散 \(z_t\) 上：</p>
+<div class="formula">$$\mathcal{L}_{\mathrm{train}}=\mathbb{E}_{x,\ t\sim U[\beta,\gamma],\ w_t}\sum_{\ell=1}^{L}f_{\mathrm{Duo}}\Big(\operatorname{argmax}(w_t^{\ell}),\ x_{\theta}^{\ell}\big(\mathrm{softmax}(w_t/\tau),t\big),\ \mathcal{T}(\tilde\alpha_t);\ x^{\ell}\Big),$$</div>
+<p>只有 \(\tau\to0^+\)、\([\beta,\gamma]=[0,1]\) 时它才等于 NELBO。蒸馏目标（Eq. 23）为 \(\sum_{\ell} D_{\mathrm{KL}}\big(x_{\theta}^{\ell}(z_t,t),\,x_{\theta^-}^{\ell}(z_s,s)\big)\)，\(z_s,z_t\) 由同一 \((x,\epsilon)\) 生成。</p>
+<p><b>为什么跨族比较困惑度会误导</b>（Beyond-Masked §1、§5）：掩码族与均匀族的 NELBO 来自不同的前向过程与反向参数化，都是同一个真实 NLL 的上界，但松紧不同；“上界更高”既可能是模型更差，也可能只是界更松。再加上少步、KV cache 这些不进入困惑度的推理特性，作者主张联合报告似然、采样效率与下游表现。MDLM 一侧的反例同样说明问题：训练时去掉权重 \(\alpha_t'/(1-\alpha_t)\)（它在 \(t\to0\) 时发散），评测仍用 ELBO，计算效率反而提高约 12%——训练目标与评测指标本可分开。<span class="src">Beyond-Masked Eq. 7–8、§3.2.2</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部的不一致与测量条件</span>
+  <ul>
+    <li><b>Beyond-Masked Tab. 2 与 Tab. 3 不符。</b>正文称 GSM8K 报告“每种方法最好的学习率设置”，Tab. 2 给 MDLM 58.8、Duo 65.8；但附录 Tab. 3 的网格里 MDLM 在 (2e-5, 2e-6)、5 epoch 有 61.7，Duo 在 (2e-5, 5e-8) 有 66.0，Tab. 2 实际对应 (2e-5, 5e-7) 一行。按真正的最好值，Duo 仍领先（66.0 vs AR 62.9），但 MDLM 与 AR 的差距从 4.1 缩到 1.2。<span class="src">Beyond-Masked §4.2、Tab. 2–3</span></li>
+    <li>GSM8K 上的“均匀态模型逐 token 左到右”具体如何实现（剩余位置是否用均匀噪声填充、每步是否允许改写已生成 token），论文未说明 <span class="unverified">未核实</span>；吞吐在 batch 1、生成 token 计（Tab. 2 注）。速度-质量前沿的吞吐用单张 80GB H100 能放下的最大 2 的幂 batch，AR 的 KV cache 实现细节未写明 <span class="unverified">未核实</span>。</li>
+    <li>Duo Eq. 11 把标准正态密度写成 \(\exp(-z^2)/\sqrt{2\pi}\)，应为 \(\exp(-z^2/2)/\sqrt{2\pi}\)（本页公式只用符号 \(\phi\)）。App. C.8 称“在 LM1B 上蒸馏 MDLM”，而 §5.2 称在 OWT 上蒸馏 Duo 并以 GPT-2 Large 评 1024-token 样本的生成困惑度，两处数据集不一致 <span class="unverified">以正文为准</span>。<span class="src">Duo Eq. 11、§5.2、App. C.8</span></li>
+    <li>Duo 的生成困惑度全部用 fp64 采样测得（避免 fp32 采样降低有效温度），与 <a href="04-discrete-flow.html#results">DFM 主表</a> 那类 fp32 数字不可混比。<span class="src">Duo §5.2；Beyond-Masked §3.3</span></li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">duo.py（依据 Duo Eq. 17–23、Alg. 1、§5 改写的示意版本）</div>
+<pre><code class="lang-py">T_table = precompute_diffusion_transform(K, n=100_000)   # (alpha_g, T(alpha_g)) pairs, Eq. 11
+
+def duo_train_step(x, model, step, tau=1e-3):            # x: [B, L] token ids
+    curriculum = step &lt; 500_000
+    t = uniform(0.03, 0.15, B) if curriculum else uniform(0, 1, B)   # 2nd-phase range: see text
+    a_g = 1 - t                                          # Gaussian schedule alpha~_t = 1 - t
+    w = a_g[:, None, None] * one_hot(x, K) + (1 - a_g**2).sqrt()[:, None, None] * randn(B, L, K)
+    z = w.argmax(-1)                                     # discrete latent with uniform-state marginal
+    a = T_table.interp(a_g)                              # alpha_t = T(alpha~_t)
+    inp = softmax(w / tau, -1) if curriculum else one_hot(z, K)    # soft lookup vs. hard lookup
+    x_theta = model(inp, t).softmax(-1)                  # bidirectional DiT, conditioned on t
+    return f_duo(z, x_theta, a, x).sum(-1).mean()        # Rao-Blackwellized NELBO terms (Eq. 17)
+
+def dcd(student, data, rounds=5, M=10_000, delta=1 / 512):
+    for _ in range(rounds):
+        teacher = frozen_copy(student)                   # teacher = current student, not EMA
+        for _ in range(M):
+            x = next(data); t = uniform(0, 1, B); s = (t - delta).clamp(min=0)
+            eps = randn(B, L, K)                         # shared noise -> deterministic pair
+            z_t = argmax_traj(x, eps, t); z_s = argmax_traj(x, eps, s)
+            with torch.no_grad():
+                p_teacher = teacher(one_hot(z_s, K), s).softmax(-1)
+            loss = kl(student(one_hot(z_t, K), t).log_softmax(-1), p_teacher)   # Eq. 23 order
+            loss.backward(); opt.step(); opt.zero_grad(); ema.update(student)
+        delta *= 2
+    return ema.weights
+
+def argmax_traj(x, eps, u):
+    a_g = (1 - u)[:, None, None]
+    return (a_g * one_hot(x, K) + (1 - a_g**2).sqrt() * eps).argmax(-1)</code></pre>
+<p>采样仍是均匀态的祖先采样（Eq. 4–5），起点为每个位置均匀随机的 token；Greedy-tail 只在最后一步把采样换成 argmax。课程第二阶段 \(t\) 的取值范围论文没有单列 <span class="unverified">未核实</span>，伪代码按 \([0,1]\) 写。</p>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>Duo</th><th>Beyond-Masked</th></tr></thead>
+  <tbody>
+    <tr><td>数据与长度</td><td>LM1B（L=128，打包 / 不打包两种）、OWT（L=1024）<span class="src">§5</span></td><td>扩展律：SlimPajama，L=2048；1.7B：Nemotron 预训练数据 phase 1+2，2.1T token，1% 序列随机截断<span class="src">§3、§4</span></td></tr>
+    <tr><td>优化</td><td>AdamW，lr 3e-4，2500 步预热后恒定，dropout 0.1，batch 512，100 万步<span class="src">App. C.5、§5</span></td><td>AdamW β=(0.9, 0.95)，wd 0.1；扩展律 lr 4e-4→2e-5 余弦；1.7B lr 3e-4 恒定 1.4T 后衰减到 4e-5，batch 256，64×H100<span class="src">§3、§4</span></td></tr>
+    <tr><td>课程</td><td>前 50 万步 \(\tau=10^{-3}\)、\(t\in[0.03,0.15]\)；之后 \(\tau=0\)<span class="src">§5.1、App. C.7</span></td><td>直接使用 Duo 的训练方法<span class="src">§2.2.2</span></td></tr>
+    <tr><td>蒸馏</td><td>5 轮 × 1 万步，\(\delta_0=1/512\) 每轮 ×2；对照 SDTT 的 MDLM 用 batch 128、lr 6e-5<span class="src">§5.2、App. C.8</span></td><td>—</td></tr>
+    <tr><td>评测</td><td>单个 \(t\) 的 MC 估计 + 低差异采样；生成困惑度用 GPT-2 Large、fp64 采样<span class="src">App. C.4、§5.2</span></td><td>生成困惑度用 Llama-2 7B、1000 条样本、fp64；GSM8K SFT 5 epoch、上下文 256<span class="src">§3.3、§4.2</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>似然（Duo Tab. 1，扩散模型为上界）</b>：Duo 是均匀态 / 高斯族里最好的；距 MDLM 在 OWT 与打包 LM1B 上约 2 个 PPL（25.2 vs 23.2、33.7 vs 31.8），不打包 LM1B 上为 2.9（29.9 vs 27.0）——摘要“差距小于 2”的说法只对前两列成立。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">LM1B（不打包）</th><th class="num">LM1B（打包）</th><th class="num">OWT</th></tr></thead>
+  <tbody>
+    <tr><td>AR Transformer</td><td class="num">22.3</td><td class="num">22.8</td><td class="num">17.5</td></tr>
+    <tr><td>MDLM（掩码）</td><td class="num">27.0</td><td class="num">31.8</td><td class="num">23.2</td></tr>
+    <tr><td>SEDD Uniform</td><td class="num">40.3</td><td class="num">—</td><td class="num">29.7</td></tr>
+    <tr><td>UDLM</td><td class="num">31.3</td><td class="num">36.7</td><td class="num">27.4</td></tr>
+    <tr class="hl"><td>Duo</td><td class="num">29.9</td><td class="num">33.7</td><td class="num">25.2</td></tr>
+  </tbody>
+</table></div>
+<p>零样本迁移（OWT 训练，Duo Tab. 2）：Duo 在 Lambada（49.78 vs 51.28）、Pubmed（44.48 vs 49.01）、Arxiv（40.39 vs 41.73）三个数据集上低于 AR，其余四个高于 AR；只在 PTB 一个数据集上优于 MDLM（89.35 vs 95.26）。<span class="src">Duo Tab. 2</span></p>
+<p><b>少步生成（Duo Tab. 7，OWT，生成困惑度 / 熵，GPT-2 Large，fp64）</b>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型（采样器）</th><th class="num">1024 步</th><th class="num">16 步</th><th class="num">8 步</th></tr></thead>
+  <tbody>
+    <tr><td>MDLM（祖先）</td><td class="num">104.85 / 5.63</td><td class="num">343.33 / 5.81</td><td class="num">830.82 / 5.91</td></tr>
+    <tr><td>MDLM + SDTT 5 轮（祖先）</td><td class="num">36.89 / 5.39</td><td class="num">89.17 / 5.53</td><td class="num">193.05 / 5.58</td></tr>
+    <tr><td>Duo（祖先）</td><td class="num">77.69 / 5.55</td><td class="num">122.78 / 5.58</td><td class="num">198.27 / 5.57</td></tr>
+    <tr class="hl"><td>Duo + DCD 5 轮（祖先）</td><td class="num">50.55 / 5.36</td><td class="num">75.24 / 5.53</td><td class="num">111.88 / 5.52</td></tr>
+    <tr class="hl"><td>Duo + DCD 5 轮（Greedy-tail）</td><td class="num">36.53 / 5.19</td><td class="num">54.11 / 5.37</td><td class="num">69.58 / 5.30</td></tr>
+  </tbody>
+</table></div>
+<p>读法：多步时 SDTT 蒸馏的 MDLM 并不差（1024 步 36.89），优势只在 ≤32 步出现；Greedy-tail 的数字更低，但熵也更低，比较时应对齐熵。<span class="src">Duo §5.2、Tab. 7</span></p>
+<p><b>Beyond-Masked</b>：匹配 AR 验证损失所需计算倍数 MDLM（ELBO 训练）≈16×、MDLM（低方差训练）≈14×、Duo ≈23×、Eso-LM ≈32×。1.7B（2.1T token）结果：<span class="src">§3.2、Tab. 1–2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">ARC-e</th><th class="num">BoolQ</th><th class="num">PIQA</th><th class="num">RACE</th><th class="num">GSM8K（SFT）</th><th class="num">tok/s（batch 1）</th></tr></thead>
+  <tbody>
+    <tr><td>AR-1.7B</td><td class="num">72.7</td><td class="num">71.9</td><td class="num">78.1</td><td class="num">36.2</td><td class="num">62.9</td><td class="num">25.6</td></tr>
+    <tr><td>MDLM-1.7B</td><td class="num">50.5</td><td class="num">62.8</td><td class="num">62.2</td><td class="num">34.7</td><td class="num">58.8</td><td class="num">24.6</td></tr>
+    <tr><td>Eso-LM-1.7B</td><td class="num">46.0</td><td class="num">53.4</td><td class="num">55.6</td><td class="num">26.1</td><td class="num">33.4</td><td class="num">25.6</td></tr>
+    <tr class="hl"><td>Duo-1.7B</td><td class="num">53.4</td><td class="num">59.6</td><td class="num">62.7</td><td class="num">35.0</td><td class="num">65.8</td><td class="num">24.6</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul>
+    <li><a href="03-mdlm.html">MDLM</a>：掩码族困惑度最好，但揭示即定稿，少步时冲突无法修复。</li>
+    <li>SEDD Uniform / UDLM：能改字，困惑度落后；没有 PF-ODE，一致性蒸馏用不上。</li>
+    <li><a href="04-discrete-flow.html">DFM</a>：把均匀源纳入同一框架，但没有给出让它变强的训练方法。</li>
+  </ul></div>
+  <div class="now"><h4>之后 → 留下的问题</h4><ul>
+    <li>Duo 第二章（<a href="https://arxiv.org/abs/2602.21185">Ψ-samplers</a>，2026-02，ICLR 2026）：适用于任意噪声的 predictor-corrector 采样器，步数增加时质量继续提升；课程训练时间 −25%、显存 −33%（摘要）。</li>
+    <li>工业落地：<a href="10-industrial.html">DiffusionGemma</a> 采用均匀噪声 + 块画布 + 采样器蒸馏；开放从零模型 Sumi 7B。</li>
+    <li>少步的另一条线：掩码模型上的学习式并行（<a href="15-learned-parallel.html">dParallel、d3LLM、CDLM</a>），以及图像侧的 <a href="../few-step/03-consistency-models.html">一致性模型</a>。</li>
+    <li>未决：均匀态的 23× 常数差能否被更好的训练抹平（von Rütte et al. 的结论不同）；“困惑度 + 速度 + 下游”联合口径如何标准化（见 <a href="01-foundations.html">基础页</a>）。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q9"><span class="qid">Q9</span>为什么说均匀态离散扩散是高斯扩散的 argmax？这一对偶让 Duo 在训练和采样上各借到了什么，又有哪些地方并不对偶？</h3>
+  <div class="ans"><p class="short">在 \(K\) 维 one-hot 上做高斯扩散 \(w_t=\tilde\alpha_t x+\sqrt{1-\tilde\alpha_t^2}\epsilon\)，argmax 后每个时刻的分布恰为“以 \(\alpha_t=\mathcal{T}(\tilde\alpha_t)\) 保留原 token、否则均匀替换”，且满足均匀态扩散的 ODE。训练上，Duo 把 argmax 软化成低温 softmax 作网络输入，用有偏但低方差的课程加速收敛（约 2×）；采样上，固定 \(\epsilon\) 得到确定性离散轨迹，代替不存在的离散 PF-ODE 做一致性蒸馏，8–16 步即可生成。</p>
+    <ul><li>只有边缘对偶：离散化的高斯轨迹不是马尔可夫离散扩散过程（App. A.3），DCD 用的是这种“伪轨迹”。</li>
+    <li>似然不对偶：同一网络下离散采样器的似然不低于高斯采样器（Thm. 3.2），所以评测留在离散侧。</li>
+    <li>代价：隐变量是 [B, L, K] 的稠密张量，课程阶段显存随词表增长。</li></ul>
+    <p class="cite">依据：Duo §3.1–3.2、§4.1–4.2、Tab. 4、Tab. 7、App. A.3；Duo Ψ-samplers 摘要。</p>
+  </div>
+  <h3 id="q10"><span class="qid">Q10</span>Beyond-Masked 显示均匀态的似然扩展更差（≈23× vs 掩码 ≈14–16×），却在 GSM8K 与速度-质量前沿上占优。为什么跨噪声族比较困惑度会误导？这一结论有哪些前提与漏洞？</h3>
+  <div class="ans"><p class="short">各族报告的是各自前向过程诱导的 NELBO 上界，松紧本身不同，上界高不等于模型差；困惑度也不包含少步、KV cache 等推理特性，而这些决定了实际的速度-质量前沿。Beyond-Masked 因此在同 FLOPs 下同时报告扩展律、前沿与下游：Duo 在高吞吐区间与 1.7B 的 GSM8K SFT 上胜出。</p>
+    <ul><li>GSM8K 上所有模型都逐 token 左到右解码，Duo 的优势与并行无关；batch 1 吞吐几乎相同。</li>
+    <li>Tab. 2 与 Tab. 3 的“最好学习率”不一致：按网格最好值 MDLM 是 61.7，Duo 66.0 仍领先 AR 62.9。</li>
+    <li>前沿依赖生成困惑度（Llama-2 7B 打分，需同时看熵）和吞吐测量方式（最大 2 的幂 batch，AR 推理栈未写明）；同期 von Rütte et al. 的扩展律结论不同。</li></ul>
+    <p class="cite">依据：Beyond-Masked §1、§3.2–3.3、§4.2、Tab. 2–3、Fig. 1；von Rütte et al. 摘要。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Sahoo, Deschenaux, Gokaslan, Wang, Chiu, Kuleshov. <i>The Diffusion Duality.</i> ICML 2025；本页读 arXiv v3。<a href="https://arxiv.org/abs/2506.10892">论文</a> · <a href="https://github.com/s-sahoo/duo">代码</a> · <a href="https://huggingface.co/collections/s-sahoo/duo-67f9ff8fde919224e5fbd875">权重</a>。</li>
+  <li>Sahoo, Lemercier, Yang, Deschenaux, Liu, Thickstun, Jukić. <i>Scaling Beyond Masked Diffusion Language Models.</i> arXiv 2026-02（官方仓库 README 标注 ICML 2026）。<a href="https://arxiv.org/abs/2602.15014">论文</a> · <a href="https://github.com/s-sahoo/scaling-dllms">代码</a> · <a href="https://huggingface.co/collections/s-sahoo/sdllm">权重</a>。</li>
+  <li>Deschenaux, Gulcehre, Sahoo. <i>The Diffusion Duality, Chapter II: Ψ-Samplers.</i> ICLR 2026。<a href="https://arxiv.org/abs/2602.21185">论文</a>。</li>
+  <li>von Rütte et al. <i>Scaling Behavior of Discrete Diffusion Language Models.</i> 2025。<a href="https://arxiv.org/abs/2512.10858">论文</a>。</li>
+  <li>Deschenaux, Gulcehre. <i>Beyond Autoregression: Fast LLMs via Self-Distillation Through Time (SDTT).</i> <a href="https://arxiv.org/abs/2410.21035">论文</a>。</li>
+  <li>Ye, …, Suzuki. <i>Sumi: Open Uniform Diffusion Language Model from Scratch.</i> 2026。<a href="https://arxiv.org/abs/2606.19005">论文</a>。</li>
+  <li>DiffusionGemma Team. <i>DiffusionGemma Technical Report.</i> 2026。<a href="https://arxiv.org/abs/2608.00146">论文</a> · <a href="10-industrial.html">本站拆解</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

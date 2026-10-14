@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR 转块扩散：SDAR、Fast-dLLM v2 与 WeDLM</title>
+<meta name="description" content="用 1B–100B tokens 把现成自回归权重改造成块扩散：SDAR 的短程转换与规模分析、Fast-dLLM v2 的互补掩码与分层缓存、WeDLM 的因果注意力拓扑重排，以及各自速度数字的测量条件。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../assets/css/atlas.css">
+<script defer src="../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../" data-page-kind="model" data-track="dllm" data-node="sdar">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：块扩散不必从零训练</h2>
+<p><a href="11-block-diffusion.html">BD3-LM</a> 把序列切成长度为 \(B\) 的块：块间自回归（前序块的 KV cache 精确、长度可变），块内掩码扩散（\(B\) 个位置并行去噪）。但从零预训练这种模型很贵：同一样本要同时喂加噪流与干净流，每样本计算接近翻倍；掩码扩散目标本身也比 next-token 交叉熵更费算力。<span class="src">SDAR §1、§4</span> 另一条路 <a href="07-dream.html">Dream</a> 把 Qwen2.5 转成全双向 dLLM，用了 580B tokens。<span class="src">SDAR §5.1；Fast-dLLM v2 摘要</span></p>
+<p>本页三篇都从现成 AR 检查点出发，只改注意力掩码与训练目标，用 1B–100B tokens 完成转换。记号沿用本路线：干净序列 \(x_0\)（长 \(L\)），腐蚀态 \(x_t\)（\(t\in[0,1]\)，\(t=1\) 全掩码），掩码 \([\mathrm{M}]\)，去噪网络 \(p_\theta(x_0^i\mid x_t)\)，块长 \(B\)，步数 / NFE \(N\)，每次前向定稿数 TPF，置信度阈值 \(\tau\)，提示 \(c\)。Fast-dLLM v2 把块长记作 \(D\)、块数记作 \(B\)；WeDLM 的 \(\tau\) 是<b>熵</b>阈值（越小越保守），掩码率记作 \(\gamma\)。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>起点</th><th>转换数据</th><th>块内注意力</th><th>推理</th></tr></thead>
+  <tbody>
+    <tr><td>SDAR</td><td>Qwen3 1.7B / 4B / 8B / 30B-A3B Base</td><td>CPT 50B + SFT 4B <span class="src">§5.1.1</span></td><td>双向；无 logits shift、无掩码退火 <span class="src">§3.1</span></td><td>静态 / 动态低置信度重掩码 <span class="src">§3.2</span></td></tr>
+    <tr><td>Fast-dLLM v2</td><td>Qwen2.5-1.5B / 7B-Instruct</td><td>约 1B tokens（SFT 数据）<span class="src">摘要、§4.1</span></td><td>双向 + token shift + 互补掩码 <span class="src">§3.2</span></td><td>块级缓存 + 子块 DualCache + 阈值 <span class="src">§3.3</span></td></tr>
+    <tr><td>WeDLM</td><td>Qwen2.5-7B / Qwen3-8B</td><td>CPT 100B + SFT <span class="src">§1、§6.1</span></td><td>严格因果（拓扑重排）<span class="src">§4.1</span></td><td>流式并行解码，滑动窗口 <span class="src">§5.2</span></td></tr>
+    <tr><td>Dream（参照）</td><td>Qwen2.5-7B</td><td>580B <span class="src">SDAR §5.1</span></td><td>全序列双向</td><td>见 <a href="07-dream.html">Dream 页</a></td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  AR 权重已经会“看左边猜右边”。块扩散只要求它在 \(B\) 个位置的小窗口里，再学会“看左边 + 块内一部分已知 token 去填空”，改动是局部的，所以少量数据就够。三篇的分歧在块内要不要双向：SDAR 与 Fast-dLLM v2 选双向，整块定稿后才能写 KV；WeDLM 坚持因果，每定稿一段连续前缀就能写 KV，并把速度基线换成 vLLM 上的 AR。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：一次 AR→块扩散转换训练</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw tgt"></i>冻结来源（AR 检查点）</span><span><i class="sw act"></i>条件（干净前缀块）</span>
+  <span><i class="sw reg"></i>缓存与状态</span><span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M]</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="AR 转块扩散训练：AR 权重初始化，加噪流与干净流拼接，块因果注意力掩码，掩码位置交叉熵；推理时前序块 KV 精确缓存；WeDLM 以拓扑重排保持因果">
+    <g class="tgt" data-part="ar-init" data-step="1">
+      <rect class="box" x="646" y="30" width="294" height="72" rx="10"/>
+      <text class="t-c t-b" x="793" y="56">AR 检查点（冻结来源）</text>
+      <text class="t-c t-sm" x="793" y="80">Qwen3 1.7B–30B / Qwen2.5 / Qwen3-8B</text>
+    </g>
+    <path class="edge" d="M721,102 V184" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="1"/>
+    <text class="t-xs" x="728" y="146" data-step="1">复制全部权重</text>
+    <g data-part="canvas" data-step="2">
+      <rect class="frame" x="24" y="110" width="280" height="200" rx="8"/>
+      <text class="t-sm" x="40" y="126">加噪流 x_t：块内随机掩码</text>
+      <rect class="tk data" x="40" y="136" width="26" height="26"/><rect class="tk mask" x="70" y="136" width="26" height="26"/><rect class="tk data" x="100" y="136" width="26" height="26"/><rect class="tk mask" x="130" y="136" width="26" height="26"/>
+      <rect class="tk mask" x="170" y="136" width="26" height="26"/><rect class="tk data" x="200" y="136" width="26" height="26"/><rect class="tk mask" x="230" y="136" width="26" height="26"/><rect class="tk data" x="260" y="136" width="26" height="26"/>
+      <text class="t-sm" x="40" y="186">干净流 x_0：同一序列，作前缀条件</text>
+      <rect class="tk act" x="40" y="196" width="26" height="26"/><rect class="tk act" x="70" y="196" width="26" height="26"/><rect class="tk act" x="100" y="196" width="26" height="26"/><rect class="tk act" x="130" y="196" width="26" height="26"/>
+      <rect class="tk act" x="170" y="196" width="26" height="26"/><rect class="tk act" x="200" y="196" width="26" height="26"/><rect class="tk act" x="230" y="196" width="26" height="26"/><rect class="tk act" x="260" y="196" width="26" height="26"/>
+      <text class="t-c t-xs" x="98" y="300">块 1</text><text class="t-c t-xs" x="228" y="300">块 2</text>
+    </g>
+    <g data-part="comp-view" data-step="6">
+      <text class="t-sm" x="40" y="246">互补视图（Fast-dLLM v2）</text>
+      <rect class="tk mask" x="40" y="256" width="26" height="26"/><rect class="tk data" x="70" y="256" width="26" height="26"/><rect class="tk mask" x="100" y="256" width="26" height="26"/><rect class="tk data" x="130" y="256" width="26" height="26"/>
+      <rect class="tk data" x="170" y="256" width="26" height="26"/><rect class="tk mask" x="200" y="256" width="26" height="26"/><rect class="tk data" x="230" y="256" width="26" height="26"/><rect class="tk mask" x="260" y="256" width="26" height="26"/>
+    </g>
+    <path class="edge" d="M306,238 H350" data-step="2"/>
+    <g data-part="attn-mask" data-step="3">
+      <text class="t-c t-sm" x="488" y="120">训练注意力掩码（行 = query）</text>
+      <text class="t-c t-xs" x="422" y="140">噪1</text><text class="t-c t-xs" x="466" y="140">噪2</text><text class="t-c t-xs" x="510" y="140">净1</text><text class="t-c t-xs" x="554" y="140">净2</text>
+      <text class="t-r t-xs" x="394" y="172">噪1</text><text class="t-r t-xs" x="394" y="216">噪2</text><text class="t-r t-xs" x="394" y="260">净1</text><text class="t-r t-xs" x="394" y="304">净2</text>
+      <g class="enc"><rect class="box" x="400" y="150" width="44" height="44"/><rect class="box" x="444" y="194" width="44" height="44"/></g>
+      <g class="act"><rect class="box" x="488" y="194" width="44" height="44"/></g>
+      <g class="data"><rect class="box" x="488" y="238" width="44" height="44"/><rect class="box" x="488" y="282" width="44" height="44"/><rect class="box" x="532" y="282" width="44" height="44"/></g>
+      <rect class="tk off" x="444" y="150" width="44" height="44"/><rect class="tk off" x="488" y="150" width="44" height="44"/><rect class="tk off" x="532" y="150" width="44" height="44"/>
+      <rect class="tk off" x="400" y="194" width="44" height="44"/><rect class="tk off" x="532" y="194" width="44" height="44"/>
+      <rect class="tk off" x="400" y="238" width="44" height="44"/><rect class="tk off" x="444" y="238" width="44" height="44"/><rect class="tk off" x="532" y="238" width="44" height="44"/>
+      <rect class="tk off" x="400" y="282" width="44" height="44"/><rect class="tk off" x="444" y="282" width="44" height="44"/>
+      <text class="t-c t-xs" x="422" y="172">双向</text><text class="t-c t-xs" x="466" y="216">双向</text><text class="t-c t-xs" x="510" y="216">前缀</text>
+      <text class="t-c t-xs" x="510" y="260">块内</text><text class="t-c t-xs" x="510" y="304">前序</text><text class="t-c t-xs" x="554" y="304">块内</text>
+      <text class="t-c t-xs" x="488" y="340">噪 = x_t，净 = x_0；示意 B = 4</text>
+    </g>
+    <path class="edge" d="M582,238 H640" data-step="3"/>
+    <g class="enc" data-part="denoiser" data-step="4">
+      <rect class="box" x="646" y="190" width="150" height="96" rx="10"/>
+      <text class="t-c t-b" x="721" y="218">去噪网络 p_θ</text>
+      <text class="t-c t-sm" x="721" y="242">全部权重可训练</text>
+      <text class="t-c t-xs" x="721" y="264">SDAR 无 shift / 退火</text>
+    </g>
+    <path class="edge enc" d="M796,238 H820" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="826" y="190" width="114" height="96" rx="10"/>
+      <text class="t-c t-b" x="883" y="218">交叉熵</text>
+      <text class="t-c t-sm" x="883" y="242">只算 [M] 位</text>
+      <text class="t-c t-xs" x="883" y="264">SDAR 乘 1/t</text>
+    </g>
+    <path class="edge idx" d="M721,286 V356 H240 V368" data-step="7"/>
+    <g class="reg" data-part="kv-infer" data-step="7">
+      <rect class="box" x="20" y="372" width="440" height="86" rx="10"/>
+      <text class="t-c t-b" x="240" y="396">推理：块间 AR，前序块 KV 精确缓存</text>
+      <text class="t-c t-sm" x="240" y="420">当前块 B 个 [M] 迭代去噪，置信度 ≥ τ 的位并行定稿</text>
+      <text class="t-c t-xs" x="240" y="442">SDAR 每块定稿后再前向一次写 KV；v2 块内另用 DualCache</text>
+    </g>
+    <g data-part="wedlm" data-step="8">
+      <rect class="panel" x="480" y="372" width="460" height="86" rx="10"/>
+      <text class="t-b" x="496" y="392">WeDLM：拓扑重排 + 纯因果注意力</text>
+      <rect class="tk data" x="500" y="406" width="18" height="18"/><rect class="tk mask" x="522" y="406" width="18" height="18"/><rect class="tk data" x="544" y="406" width="18" height="18"/><rect class="tk mask" x="566" y="406" width="18" height="18"/>
+      <path class="edge" d="M592,415 H612"/>
+      <rect class="tk data" x="620" y="406" width="18" height="18"/><rect class="tk data" x="642" y="406" width="18" height="18"/><rect class="tk mask" x="664" y="406" width="18" height="18"/><rect class="tk mask" x="686" y="406" width="18" height="18"/>
+      <text class="t-c t-xs" x="509" y="440">1</text><text class="t-c t-xs" x="531" y="440">2</text><text class="t-c t-xs" x="553" y="440">3</text><text class="t-c t-xs" x="575" y="440">4</text>
+      <text class="t-c t-xs" x="629" y="440">1</text><text class="t-c t-xs" x="651" y="440">3</text><text class="t-c t-xs" x="673" y="440">2</text><text class="t-c t-xs" x="695" y="440">4</text>
+      <text class="t-sm" x="720" y="412">位置 id 随 token 走</text>
+      <text class="t-sm" x="720" y="434">[M] 在因果掩码下可见全部观测</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="ar-init"><h4>从 AR 检查点出发</h4><p>SDAR 用 Qwen3 Base（含 30B-A3B MoE），Fast-dLLM v2 用 Qwen2.5-Instruct，WeDLM 用 Qwen2.5-7B / Qwen3-8B。结构不变，改的只是注意力掩码与损失。SDAR 在 2B 受控实验里发现：同等 1T tokens 预训练，AR 底座转出来的块扩散明显强于掩码扩散底座转出来的。<span class="src">SDAR §4.2 Tab. 1；Fast-dLLM v2 §3.2；WeDLM §6.1</span></p></div>
+    <div data-note="canvas"><h4>加噪流 + 干净流</h4><p>沿用 BD3-LM 的向量化训练：把加噪序列 \(x_t\) 与干净序列 \(x_0\) 拼成长 \(2L\) 的输入，一次前向就让每个块都以干净前序块为条件去噪。SDAR 预训练阶段整段加噪，SFT 阶段 prompt 保持干净；代价是有效训练吞吐约为 AR 的一半。<span class="src">SDAR §3.1、§10.1；Fast-dLLM v2 §3.2</span></p></div>
+    <div data-note="comp-view"><h4>互补掩码（Fast-dLLM v2）</h4><p>每个样本复制成两个视图，掩码分别为 \(m\) 与 \(\bar m=1-m\)，放进同一 batch：每个 token 都恰好在一个视图里被预测、在另一个视图里作上下文。1.5B 消融中，加入 padding 与互补掩码后平均分从 41.3 升到 45.0。<span class="src">Fast-dLLM v2 §3.2、Tab. 2</span></p></div>
+    <div data-note="attn-mask"><h4>块因果的双流掩码</h4><p>加噪块 \(b\) 看自己（块内双向）和干净流里块 \(&lt;b\) 的部分；干净流内部块因果。这与推理完全对应：生成块 \(b\) 时，前序块已定稿、KV 已缓存。Fast-dLLM v2 训练前把每个样本 pad 到 \(D\) 的整数倍，避免打包时块跨越样本边界、双向注意力看到下一条样本。<span class="src">SDAR §3.1；Fast-dLLM v2 §3.2、§4.3</span></p></div>
+    <div data-note="denoiser"><h4>改目标，不改结构</h4><p>SDAR 明确不用 logits shift，也不做注意力掩码退火（致谢中说这一建议来自 LLaDA 作者）；Fast-dLLM v2 保留 token shift：位置 \(i\) 的 [M] 用位置 \(i-1\) 的隐状态预测，以贴近原 AR 的表征。两条路都用 FlexAttention 实现结构化掩码。<span class="src">SDAR §3.1、§9、§10.1；Fast-dLLM v2 §3.2</span></p></div>
+    <div data-note="loss"><h4>只在 [M] 位计损失</h4><p>SDAR 写的是块条件 NELBO（\(1/t\) 加权的掩码交叉熵）；Fast-dLLM v2 的式子没有 \(1/t\) 权重；WeDLM 用每块 \(1/\gamma_k\) 加权，并加一项 AR 辅助损失。公式见 §5。<span class="src">SDAR Eq. 5；Fast-dLLM v2 §3.2；WeDLM Eq. 10、§6.1</span></p></div>
+    <div data-note="kv-infer"><h4>推理：精确的块级 KV</h4><p>块间因果，所以前序块的 KV 与 AR 一样精确，可直接用 PagedAttention 管理；当前块从 \(B\) 个 [M] 开始迭代。SDAR 的引擎在每块定稿后额外做一次前向写 KV，吞吐公式里因此出现 \(B+1\)；Fast-dLLM v2 在 32-token 块内再按子块（默认 8）推进，并对块内未定稿部分用近似的 DualCache。<span class="src">SDAR §5.2.4、§10.2；Fast-dLLM v2 §3.3</span></p></div>
+    <div data-note="wedlm"><h4>WeDLM：不要块内双向</h4><p>把已观测 token 物理上挪到前面、[M] 挪到后面，RoPE 的位置 id 仍用逻辑位置。这样在标准下三角掩码下，每个 [M] 都能看到全部已观测 token，而 [M] 之间只按某个顺序单向依赖。定稿 token 的 KV 只依赖更早的物理位置，可以立即进缓存。<span class="src">WeDLM §3.2、§4.1</span></p></div>
+    <div data-step-note="1"><h4>① 复制 AR 权重</h4><p>不加新参数，网络结构与原 AR 相同。</p></div>
+    <div data-step-note="2"><h4>② 构造双流画布</h4><p>按块独立采样掩码率得到 \(x_t\)，与 \(x_0\) 拼接成长 \(2L\) 的输入。</p></div>
+    <div data-step-note="3"><h4>③ 施加块因果掩码</h4><p>加噪块只看自身与干净前序块；干净流块因果。</p></div>
+    <div data-step-note="4"><h4>④ 一次前向</h4><p>所有块并行去噪，计算量约为同长度 AR 的两倍。</p></div>
+    <div data-step-note="5"><h4>⑤ 掩码位置交叉熵</h4><p>只对 [M] 位计损失；反向更新全部权重。</p></div>
+    <div data-step-note="6"><h4>⑥ 互补视图（v2）</h4><p>补上被掩位置的反面，使每个 token 都得到监督。</p></div>
+    <div data-step-note="7"><h4>⑦ 推理时的块级缓存</h4><p>逐块生成；完成的块写入精确 KV，当前块并行定稿。</p></div>
+    <div data-step-note="8"><h4>⑧ WeDLM 的替代做法</h4><p>不分块内双向，靠重排在因果掩码下实现填空，换来逐 token 可缓存。</p></div>
+  </div>
+  <figcaption>图 1　SDAR 与 Fast-dLLM v2 共用的双流训练布局（BD3-LM 式），附 WeDLM 的拓扑重排示意。块长与 token 数为示意。<span class="src">SDAR Fig. 1、§3.1；Fast-dLLM v2 Fig. 2；WeDLM Fig. 2</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="sdar">3.1 SDAR：先做 AR 预训练，再短程转换</h3>
+<p><b>该从 AR 还是从掩码扩散出发？</b>作者用同一 1T tokens 语料、同一架构与分词器、上下文 4096，各预训练一个 2B 的 AR 和一个 MDLM；再各做 100B tokens 退火，得到 AR、AR→块扩散（即 SDAR，\(B=16\)）、MDLM、MDLM→块扩散四个底座，统一 4B tokens SFT。结论：AR 底座整体最强，SDAR 与之基本持平（MMLU 50.9 vs 48.7，MATH 26.8 vs 29.9），MDLM 转块扩散虽有提升（MATH 12.6→23.3）但仍落后。<span class="src">SDAR §4.1、Tab. 1</span>作者的解释：AR 交叉熵是精确 NLL，每个 token 都贡献梯度；掩码扩散只有被掩的子集贡献，且优化的是上界。</p>
+<p><b>转换配方。</b>改掩码、把 NLL 换成块条件 NELBO，不做 logits shift 和注意力退火；Qwen3 系列先 50B tokens CPT（上下文 4096、序列打包），再 4B tokens SFT。同一管线也训练了一组 AR-Chat 对照。作者另试了 20B / 30B / 40B 的转换预算，模型可用但略差，且后续 SFT 时放大块长的余地更小。<span class="src">SDAR §3.1、§5.1.1、§5.1.2</span></p>
+<p><b>解码。</b>静态模式每步定稿 \(\lceil B/N\rceil\) 个最高置信位；动态模式定稿所有置信度 \(\ge\tau\) 的位，不足时至少定稿 1 个。<b>注意</b>：主表用的是静态、块长 4、4 步，即 TPF = 1，衡量的是质量而不是并行加速。<span class="src">SDAR §3.2、§5.1.1</span></p>
+<p><b>规模与块长。</b>1.7B / 4B 在 \(B&gt;4\) 时明显掉点，8B / 30B-A3B 对块长和较低的 \(\tau\) 都更稳健；TPF 随 \(B\) 单调上升，也随模型变大而上升，作者归因于大模型预测熵更低、更多位置越过阈值。TPF 与 \(\tau\) 却不是单调关系：阈值过低会接受高熵的块，错误使后续块的置信度下降，反而要更多步。<span class="src">SDAR §5.2.2–5.2.3、Fig. 3–6</span></p>
+<p><b>真实引擎上的吞吐。</b>在 LMDeploy、单张 H200、Math-500、\(\tau=0.9\) 下，SDAR-8B-Chat 的峰值吞吐为 6600 / 5510 / 4236 / 2520 / 1509 tok/s（\(B\) = 4 / 8 / 16 / 32 / 64，动态解码）；batch 从 4 扫到 512，小 batch 明显快于 AR，随 batch 增大优势消失，且块越大越早进入算力受限区。<span class="src">SDAR §5.2.4、Fig. 7–8</span>把单次前向时间记为 \(t_f\)、batch 为 \(b\)、每块平均前向数为 \(\bar n\)（论文用 \(\alpha,\beta,\gamma\)），作者给出：</p>
+<div class="formula">$$\mathrm{TGS}_{\mathrm{AR}}=\frac{b}{t_f},\qquad \mathrm{TGS}_{\mathrm{dyn}}=\frac{b\,B}{(\bar n+1)\,t_f},\qquad \mathrm{TPF}=\frac{B}{\bar n}.$$</div>
+<p>分母里的 “+1” 是每块定稿后写 KV 的那次前向。访存受限时两种解码的 \(t_f\) 相近，加速约为 \(B/(\bar n+1)\)；算力受限后 SDAR 每次前向处理 \(B\) 个 token、\(t_f\) 先涨，优势被吃掉（推导自上式）。</p>
+<p><b>科学推理版。</b>SDAR-30B-A3B-Sci：Qwen3-30B-A3B 先做 1T tokens 科学语料 AR 继续预训练，再用其中 50B 转换、0.5B 长思维链 SFT；对照 AR-30B-A3B-Sci 走完全相同的数据，只是不转换。贪心解码下 GPQA-diamond 66.7 vs 61.2、ChemBench 72.3 vs 60.5，但 LCB-v5 40.7 vs 51.5。<span class="src">SDAR §6.1、Tab. 4–5</span>这个开源系列后来是 <a href="17-rl.html">TraceRL / TraDo</a> 的底座。</p>
+<div class="callout code-note">
+  <span class="callout-title">SDAR 论文内部不一致</span>
+  ① Tab. 7 把 GPQA（G）的提升写成 +5.9，Tab. 5 写 +5.5（66.7 − 61.2 = 5.5）；Tab. 6 的 “SDAR (S)” 行 GPQA 填的是贪心值 66.7，而 Tab. 5 的采样值为 66.0。② §4.1 称受控模型为 2B，§5 引言称其为 “1.7B parameter model trained on 1T tokens”。③ SDAR-4B 的 HumanEval 在 Tab. 2 为 72.8、Tab. 3 为 72.0。本页分别标注出处，不混用。<span class="src">SDAR Tab. 2、3、5、6、7；§4.1、§5</span>
+</div>
+
+<h3 id="fast-dllm-v2">3.2 Fast-dLLM v2：互补掩码、token shift 与分层缓存</h3>
+<p><b>训练。</b>以 Qwen2.5-1.5B / 7B-Instruct 为底，在 LLaMA-Nemotron 后训练数据上做 SFT：batch 256，1.5B 用学习率 \(2\times10^{-5}\) 训 6000 步，7B 用 \(1\times10^{-5}\) 训 2500 步，64 张 A100 分别约 8 / 12 小时；块长 \(D=32\)。<span class="src">Fast-dLLM v2 §4.1</span>摘要称约 1B tokens、比 Dream 少约 500 倍；论文未给出序列长度，无法由步数核算<span class="unverified">（约 1B tokens 为作者自述）</span>。三个配方要素：</p>
+<ul>
+  <li><b>样本 pad 到块长整数倍</b>：不 pad 时，打包后一条样本的 EOS 可能和下一条的 BOS 落在同一块，块内双向注意力会跨样本泄漏。</li>
+  <li><b>互补掩码</b>：\(m\) 与 \(1-m\) 两个视图同批训练，所有 token 都被监督到。1.5B 消融：朴素 token shift 41.3 → 加 pad 42.2 → 再加互补掩码 45.0。<span class="src">Tab. 2</span></li>
+  <li><b>token shift</b>：被掩位置 \(i\) 用位置 \(i-1\) 的隐状态出 logits，与 AR 的“下一 token”头对齐（SDAR 恰好相反，不用 shift）。<span class="src">§3.2</span></li>
+</ul>
+<p><b>推理：两级缓存。</b>块级缓存：已完成块作为只读前缀，KV 精确复用。子块缓存：32-token 块内按子块（默认 8）推进，块内未定稿部分沿用 <a href="14-kv-cache.html">Fast-dLLM</a> 的 DualCache（近似）；子块内按置信度阈值并行定稿。推理时直接改块长（与训练不一致）会掉点，例如 GSM8K 从子块方案的 62.0 降到 58.5，所以要改粒度只改子块。子块缓存在小 batch 下几乎无收益，在 batch 32 这类算力受限设置下明显提速，对精度无可见影响。<span class="src">§3.3、§4.3、Tab. 3–4、Fig. 6</span></p>
+
+<h3 id="wedlm">3.3 WeDLM：在因果注意力下做掩码恢复</h3>
+<p><b>问题的重新表述。</b>WeDLM 认为，接上 KV cache 之后速度取决于“有多少预测能尽快变成可缓存的左到右前缀”，而不只是每次前向预测几个 token。它定义前缀可缓存率 \(p_{\mathrm{cache}}=N_{\mathrm{gen}}/N_{\mathrm{fwd}}\)：生成 token 数除以 prefill 之后网络处理过的 token 实例总数，倒数就是平均重算倍数。全双向模型（LLaDA、Dream）每步可能猜很多 token，但很少能立刻进缓存；块扩散（SDAR）靠整块提交提高了 \(p_{\mathrm{cache}}\)，但块内双向使任何 token 都要等整块定稿。<span class="src">WeDLM §3.1、Eq. 4</span></p>
+<p><b>拓扑重排。</b>掩码恢复真正需要的是“每个 [M] 能看到全部已观测 token”，不需要 [M] 之间互相可见。把已观测 token 按序放到物理前缀、[M] 放到后面，位置 id 仍取逻辑位置，标准因果掩码就满足这一点；[M] 之间则变成按某个顺序的单向依赖 \(q_\theta(x_{\mathcal M}\mid x_{\mathcal O})=\prod_j q_\theta(x_{\pi(j)}\mid x_{\mathcal O},x_{\pi(&lt;j)})\)。作者明确说这不等价于双向 MDLM，是否够用要看实验。<span class="src">§3.2、§4.1、Eq. 5–7</span></p>
+<p><b>双流掩码训练。</b>推理时未定稿 token 集中在右侧后缀，训练若在全序列上均匀掩码会有分布差。WeDLM 把干净的记忆流 \(x_o\) 与预测流 \(x_t\) 拼接（两者位置 id 相同），预测流按块长 \(B=32\) 分块、块内掩码后重排；块 \(k\) 只看记忆流中逻辑位置在它之前的干净 token 与本块内物理上更早的 token。推理时丢掉记忆流，单序列因果解码。另在同一序列上加 AR 辅助损失以保留原 NTP 能力。<span class="src">§4.2、§6.1</span>消融显示块内双向的变体整体更差，且 0.6B / 1.5B 底座转换后分别掉 3.9 / 0.6 分、7B 涨 3.6 分。<span class="src">§6.5、Fig. 5c</span></p>
+<p><b>流式并行解码。</b>维护 \(W\) 个槽位的窗口：每步把已填 token 重排到 [M] 之前做一次带缓存的因果前向（相当于一次小 prefill）；最左侧连续已填部分立即提交进 KV cache；在剩余 [M] 中按带距离惩罚的熵 \(\tilde H_i=H_i+\lambda d_i\) 选出低于阈值 \(\tau\) 的位置填入；再在窗口末尾补等量新 [M]，保持每步工作量恒定，避免块解码在块边界“停下等待”。因为始终是标准因果掩码，FlashAttention、PagedAttention、CUDA Graphs 可以不改 kernel 直接用。<span class="src">§5.2、Alg. 1、Eq. 11</span>同为 \(\tau=0.9\)，流式比块式解码快 1.9×（423 vs 221 tok/s）。<span class="src">§6.4、Fig. 4c</span></p>
+<div class="callout code-note">
+  <span class="callout-title">WeDLM：论文内部与 README 的出入</span>
+  ① SFT 规模：§1 写 “10B tokens for SFT”，§6.1 写 “10K internal instruction-response pairs”。② 平均分：§1 称 WeDLM-8B 平均 77.36，Tab. 2 为 77.53。③ 加速：论文正文为 GSM8K 约 3×（Pareto 上 1.97×–3.2×），官方 README 写数学推理 “3-6×”、计数类 “up to 10×”。④ 论文称 WeDLM 模型 “served via vLLM”，README 的 <code>wedlm</code> 推理库注明构建在 nano-vllm 之上。⑤ 论文的速度实验没有写 GPU 型号、batch 与并发；README 的示例输出标注 NVIDIA H20、单条 prompt（218 tokens，689.18 tok/s）。<span class="src">WeDLM §1、§6.1、Tab. 2、Fig. 5a；官方 README</span>
+</div>
+
+<h3 id="vs-ar">3.4 与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>SDAR</th><th>Fast-dLLM v2</th><th>WeDLM</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>块条件 NELBO，\(1/t\) 加权；AR 底座 50B CPT + 4B SFT <span class="src">Eq. 5、§5.1.1</span></td><td>块内掩码交叉熵（无 \(1/t\)），互补视图；约 1B tokens SFT <span class="src">§3.2</span></td><td>重排后的掩码交叉熵（\(1/\gamma_k\) 加权）+ AR 辅助损失；100B CPT <span class="src">Eq. 10、§6.1</span></td><td>逐 token 交叉熵 = 精确 NLL</td></tr>
+    <tr><td>注意力与 KV cache</td><td>块内双向、块间因果；前序块 KV 精确，可接 PagedAttention <span class="src">§10.2</span></td><td>同左；块级 KV 精确，块内子块 DualCache 近似 <span class="src">§3.3</span></td><td>全程因果；最左连续定稿段的 KV 立即精确 <span class="src">§5.2</span></td><td>因果，KV 精确</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>主表静态 \(B=4\)、4 步，TPF = 1；动态 \(\tau\) 时随 \(B\) 与规模上升（仅图示）<span class="src">§5.1.1、Fig. 5</span></td><td>主表阈值 1（逐步定稿）；\(\tau=0.9\) 时 GSM8K 吞吐 39.1→101.7 tok/s <span class="src">§4.1、Fig. 4</span></td><td>质量表统一每步 1 token；速度模式按熵阈值，每步提交一段前缀 <span class="src">§6.2</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>块内并行；30B-A3B-Sci 的 ChemBench +11.8（贪心）<span class="src">Tab. 5</span></td><td>同 AR 数据同步数训练，7B 平均 60.3 vs 59.6 <span class="src">Tab. 1</span></td><td>直接复用 AR 服务栈；低熵文本每步提交多 token <span class="src">§5.2、§6.6</span></td><td>精确似然、成熟服务栈</td></tr>
+    <tr><td>代价与失效情形</td><td>小模型对块长敏感；大 batch 优势消失；训练吞吐减半 <span class="src">§5.2、§10.1</span></td><td>推理块长须与训练一致；7B MATH 61.6 vs 同数据 AR 72.0 <span class="src">Tab. 1、Tab. 4</span></td><td>开放问答等高熵文本加速小（197.8 vs 计数 1673.3 tok/s）；小底座转换掉点 <span class="src">§6.5–6.6</span></td><td>一步一 token，小 batch 访存受限</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、块与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 设置</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>训练输入（SDAR / v2）</td><td>\([b,\,2L]\)，SDAR \(L=4096\)</td><td>加噪流 + 干净流拼接，注意力掩码 \(2L\times2L\) <span class="src">SDAR §5.1.1；v2 §3.2</span></td></tr>
+    <tr><td>训练输入（WeDLM）</td><td>\([b,\,2L]\)，块长 \(B=32\)</td><td>记忆流 + 预测流，共享位置 id；块内重排 <span class="src">WeDLM Eq. 8–9、§6.1</span></td></tr>
+    <tr><td>SDAR 推理一块</td><td>query \([b,B]\)，读前缀 KV</td><td>静态 \(N=B\) 步（\(B=4\) 时 TPF = 1）或动态 \(\bar n\) 步，另加 1 次写 KV 前向 <span class="src">§5.2.4</span></td></tr>
+    <tr><td>Fast-dLLM v2 推理一块</td><td>块 \(D=32\)，子块 8</td><td>块级 KV 精确；块内用 DualCache <span class="src">§4.1、§3.3</span></td></tr>
+    <tr><td>WeDLM 推理一步</td><td>query \([b,W]\)，读已提交前缀 KV</td><td>质量评测 \(W=6\)、\(\lambda=0.10\)；推荐 \(\tau\in[0.3,0.6]\) <span class="src">§6.2、§6.4</span></td></tr>
+    <tr><td>AR（参照）</td><td>query \([b,1]\)</td><td>每步 1 token，KV 追加 1 行</td></tr>
+  </tbody>
+</table></div>
+<p>每次前向的 query 数是 AR 的 \(B\)（或 \(W\)）倍，访存受限时几乎免费，一旦 \(b\cdot B\) 让前向进入算力受限区就不再免费。这就是三篇的加速都随 batch 下降的共同原因，也是 §8 必须对齐测量条件的原因。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>把序列分成 \(K=L/B\) 块，第 \(k\) 块记作 \(x^{(k)}\)。三篇的目标都可以写成“以干净前序块为条件，对块内被掩位置做交叉熵”，差别在权重与条件集合：</p>
+<div class="formula">$$\mathcal L_{\mathrm{SDAR}}=\mathbb E_{k,t,x_t^{(k)}}\Big[-\frac1t\sum_{i\in x^{(k)}}\mathbf 1[x_t^i=[\mathrm M]]\log p_\theta\big(x_0^i\mid x_t^{(k)},x_0^{(&lt;k)}\big)\Big]$$</div>
+<div class="formula">$$\mathcal L_{\mathrm{v2}}=\mathbb E_{x,m}\Big[-\sum_i \mathbf 1[x_t^i=[\mathrm M]]\log p_\theta\big(x_0^i\mid x_0^{(&lt;k(i))},x_t^{(k(i))}\big)\Big],\quad m\ \text{与}\ 1-m\ \text{各算一次}$$</div>
+<div class="formula">$$\mathcal L_{\mathrm{WeDLM}}=\mathbb E\Big[\sum_{k=1}^{K}\frac{1}{\gamma_k}\sum_{j\in\mathcal M_k}-\log P_\theta\big(x_0^{j}\mid x_o^{(&lt;k)},\tilde x_t^{(k,&lt;j)}\big)\Big]+\mathcal L_{\mathrm{AR}}$$</div>
+<p>按块分解后 \(\log p_\theta(x)=\sum_k\log p_\theta(x^{(k)}\mid x^{(&lt;k)})\)，每一块的项仍只能由 NELBO 给上界，所以块扩散的似然介于 AR（\(B=1\)，精确）与全序列扩散之间。WeDLM 的 \(\tilde x_t^{(k,&lt;j)}\) 指重排后物理上位于 \(j\) 之前的 token；AR 辅助损失的权重论文未给出。<span class="src">SDAR Eq. 4–5；Fast-dLLM v2 §3.2；WeDLM Eq. 10、§6.1</span></p>
+<div class="callout code-note">
+  <span class="callout-title">式子与实现的细节</span>
+  SDAR 的 Eq. 7 把转换目标写成 \(\mathbb E[\log P(b_k^0\mid b_k^t,b_{&lt;k})]\)，省去了 Eq. 5 中的负号与 \(1/t\) 权重；本页以 Eq. 5 为准。Fast-dLLM v2 §3.1 的预备知识里有 \(1/t\)，但 §3.2 的训练目标式没有，本页按 §3.2 书写。两者的官方训练代码未逐行核对。<span class="src">SDAR Eq. 5、7；Fast-dLLM v2 §3.1–3.2</span>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">ar_to_block.py（转换训练一步 + WeDLM 流式解码；依据 SDAR §3、Fast-dLLM v2 §3.2、WeDLM Alg. 1）</div>
+<pre><code class="lang-py">def convert_step(model, x0, B, variant="sdar"):          # model 由 AR 检查点初始化
+    if variant == "v2":
+        x0 = pad_to_multiple(x0, B, pad=MASK)              # 块不跨样本；pad 位不计损失
+    t = uniform(0, 1, size=num_blocks(x0, B))              # 每块独立掩码率
+    m = bernoulli(repeat_per_block(t, B))                  # 1 = 掩码
+    views = [m, 1 - m] if variant == "v2" else [m]         # 互补视图
+    loss = 0
+    for mv in views:
+        xt = where(mv, MASK, x0)
+        h = model(cat(xt, x0), attn=block_causal_dual_stream(B))  # 长 2L 的一次前向
+        logits = h[:, :L]
+        if variant == "v2":
+            logits = shift_right(logits)                   # 位置 i 用 i-1 的隐状态
+        ce = cross_entropy(logits, x0, reduce=False) * mv
+        w = 1.0 / repeat_per_block(t, B) if variant == "sdar" else 1.0
+        loss += (ce * w).sum() / mv.numel()
+    return loss
+
+def wedlm_stream(model, prompt, W, tau, lam):
+    kv = model.prefill(prompt); y = []
+    win = [Slot(MASK, pos=len(prompt) + i) for i in range(W)]
+    while win and not ended(y):
+        win = [s for s in win if s.filled] + [s for s in win if not s.filled]  # 拓扑重排
+        logits, kv_win = model.forward_causal(win, kv)     # 一次小 prefill，位置 id = 逻辑位置
+        n = first_unfilled(win)                            # 最左连续已填段
+        y += win[:n]; kv = kv.extend(kv_win[:n]); win = win[n:]   # 立即提交、写 KV
+        masks = [i for i, s in enumerate(win) if not s.filled]
+        H = entropy(logits[masks]) + lam * distance_to_leftmost(masks)
+        for i in select(masks, H &lt; tau, at_least_one=True):
+            win[i] = Slot(sample(logits[i]), pos=win[i].pos, filled=True)
+        win += [Slot(MASK, pos=next_pos(win, y)) for _ in range(n)]       # 补齐窗口
+    return y</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>SDAR</th><th>Fast-dLLM v2</th><th>WeDLM</th></tr></thead>
+  <tbody>
+    <tr><td>底座</td><td>Qwen3-1.7B / 4B / 8B / 30B-A3B Base</td><td>Qwen2.5-1.5B / 7B-Instruct</td><td>Qwen2.5-7B、Qwen3-8B</td></tr>
+    <tr><td>转换数据</td><td>50B CPT（1T 语料子集）+ 4B SFT <span class="src">§5.1.1</span></td><td>LLaMA-Nemotron 后训练数据，batch 256 × 2500 / 6000 步 <span class="src">§4.1</span></td><td>100B CPT + SFT（规模见 §3.3 注）<span class="src">§6.1</span></td></tr>
+    <tr><td>学习率</td><td><span class="unverified">正文未给出</span></td><td>7B \(1\times10^{-5}\)；1.5B \(2\times10^{-5}\) <span class="src">§4.1</span></td><td>\(3\times10^{-6}\to3\times10^{-7}\) 余弦 <span class="src">§6.1</span></td></tr>
+    <tr><td>训练块长</td><td>受控实验 16；发布 4–64 <span class="src">§4.1、§1</span></td><td>\(D=32\)，推理子块 8 <span class="src">§4.1</span></td><td>32（4 / 8 / 32 差异 ≤ 0.8 分）<span class="src">§6.1、§6.5</span></td></tr>
+    <tr><td>推理阈值</td><td>动态 \(\tau\in\{0.80,\dots,0.95\}\)；部署 0.9 <span class="src">§5.2.1、§5.2.4</span></td><td>置信度 0.9（主表为 1）<span class="src">§4.2</span></td><td>熵阈值 \(\tau\)、\(\lambda\)、窗口 \(W\) <span class="src">§6.2、§6.4</span></td></tr>
+    <tr><td>训练硬件 / 实现</td><td>FlexAttention + Triton 融合损失 <span class="src">§10.1</span></td><td>64 × A100，8 h / 12 h <span class="src">§4.1</span></td><td>MagiAttention 处理非矩形掩码 <span class="src">§6.1</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>质量（各自协议，不跨表比较）。</b>SDAR 受控实验：同 1T 预训练、同 4B SFT，块扩散变体用块长 16、16 步静态解码，TPF = 1。<span class="src">SDAR §4.1、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>2B Chat</th><th class="num">MMLU</th><th class="num">MATH</th><th class="num">GSM8K</th><th class="num">HumanEval</th><th class="num">GPQA</th></tr></thead>
+  <tbody>
+    <tr><td>AR-2B</td><td class="num">48.7</td><td class="num">29.9</td><td class="num">61.8</td><td class="num">42.1</td><td class="num">26.3</td></tr>
+    <tr><td>MDLM-2B</td><td class="num">47.0</td><td class="num">12.6</td><td class="num">57.9</td><td class="num">21.3</td><td class="num">26.3</td></tr>
+    <tr class="hl"><td>SDAR（AR→块扩散，\(B=16\)）</td><td class="num">50.9</td><td class="num">26.8</td><td class="num">59.4</td><td class="num">40.0</td><td class="num">28.2</td></tr>
+    <tr><td>MDLM→块扩散（\(B=16\)）</td><td class="num">47.5</td><td class="num">23.3</td><td class="num">64.7</td><td class="num">39.0</td><td class="num">29.8</td></tr>
+  </tbody>
+</table></div>
+<p>放大到 Qwen3：AR-Chat 与 SDAR 走同一 CPT + SFT，SDAR 静态 \(B=4\)、4 步、贪心（TPF = 1）；AR 贪心。<span class="src">SDAR §5.1.1、Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">MMLU</th><th class="num">GSM8K</th><th class="num">Math500</th><th class="num">HumanEval</th><th class="num">LCB-v6</th></tr></thead>
+  <tbody>
+    <tr><td>AR-Chat 8B</td><td class="num">77.5</td><td class="num">92.8</td><td class="num">78.4</td><td class="num">80.7</td><td class="num">20.5</td></tr>
+    <tr class="hl"><td>SDAR-8B</td><td class="num">78.6</td><td class="num">91.3</td><td class="num">78.6</td><td class="num">78.7</td><td class="num">16.6</td></tr>
+    <tr><td>AR-Chat 30B-A3B</td><td class="num">82.2</td><td class="num">92.7</td><td class="num">76.8</td><td class="num">84.8</td><td class="num">23.4</td></tr>
+    <tr class="hl"><td>SDAR-30B-A3B</td><td class="num">82.8</td><td class="num">91.4</td><td class="num">77.8</td><td class="num">87.2</td><td class="num">21.7</td></tr>
+  </tbody>
+</table></div>
+<p>Fast-dLLM v2 7B 与“同数据、同步数做 NTP 微调”的 Qwen2.5-7B-Nemo-FT 对照；主表阈值为 1，即不并行。<span class="src">Fast-dLLM v2 §4.1、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>7B</th><th class="num">HumanEval</th><th class="num">MBPP</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">IFEval</th><th class="num">平均</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-7B-Nemo-FT（AR）</td><td class="num">52.4</td><td class="num">57.1</td><td class="num">84.1</td><td class="num">72.0</td><td class="num">69.5</td><td class="num">59.6</td></tr>
+    <tr><td>Dream 7B</td><td class="num">57.9</td><td class="num">68.3</td><td class="num">81.0</td><td class="num">39.2</td><td class="num">62.5</td><td class="num">57.6</td></tr>
+    <tr class="hl"><td>Fast-dLLM v2 7B</td><td class="num">63.4</td><td class="num">63.0</td><td class="num">83.7</td><td class="num">61.6</td><td class="num">61.4</td><td class="num">60.3</td></tr>
+  </tbody>
+</table></div>
+<p>平均分（含 MMLU、GPQA 与 EvalPlus 的 Plus 列）略高于 AR，但 MATH 低 10.4、IFEval 低 8.1，均值掩盖了这两项退步。WeDLM 指令模型的质量表统一每步只定稿 1 个 token（\(W=6\)、\(\lambda=0.10\)），生成上限 512、温度 0.1；各模型用各自推荐引擎。<span class="src">WeDLM §6.2、Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Instruct（引擎）</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">GPQA-D</th><th class="num">HumanEval</th><th class="num">平均</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen3-8B（vLLM）</td><td class="num">89.91</td><td class="num">69.60</td><td class="num">41.41</td><td class="num">71.95</td><td class="num">75.12</td></tr>
+    <tr><td>SDAR-8B（JetEngine）</td><td class="num">91.66</td><td class="num">43.40</td><td class="num">38.38</td><td class="num">76.83</td><td class="num">74.22</td></tr>
+    <tr class="hl"><td>WeDLM-8B</td><td class="num">92.27</td><td class="num">64.80</td><td class="num">44.95</td><td class="num">80.49</td><td class="num">77.53</td></tr>
+  </tbody>
+</table></div>
+<p><b>速度：先看测量条件。</b>三篇的加速比对应不同硬件、batch 与基线，不能排成一张榜：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>模型 / 任务</th><th>硬件与引擎</th><th>batch</th><th>块 / 阈值</th><th>AR 基线</th><th>结果</th></tr></thead>
+  <tbody>
+    <tr><td>SDAR</td><td>SDAR-8B-Chat，Math-500</td><td>1 × H200，LMDeploy</td><td>4–512</td><td>\(B\) = 4–64，\(\tau=0.9\)</td><td>同引擎 AR 解码</td><td>峰值 6600 tok/s（\(B=4\)）；小 batch 领先，大 batch 优势消失 <span class="src">§5.2.4、Fig. 7</span></td></tr>
+    <tr><td>Fast-dLLM v2</td><td>7B，GSM8K</td><td>A100 / H100；引擎未写明</td><td>1–64</td><td>\(D=32\)，子块缓存，\(\tau=0.9\)</td><td>Qwen2.5-7B-Instruct</td><td>A100 最高 1.5×、H100 最高 1.8×（batch 64）；Fig. 1 称 2.54× <span class="src">§4.2、Fig. 1、Fig. 5</span></td></tr>
+    <tr class="hl"><td>WeDLM</td><td>WeDLM-8B-Instruct，GSM8K</td><td><span class="unverified">论文未写 GPU</span></td><td><span class="unverified">未写明</span></td><td>\(\tau\)、\(\lambda\) 扫描</td><td>Qwen3-8B on vLLM</td><td>272–445 tok/s：\(\tau=0.2\) 时 92.3%、1.97×；\(\tau=0.9\) 时 &gt; 79%、3.2× <span class="src">§6.4、Fig. 5a</span></td></tr>
+  </tbody>
+</table></div>
+<p>WeDLM 是三者中唯一以 vLLM 服务的 AR 作基线的；但它的论文没有给出硬件与并发，所以“比 vLLM 快 3×”目前只能理解为作者环境下、推测为低并发的结果。WeDLM 的熵依赖也很明显：计数任务 1673.3 tok/s，数学推导 745.2 tok/s，开放问答 197.8 tok/s。<span class="src">WeDLM §6.6、App. A</span></p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul><li>把 <a href="11-block-diffusion.html">BD3-LM</a> 的块扩散从小规模验证推到 1.5B–30B 的实用模型，转换数据比 <a href="07-dream.html">Dream</a> 少一到三个数量级。</li><li>块级 KV 精确，可直接接 PagedAttention / LMDeploy / vLLM 类服务栈。</li><li>WeDLM 把评价指标从 TPF 改成“可缓存前缀增长率”，并要求以 vLLM 上的 AR 为基线。</li></ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul><li>块越大越快，但质量与大 batch 吞吐都会下降；块内仍是独立采样的因子分解误差 → <a href="16-order-limits.html">顺序与并行上限</a>。</li><li>转换后模型仍要逐块等待；<a href="13-hybrid.html">TiDAR / Nemotron-Labs-Diffusion / DFlash</a> 改用“扩散起草、AR 验证”拿回 AR 的分布保证。</li><li><a href="09-llada2.html">LLaDA2.0</a> 在相关工作中把 SDAR 列为由 AR 初始化块扩散的先例并扩到 100B；SDAR 也是 <a href="17-rl.html">TraceRL</a> 的底座；块内近似缓存见 <a href="14-kv-cache.html">KV cache 页</a>。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q23"><span class="qid">Q23</span>把现成 AR 权重转成块扩散，为什么 1B–100B tokens 就够，而 Dream 式全双向转换要 580B？SDAR 与 Fast-dLLM v2 在掩码、shift 与损失上的取舍各带来什么代价？</h3>
+  <div class="ans"><p class="short">块扩散保留了块间的左到右因果，网络只需在长度 \(B\) 的局部窗口里学会“看左边 + 部分块内 token 填空”，表征与原 AR 的 next-token 结构大体一致；全双向转换则要让每个位置都适应看见整段未来，改动是全局的。SDAR 在 2B 受控实验中还发现，AR 预训练本身比掩码扩散更省算力，AR 底座转出的块扩散也更强，于是“先 AR、后短程转换”成为划算路线。</p>
+    <ul><li>SDAR：不 shift、不退火，50B CPT 即与同管线 AR-Chat 基本持平；代价是小模型对块长敏感，双流训练使吞吐减半。</li><li>Fast-dLLM v2：保留 token shift 贴近原 LM 头，互补掩码让每个 token 都有监督，约 1B tokens 完成；代价是推理块长必须与训练一致，且 7B 的 MATH 比同数据 AR 低 10.4。</li><li>两者都只在块级获得精确 KV，块内仍要近似缓存或整块等待。</li></ul>
+    <p class="cite">依据：SDAR §4、§5.1.2、Tab. 1–2、§10.1；Fast-dLLM v2 §3.2、Tab. 1–4；Dream 数据量引自 SDAR §5.1。</p>
+  </div>
+  <h3 id="q24"><span class="qid">Q24</span>WeDLM 为什么坚持因果注意力？拓扑重排如何让 [M] 在下三角掩码下看到全部已观测 token？它“比 vLLM 快约 3×”应在什么测量条件下理解？</h3>
+  <div class="ans"><p class="short">在带 KV cache 的部署里，只有依赖已提交上下文的 KV 才能复用；块内双向让每个 token 都要等整块定稿才能入缓存。WeDLM 把已观测 token 移到物理前缀、[M] 放后面，位置 id 保持逻辑位置，于是标准因果掩码下每个 [M] 都能看到全部观测，而 [M] 之间按顺序单向依赖；最左连续已填段立刻可缓存，配合滑动窗口持续补 [M]，避免块边界停顿。</p>
+    <ul><li>速度数字：GSM8K 上 272–445 tok/s，对 vLLM 上的 Qwen3-8B 为 1.97×（92.3%）到 3.2×（&gt; 79%），随熵阈值折中。</li><li>论文未给出 GPU、batch、并发；质量主表又统一每步 1 token，与速度设置不同。README 示例为 H20、单条请求。</li><li>收益强依赖熵：计数 1673.3 tok/s，开放问答 197.8 tok/s；高并发下多出的 query 不再“免费”（与 SDAR Fig. 7 同理，推断）。</li></ul>
+    <p class="cite">依据：WeDLM §3.1–3.2、§4.1、§5.2、§6.2–6.6、Fig. 5a；官方 README；SDAR §5.2.4。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Cheng, Bian, Liu, …, Qi, Zhou. <i>SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation.</i> 2025，本页读 arXiv v3。<a href="https://arxiv.org/abs/2510.06303">arXiv:2510.06303</a> · <a href="https://github.com/JetAstra/SDAR">代码</a> · <a href="https://huggingface.co/collections/JetLM/sdar-689b1b6d392a4eeb2664f8ff">权重</a></li>
+  <li>Wu, Zhang, Xue, Diao, Fu, Liu, Molchanov, Luo, Han, Xie. <i>Fast-dLLM v2: Efficient Block-Diffusion LLM.</i> 2025，ICLR 2026（据官方 README）；本页读 arXiv v1。<a href="https://arxiv.org/abs/2509.26328">arXiv:2509.26328</a> · <a href="https://github.com/NVlabs/Fast-dLLM">代码</a> · <a href="https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B">权重</a></li>
+  <li>Liu, He, Zeng, …, Zhou. <i>WeDLM: Reconciling Diffusion Language Models with Standard Causal Attention for Fast Inference.</i> ICML 2026；本页读 arXiv v1。<a href="https://arxiv.org/abs/2512.22737">arXiv:2512.22737</a> · <a href="https://github.com/Tencent/WeDLM">代码</a> · <a href="https://huggingface.co/collections/tencent/wedlm">权重</a> · <a href="https://wedlm.github.io">项目页</a></li>
+  <li>Arriola et al. <i>Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models.</i> ICLR 2025. <a href="https://arxiv.org/abs/2503.09573">arXiv:2503.09573</a>（本路线 <a href="11-block-diffusion.html">第 11 页</a>）</li>
+  <li>Ye et al. <i>Dream 7B: Diffusion Large Language Models.</i> 2025. <a href="https://arxiv.org/abs/2508.15487">arXiv:2508.15487</a>（本路线 <a href="07-dream.html">第 07 页</a>）</li>
+  <li>vLLM / PagedAttention 背景：<a href="../ai-infra/03-vllm.html">AI Infra 路线 vLLM 页</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

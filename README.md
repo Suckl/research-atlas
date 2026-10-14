@@ -13,7 +13,9 @@
 
 **路线四：视频记忆（离开视野以后，世界还在吗？）** — 18 个拆解页、37 篇论文（2025–2026 为主），按记忆机制分六列：历史上下文（FramePack / TinyHistory、LCT / MoC）、循环状态（TTT-Video / SSM 世界模型 / RAD）、流式缓存（Self Forcing / LongLive / Rolling Forcing、WorldKV / Memory Forcing、WorldTrace / Learning to Retrieve）、历史检索（WorldMem / VRAG、Context-as-Memory / WorldPack、VMem、HyDRA / ActWorld）、三维状态（GEN3C / Spatial Memory、Voyager / LSM、PERSIST / Honeycomb、Matrix-Game 3.0 / 3.5）、叙事记忆（Captain Cinema / OneStory / StoryMem、IAMFlow / SlotMem、ShotStream / CausalCine）。每页用同一张“记忆的四个操作”表拆解；总览页有[记忆专测索引](tracks/video-memory/index.html#benchmarks)，时间线另含 42 条未展开的论文与评测；每页附简答题（共 36 题）。
 
-四条路线的总览页都有演化图（每列一条路线、按年自上而下，悬停高亮上下游）、完整时间线（未单独成页的重要论文以虚线节点 + arXiv 链接列出）和逐维度对比表。
+**路线五：扩散 LLM（不再从左到右）** — 19 个拆解页、47 篇论文，时间线 2021 → 2026-10，六个方向：噪声与目标（SEDD / RADD、MDLM / MD4、离散流匹配 / Edit Flows、Duo / 均匀噪声扩展律）、规模与配方（LLaDA / SMDM / iLLaDA、Dream / DiffuLLaMA、数据受限扩展律、LLaDA2.x、DiffusionGemma / Mercury / Seed Diffusion）、块扩散与混合（BD3-LM / Eso-LM、SDAR / Fast-dLLM v2 / WeDLM、TiDAR / Nemotron-Diffusion / DFlash）、缓存与并行解码（Fast-dLLM / dKV-Cache / D2F、dParallel / d3LLM / CDLM、Token Ordering / ParallelBench / Flexibility Trap）、后训练与代码（d1 / LLaDA 1.5 / TraceRL、DiffuCoder / Dream-Coder / Stable-DiffCoder）、多模态（MMaDA / LLaDA-V / LaViDa）。每页有“与自回归模型对照”表，速度数字附测量条件；总览页有[检查清单](tracks/dllm/index.html#eval)；每页附简答题（共 38 题）。
+
+五条路线的总览页都有演化图（每列一条路线、按年自上而下，悬停高亮上下游）、完整时间线（未单独成页的重要论文以虚线节点 + arXiv 链接列出）和逐维度对比表。
 
 ## 打开
 
@@ -29,7 +31,7 @@ python scripts/serve.py
 
 动机 → 全局架构（点击组件看说明，「逐步讲解」按前向/反向顺序高亮）→ 组件拆解（含交互演示）→ 张量形状追踪 → 训练目标与防坍塌 → 伪代码 → 关键超参 → 关键结果 → 承上启下 → 参考。
 
-交互演示：I-JEPA 多块掩码采样器、V-JEPA 时空掩码、块因果 / AdaLN 注意力掩码、CEM + MPC 玩具规划器、SIGReg（Epps–Pulley）二维梯度下降；AI Infra 路线另有 roofline / KV 计算器、PagedAttention 块表、投机解码加速比、集合通信分步演示；少步生成路线有二维玩具上的少步采样 / 配对回归 / DMD / 漂移场演示；视频记忆路线有“拆墙后回访”的四种记忆策略演示。
+交互演示：I-JEPA 多块掩码采样器、V-JEPA 时空掩码、块因果 / AdaLN 注意力掩码、CEM + MPC 玩具规划器、SIGReg（Epps–Pulley）二维梯度下降；AI Infra 路线另有 roofline / KV 计算器、PagedAttention 块表、投机解码加速比、集合通信分步演示；少步生成路线有二维玩具上的少步采样 / 配对回归 / DMD / 漂移场演示；视频记忆路线有“拆墙后回访”的四种记忆策略演示；扩散 LLM 路线有并行去掩码与因子分解误差的精确计算演示。
 
 ## 扩展
 
@@ -48,5 +50,6 @@ tracks/jepa/{index,00-foundations,01-i-jepa,…,11-robojepa}.html     tracks/jep
 tracks/ai-infra/{index,00-inference-basics,…,23-deepseek-v4}.html  tracks/ai-infra/SOURCES.md
 tracks/few-step/{index,01-foundations,…,17-virdm}.html            tracks/few-step/SOURCES.md
 tracks/video-memory/{index,01-foundations,…,18-shotstream}.html    tracks/video-memory/SOURCES.md
+tracks/dllm/{index,01-foundations,…,19-multimodal}.html            tracks/dllm/SOURCES.md
 scripts/{check,serve}.py
 ```
