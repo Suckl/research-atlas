@@ -173,7 +173,7 @@
     // progress = furthest point reached between the start of the reading content (#overview, else the full text)
     // and the end of the full text — so reading only the overview + section notes still counts
     const full = document.getElementById("fulltext-body");
-    const start = document.getElementById("overview") || full;
+    const start = document.getElementById("notes") || document.getElementById("overview") || full;
     let tm = 0;
     window.addEventListener("scroll", () => {
       clearTimeout(tm);

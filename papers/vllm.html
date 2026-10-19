@@ -18,6 +18,16 @@
 </head>
 <body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="vllm">
 <header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
 <div class="layout">
 <nav class="toc" aria-label="目录"></nav>
 <main class="content">
@@ -49,221 +59,410 @@
   <p class="w-note" style="margin-top:6px">被引次数与 GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
 </div>
 
-<h2 id="overview">粗读：这篇论文在做什么</h2>
-<div class="overview">
-<p class="lead">大模型推理服务的吞吐量，取决于一次能把多少个请求塞进同一个批里；而能塞多少，卡在显存——准确地说，卡在每个请求的 <b>KV 缓存</b>上。这篇论文发现，当时的推理系统把 KV 缓存当成一整块连续数组来分配，结果六到八成的 KV 显存其实被浪费了。作者的办法来自操作系统教科书：像虚拟内存那样，把 KV 缓存切成固定大小的“页”，按需分配、可以不连续、还能在请求之间共享。围绕这个想法，他们写了一个新的注意力内核 PagedAttention 和一套推理引擎 vLLM，在同样的延迟下把吞吐量提高到原来的 2–4 倍。vLLM 后来成为使用最广的开源推理引擎之一。</p>
-
-<h3 id="ov-why">1. 问题从哪来：推理服务卡在显存，而不是算力</h3>
-<p>LLM 生成文本是<b>自回归</b>的：每一步只产出一个 token，而且要用到之前所有 token 的 key 和 value 向量。为了不重复计算，系统把这些向量缓存下来，这就是 KV 缓存。单个请求的 KV 缓存很大：以 OPT-13B 为例，一个 token 就要 2（K 和 V）× 5120（隐藏维度）× 40（层数）× 2 字节 = 800 KB，一条 2048 token 的序列能占到 1.6 GB。一张 40 GB 的 A100 上跑 13B 模型，权重大约占 65% 的显存，留给 KV 缓存的只有 30% 左右。</p>
-<p>逐 token 解码时，每一步都要把权重和 KV 缓存从显存读一遍，却只做很少的计算，GPU 的算力大部分闲着。想把算力用起来，唯一的办法是把更多请求放进同一批一起算，而批能开多大，直接由 KV 缓存能装下多少个请求决定。作者还指出，从 A100 到 H100，算力涨了两倍多，显存上限却仍是 80 GB——内存只会越来越成为瓶颈。</p>
-
-<h3 id="ov-waste">2. 现有系统把显存浪费在了哪里</h3>
-<p>当时的系统（例如 FasterTransformer 和 Orca）沿用深度学习框架的习惯：张量必须放在连续内存里。可是一个请求最终会生成多长事先并不知道，于是系统只能按“最大可能长度”给每个请求预先分一整段连续空间。这带来三种浪费：</p>
-<ul>
-  <li><b>预留</b>：为将来才会生成的 token 提前占着位置，在请求结束前别人都用不了；</li>
-  <li><b>内部碎片</b>：按最大长度分配，而实际输出往往短得多，多出来的部分直到请求结束都空着；</li>
-  <li><b>外部碎片</b>：内存分配器（如 buddy 分配）在一段段连续空间之间留下的、谁也放不进去的缝隙。</li>
-</ul>
-<p>论文的测量显示，在现有系统里，真正用来存 token 状态的 KV 显存只有 <b>20.4%–38.2%</b>。另一个问题是共享：并行采样（一个 prompt 生成多个候选）和束搜索里，多个输出序列本来共用同一段 prompt，它们的 KV 缓存完全可以只存一份，但连续分配让每个序列都必须有自己独立的一段内存，共享无从谈起。</p>
-
-<h3 id="ov-idea">3. 核心想法：把操作系统的分页搬到 KV 缓存上</h3>
-<p>操作系统早就解决过同样的问题：进程以为自己拥有一段连续的地址空间（虚拟内存），实际的物理内存却被切成固定大小的页，按需分配、散落在各处，由页表负责翻译。vLLM 一一对应地搬过来：</p>
-<ul>
-  <li>每个请求的 KV 缓存被切成固定大小的 <b>KV 块</b>，每块存 \(B\) 个 token 的 K 和 V（默认 \(B=16\)）。块就是“页”，token 就是“字节”，请求就是“进程”。</li>
-  <li>每个请求看到的是一串连续的<b>逻辑块</b>；显存里的<b>物理块</b>可以在任何位置，由<b>块表</b>记录二者的映射。</li>
-  <li>生成过程中，只有当最后一个块写满了，才去申请一个新的物理块。</li>
-</ul>
-<p>这样一来，浪费只可能出现在每个请求的最后一个块里（最多 \(B-1\) 个空位）；又因为所有块一样大，外部碎片完全消失。KV 显存利用率因此接近 100%，同一张卡上可以同时容纳多得多的请求。</p>
-<p>代价是注意力计算不能再假设 K、V 是连续存放的。为此作者写了 <b>PagedAttention</b> 内核：计算第 \(i\) 个 token 的注意力时，它按块表逐块取出 K、V，分块算出注意力分数，再把各块的结果合起来，数学上与普通注意力完全等价。下面的小演示可以直接体验块表、按需分配和写时复制：</p>
-<div data-widget="paged-kv"></div>
-
-<h3 id="ov-share">4. 分页带来的额外好处：共享与写时复制</h3>
-<p>有了块表，共享就和操作系统里 <code>fork</code> 出的子进程共享内存一样自然。并行采样时，多个输出序列的块表都指向同一组存放 prompt 的物理块，每个物理块记一个<b>引用计数</b>。当某个序列要往一个被共享的块里写新 token 时，才把这个块复制一份再写，这就是<b>写时复制</b>（copy-on-write）。束搜索的共享更深：不同候选可能共用很长一段前缀，形成一棵树；某个候选被淘汰时，引用计数归零的块立即释放。服务方还可以把常用的系统 prompt 预先存好，新请求直接映射过去，就像多个进程共享同一个动态链接库。</p>
-<p>论文的测量：并行采样节省 6.1%–9.8%（Alpaca）或 16.2%–30.5%（ShareGPT）的 KV 显存，束搜索节省 37.6%–55.2%（Alpaca）或 44.3%–66.3%（ShareGPT）。</p>
-
-<h3 id="ov-sched">5. 显存不够了怎么办：抢占、换出与重计算</h3>
-<p>按需分配意味着可能出现“块用光了”的时刻。vLLM 采用先到先服务（FCFS）：需要腾空间时，先抢占最晚到达的请求。因为一个请求的所有块必须同时在显存里才能继续计算，被抢占时它的块要么全部移走、要么一个不动（<b>全有或全无</b>）。被移走的请求有两种恢复方式：</p>
-<ul>
-  <li><b>换出（swap）</b>：把块拷到 CPU 内存，之后再拷回来。CPU 上的交换空间不会超过 GPU 上分给 KV 缓存的大小。</li>
-  <li><b>重计算</b>：直接丢掉 KV 缓存，等它重新被调度时，把已经生成的 token 接到 prompt 后面，用一次 prefill 一口气算回来。</li>
-</ul>
-<p>哪种更好取决于块大小：块小时，换出会变成大量零碎的 CPU–GPU 小拷贝，PCIe 带宽用不满，重计算更划算；块大时换出更好。作者测到，重计算的开销从未超过换出延迟的 20%；块大小在 16 到 64 之间时，两者端到端性能相当。</p>
-
-<h3 id="ov-sys">6. 系统怎么搭起来</h3>
-<p>vLLM 由一个中心调度器和若干 GPU worker 组成。调度器维护所有请求的块表；多卡时采用 Megatron-LM 式的张量并行，每张卡只存自己那部分注意力头的 KV，但所有卡共用同一张块表，调度器每步把块表连同输入一起广播给各卡。整个引擎约 8.5K 行 Python 加 2K 行 C++/CUDA，前端用 FastAPI，兼容 OpenAI API。为了抵消分页带来的额外访存开销，作者把“写入块”“按块读取并做注意力”“批量块拷贝”都做成了融合内核。即便如此，PagedAttention 内核的注意力延迟仍比高度优化的 FasterTransformer 高 20%–26%，但多出的批大小带来的收益远大于这点开销。</p>
-
-<h3 id="ov-result">7. 结果：同样延迟下吞吐量提高 2–4 倍</h3>
-<p>实验用 OPT-13B / 66B / 175B 和 LLaMA-13B，在 A100 上回放两种真实请求分布：ShareGPT（ChatGPT 对话，输入输出都长）和 Alpaca（指令数据，较短）。指标是“归一化延迟”（每个请求的端到端延迟除以输出长度）随请求速率的变化，看系统在延迟不爆炸的前提下能扛住多高的请求速率。</p>
-<ul>
-  <li>ShareGPT 上，vLLM 能承受的请求速率是 Orca (Oracle) 的 1.7–2.7 倍、Orca (Max) 的 2.7–8 倍，最高是 FasterTransformer 的 22 倍。</li>
-  <li>以 OPT-13B 为例，vLLM 同时处理的请求数是 Orca (Oracle) 的 2.2 倍、Orca (Max) 的 4.3 倍——吞吐量的提升直接来自更大的批。</li>
-  <li>解码越复杂，优势越大：在 OPT-13B + Alpaca 上，相对 Orca (Oracle) 的提升从普通采样的 1.3 倍增加到束宽为 6 时的 2.3 倍。共享前缀的翻译任务中，吞吐量是 Orca (Oracle) 的 1.67 倍（单示例前缀）到 3.58 倍（五示例前缀）。</li>
-  <li>块大小 16 在大多数负载下都足够好：既能让 GPU 并行地读 KV，又不至于产生明显的内部碎片，于是成了默认值。</li>
-</ul>
-
-<h3 id="ov-read">8. 读这篇论文时要注意的几点</h3>
-<ul>
-  <li><b>基线是作者复现的。</b>Orca 没有公开实现，论文自己实现了三个版本：Orca (Oracle) 假设事先知道每个请求的真实输出长度，是无法实现的上界；Orca (Pow2) 最多过度预留 2 倍；Orca (Max) 总是按 2048 预留。FasterTransformer 本身没有调度器，也是作者给它加了一个动态批处理调度。</li>
-  <li><b>收益来自“显存受限”这个前提。</b>当 KV 显存充足、批已经足够大时，优势会缩小：论文自己也指出，在 OPT-175B + Alpaca 这种显存充裕、序列又短的设置下，vLLM 相对 Orca (Oracle) 和 Orca (Pow2) 的优势不明显。</li>
-  <li><b>分页并不是对所有 GPU 负载都有用。</b>作者在讨论部分说明：它之所以适合 LLM 推理，是因为输出长度事先未知、需要动态分配，性能又受显存容量限制；像深度学习训练这类张量形状固定的负载，分页反而只会带来额外开销。</li>
-</ul>
-
-<h3 id="ov-impact">9. 后来怎么样了</h3>
-<p>“把 KV 缓存当作可分页的内存”几乎成了此后所有推理引擎的默认做法。在本站的 AI Infra 路线里，它的直接后继包括：</p>
-<ul>
-  <li><a href="../tracks/ai-infra/04-sglang.html">SGLang</a> 把块级共享推广成基数树上的自动前缀复用；</li>
-  <li><a href="../tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a> 把 prefill 和 decode 拆到不同的 GPU 池；</li>
-  <li><a href="../tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储</a> 把 KV 进一步放进 CPU、SSD 和远端存储；</li>
-  <li><a href="../tracks/ai-infra/02-flashinfer.html">FlashInfer</a> 用一个统一的块稀疏抽象，覆盖分页、基数树等各种 KV 布局。</li>
-</ul>
-<p>想看 vLLM 的架构图拆解、块表与写时复制的分步演示，以及配套简答题，见<a href="../tracks/ai-infra/03-vllm.html">结构拆解页</a>。</p>
-</div>
-
 <h2 id="notes">逐节精读</h2>
-<p class="notes-intro">下面按论文自己的章节顺序，用本站的话把每一节讲一遍：先一句话说清这一节在干什么，再把过程和道理讲透，配上具体例子和算一遍的数字，最后标出容易读偏的地方。每节末尾可以跳到同一节的<b>全文翻译</b>，或打开 arXiv 上的<b>英文原文</b>对照。标“推算”的数字是本站根据论文数据算的，不是论文原话。</p>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文的原图都放在讲到它的地方，并说明这张图怎么看；原图没画到的概念，用示意图补上。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。读完这部分，不需要再看全文翻译也能完整理解这篇论文；想核对原文措辞时，每节末尾都有链接。</p>
 
 <section class="note">
-<h3 id="n-1">1 引言：吞吐量卡在哪</h3>
-<p class="note-gist">一句话：推理服务贵，降低成本靠提高吞吐量；吞吐量靠把更多请求放进一个批；批开多大，被 KV 缓存的显存管理卡住了。</p>
-<p>引言的逻辑是一条链。LLM 推理服务很贵，单个请求的成本是传统搜索的约 10 倍（论文引用的估算），所以每张卡每秒能服务多少请求（吞吐量）直接决定成本。逐 token 生成时，GPU 每一步都要把整份权重从显存读一遍，却只为批里的每个请求算一个 token——批越小，这次“读权重”分摊到的请求越少，算力越闲。所以提高吞吐量的关键是<b>同时处理更多请求</b>。</p>
-<p>那为什么不多放几个请求？因为每个请求都要在显存里占一份 KV 缓存，而当时的系统管理这份内存的方式很浪费：按最大长度预先划一整段连续空间，真正存了 token 的只有 20.4%–38.2%。另外，像并行采样、束搜索这些本来可以共用一部分 KV 的场景，在连续分配下也没法共用。</p>
-<p>论文的回答分两层：算法层是 PagedAttention（让注意力能读散落在各处的 KV 块），系统层是 vLLM（用分页的方式分配、共享、回收这些块）。结果是同等延迟下吞吐量提高 2–4 倍，序列越长、模型越大、解码方式越复杂，提升越明显。</p>
-<div class="note-warn"><b>读的时候注意：</b>论文里 “memory-bound” 有两层意思。一是<b>访存带宽受限</b>：解码时每一步都在读权重和 KV，算得很少；二是<b>显存容量受限</b>：显存装不下更多请求，批开不大。vLLM 直接解决的是第二个，但收益是通过第一个兑现的——容量省出来，批变大，每次读权重就能服务更多请求。</div>
-<p class="note-links"><a href="#s-1">读全文翻译 §1</a> · <a href="https://arxiv.org/html/2309.06180#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>像 ChatGPT 这样的服务，背后是一组 GPU 在不停地为成千上万个用户生成文字。服务商最关心的数字之一，是<b>一张 GPU 每秒能处理多少个请求</b>，也就是吞吐量。吞吐量翻倍，同样的硬件就能服务两倍的用户，单个请求的成本减半。</p>
+<p>这篇论文发现，当时主流的推理系统在吞吐量上留下了很大的空间，原因不在计算，而在内存管理：模型生成文字时，需要为每个请求保存一份叫 <b>KV 缓存</b> 的中间结果，而这些系统给 KV 缓存分配内存的方式非常浪费，导致一张 GPU 同时只能放下很少几个请求。作者借用了操作系统里管理内存的经典办法（虚拟内存和分页），重新设计了 KV 缓存的存放方式，并围绕它做了一个新的推理系统 <b>vLLM</b>。结果是在响应速度不变的前提下，吞吐量提高到原来的 2–4 倍。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么 GPU 同时处理的请求越多，吞吐量越高？</li>
+  <li>KV 缓存是什么，为什么它这么占显存？</li>
+  <li>当时的系统具体把显存浪费在了哪里？</li>
+  <li>“分页”是怎么解决这些浪费的，又顺带解决了什么问题？</li>
+  <li>显存不够用时 vLLM 怎么办？多张 GPU 时怎么办？</li>
+  <li>2–4 倍这个数字是在什么条件下测出来的，什么情况下优势会变小？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2309.06180#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="#s-abstract">摘要的全文翻译</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：吞吐量为什么上不去</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>推理服务很贵，降成本最直接的办法是让一张 GPU 每秒处理更多请求。要做到这一点，就得让 GPU 同时处理更多的请求。那么，是什么限制了 GPU 同时能处理的请求数？论文的答案是：每个请求都要在显存里占一块地方存 KV 缓存，而当时的系统分配这块地方的方式很浪费，显存很快就被“占满”了，实际上却有一大半是空着的。</div>
+
+<div class="note-pre"><b>先补一点背景：GPU 生成文字时，时间花在哪里。</b>
+<p>大模型每生成一个 token（大致相当于一个词或半个词），都要把整个模型从头到尾算一遍。模型的参数存在 GPU 的显存里，计算单元在芯片上。每算一步，都得先把参数从显存读到计算单元。以论文用的 130 亿参数模型 OPT-13B 为例，它的参数有 26 GB。A100-40GB 每秒大约能从显存读 1.5 TB 数据（NVIDIA 官方规格），光是把 26 GB 参数读一遍就要约 17 毫秒（推算）。</p>
+<p>如果一次只为一个请求生成 token，那么每 17 毫秒才产出一个 token，每秒约 60 个，而这期间 GPU 的计算单元大部分时间在等数据，几乎是闲着的。但如果把 32 个请求放在一起算（称为一个“批”，batch），参数只需要读一遍，就能同时为 32 个请求各算出一个 token。读参数的时间几乎不变，产出却变成了 32 倍。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：同样读一遍参数，批越大产出越多（OPT-13B，A100-40GB，理想化估算）</div>
+  <div class="dia-row"><span class="lbl">批大小 = 1</span><div class="dia-track"><span class="dia-seg w" style="flex:17">读参数 26 GB ≈ 17 ms</span><span class="dia-seg cmp" style="flex:0.6">算</span></div></div>
+  <div class="dia-out">每一步产出 1 个 token，约 60 token/秒</div>
+  <div class="dia-row"><span class="lbl">批大小 = 32</span><div class="dia-track"><span class="dia-seg w" style="flex:17">读参数 26 GB ≈ 17 ms</span><span class="dia-seg cmp" style="flex:2.4">算 32 份</span></div></div>
+  <div class="dia-out">每一步产出 32 个 token，约 1,900 token/秒</div>
+  <div class="dia-note">推算：读参数时间 = 26 GB ÷ 1.555 TB/s；计算时间示意，实际很小。这里忽略了读 KV 缓存的时间，后者会随批变大而增加，所以真实吞吐量达不到这个理想值，但趋势相同：批越大，读参数的开销被分摊得越开，吞吐量越高。</div>
+</div>
+
+<p>所以提高吞吐量的关键，就是<b>让一个批里同时容纳尽可能多的请求</b>。问题在于，每个请求在生成过程中都要在显存里占一份空间，用来保存它的 KV 缓存（下一节会详细解释它是什么）。显存的总量是固定的，参数已经占掉了一大块，剩下的空间能放下几个请求的 KV 缓存，批就最多能开多大。</p>
+<p>KV 缓存有两个让人头疼的特点。第一，它很大：一个请求可以占到上 GB。第二，它的大小一直在变：请求每多生成一个 token，KV 缓存就长一点；请求结束时，它就整个被释放。而一个请求最终会生成多长，开始时谁也不知道。</p>
+
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/memory-distribution.svg" alt="原文图 1 左" loading="lazy"><img src="vllm/fig/memory_batchsize.svg" alt="原文图 1 右" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左图是 OPT-13B 在 A100-40GB 上运行时显存的分配：参数占 26 GB（约 65%），KV 缓存占 30% 以上，剩下一小块给计算时的临时数据。右图上半部分的横轴是批大小（同时处理的请求数），纵轴是占用的显存：现有系统（橙色）的显存占用随批大小飞快上涨，批开到 8 左右就碰到了 40 GB 的上限；vLLM（蓝色）涨得慢得多，能开到约 40。下半部分是对应的吞吐量：现有系统停在批大小 8 时的水平，vLLM 随着批变大继续上升。这张图就是整篇论文的结论缩影：同样的显存，管理得好，就能放下几倍的请求。</figcaption></figure>
+
+<p>那么现有系统把显存浪费在了哪里？它们的做法是：一个请求一来，就按它<b>可能达到的最大长度</b>（比如 2048 个 token）一次性划出一整段连续的显存给它。可是大多数请求根本用不到最大长度，划出来却没用上的部分，别的请求也用不了。论文实测，在现有系统里，KV 缓存占用的显存中只有 20.4%–38.2% 真正存了数据，其余都浪费了。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/memory_breakdown.svg" alt="原文图 2" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>每根柱子是一个系统在 §6.2 实验中 KV 显存的去向，按百分比堆起来。绿色是真正存了 token 数据的部分，其余颜色都是浪费：黄色是为将来的 token 提前预留的，红色是内部碎片，灰色是外部碎片和其他。三个 Orca 版本是作者复现的对照系统（§6.1 会解释三者的区别），绿色只占 20.4%、26.8%、38.2%；vLLM 的绿色占 96.3%。</figcaption></figure>
+
+<p>除了浪费，还有一个问题：很多场景下不同的输出其实可以共用一部分 KV 缓存。比如让模型针对同一个问题给出 3 个不同的回答，这 3 个回答前面的问题部分是完全一样的，KV 缓存本来只需要存一份。但在“每个请求独占一整段连续显存”的做法下，没法让两个请求指向同一段数据，只能各存各的。</p>
+<p>论文的方案分两层。算法层是 <b>PagedAttention</b>：一种新的注意力计算方式，它允许 KV 缓存被切成小块、分散存放在显存的不同位置。系统层是 <b>vLLM</b>：它像操作系统管理内存页那样，按需给每个请求分配这些小块，并允许多个请求共享同一个小块。论文列出的贡献依次是：找出 KV 缓存管理的问题、提出 PagedAttention、实现 vLLM、在各种负载上验证效果。</p>
+<div class="note-warn"><b>读的时候容易混淆的一点：</b>论文里 “memory-bound” 这个词出现过两种意思。一种指<b>显存带宽</b>是瓶颈：每一步读数据的时间远多于计算的时间（上面示意图里读参数的那 17 毫秒）。另一种指<b>显存容量</b>是瓶颈：显存装不下更多请求的 KV 缓存，批开不大。vLLM 直接解决的是第二个问题，但它带来的收益是通过第一个问题兑现的：容量省出来之后批变大了，读一遍参数就能服务更多请求，吞吐量自然上去。</div>
+<p class="note-links"><a href="#s-1">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
 </section>
 
 <section class="note">
 <h3 id="n-2">2 背景：KV 缓存从哪来，批处理为什么难</h3>
-<h4>2.1 只有注意力会回头看</h4>
-<p class="note-gist">一句话：Transformer 里只有注意力层需要读“之前所有 token”的信息，而它读的就是那些 token 的 key 和 value 向量——这就是要缓存的东西。</p>
-<p>语言模型按“下一个词的条件概率”一个个地生成。每一层里，每个位置的输入先被三个矩阵分别映射成 query、key、value 三个向量；位置 \(i\) 的输出，是用自己的 query 去和第 1 到 \(i\) 个位置的 key 打分、做 softmax，再按分数加权求和那些位置的 value。其他计算（前馈网络、归一化等）都是各位置各算各的，不需要看别的位置。所以生成新 token 时唯一要“翻旧账”的地方，就是这些历史 key 和 value。</p>
-<h4>2.2 两个阶段：prompt 一次算完，生成一步一个</h4>
-<p class="note-gist">一句话：prompt 阶段能并行、算力吃得满；生成阶段每步只走一个 token、主要时间花在读内存上。</p>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节反复提到的 KV 缓存到底是什么？为什么生成文字时必须保存它？把多个请求放进一个批听起来很简单，实际做起来难在哪里？这一节交代后面所有设计的前提。</div>
+
+<h4 id="n-2-1">2.1 语言模型怎么生成文字，注意力在算什么</h4>
+<p>语言模型生成文字的方式是“接龙”：给定前面所有的词，预测下一个词最可能是什么；选出一个词接上去，再预测下一个，如此反复。数学上，一整句话的概率被拆成一连串条件概率的乘积：</p>
+<div class="formula">$$P(x_1,\dots,x_n)=P(x_1)\cdot P(x_2\mid x_1)\cdots P(x_n\mid x_1,\dots,x_{n-1})$$</div>
+<p>这意味着第 \(n\) 个词必须等前 \(n-1\) 个词都确定之后才能生成，生成过程天生是一个一个来的。</p>
+<div class="note-pre"><b>先补一点背景：注意力在做什么。</b>
+<p>Transformer 模型由很多层组成，每一层里，要决定“当前这个词该参考前面哪些词”，靠的是注意力机制。可以把它想成一次查资料：</p>
 <ul>
-  <li><b>prompt 阶段</b>：用户输入的 \(n\) 个 token 都已知，一次前向就能同时算出它们的 key、value，并得到第一个输出 token 的概率。这是矩阵乘矩阵，GPU 的并行能力用得很充分。</li>
-  <li><b>生成阶段</b>：之后每一步只输入上一步刚生成的那一个 token，算出它自己的 key、value，再和缓存里所有旧的 key、value 做注意力。这是矩阵乘向量，算得少、读得多，是推理延迟的大头。直到生成结束符或达到长度上限为止。</li>
+  <li>每个词先算出三个向量。<b>query</b>（查询）表示“我想找什么样的信息”；<b>key</b>（键）是这个词贴在自己身上的标签，表示“我能提供什么样的信息”；<b>value</b>（值）是这个词真正携带的内容。</li>
+  <li>处理第 \(i\) 个词时，拿它的 query 去和前面每一个词（第 1 到第 \(i\) 个）的 key 比相似度，得到一组分数；分数经过 softmax 变成加起来等于 1 的权重；再用这些权重把前面各个词的 value 加权平均，得到第 \(i\) 个词在这一层的输出。</li>
 </ul>
-<div class="note-warn"><b>容易忽略的一点：</b>同一个 token 出现在不同位置，它的 KV 是不一样的，因为每一层的输入都已经混入了它前面的上下文。所以 KV 只能在“前缀完全相同”的序列之间共享——这正是后面并行采样、束搜索、共享系统 prompt 能共享的前提。</div>
-<h4>2.3 批处理：从“等一整批”到“每一步都能进出”</h4>
-<p class="note-gist">一句话：把请求凑成批能分摊读权重的开销，但请求到达时间不同、长度差异巨大，简单地按批处理会让人干等；Orca 的迭代级调度解决了“等”，剩下的瓶颈就是显存。</p>
-<p>传统做法是按请求成批：凑齐一批一起跑，跑完再换下一批。问题是先到的请求要等后到的，短请求要陪长请求跑到底，还得把长度不齐的输入输出补齐（padding）。Orca 提出的<b>迭代级调度</b>改成每生成一个 token（一次迭代）就重新组批：做完的请求立刻离开，新请求下一步就能加入，也不需要补齐。这让批里能“同时在跑”的请求数主要取决于一件事——显存里能不能放下它们的 KV 缓存。vLLM 正是从这里接着往下做的。</p>
-<p class="note-links"><a href="#s-2">读全文翻译 §2</a> · <a href="https://arxiv.org/html/2309.06180#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · 相关：<a href="../tracks/ai-infra/15-orca-sarathi.html">Orca 拆解页</a></p>
+<div class="formula">$$a_{ij}=\frac{\exp\!\big(q_i^\top k_j/\sqrt{d}\big)}{\sum_{t=1}^{i}\exp\!\big(q_i^\top k_t/\sqrt{d}\big)},\qquad o_i=\sum_{j=1}^{i}a_{ij}\,v_j$$</div>
+<p>这里 \(q_i\)、\(k_j\)、\(v_j\) 分别是第 \(i\) 个词的 query 和第 \(j\) 个词的 key、value，\(d\) 是向量的维度（除以 \(\sqrt{d}\) 是为了让分数不至于太大）。\(a_{ij}\) 就是“第 \(i\) 个词有多关注第 \(j\) 个词”。</p>
+<p>关键的一点是：Transformer 一层里的其他计算（前馈网络、归一化等）都是每个词各算各的，<b>只有注意力需要用到前面所有词的信息</b>，而它用的就是前面那些词的 key 和 value。</p>
+</div>
+
+<h4 id="n-2-2">2.2 KV 缓存：为什么要存，存了什么</h4>
+<p>推理服务处理一个请求分两个阶段。</p>
+<p><b>第一个阶段处理用户的输入（prompt）。</b>用户输入了 \(n\) 个词，这些词全部已知，所以模型可以一次性把它们同时算完：算出每个词在每一层的 key 和 value，并预测出第一个输出词。这种“一大批数据同时算”的计算是矩阵乘矩阵，正好是 GPU 最擅长的，算力能用得很满。</p>
+<p><b>第二个阶段逐个生成输出。</b>从第一个输出词开始，每一步只输入上一步刚生成的那一个词，算出它自己的 query、key、value，然后用它的 query 去和<b>之前所有词</b>的 key、value 做注意力。前面那些词的 key 和 value 在之前的步骤里已经算过了，没有必要每一步都重新算一遍。于是系统把它们存下来，每一步只需要算新词的 key、value 并追加进去。这份存下来的数据就叫 <b>KV 缓存</b>。这个阶段一直持续到模型输出“结束”符号，或者达到长度上限为止。</p>
+<p>第二个阶段每一步只算一个词，是矩阵乘向量，计算量很小，却要把整份参数和这个请求的全部 KV 缓存读一遍，所以它的速度主要被读显存的速度限制，GPU 的算力用不满。推理服务的大部分时间都花在这个阶段。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>同一个词出现在句子的不同位置，它的 KV 缓存是不一样的。因为从第二层开始，每一层的输入已经混入了这个词前面的上下文。所以只有当两个序列<b>从开头起完全相同</b>时，它们这部分的 KV 缓存才一模一样、才能共用一份。后面讲的并行采样、束搜索、共享系统提示词能共享 KV，前提都是这一点。</div>
+
+<h4 id="n-2-3">2.3 批处理：为什么不能简单地“凑齐一批一起算”</h4>
+<p>第 1 节讲过，把多个请求放在一个批里一起算，能把读参数的开销分摊开，所以批越大越划算。但推理服务里的请求有两个特点，让批处理没那么简单：</p>
+<ul>
+  <li><b>请求到达的时间不一样。</b>如果一定要凑齐一批再开始算，先到的请求就得干等后到的；如果一批开始算了，新来的请求就得等这一批全部结束。</li>
+  <li><b>请求的长度差别极大。</b>有的请求只需要生成 10 个词，有的要生成 1000 个。如果一批里的请求要同进同出，短的请求算完了也不能离开，只能陪着最长的那个一起跑完；它们的位置空转着，还得用无意义的填充数据（padding）把长度补齐。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：按请求成批 vs 按迭代成批（每格是一次生成一个 token 的迭代）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td colspan="11" class="gsub">① 按请求成批：这一批全部结束，下一批才能进来</td></tr>
+    <tr><td class="lbl">请求 1（长）</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td></tr>
+    <tr><td class="lbl">请求 2（短）</td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td></td><td></td></tr>
+    <tr><td class="lbl">请求 3（第 3 步才到）</td><td></td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td colspan="11" class="gsub">② 按迭代成批：每一步都可以有请求离开、有请求加入</td></tr>
+    <tr><td class="lbl">请求 1（长）</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td></tr>
+    <tr><td class="lbl">请求 2（短）</td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">请求 3（第 3 步才到）</td><td></td><td></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">蓝色 = 正在生成；红色 = 已经生成完却只能陪跑（占着位置、算填充数据）；斜纹 = 已经到达却只能排队。按迭代成批时，请求 2 生成完立刻离开，空出的位置第 3 步就给了新来的请求 3。</div>
+</div>
+<p>为了解决这两个问题，Orca 等系统提出了<b>迭代级调度</b>：不再按“一整个请求”来组批，而是每生成一个 token（称为一次迭代）就重新组一次批。哪个请求生成完了就立刻移出，新到的请求下一次迭代就能加进来，也不再需要填充。这样，排队等待和陪跑的浪费都没了。</p>
+<p>但这也把问题推到了另一个地方：既然随时都可以加入新请求，那批里最多能同时有多少个请求，就只取决于一件事——<b>显存里能不能放下它们的 KV 缓存</b>。vLLM 正是从这里接着往下做的。</p>
+<p class="note-links"><a href="#s-2">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · 相关：<a href="../tracks/ai-infra/15-orca-sarathi.html">Orca 拆解页</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-3">3 内存挑战：KV 有多大，现有系统浪费在哪</h3>
-<p class="note-gist">一句话：KV 缓存又大、又不知道最终多长、还会被共享，而当时的系统用“按最大长度预留一整段连续内存”来对付它，结果大部分都浪费了。</p>
-<p><b>先算一笔账。</b>OPT-13B 每个 token 的 KV 要 2（K 和 V）× 5120（隐藏维度）× 40（层数）× 2 字节（FP16）= 800 KB；一条 2048 token 的序列就是 1.6 GB。论文表 1 给出：40 GB 的 A100 上跑 13B 模型，参数占 26 GB，留给 KV 的只有 12 GB，最多约 15.7K 个 token 的位置。</p>
-<div class="note-eg"><b>推算一下：</b>如果每个请求都按最大长度 2048 预留，这 15.7K 个位置只够同时服务 15.7K ÷ 2048 ≈ 7 个请求——哪怕大多数请求实际只生成几百个 token。而 ShareGPT 这类真实对话的平均长度远小于 2048，按实际长度算本来可以放下多得多的请求。这就是“浪费”的直观含义。</div>
-<p>论文还指出三个让问题更难的因素：GPU 算力增长比显存快（A100 到 H100 算力翻倍多，显存上限仍是 80 GB）；并行采样、束搜索这类解码天然有可共享的 KV（例如并行采样中 prompt 部分约占 KV 的 12%，束搜索最多能省 55%）；而输入输出长度事先未知，系统要能随时扩容、在显存不够时把一些请求“请出去”。</p>
-<h4>3.1 现有系统的三种浪费</h4>
-<p>当时的深度学习框架要求张量放在连续内存里，于是现有系统给每个请求按“最大可能长度”一次性划一整段（图 3 的例子：请求 A 最长 2048，请求 B 最长 512）。浪费分三种：</p>
+<h3 id="n-3">3 内存的挑战：KV 缓存有多大，现有系统怎么浪费的</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KV 缓存到底有多大，大到什么程度会限制批的大小？除了大，它还有哪些特点让内存管理变难？当时的系统是怎么给它分配显存的，这种分配方式具体在哪几个地方造成浪费？</div>
+
+<p><b>先算一下 KV 缓存有多大。</b>每生成一个 token，模型的每一层都要存下它的一个 key 向量和一个 value 向量。以 OPT-13B 为例：</p>
+<div class="formula">$$\underbrace{2}_{\text{key 和 value}}\times\underbrace{5120}_{\text{向量维度}}\times\underbrace{40}_{\text{层数}}\times\underbrace{2\ \text{字节}}_{\text{FP16 每个数}}=800\ \text{KB / token}$$</div>
+<p>也就是说，一个 token 的 KV 缓存要 800 KB。OPT 最长能处理 2048 个 token，一个请求写满时 KV 缓存就是 1.6 GB。</p>
+<div class="dia">
+  <div class="dia-title">示意图：A100-40GB 上跑 OPT-13B，显存怎么分（数字来自原文表 1）</div>
+  <div class="dia-row"><span class="lbl">40 GB 显存</span><div class="dia-track"><span class="dia-seg w" style="flex:26">参数 26 GB</span><span class="dia-seg kv" style="flex:12">KV 缓存 12 GB</span><span class="dia-seg oth" style="flex:2">其他</span></div></div>
+  <div class="dia-out">12 GB 的 KV 缓存空间，最多能放下约 15.7K 个 token 的 KV。</div>
+  <div class="dia-row"><span class="lbl">每个请求都按 2048 预留</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span></div></div>
+  <div class="dia-out">15.7K ÷ 2048 ≈ 7：同一时刻最多只能服务 7 个请求，哪怕它们实际只生成了几百个 token。</div>
+  <div class="dia-row"><span class="lbl">按实际用量分配</span><div class="cells"><span class="cell b">1</span><span class="cell b">2</span><span class="cell b">3</span><span class="cell b">4</span><span class="cell b">5</span><span class="cell b">6</span><span class="cell b">7</span><span class="cell b">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell b">12</span><span class="cell b">…</span><span class="cell b">31</span></div></div>
+  <div class="dia-out">假设平均每个请求实际只用 500 个 token 的位置（示意值），就能同时放下约 31 个请求。</div>
+  <div class="dia-note">“7 个请求”和“31 个请求”都是推算，用来说明数量级；真实请求的长度分布见原文图 11。</div>
+</div>
+<p>更麻烦的是，显存涨得比算力慢。论文举了个例子：从 A100 到 H100，计算能力提高了两倍多，显存最大却还是 80 GB。模型越来越大、算力越来越强，KV 缓存占用的显存只会越来越成为瓶颈。</p>
+<p>除了大，KV 缓存还有三个特点，让内存管理更难：</p>
 <ul>
-  <li><b>预留</b>：将来才会生成的 token 的位置被提前占着。这些位置最终会被用上，但在那之前谁也用不了。</li>
-  <li><b>内部碎片</b>：请求实际比最大长度短，多划的部分直到请求结束都空着——而且要等请求结束才知道空了多少。</li>
-  <li><b>外部碎片</b>：内存分配器（如伙伴分配器）在一段段连续空间之间留下的小缝隙，大小不够放下新的整段，永远用不上。</li>
+  <li><b>能被共享。</b>有些解码方式会针对同一个输入生成多个输出。比如代码补全常常一次给出几个候选（并行采样），输入部分的 KV 缓存就可以让几个候选共用一份；论文的实验里，这部分占全部 KV 缓存的约 12%。束搜索（§4.4 会解释）能共享的部分更多，最多能省下 55% 的显存。但共享的模式会随着生成过程不断变化。</li>
+  <li><b>长度事先未知。</b>输入有长有短，输出更是要等生成结束才知道多长。系统必须能随时给请求追加空间。</li>
+  <li><b>可能突然不够用。</b>既然长度不可预测，就可能出现显存被占满、某个请求再也追加不了空间的情况。这时系统得把一些请求暂时“请出去”，比如把它们的 KV 缓存删掉，或者搬到别的地方。</li>
 </ul>
-<p>“压缩整理内存”（compaction）在这里也不现实：KV 动辄几十 GB，频繁搬动代价太大；而且就算整理了，每个请求独占一整段的做法仍然让共享无从谈起。</p>
-<p class="note-links"><a href="#s-3">读全文翻译 §3</a> · <a href="https://arxiv.org/html/2309.06180#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · 配图：<a href="#f-S2.F3">图 3</a></p>
+
+<h4 id="n-3-1">3.1 现有系统怎么分配显存，浪费在哪</h4>
+<div class="note-pre"><b>先补一点背景：为什么张量要连续存放。</b>
+<p>在 PyTorch 这类深度学习框架里，一个张量（多维数组）通常存放在一段连续的内存里，程序只需要记住起始地址和每一维的步长，就能算出任何一个元素在哪里。几乎所有计算内核都默认这种布局。所以当时的推理系统也很自然地把一个请求的 KV 缓存存成一个连续的张量：第 1 个 token 的 KV 紧挨着第 2 个，第 2 个紧挨着第 3 个……</p>
+<p>问题是，连续存放要求事先知道需要多大一段。而一个请求最终生成多长事先不知道，所以系统只能按<b>最大可能长度</b>一次性划出一整段，比如按 2048 个 token 划。这就是浪费的根源。</p>
+</div>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/baseline-memory-management.svg" alt="原文图 3" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>一条长长的格子代表 KV 缓存的显存，每个格子能存一个 token 的 KV。请求 A 的最大长度是 2048，请求 B 是 512，系统分别为它们划出一整段连续的格子。每段的开头存着已经生成的 token，后面是三种浪费：为将来的 token 预留的格子（reserved），因为按最大长度分配、注定用不上的格子（internal fragmentation），以及两段之间零碎的空隙（external fragmentation）。图里还特意提醒：同一个词出现在不同位置，KV 是不同的（呼应 §2.2）。</figcaption></figure>
+<p>把这三种浪费用一个比喻讲一遍。设想一家酒店按“团”分配房间，而且同一个团的房间必须在走廊上连成一排：</p>
+<ul>
+  <li><b>预留</b>：一个团说最多来 2048 人，酒店就先把 2048 间连着的房锁给它；客人是陆陆续续到的，这些房间最终可能会住上人，但在住上之前，别的团也不能用。论文特别指出，预留的空间就算最终被用上，在请求的整个生命周期里一直占着，本可以先拿去服务别的请求。</li>
+  <li><b>内部碎片</b>：这个团最后只来了 300 人，剩下的 1748 间房从头到尾都空着。更糟的是，直到这个团退房，酒店才知道到底空了多少。</li>
+  <li><b>外部碎片</b>：一段段整排分配下来，走廊上会留下一些零散的空房间，每一处都凑不够下一个团需要的整排，于是永远也分不出去。这部分在请求开始之前就已经注定浪费。</li>
+</ul>
+<p>原文图 2 测出的结果是：在现有系统里，KV 缓存显存只有 20.4%–38.2% 真正存了 token 数据。</p>
+<p>操作系统里有一个对付碎片的经典办法：<b>内存紧缩</b>（compaction），也就是把分散的已用空间挪到一起，腾出整块的空地。但 KV 缓存动辄几十 GB，推理服务又对延迟很敏感，频繁地挪动这么大的数据不现实。而且就算挪了，每个请求独占一整段连续空间的做法，仍然让不同请求之间没办法共享同一份 KV 缓存。要同时解决浪费和共享两个问题，得换一种根本不要求连续存放的做法。</p>
+<p class="note-links"><a href="#s-3">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-4">4 方法：分页、共享、调度、多卡</h3>
-<p class="note-gist">一句话：一个中心调度器管着所有请求的“块表”，GPU 上的 KV 被切成一样大的块；注意力内核按块表去取块。后面所有能力（按需分配、共享、抢占、多卡）都建立在这一层映射上。</p>
-<p>整体结构（图 4）：一个<b>中心调度器</b>，里面有 KV 缓存管理器，负责为每个请求维护块表；若干 <b>GPU worker</b>，每个上面有一个块引擎，开机时就把一大段显存切成固定大小的物理块；另有一个 CPU 侧的块分配器，用于把块换出到内存。</p>
+<h3 id="n-4">4 方法：把操作系统的分页搬到 KV 缓存上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>既然“每个请求独占一整段连续显存”是浪费和无法共享的根源，那能不能让一个请求的 KV 缓存分散地存在显存的不同位置，用到多少就分配多少？这样做之后，注意力还能不能正常计算？共享、显存不够用、多张 GPU 这些情况又怎么处理？这一节是全文的核心，作者的思路几乎全部来自操作系统课本，所以先把那部分背景讲清楚。</div>
 
-<h4>4.1 PagedAttention：让注意力读得懂“分页”的 KV</h4>
-<p>把每个序列的 K、V 按每 \(B\) 个 token 切成一块（论文默认 \(B=16\)）。算第 \(i\) 个 token 的注意力时，内核拿着这条序列的块表，一块一块地把 K、V 取出来：先用 query 和每一块里的 key 算出分数，所有块的分数一起做 softmax，再用这些权重去加权各块里的 value，最后加起来。数学上和普通注意力完全一样，区别只在于<b>数据不再要求连续存放</b>。</p>
-<div class="note-eg"><b>论文的例子（图 5）：</b>句子 “Four score and seven years ago our fathers brought forth”，块大小 4。三个块分别装着 “Four score and seven”、“years ago our fathers”、“brought forth”，在显存里的位置毫不相邻。生成 “forth” 之后的那个 token 时，query 依次和三个块里的 key 打分，再取对应的 value——内核只需要知道这三块各在哪。</div>
-
-<h4>4.2 KV 缓存管理器：逻辑块与物理块</h4>
-<p>每个请求看到的是一串从左往右填的<b>逻辑块</b>；显存里真正的<b>物理块</b>可以在任何位置。<b>块表</b>的每一项记两样东西：这个逻辑块对应哪个物理块，以及里面已经填了几个 token。逻辑上连续、物理上分散，和操作系统里“进程看到连续地址、内存其实一页一页散着放”是一回事。好处是 KV 可以随着生成一点点长，不用提前为所有位置预留。</p>
-
-<h4>4.3 走一遍解码过程</h4>
-<div class="note-eg"><b>按图 6 走一遍：</b>prompt 有 7 个 token，块大小 4。<br>
-① prompt 阶段只分配需要的：逻辑块 0、1 映射到物理块 7、1；块 1 里填了 3 个，剩 1 个空位留给下一个 token。<br>
-② 第一次解码：新 token 正好填进块 1 的空位，块表里“已填数”从 3 变 4，不用分配新块。<br>
-③ 第二次解码：块 1 满了，这时才去申请一个新的物理块（物理块 3），作为逻辑块 2。</div>
-<p>多个请求同时跑时（图 7），它们的块在显存里交错摆放，互不干扰。每个请求最多只浪费最后一块里没填满的那几个位置，所以浪费被限制在“每个序列不到一个块”。块越大，内核一次能并行处理的位置越多、越快；但最后一块里可能空着的位置也越多——这个取舍在 §7.2 里实测。</p>
-
-<h4>4.4 其他解码方式：共享与写时复制</h4>
+<div class="note-pre"><b>先补一点背景：操作系统的虚拟内存和分页。</b>
+<p>操作系统同时运行很多程序，每个程序都觉得自己拥有一大段从 0 开始的、连续的内存地址，这叫<b>虚拟内存</b>。实际上，物理内存被切成很多大小相同的小块，叫<b>页</b>（常见大小 4 KB）。程序眼里连续的地址，被一页一页地映射到物理内存里任意位置的页上；记录“程序的第几页对应物理内存的第几页”的表叫<b>页表</b>。</p>
+<p>这样做有三个好处，后面 vLLM 都会用到：</p>
 <ul>
-  <li><b>并行采样</b>（一个 prompt 生成多个候选，比如代码补全给你几个备选）：几个候选的块表都指向同一组存 prompt 的物理块，每个物理块记一个引用计数。某个候选要往被共享的块里写新 token 时，先复制一份再写（写时复制）。<br><span class="note-eg-inline">图 8 的例子：A1、A2 共享物理块 7 和 1（引用计数都是 2）。A1 要写块 1 时发现计数是 2，于是复制出物理块 3 来写，块 1 的计数降到 1；轮到 A2 写时计数已是 1，直接写块 1，不用再复制。</span></li>
-  <li><b>束搜索</b>：候选之间共享的不只是 prompt，还有生成到一半的公共前缀，形状像一棵不断分叉、剪枝的树（图 9）。某个候选被淘汰时，它独占的块引用计数归零，立刻释放。以前的系统在候选切换时要整段复制 KV，这里最多只复制一块。</li>
-  <li><b>共享前缀</b>：很多请求共用同一段系统 prompt（任务说明 + 示例）。服务方可以预先算好这段的 KV 存成一组物理块，新请求直接映射过去，只需算用户自己那部分输入——就像多个进程共享同一个动态链接库（最后一块同样标成写时复制）。</li>
-  <li><b>混合解码</b>：因为所有共享关系都藏在块表这一层，注意力内核只看到“每个序列的一串物理块编号”，所以用贪心、采样、束搜索的请求可以放进同一批一起算。</li>
+  <li><b>按需分配</b>：程序声明要一大段内存时，操作系统并不马上给它全部的物理页，而是等它真正用到某一页时才分配。</li>
+  <li><b>不怕碎片</b>：所有页一样大，任何一个空闲的物理页都能分给任何程序，不存在“空地太零碎、凑不出一整段”的问题。</li>
+  <li><b>可以共享</b>：两个程序的页表可以指向同一个物理页。比如一个程序用 <code>fork</code> 复制出一个子程序时，操作系统并不真的复制内存，而是让父子两个程序的页表都指向同一批物理页，并给每个物理页记一个<b>引用计数</b>（有几个程序在用它）。只有当其中一个要修改某一页时，才把那一页复制一份给它单独改，这叫<b>写时复制</b>（copy-on-write）。</li>
 </ul>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：操作系统的分页 与 vLLM 的 KV 分块，是同一套思路</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">程序 A 的第 0、1、2 页<small>程序眼里地址连续</small></span><span class="dia-arrow">→</span><span class="dia-box reg">页表<small>0→物理页 7，1→物理页 1，2→物理页 3</small></span></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">物理内存：</span><div class="cells"><span class="cell">0</span><span class="cell a">1</span><span class="cell">2</span><span class="cell a">3</span><span class="cell">4</span><span class="cell b">5</span><span class="cell">6</span><span class="cell a">7</span><span class="cell b">8</span></div></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">请求 A 的第 0、1、2 个逻辑块<small>每块存 4 个 token 的 KV</small></span><span class="dia-arrow">→</span><span class="dia-box reg">块表<small>0→物理块 7，1→物理块 1，2→物理块 3</small></span></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">显存中的物理块：</span><div class="cells"><span class="cell">0</span><span class="cell a">1</span><span class="cell">2</span><span class="cell a">3</span><span class="cell">4</span><span class="cell b">5</span><span class="cell">6</span><span class="cell a">7</span><span class="cell b">8</span></div></div>
+    </div>
+  </div>
+  <div class="dia-note">蓝色是程序 A / 请求 A 占用的物理页（块），绿色是另一个程序 / 请求占用的。对应关系：页 ↔ KV 块，字节 ↔ token，程序 ↔ 请求，页表 ↔ 块表。</div>
+</div>
 
-<h4>4.5 调度与抢占：显存不够了怎么办</h4>
-<p>按需分配意味着可能出现物理块用光的时刻，必须请一些请求先让出来。vLLM 的规则：</p>
+<p>vLLM 的整体结构如下图。左边是一个<b>中心调度器</b>，它决定每一步哪些请求参与计算，并通过 <b>KV 缓存管理器</b> 记录每个请求的块表；右边是若干个 <b>GPU worker</b>，每个 worker 管一张 GPU，上面有模型的一部分和存放 KV 块的显存。调度器还管着两个“块分配器”：一个分配 GPU 上的块，一个分配 CPU 内存里的块（用于显存不够时把块挪出去，见 §4.5）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/system-overview.png" alt="原文图 4" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>vLLM 的系统总览。调度器（Scheduler）里有 KV 缓存管理器（KV Cache Manager），它维护所有请求的块表，并通过 CPU 块分配器和 GPU 块分配器分配物理块。下面每个 worker 持有模型的一个分片（Model Shard）和一个缓存引擎（Cache Engine），后者负责在 GPU 上实际存放 KV 块。调度器每一步把指令发给所有 worker。</figcaption></figure>
+
+<h4 id="n-4-1">4.1 PagedAttention：让注意力能读“分散存放”的 KV</h4>
+<p>要把 KV 缓存切块分散存放，首先得解决一个问题：原来的注意力计算内核假设一个请求的所有 key 和 value 都连续地排在一起，按偏移量直接读。如果它们被切成小块散落在显存各处，原来的内核就读不对了。PagedAttention 就是一个能处理这种布局的注意力算法。</p>
+<p>具体做法是：把每个请求的 KV 缓存按每 \(B\) 个 token 切成一块（\(B\) 叫块大小，vLLM 默认取 16）。第 1 到第 \(B\) 个 token 的 key 放在第 0 块，第 \(B+1\) 到第 \(2B\) 个放在第 1 块，依此类推，value 也一样。计算第 \(i\) 个 token 的注意力时，内核拿着这个请求的块表，一块一块地去取：</p>
+<ol>
+  <li>取出第 0 块的 \(B\) 个 key，和当前 token 的 query 分别算出相似度分数；</li>
+  <li>取出第 1 块，同样算出 \(B\) 个分数……直到最后一块；</li>
+  <li>把所有块的分数放在一起做 softmax，得到权重；</li>
+  <li>再一块一块地取出 value，按权重加权求和，得到输出。</li>
+</ol>
+<p>写成公式，就是把前面那个注意力公式里的“逐个 token”换成“逐块”：</p>
+<div class="formula">$$A_{ij}=\frac{\exp\!\big(q_i^\top K_j/\sqrt{d}\big)}{\sum_{t=1}^{\lceil i/B\rceil}\exp\!\big(q_i^\top K_t\mathbf{1}/\sqrt{d}\big)},\qquad o_i=\sum_{j=1}^{\lceil i/B\rceil}V_j\,A_{ij}^\top$$</div>
+<p>这里 \(K_j\)、\(V_j\) 是第 \(j\) 块里 \(B\) 个 token 的 key、value 拼成的矩阵，\(A_{ij}\) 是第 \(i\) 个 token 对第 \(j\) 块里每个 token 的注意力权重（一行 \(B\) 个数），分母是对所有块、所有 token 的分数求和。只要你把它展开，就会发现它和普通注意力的计算结果<b>完全相同</b>。PagedAttention 改变的只是“去哪里读数据”，不改变“算什么”，所以对模型的输出没有任何影响，也不需要重新训练模型。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/pagedattention.svg" alt="原文图 5" loading="lazy"></div>
+<figcaption><b>原文图 5。怎么看：</b>句子 “Four score and seven years ago our fathers brought forth” 被切成三块（块大小 4）：“Four score and seven”、“years ago our fathers”、“brought forth”，它们的 key、value 分别存在显存中三个互不相邻的位置。正在处理的 token 是 “forth”，它的 query 依次和三块里的 key 计算分数，再取对应的 value。内核只需要知道这三块各在哪里。</figcaption></figure>
+
+<h4 id="n-4-2">4.2 KV 缓存管理器：逻辑块、物理块与块表</h4>
+<p>有了能读分散数据的注意力内核，剩下的就是怎么管理这些块。这部分几乎是虚拟内存的一一对应：</p>
 <ul>
-  <li><b>谁让</b>：先到先服务（FCFS），所以先抢占最晚到的请求，保证公平、不饿死老请求。</li>
-  <li><b>让多少</b>：一个序列算下一步时，它所有的块都必须在显存里，所以要么全部移走、要么一块不动（全有或全无）。束搜索的几个候选这类有共享关系的序列组成一组，一起调度。</li>
-  <li><b>怎么回来</b>：两种办法。<b>换出</b>——把块拷到 CPU 内存，回来时再拷回；CPU 上占的空间不会超过 GPU 上 KV 的总量。<b>重计算</b>——直接丢掉 KV，回来时把“原 prompt + 已生成的部分”当成新的 prompt 一次性算回来；因为这一步是 prompt 阶段那样的并行计算，比当初一步步生成快得多。</li>
+  <li>每个请求看到的是一串<b>逻辑块</b>，从左往右依次填满。最后一个逻辑块通常没填满，空着的位置留给接下来生成的 token。</li>
+  <li>每张 GPU 上的<b>块引擎</b>在启动时就申请好一大片显存，把它切成许多大小相同的<b>物理块</b>。</li>
+  <li><b>块表</b>记录每个逻辑块对应哪个物理块，以及这个块里已经填了几个 token。</li>
 </ul>
+<p>逻辑块和物理块分开之后，一个请求的 KV 缓存就可以边生成边长，每次只在需要时才多要一个物理块，不必为还没生成的内容提前预留空间。这一下就消除了上一节说的大部分浪费：没有按最大长度划出的大段空间，就没有内部碎片和长期占着的预留；所有物理块一样大，任何空闲块都能给任何请求用，也就没有外部碎片。唯一可能浪费的，是每个请求最后一块里还没填满的几个位置，最多 \(B-1\) 个。</p>
+<p>下面这个小演示可以直接操作：给几个请求生成 token，看块表怎么记录、物理块怎么按需分配、共享和写时复制怎么发生。</p>
+<div data-widget="paged-kv"></div>
 
-<h4>4.6 多卡：一张块表，所有卡共用</h4>
-<p>模型太大时用 Megatron-LM 式的张量并行，把每层的注意力头分到多张卡上。关键观察是：每张卡处理的是同样的 token、需要同样位置的 KV，只是各自只存自己那部分注意力头。所以调度器里只维护一张块表，所有卡共用同一套物理块编号。每一步，调度器把这批请求的输入 token 和块表广播给所有卡；各卡按块表读自己那份 KV、算完自己的部分，卡与卡之间用 all-reduce 同步中间结果（不经过调度器），最后把采样出的 token 交回调度器。内存管理全在调度器里，卡之间不需要再同步“谁用了哪块”。</p>
-<p class="note-links"><a href="#s-4">读全文翻译 §4</a> · <a href="https://arxiv.org/html/2309.06180#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · 配图：<a href="#f-S4.F4">图 4</a> · <a href="#f-S4.F5">图 5</a> · <a href="#f-S4.F6">图 6</a> · <a href="#f-S4.F8">图 8</a> · <a href="#f-S4.F9">图 9</a></p>
+<h4 id="n-4-3">4.3 走一遍：一个请求的解码过程</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/logical-and-physical-block-table.svg" alt="原文图 6" loading="lazy"></div>
+<figcaption><b>原文图 6。怎么看：</b>左边是请求 A 的逻辑块，中间是块表（每行记录物理块编号和已填个数），右边是显存里的物理块。圆圈里的数字 ①②③ 对应下面三个步骤；箭头表示逻辑块被映射到哪个物理块。</figcaption></figure>
+<p>论文用图 6 演示了一个请求从开始到生成两个新 token 的过程。请求的输入是 7 个词 “Four score and seven years ago our”，块大小是 4。</p>
+<ol>
+  <li><b>① 处理输入。</b>7 个词需要 2 个块。vLLM 只分配这 2 块：逻辑块 0 映射到物理块 7，存 “Four score and seven”；逻辑块 1 映射到物理块 1，存 “years ago our”，块里填了 3 个，还剩 1 个空位。注意，它并没有像现有系统那样一上来就为 2048 个 token 预留空间。</li>
+  <li><b>② 生成第一个词 “fathers”。</b>它的 KV 正好可以放进逻辑块 1 剩下的那个空位，不需要新的物理块，只要把块表里逻辑块 1 的“已填个数”从 3 改成 4。</li>
+  <li><b>③ 生成第二个词 “brought”。</b>逻辑块 1 已经满了，这时 vLLM 才去申请一个新的物理块（物理块 3），作为逻辑块 2，并把 “brought” 的 KV 存进去，块表新增一行。</li>
+</ol>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/multi-sequence-block-mapping.svg" alt="原文图 7" loading="lazy"></div>
+<figcaption><b>原文图 7。怎么看：</b>两个请求 A、B 同时在跑时，它们的逻辑块被映射到显存里交错分布的物理块上，互不干扰。每个请求最多只浪费自己最后一块里没填满的位置。</figcaption></figure>
+<p>块大小 \(B\) 的选择是一个权衡。块越大，注意力内核一次能并行处理的位置越多，GPU 用得越充分，速度越快；但最后一块里可能空着的位置也越多，浪费变大，而且能和别的请求共享的机会变少（共享以块为单位，块越大越难整块相同）。§7.2 用实验比较了不同块大小，结论是 16 在大多数情况下最好。</p>
+
+<h4 id="n-4-4">4.4 其他解码方式：共享与写时复制</h4>
+<p>前面讲的是最简单的情况：一个输入生成一个输出。实际应用里还有几种更复杂的生成方式，它们恰好都有大量可以共享的 KV 缓存。有了块表，共享就和操作系统里两个程序共享物理页一样自然。</p>
+<p><b>并行采样。</b>代码补全工具常常针对同一段代码给出好几个候选，让用户挑一个。这几个候选的输入完全相同，所以输入部分的 KV 缓存只需要存一份：几个候选的块表都指向同一组物理块，每个物理块记录被几个候选引用着。直到某个候选要往一个被共享的块里写新内容时，才把这一块复制一份给它单独写。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/parallel-decoding.svg" alt="原文图 8" loading="lazy"></div>
+<figcaption><b>原文图 8。怎么看：</b>两个候选 A1、A2 共享同一个输入，它们的逻辑块 0 和 1 都指向物理块 7 和 1，所以这两个物理块的引用计数都是 2。生成阶段两个候选开始写不同的内容，这时触发写时复制，见下面的分步说明。</figcaption></figure>
+<p>写时复制的过程是这样的。输入 “Four score and seven years ago our” 占了两块，第二块（物理块 1）里还剩一个空位。A1 先生成了一个词，要写进这个空位，但 vLLM 发现物理块 1 的引用计数是 2，说明 A2 也在用它，直接写会把 A2 的数据改坏。于是 vLLM 新分配物理块 3，把物理块 1 的内容复制过去，让 A1 写在物理块 3 里，并把物理块 1 的引用计数减成 1。轮到 A2 写时，物理块 1 的引用计数已经是 1，说明只有它自己在用，就直接写进去，不再复制。总的来说，几个候选之间共享了输入的绝大部分 KV 缓存，只有最后那个没填满的块需要复制一次。输入越长，省得越多。</p>
+<p><b>束搜索。</b>机器翻译等任务常用束搜索来找出最可能的几个完整输出。它的做法是：每一步都保留目前概率最高的 \(k\) 个候选句子（\(k\) 叫束宽），把每个候选往后接上所有可能的词，算出概率，再从这些扩展出来的句子里挑出新的前 \(k\) 个。候选之间往往共享一长段前缀，而且随着生成的推进，有的候选被淘汰，有的分叉出新候选，共享关系像一棵不断生长、不断剪枝的树。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/beam-search.svg" alt="原文图 9" loading="lazy"></div>
+<figcaption><b>原文图 9。怎么看：</b>束宽 \(k=4\) 的例子。虚线之前，四个候选都共享第 0 块（输入）；候选 3 从第 1 块开始和其他候选分开；候选 0–2 共享前 3 块，在第 4 块才分开。虚线之后，新的前 4 名都来自候选 1 和 2，于是原来的候选 0 和 3 被淘汰，它们独占的块引用计数降到 0，立即被释放（图中的块 2、4、5、8）。</figcaption></figure>
+<p>以前的系统要为每个候选保存一份完整的 KV 缓存。候选之间切换时，比如淘汰候选 3、让它接着候选 2 的内容往下生成，就得把候选 2 的大段 KV 缓存整个复制过去。在 vLLM 里，这只是让块表指向同一批物理块，最多复制一块。</p>
+<p><b>共享前缀。</b>很多应用会在用户输入前面拼上一段固定的说明，比如任务描述加几个示例（常叫系统提示词）。所有请求的这一段都一样。服务方可以预先算好这段内容的 KV 缓存，存在一组物理块里；新请求来了，直接让它的块表指向这些块，只需要计算用户自己输入的那部分。这和操作系统让多个程序共享同一个动态链接库是一个道理。最后一块同样标记为写时复制。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/share-prompt.svg" alt="原文图 10" loading="lazy"></div>
+<figcaption><b>原文图 10。怎么看：</b>机器翻译的例子。所有请求都以同一段“任务说明 + 翻译示例”开头（共享前缀），后面才是各自要翻译的句子。共享前缀的 KV 只存一份。</figcaption></figure>
+<p><b>混合解码。</b>因为所有的共享关系都藏在块表这一层，注意力内核只看到“每个序列对应的一串物理块编号”，并不关心哪些块是共享的。于是用普通采样、并行采样、束搜索的请求可以放进同一个批里一起算。以前的系统很难做到这一点，因为不同解码方式的内存布局不一样。</p>
+
+<h4 id="n-4-5">4.5 调度与抢占：显存不够用了怎么办</h4>
+<p>按需分配带来一个新问题：既然开始时不为请求预留全部空间，就可能出现某个请求需要新块、显存里却已经没有空闲块的情况。这时必须让一些请求暂时让出它们的块。vLLM 要回答三个问题：</p>
+<ul>
+  <li><b>让谁出去？</b>vLLM 按先来先服务（FCFS）处理请求，所以需要让位时，先请出<b>最晚到达</b>的请求。这样能保证先到的请求不会一直被插队、饿着。</li>
+  <li><b>让出多少？</b>一个请求要计算下一步，它的全部 KV 块都必须在显存里，缺一块都算不了。所以 vLLM 对一个请求的块“要么全部移走，要么一块不动”（全有或全无）。另外，像束搜索的几个候选这种彼此共享块的序列被当成一组，总是一起调度、一起被请出。</li>
+  <li><b>之后怎么恢复？</b>有两种办法，见下面的示意图。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：被请出的请求怎么恢复</div>
+  <div class="dia-flow"><b style="width:64px">换出</b><span class="dia-box enc">GPU 上的 KV 块</span><span class="dia-arrow">→ 经 PCIe 拷贝 →</span><span class="dia-box reg">CPU 内存中的块</span><span class="dia-arrow">→ 恢复时再拷回 →</span><span class="dia-box enc">GPU</span></div>
+  <div class="dia-flow"><b style="width:64px">重计算</b><span class="dia-box frag pred">直接删掉 KV 块</span><span class="dia-arrow">→ 恢复时 →</span><span class="dia-box act">原输入 + 已生成的内容<small>当成一个新的输入</small></span><span class="dia-arrow">→ 一次性算回 →</span><span class="dia-box enc">全部 KV</span></div>
+  <div class="dia-note">换出的代价是 CPU 与 GPU 之间的拷贝时间；重计算的代价是 GPU 计算时间。哪个更快取决于块大小和硬件，见 §7.3。</div>
+</div>
+<p><b>换出</b>就是操作系统常用的 swap：把被请出请求的 KV 块拷贝到 CPU 内存里存着，等它重新被调度时再拷回 GPU。为此 vLLM 在 CPU 内存里也管理着一批物理块。被换出的块数不会超过 GPU 上 KV 块的总数，所以 CPU 内存里需要的空间也有上限。</p>
+<p><b>重计算</b>是操作系统做不到、LLM 推理才有的办法：干脆把 KV 缓存删掉，等请求重新被调度时，把“原来的输入 + 已经生成的那些词”拼起来，当作一个新的输入一次性算一遍，就能把 KV 缓存全部恢复。因为这一次是像处理输入那样所有位置同时算（§2.2 的第一个阶段），比当初一个词一个词地生成要快得多。</p>
+
+<h4 id="n-4-6">4.6 多张 GPU：所有 GPU 共用一张块表</h4>
+<div class="note-pre"><b>先补一点背景：张量并行。</b>
+<p>模型太大、一张 GPU 放不下时，常用 Megatron-LM 的<b>张量并行</b>：把每一层的计算拆开，分给多张 GPU 各算一部分。对注意力层来说，就是把注意力头分开，比如 40 个头分给 2 张 GPU，每张负责 20 个。每一层算完后，各张 GPU 用一种叫 <b>all-reduce</b> 的通信操作把各自的部分结果加起来，得到完整的结果，再进入下一层。</p>
+</div>
+<p>作者注意到一个关键事实：在张量并行下，每张 GPU 处理的是<b>同一批请求、同样的 token</b>，只是负责不同的注意力头。所以每张 GPU 需要的 KV 缓存，在“哪些请求、哪些位置”上是完全一样的，区别只在于每张卡只存自己负责的那些头的部分。既然如此，就没必要让每张 GPU 各自管理一套块表：vLLM 在中心调度器里只维护一张块表，所有 GPU 共用同一套物理块编号。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两张 GPU 做张量并行时的 KV 存放（以 40 个注意力头为例）</div>
+  <div class="dia-flow"><span class="dia-box reg">调度器：一张块表<small>请求 A：逻辑块 0→物理块 7，1→物理块 1</small></span><span class="dia-arrow">→ 每一步广播 token 与块表 →</span></div>
+  <div class="dia-flow"><span class="dia-box enc">GPU 0 的物理块 7、1<small>只存第 0–19 个头的 K、V</small></span><span class="dia-arrow">⇄ all-reduce ⇄</span><span class="dia-box enc">GPU 1 的物理块 7、1<small>只存第 20–39 个头的 K、V</small></span></div>
+  <div class="dia-note">两张 GPU 上编号相同的物理块，存的是同一批 token 的 KV 的不同部分。</div>
+</div>
+<p>每一步的流程是：调度器把这一批请求的输入 token 和它们的块表打包，广播给所有 GPU；各 GPU 按块表读取自己那份 KV、计算自己负责的那部分；中间结果在 GPU 之间直接用 all-reduce 同步，不经过调度器；最后各 GPU 把这一步采样出的 token 交回调度器。所有的内存管理决策都在调度器里集中完成，GPU 之间不需要再互相同步“谁用了哪个块”。</p>
+<p class="note-links"><a href="#s-4">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-5">5 实现：把分页的额外开销压下去</h3>
-<p class="note-gist">一句话：约 8.5K 行 Python + 2K 行 C++/CUDA；为了让“按块表查找”不拖慢速度，写了三个融合内核；所有解码方式都由 fork / append / free 三个操作拼出来。</p>
-<p>前端用 FastAPI，接口兼容 OpenAI API，用户可以按请求设置最大长度、束宽等采样参数；模型用 PyTorch 和 Transformers 实现，多卡通信用 NCCL。分页带来的新访存模式现成的内核支持不好，于是作者写了三个融合内核：</p>
+<h3 id="n-5">5 实现：怎么把分页的额外开销压下去</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>分页让注意力每次读数据前都要先查块表、再去不同的地方取数据，这比直接读一整段连续内存要麻烦。vLLM 是怎么实现的，又用了什么办法让这些额外的步骤不拖慢速度？各种解码方式又是怎么用同一套接口实现的？</div>
+<p>vLLM 由大约 8.5K 行 Python 和 2K 行 C++/CUDA 代码组成。用户通过一个基于 FastAPI 的前端发请求，接口兼容 OpenAI 的 API，可以为每个请求单独设置最大长度、束宽等参数。模型本身用 PyTorch 和 Hugging Face Transformers 实现，支持 GPT、OPT、LLaMA 等模型，多张 GPU 之间的通信用 NVIDIA 的 NCCL 库。</p>
+<div class="note-pre"><b>先补一点背景：GPU 内核、内核启动开销和访存合并。</b>
+<p>在 GPU 上，每一个计算操作（比如一次矩阵乘、一次拷贝）都要以一个“内核”（kernel）的形式被启动。每启动一次内核，都有一点固定的开销。如果一个操作被拆成很多个小内核依次启动，这些开销加起来就很可观。把几个连续的小操作合并成一个内核一次做完，叫<b>内核融合</b>。</p>
+<p>GPU 上的线程是以 32 个为一组（称为一个 <b>warp</b>）一起执行的。如果同一个 warp 里的 32 个线程读的是显存里挨在一起的地址，硬件就能把它们合并成少数几次大的读取，速度很快，这叫<b>合并访存</b>；如果地址分散，就得拆成很多次小读取，速度会慢很多。</p>
+</div>
+<p>分页带来的新的访存方式，是现有内核没有为之优化过的，所以作者写了三个融合内核：</p>
 <ul>
-  <li><b>写入</b>：每层新产生的 KV 要切块、重排成便于按块读取的布局、再写到块表指定的位置——三件事合成一次内核调用，省掉多次启动的开销。</li>
-  <li><b>读取 + 注意力</b>：在 FasterTransformer 的注意力内核上改造，边按块表取块边算注意力；每个块交给一个 warp 读，保证访存是合并的；同一批里不同序列的长度可以不一样。</li>
-  <li><b>复制</b>：写时复制会产生很多零碎的小块拷贝，合并成一次批量拷贝的内核调用。</li>
+  <li><b>写入融合。</b>每一层新算出来的 KV 缓存，要先按块切开、重新排成便于按块读取的内存布局，再写到块表指定的物理块里。这三步合并成一个内核一次完成，省掉多次启动的开销。</li>
+  <li><b>读取与注意力融合。</b>作者在 FasterTransformer 的注意力内核基础上修改，让它边按块表取块边做注意力计算，而不是先把分散的块拼成一整段再算。每个块交给一个 warp 去读，保证每次读取的地址是连续的（合并访存）。这个内核还支持同一个批里不同请求的长度各不相同。</li>
+  <li><b>拷贝融合。</b>写时复制会产生很多零散的小块拷贝，每个都单独启动一次拷贝操作太慢，于是把它们合在一个内核里批量完成。</li>
 </ul>
-<p>解码接口只有三个动作：<b>fork</b>（从已有序列分出一条新序列）、<b>append</b>（给序列加一个新 token）、<b>free</b>（删掉序列）。并行采样就是 fork 出几条、每步 append、满足停止条件就 free；束搜索和共享前缀也是同样的拼法。</p>
-<p class="note-links"><a href="#s-5">读全文翻译 §5</a> · <a href="https://arxiv.org/html/2309.06180#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+<p>在接口层面，vLLM 把各种解码方式都归结成对“序列”的三种操作：<b>fork</b>（从一个已有的序列分出一个新序列，新序列共享原序列的所有块），<b>append</b>（给序列追加一个新生成的 token），<b>free</b>（删除一个序列，释放它独占的块）。比如并行采样，就是从同一个输入 fork 出几个序列，每一步给每个序列 append 一个 token，满足停止条件的序列就 free 掉。束搜索和共享前缀也都用这三种操作拼出来。作者认为，未来新的解码算法也能用这三种操作组合实现。</p>
+<p class="note-links"><a href="#s-5">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-6">6 评估：同样延迟下能多扛多少请求</h3>
-<p class="note-gist">一句话：在真实请求分布上，逐步提高请求速率，看哪个系统的延迟先“爆炸”；vLLM 能扛住的请求速率是对手的 1.7–22 倍不等，越是长序列、复杂解码，优势越大。</p>
-<h4>6.1 实验怎么设计的</h4>
+<h3 id="n-6">6 实验：同样的延迟下，能多扛多少请求</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>vLLM 比当时最好的系统快多少？“快”具体指什么、是怎么测出来的？优势在什么情况下大，什么情况下小？读这一节之前，先要弄清楚实验是怎么设计的、结果图该怎么看。</div>
+
+<h4 id="n-6-1">6.1 实验是怎么设计的</h4>
+<p><b>模型和机器。</b>主要用 Meta 开源的 OPT 系列：OPT-13B 跑在 1 张 A100（40GB）上，OPT-66B 跑在 4 张 A100 上，OPT-175B 跑在 8 张 A100（80GB）上；共享前缀的实验另用了 LLaMA-13B。所有实验都在 Google Cloud 的 A2 实例上进行。13B 和 66B 是当时常见的模型大小，175B 和 GPT-3 一样大。</p>
+<p><b>请求从哪来。</b>作者用两个真实数据集里的输入、输出长度来合成请求：ShareGPT（用户分享的与 ChatGPT 的对话）和 Alpaca（用 GPT-3.5 生成的指令数据）。ShareGPT 的输入平均比 Alpaca 长 8.4 倍、输出长 5.8 倍，而且长短差别更大。</p>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/sharegpt_hist.svg" alt="原文图 11a" loading="lazy"><img src="vllm/fig/alpaca_hist.svg" alt="原文图 11b" loading="lazy"></div>
+<figcaption><b>原文图 11。怎么看：</b>两个数据集的输入长度和输出长度分布（直方图）。左边 ShareGPT 的长度分布拖着很长的尾巴，有不少上千 token 的请求；右边 Alpaca 的请求普遍很短。长请求多、长短差异大，正是现有系统按最大长度预留时浪费最严重的情况。</figcaption></figure>
+<div class="note-pre"><b>先补一点背景：泊松到达。</b>
+<p>两个数据集都没有记录请求是什么时候到达的，作者用<b>泊松过程</b>来生成到达时间。这是模拟“大量用户各自随机地发请求”时最常用的模型：给定一个平均速率（比如每秒 2 个请求），相邻两个请求的间隔是随机的，有时扎堆、有时稀疏。通过调整这个平均速率，就能模拟服务从空闲到繁忙的不同负载。</p>
+</div>
+<p><b>和谁比。</b>两类对手：</p>
 <ul>
-  <li><b>模型与硬件</b>：OPT-13B（1 张 A100 40GB）、OPT-66B（4 张 A100）、OPT-175B（8 张 A100 80GB），另有 LLaMA-13B，都在 Google Cloud 上。</li>
-  <li><b>负载</b>：用 ShareGPT（真实 ChatGPT 对话）和 Alpaca（指令数据）的输入输出长度合成请求；ShareGPT 的平均输入长 8.4 倍、输出长 5.8 倍，方差也更大。数据没有时间戳，请求按泊松过程到达。</li>
-  <li><b>基线</b>：FasterTransformer（作者给它加了一个动态批处理调度器）；Orca 没有公开实现，作者自己实现了三个版本——Oracle（假设事先知道真实输出长度，是理论上界）、Pow2（最多多预留 2 倍）、Max（总按 2048 预留）。</li>
-  <li><b>指标</b>：归一化延迟 = 每个请求的端到端延迟 ÷ 它的输出长度，取平均。随请求速率增加，这条曲线一开始平缓，超过系统处理能力后急剧上升；曲线越晚上翘，说明系统能扛的负载越高。一般跑 1 小时的请求轨迹，175B 因为成本跑 15 分钟。</li>
+  <li><b>FasterTransformer</b>：NVIDIA 的推理引擎，单次计算的延迟优化得非常好，但它本身没有调度器。作者给它加了一个动态批处理调度器：每次取最早到达的若干个请求组成一批，交给它算。</li>
+  <li><b>Orca</b>：当时针对吞吐量优化得最好的推理系统，也就是 §2.3 讲的迭代级调度的提出者。它没有公开代码，作者自己实现了三个版本，区别在于给每个请求的输出预留多少空间：<b>Orca (Oracle)</b> 假设事先就知道每个请求真实会生成多长，只预留刚好够用的空间，这在现实中不可能做到，代表 Orca 的理论上限；<b>Orca (Pow2)</b> 最多多预留一倍，按 2 的幂向上取整，比如真实长度 25 就预留 32；<b>Orca (Max)</b> 总是按模型的最大长度 2048 预留。三个版本都用伙伴分配算法决定 KV 缓存放在哪里。</li>
 </ul>
-<h4>6.2–6.5 结果</h4>
+<p><b>怎么衡量。</b>论文用<b>归一化延迟</b>作为指标：每个请求从发出到完成的总时间，除以它生成的 token 数，再对所有请求取平均，单位是“秒/token”。除以输出长度是为了让长请求和短请求可以放在一起比较。每个实验跑 1 小时的请求流，OPT-175B 因为成本太高只跑 15 分钟。</p>
+<div class="note-pre"><b>先补一点背景：怎么读“延迟—请求速率”曲线。</b>
+<p>后面的结果图都是同一种画法：横轴是每秒到达的请求数，纵轴是归一化延迟。请求少的时候，系统轻松应付，延迟很低而且基本不变；请求速率逐渐提高，延迟慢慢上升；一旦超过了系统的处理能力，请求处理不完就开始排队，队列越排越长，延迟会突然急剧上升。曲线“拐弯”的那个位置，就是这个系统能稳定承受的最高请求速率，也就是它的吞吐能力。所以看这类图，主要看<b>哪个系统的曲线拐得更靠右</b>。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：曲线越晚拐弯，系统能扛的请求越多</div>
+  <svg class="dg" viewBox="0 0 640 230" role="img" aria-label="延迟随请求速率变化的示意曲线" style="max-width:640px">
+    <line x1="70" y1="190" x2="610" y2="190" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="70" y1="190" x2="70" y2="20" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="340" y="218" class="t-c t-sm">每秒到达的请求数 →</text>
+    <text x="22" y="105" class="t-c t-sm" transform="rotate(-90 22 105)">归一化延迟 →</text>
+    <path d="M70,170 C170,168 220,160 245,135 C262,115 270,70 276,30" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <path d="M70,172 C260,170 400,164 445,138 C465,120 476,72 482,30" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <line x1="262" y1="190" x2="262" y2="40" style="stroke:var(--c-pred);stroke-dasharray:4 4"/>
+    <line x1="468" y1="190" x2="468" y2="40" style="stroke:var(--c-enc);stroke-dasharray:4 4"/>
+    <text x="256" y="28" class="t-r t-sm" style="fill:var(--c-pred)">系统 A 的极限</text>
+    <text x="490" y="28" class="t-sm" style="fill:var(--c-enc)">系统 B 的极限</text>
+    <text x="365" y="120" class="t-c t-xs">B 能多扛的请求速率</text>
+    <line x1="268" y1="132" x2="462" y2="132" style="stroke:var(--text-3);marker-end:url(#ah);marker-start:url(#ah)"/>
+  </svg>
+  <div class="dia-note">示意，不是论文数据。论文说的“vLLM 能承受 2 倍的请求速率”，指的就是在延迟相近时，vLLM 的拐点在对手的 2 倍处。</div>
+</div>
+
+<h4 id="n-6-2">6.2 基本采样：每个请求生成一个输出</h4>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/n1-sharegpt.svg" alt="原文图 12 上" loading="lazy"><img src="vllm/fig/n1-alpaca.svg" alt="原文图 12 下" loading="lazy"></div>
+<figcaption><b>原文图 12。怎么看：</b>上面三张是 ShareGPT，下面三张是 Alpaca，从左到右分别是 OPT-13B（1 张卡）、OPT-66B（4 张卡）、OPT-175B（8 张卡）。每张小图里五条曲线分别是 FasterTransformer、三个 Orca 版本和 vLLM，横轴请求速率、纵轴归一化延迟。vLLM 的曲线总是最晚拐弯。</figcaption></figure>
+<p>在 ShareGPT 上，延迟相近的前提下，vLLM 能承受的请求速率是 Orca (Oracle) 的 1.7–2.7 倍，是 Orca (Max) 的 2.7–8 倍，最高能到 FasterTransformer 的 22 倍。FasterTransformer 差得最多，因为它没有迭代级调度，内存管理也和 Orca (Max) 一样按最大长度预留。</p>
+<p>快的原因可以直接从“批里同时有多少个请求”看出来：</p>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/batched_requests_sharegpt.svg" alt="原文图 13a" loading="lazy"><img src="vllm/fig/batched_requests_alpaca.svg" alt="原文图 13b" loading="lazy"></div>
+<figcaption><b>原文图 13。怎么看：</b>OPT-13B 在 ShareGPT（每秒 2 个请求）和 Alpaca（每秒 30 个请求）下，各系统平均同时在批里的请求数。在 ShareGPT 上，vLLM 同时处理的请求数是 Orca (Oracle) 的 2.2 倍、Orca (Max) 的 4.3 倍。吞吐量的提升，基本就来自这里。</figcaption></figure>
+<p>Alpaca 上的趋势和 ShareGPT 相同，只有一个例外：OPT-175B 在 Alpaca 上，vLLM 相对 Orca (Oracle) 和 Orca (Pow2) 的优势不明显。原因是 OPT-175B 用 8 张 80GB 的卡，留给 KV 缓存的显存很多（原文表 1 中为 264 GB），而 Alpaca 的请求又短。显存本来就够用时，就算有些浪费，Orca 也能塞进足够多的请求，显存管理得好不好就不那么关键了。</p>
+
+<h4 id="n-6-3">6.3 并行采样与束搜索：共享越多，优势越大</h4>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/parallel.svg" alt="原文图 14a" loading="lazy"><img src="vllm/fig/beam.svg" alt="原文图 14b" loading="lazy"></div>
+<figcaption><b>原文图 14。怎么看：</b>OPT-13B、Alpaca 数据集。左边一组是并行采样，每个请求分别生成 2、4、6 个输出；右边一组是束搜索，束宽分别为 2、4、6。和前面一样，看哪条曲线拐得靠右。</figcaption></figure>
+<p>每个请求要生成的输出越多、束越宽，可以共享的 KV 缓存就越多，vLLM 的优势也越大。在 OPT-13B 和 Alpaca 上，vLLM 相对 Orca (Oracle) 的提升，从基本采样时的 1.3 倍，增加到束宽为 6 的束搜索时的 2.3 倍。</p>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/mem_saving_parallel_gen.svg" alt="原文图 15a" loading="lazy"><img src="vllm/fig/mem_saving_beam.svg" alt="原文图 15b" loading="lazy"></div>
+<figcaption><b>原文图 15。怎么看：</b>OPT-13B、Alpaca 数据集上，因为共享 KV 块而省下的显存比例。左图横轴是每个请求生成的输出数（2、4、6），省下 6.09%、8.53%、9.79%；右图横轴是束宽（2、4、6），省下 37.56%、53.13%、55.16%。束搜索省得多得多。</figcaption></figure>
+<p>具体省了多少：在 Alpaca 上，并行采样省下 6.1%–9.8% 的显存，束搜索省下 37.6%–55.2%；在输入更长的 ShareGPT 上，并行采样省 16.2%–30.5%，束搜索省 44.3%–66.3%。束搜索省得多，是因为候选之间不只共享输入，还共享生成到一半的前缀。</p>
+
+<h4 id="n-6-4">6.4 共享前缀：前缀越长，省得越多</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/prefix.svg" alt="原文图 16" loading="lazy"></div>
+<figcaption><b>原文图 16。怎么看：</b>LLaMA-13B 做英译德（WMT16 数据集），所有请求共用一段前缀，内容是任务说明加翻译示例。(a) 前缀里有 1 个示例，共 80 个 token；(b) 有 5 个示例，共 341 个 token。</figcaption></figure>
+<p>前缀只有 1 个示例时，vLLM 的吞吐量是 Orca (Oracle) 的 1.67 倍；前缀有 5 个示例时，提升到 3.58 倍。前缀越长，每个请求省下的计算和显存越多。</p>
+
+<h4 id="n-6-5">6.5 聊天机器人</h4>
+<p>模拟聊天场景时，作者把之前的聊天记录和用户最新的问题拼在一起作为输入，用 ShareGPT 合成对话。因为 OPT-13B 能处理的长度有限，输入截取最后 1024 个 token，输出最多 1024 个 token。不同轮对话之间不保留 KV 缓存，因为保留会占着显存，影响其他请求。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="vllm/fig/chat-sharegpt.svg" alt="原文图 17" loading="lazy"></div>
+<figcaption><b>原文图 17。怎么看：</b>聊天负载下的延迟—请求速率曲线。三个 Orca 版本的曲线几乎重合。</figcaption></figure>
+<p>vLLM 能承受的请求速率是三个 Orca 版本的 2 倍。三个 Orca 版本几乎一样，是因为大多数对话的输入都被截到了 1024 个 token，而伙伴分配算法要求按 2 的幂分配，于是不管怎么预测输出长度，都会为输出预留 1024 个位置，预测得准不准都没用。</p>
+<div class="note-warn"><b>读实验结果时要注意的几点：</b>
 <ul>
-  <li><b>普通采样</b>（每个请求一个输出）：ShareGPT 上，vLLM 能扛的请求速率是 Orca (Oracle) 的 1.7–2.7 倍、Orca (Max) 的 2.7–8 倍、FasterTransformer 的最高 22 倍。原因直接可见：OPT-13B 上 vLLM 同时在批里的请求数是 Orca (Oracle) 的 2.2 倍、Orca (Max) 的 4.3 倍。Alpaca 上趋势相同，只有 OPT-175B 这一组例外——显存充裕、序列又短，Orca (Oracle) 和 Pow2 也能放下足够多的请求，vLLM 的优势变小。</li>
-  <li><b>并行采样和束搜索</b>：越复杂共享越多，优势越大。OPT-13B + Alpaca 上，相对 Orca (Oracle) 的提升从普通采样的 1.3 倍涨到束宽 6 时的 2.3 倍。省下的 KV：并行采样 6.1%–9.8%（Alpaca）/ 16.2%–30.5%（ShareGPT），束搜索 37.6%–55.2% / 44.3%–66.3%。</li>
-  <li><b>共享前缀</b>（LLaMA-13B 做 WMT16 英译德，前缀里放任务说明和翻译示例）：只放 1 个示例时吞吐量是 Orca (Oracle) 的 1.67 倍，放 5 个示例时是 3.58 倍——前缀越长，共享省得越多。</li>
-  <li><b>聊天机器人</b>（把聊天历史和最新问题拼成 prompt，截到最后 1024 token，最多生成 1024 token）：vLLM 能扛 2 倍的请求速率。这里三个 Orca 版本表现几乎一样，因为大多数 prompt 都到了 1024，伙伴分配器总要为输出预留 1024 个位置，猜得准不准都没用。</li>
-</ul>
-<div class="note-warn"><b>读结果时要注意：</b>Orca 的三个版本都是作者复现的，其中 Oracle 用了现实中拿不到的信息，所以“比 Oracle 快”是在和一个理想化的对手比。另外，这些收益的前提是“显存装不下更多请求”；显存充裕时（上面 175B + Alpaca 那组），分页的优势会明显缩小。</div>
-<p class="note-links"><a href="#s-6">读全文翻译 §6</a> · <a href="https://arxiv.org/html/2309.06180#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · 配图：<a href="#f-S5.F12">图 12</a> · <a href="#f-S6.F14">图 14</a> · <a href="#f-S6.F16">图 16</a> · <a href="#f-S6.F17">图 17</a></p>
+  <li>三个 Orca 版本都是作者复现的，不是 Orca 原作者的代码；其中 Orca (Oracle) 用到了现实中拿不到的信息（每个请求的真实输出长度），所以“比 Oracle 快”是在和一个理想化的对手比。</li>
+  <li>所有收益都建立在“显存装不下更多请求”这个前提上。显存很宽裕时（比如 OPT-175B + Alpaca），vLLM 的优势明显缩小。</li>
+  <li>实验衡量的是“延迟可接受时的最大吞吐量”，不是单个请求的速度。只有一个请求时，vLLM 不会更快，§7.1 会讲到它的注意力内核反而稍慢。</li>
+</ul></div>
+<p class="note-links"><a href="#s-6">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-7">7 消融实验：分页本身要付多少代价</h3>
-<ul>
-  <li><b>内核开销</b>：查块表、多出来的分支判断、处理不同长度的序列，让 PagedAttention 的注意力内核比 FasterTransformer 慢 20%–26%。但注意力只是整次前向的一部分，端到端仍然大幅领先——批变大的收益远远盖过这点开销。</li>
-  <li><b>块大小</b>：太小，一次读的数据太少，GPU 并行度用不满；太大，最后一块空着的位置变多，能共享的概率也下降。ShareGPT 上 16–128 都表现最好，Alpaca 上 16、32 好，更大就明显变差（因为序列本身比块还短）。所以默认取 16。</li>
-  <li><b>换出 vs 重计算</b>：块小时换出要做大量零碎的 CPU–GPU 小拷贝，PCIe 带宽用不满，开销很大；重计算不碰块，开销和块大小无关。结论：块小用重计算、块大用换出，块大小在 16–64 时两者端到端差不多；重计算的开销从未超过换出延迟的 20%。</li>
-</ul>
-<p class="note-links"><a href="#s-7">读全文翻译 §7</a> · <a href="https://arxiv.org/html/2309.06180#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · 配图：<a href="#f-S7.F18">图 18</a> · <a href="#f-S7.F19">图 19</a></p>
+<h3 id="n-7">7 消融实验：分页本身要付出多少代价</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>分页不是免费的：查块表、从分散的位置读数据都有额外开销。这些开销有多大？块大小该怎么选？换出和重计算这两种恢复方式，哪种更好？</div>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/micro_latency.svg" alt="原文图 18a" loading="lazy"><img src="vllm/fig/n1-block-size.svg" alt="原文图 18b" loading="lazy"></div>
+<figcaption><b>原文图 18。怎么看：</b>(a) 注意力内核本身的延迟（微秒），横轴是上下文长度（64、128、256），比较 vLLM 和 FasterTransformer（FT）在批大小 8 和 32 下的表现，vLLM 的线略高一些。(b) 固定请求速率下，横轴是块大小（1 到 256），纵轴是归一化延迟：ShareGPT（蓝）在 16–128 都很低；Alpaca（橙）在块大小 64 以上开始变差，到 128、256 时急剧上升。</figcaption></figure>
+<p><b>注意力内核的开销。</b>PagedAttention 的内核要多做几件事：查块表、执行额外的分支判断、处理同一批里长短不一的序列。所以单看注意力这一个操作，它比高度优化的 FasterTransformer 慢 20%–26%。但注意力只是整个模型计算的一部分，而 vLLM 能把批开大好几倍，端到端的吞吐量仍然大幅领先。这正说明了 vLLM 的取舍：用一点单次计算的速度，换显存的利用率。</p>
+<p><b>块大小怎么选。</b>块太小，每次读的数据太少，GPU 的并行能力用不满；块太大，每个请求最后一块里空着的位置变多（内部碎片又回来了），能和别的请求整块相同、从而共享的机会也变少。实验结果是：在 ShareGPT 上，块大小 16 到 128 都表现最好；在 Alpaca 上，16 和 32 表现好，再大性能就明显下降，因为 Alpaca 的很多请求本身比一个块还短。综合来看，16 已经大到能把 GPU 用好，又小到不会产生明显的碎片，所以 vLLM 默认块大小为 16。</p>
+<figure class="paper-fig"><div class="imgs"><img src="vllm/fig/micro-swap.svg" alt="原文图 19a" loading="lazy"><img src="vllm/fig/recompute-vs-swap.svg" alt="原文图 19b" loading="lazy"></div>
+<figcaption><b>原文图 19。怎么看：</b>(a) 恢复一个被请出的请求要花的时间（毫秒），横轴是块大小。重计算（蓝线）几乎是一条水平线；换出（换进、换出、两者相加三条线）在块很小时非常慢，块变大后迅速下降。(b) OPT-13B、ShareGPT、相同请求速率下，横轴是块大小、纵轴是归一化延迟：块小时重计算更好，块大时换出更好，16–64 之间两条线几乎重合。</figcaption></figure>
+<p><b>换出还是重计算。</b>换出要在 CPU 和 GPU 之间拷贝数据，走的是 PCIe 总线。块很小时，一次换出要拆成大量零碎的小拷贝，每次拷贝都有固定开销，PCIe 的带宽根本用不满，所以换出非常慢。重计算不涉及拷贝块，它的开销和块大小无关。所以：块小时重计算更划算，块大时换出更划算；块大小在 16 到 64 之间时，两者端到端的表现差不多。论文还测到，重计算的开销从来没有超过换出延迟的 20%。</p>
+<p class="note-links"><a href="#s-7">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
 </section>
 
 <section class="note">
-<h3 id="n-8">8 讨论：分页什么时候有用，vLLM 又改了什么</h3>
-<p>作者明确限定了适用范围：分页之所以在这里有效，是因为 LLM 推理同时满足两个条件——<b>要动态分配</b>（输出长度事先不知道），而且<b>性能受显存容量限制</b>。训练时张量形状固定，内存可以事先规划好；很多非 LLM 模型的推理受算力限制，省下内存也换不来速度。这两类场景用分页只会多一层间接寻址的开销。</p>
-<p>同时，vLLM 也不是照搬操作系统：全有或全无的换出利用了“一个请求要么整个在显存里、要么不能算”这个特点；用重计算恢复被移走的数据，在操作系统里根本做不到（内存页丢了就丢了）；把查块表和注意力计算融合在一个内核里，用来抵消分页的间接寻址开销。</p>
-<p class="note-links"><a href="#s-8">读全文翻译 §8</a> · <a href="https://arxiv.org/html/2309.06180#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+<h3 id="n-8">8 讨论：分页什么时候有用，vLLM 又改了哪些地方</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>虚拟内存和分页既然这么好用，能不能套到其他 GPU 任务上？vLLM 是原样照搬操作系统，还是针对 LLM 做了改动？</div>
+<p>作者明确限定了这个方法的适用范围。分页在 LLM 推理里有效，是因为这里同时满足两个条件：一是<b>必须动态分配内存</b>，因为输出长度事先不知道；二是<b>性能受显存容量限制</b>，显存省出来就能放下更多请求、提高吞吐。很多 GPU 任务并不满足这两个条件。比如训练神经网络时，张量的形状通常是固定的，内存可以事先规划好，不需要动态分配；又比如很多不是 LLM 的模型做推理时，瓶颈在算力而不是显存，省下显存也换不来速度。在这些场景里用分页，只会白白多出一层查表的开销。</p>
+<p>另外，vLLM 并不是原样照搬操作系统，而是针对 LLM 的特点做了改动：</p>
+<ul>
+  <li><b>全有或全无的换出。</b>操作系统可以只换出一个程序的部分内存页，而 vLLM 一次要么换出一个请求的全部块、要么一块不动，因为一个请求只要缺一块就无法计算。</li>
+  <li><b>用重计算来恢复。</b>操作系统里，被换出又丢掉的内存页是找不回来的；而 KV 缓存可以根据输入和已生成的内容重新算出来，所以 vLLM 多了这种恢复方式。</li>
+  <li><b>把查表和计算融合。</b>分页的间接寻址有额外开销，vLLM 把访存操作和注意力等计算融合在同一个内核里（§5），尽量把这部分开销藏起来。</li>
+</ul>
+<p class="note-links"><a href="#s-8">读这一节的全文翻译</a> · <a href="https://arxiv.org/html/2309.06180#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
 </section>
 
 <section class="note">
 <h3 id="n-9">9 相关工作与结论</h3>
-<p>相关工作分三类：通用的模型推理系统（Clipper、TensorFlow Serving、Clockwork 等，关注批处理、缓存、放置和调度）；专门针对 Transformer 的推理系统（优化内核、批处理、模型并行）；以及训练和推理里的内存优化（换出、重计算，FlexGen 研究显存有限时的离线推理，但不针对在线服务）。</p>
-<p>其中最值得一读的是和 Orca 的关系：两者<b>互补</b>而不是竞争。Orca 靠更细粒度的调度，让更多请求能交错着一起跑；vLLM 靠提高显存利用率，让更多请求的 KV 能同时放进显存。事实上，正是 Orca 那种每一步都可能加入新请求的调度，让显存管理变得更关键——可以同时在跑的请求一多，内存就成了下一个瓶颈。</p>
-<p>结论一句话：把操作系统里已经很成熟的虚拟内存、分页、写时复制搬到 KV 缓存上，就能在不改模型的前提下，让同一张卡服务多得多的请求。</p>
-<p class="note-links"><a href="#s-9">读全文翻译 §9</a> · <a href="#s-10">§10</a> · <a href="https://arxiv.org/html/2309.06180#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a></p>
+<p>论文把相关工作分成三类。第一类是通用的模型推理系统，比如 Clipper、TensorFlow Serving、Clockwork，它们研究的是批处理、缓存、模型放在哪台机器上、请求怎么调度，并不针对 LLM 的特点。第二类是专门为 Transformer 设计的推理系统，主要通过优化计算内核、改进批处理、做模型并行来提速，其中和本文最相关的是 Orca。第三类是内存优化技术，比如在训练中用换出或重计算降低显存峰值；FlexGen 研究了显存有限时怎么换出参数和 KV 缓存来跑 LLM 推理，但它面向的是不在乎延迟的离线批处理，而不是在线服务。</p>
+<p>其中最值得细读的是和 Orca 的关系。作者认为两者是<b>互补</b>的，而不是替代关系：Orca 通过更细粒度的调度，让更多请求能交错着同时运行；vLLM 通过提高显存利用率，让更多请求的 KV 缓存能同时放进显存。实际上，正是 Orca 那种“每一步都可能加入新请求”的调度方式，让同时在跑的请求变多，才使得显存管理成为新的瓶颈，也让 vLLM 的方法更加必要。</p>
+<p>论文的结论可以这样概括：大模型推理服务的吞吐量受限于 KV 缓存的显存管理；把操作系统里已经非常成熟的虚拟内存、分页、写时复制等技术搬到 KV 缓存上，就能在不改模型的前提下几乎消除显存浪费，并让不同请求灵活共享 KV 缓存，从而在延迟不变时把吞吐量提高到 2–4 倍。</p>
+<p class="note-links"><a href="#s-9">读第 9 节的全文翻译</a> · <a href="#s-10">读第 10 节</a> · <a href="https://arxiv.org/html/2309.06180#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 后来怎么样了</h3>
+<p>这篇论文发表后，“把 KV 缓存当作可以分页管理的内存”几乎成了所有主流推理引擎的默认做法，vLLM 本身也成了使用最广泛的开源推理引擎之一：截至 2026-10-19，论文在 Semantic Scholar 上被引用 9,204 次，GitHub 仓库有 9.4 万个 star。在本站的 AI Infra 路线里，可以接着读这些直接的后续工作：</p>
+<ul>
+  <li><a href="../tracks/ai-infra/04-sglang.html">SGLang / RadixAttention</a>：vLLM 的共享要求“前缀完全相同的整块”，SGLang 用一棵基数树自动找出不同请求之间所有可以复用的前缀，把共享做得更细、更自动。</li>
+  <li><a href="../tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a>：§2.2 讲的两个阶段性质完全不同（一个吃算力、一个吃显存带宽），PD 分离把它们拆到不同的 GPU 上分别处理，KV 缓存在两组 GPU 之间传递。</li>
+  <li><a href="../tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储</a>：把 vLLM 的“换出到 CPU”进一步推广，让 KV 缓存可以存在 CPU 内存、本地 SSD 甚至远端存储里，按需取回。</li>
+  <li><a href="../tracks/ai-infra/02-flashinfer.html">FlashInfer</a>：分页之后各种 KV 布局层出不穷，FlashInfer 用一个统一的“块稀疏矩阵”抽象，让一套注意力内核覆盖所有这些布局。</li>
+</ul>
+<p>想看 vLLM 的可交互架构图、块表与写时复制的分步演示和配套简答题，见<a href="../tracks/ai-infra/03-vllm.html">结构拆解页</a>。</p>
 </section>
 
 <h2 id="authors">作者</h2>

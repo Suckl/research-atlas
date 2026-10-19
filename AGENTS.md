@@ -202,6 +202,15 @@ Widgets must be deterministic for a given seed and must not fetch anything.
   English title, authors with affiliations as printed, pills, stats, reading controls) → `#overview` 粗读 (a long,
   plain-language walk from motivation to method to results, with the paper's own numbers) → `#fulltext` 全文翻译 →
   `#authors` (affiliation + verifiable background only) → `#impact` → `#more`.
+- **逐节精读 (`#notes`) is the main content of a reading page** and replaces a separate overview. Style rules (from user
+  feedback): follow the paper's section order; open each section with a `.note-ask` box that states, in full sentences,
+  the question the section answers and why it arises — never a telegraphic one-liner; explain every prerequisite in a
+  `.note-pre` box before first use (e.g. why batching raises throughput, what attention reads, OS paging); write every
+  claim as cause → effect with explicit connectives; say what each number means and work small examples (mark own
+  calculations 推算); put every figure next to the text that discusses it with a "怎么看" caption (original figures when
+  the license allows, otherwise HTML/SVG diagrams in `.dia` boxes drawn by us); end with `.note-warn` boxes for
+  common misreadings and links to the translated section and the arXiv original. The notes may carry more
+  information than the paper itself.
 - Full-text blocks use `<div class="bi"><div class="zh">…</div><div class="en" lang="en">…</div><button
   class="bi-toggle">原文</button></div>`; `[data-mode="zh|bi"]` switches to side-by-side. Reading state is per viewer in
   localStorage (`atlas-paper:<node id>`).
