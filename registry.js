@@ -902,6 +902,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/vllm-project/vllm" }
       ],
       "page": "tracks/ai-infra/03-vllm.html",
+      "reading": "papers/vllm.html",
       "tldr": "把操作系统的分页虚拟内存搬到 KV cache：按 16 token 的块分配、块表做逻辑→物理映射、引用计数 + 写时复制实现共享。现有系统只有 20–38% 的 KV 显存装的是真实 token，vLLM 把浪费限制在每请求最后一块之内，吞吐提升 2–4×。",
       "tags": ["推理引擎", "分页", "块表", "写时复制"],
       "facts": {

@@ -94,6 +94,7 @@
       <a class="brand" href="${href("index.html")}"><span class="dot"></span>${Atlas.esc(R.site.title || "Atlas")}</a>
       <nav class="crumbs" aria-label="breadcrumb">${crumbHTML}</nav>
       <span class="spacer"></span>
+      <a class="nav-link${body().dataset.pageKind === "library" ? " on" : ""}" href="${href("papers/index.html")}">论文书架</a>
       <button class="icon-btn" id="theme-btn" type="button" title="切换主题"></button>
     </div>`;
     const btn = host.querySelector("#theme-btn");

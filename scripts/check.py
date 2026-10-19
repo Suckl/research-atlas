@@ -68,6 +68,9 @@ def check_registry(reg: dict) -> tuple[set[str], set[str]]:
         for k in ("id", "title", "short", "page", "reading_order", "compare_fields"):
             if k not in t:
                 err(f"track '{t.get('id')}': missing '{k}'")
+        for n in [x for x in reg.get("nodes", []) if x.get("track") == t.get("id") and x.get("reading")]:
+            if not (ROOT / n["reading"]).exists():
+                err(f"node '{n['id']}': reading page not found: {n['reading']}")
         if not (ROOT / t.get("page", "")).exists():
             err(f"track '{t.get('id')}': page not found: {t.get('page')}")
         for nid in t.get("reading_order", []):
