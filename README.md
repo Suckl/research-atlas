@@ -29,6 +29,25 @@
   - [HybridFlow / verl](papers/hybridflow.html)
   - [DeepSeek-V3](papers/deepseek-v3.html)
 - 统一多模态：[视觉生成能扩展 UMM 的知识吗](papers/visual-generation-knowledge.html)
+- 循环 Transformer（looped / recurrent-depth）。每页都有“结果的份量”一节，写明每个比较到底对齐了什么（参数、训练算力、推理算力、KV 缓存还是数据）。
+  - 奠基与理论：
+    - [Universal Transformer](papers/universal-transformers.html)
+    - [循环 Transformer 作为可编程计算机](papers/looped-programmable-computers.html)
+    - [潜在思考](papers/reasoning-latent-thoughts.html)
+  - 规模化语言模型：
+    - [Huginn](papers/huginn.html)
+    - [Ouro](papers/ouro.html)
+    - [Mixture-of-Recursions](papers/mixture-of-recursions.html)
+  - 小网络递归推理：[TRM / HRM](papers/tiny-recursive-model.html)
+  - 稳定性与扩展律：
+    - [Parcae](papers/parcae.html)
+    - [等深度扩展律](papers/iso-depth-scaling.html)
+    - [SMELT](papers/smelt.html)
+  - ICLR 2027 在审的匿名投稿：
+    - [Loop-μP](papers/loop-mup.html)
+    - [ELR](papers/elastic-latent-recurrence.html)
+    - [循环能替代多少参数](papers/loops-vs-parameters.html)
+    - [ARLoop](papers/arloop.html)
 
 ## 每个精读页的结构
 

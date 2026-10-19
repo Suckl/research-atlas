@@ -648,6 +648,18 @@ window.ATLAS_REGISTRY = {
       "lanes": [],
       "milestones": [],
       "compare_fields": []
+    },
+    {
+      "id": "looped",
+      "title": "循环 Transformer",
+      "short": "循环 Transformer",
+      "status": "papers-only",
+      "page": "index.html",
+      "summary": "只有论文精读页的分类：把同一组层反复使用、在深度方向循环计算的 Transformer（looped / recurrent-depth / recursive），以及它的扩展律、训练稳定性和递归推理小模型。",
+      "reading_order": ["ut", "looped-computers", "latent-thoughts", "huginn", "ouro", "mor", "trm", "parcae", "iso-depth", "smelt", "loop-mup", "elr", "loop-storage", "arloop"],
+      "lanes": [],
+      "milestones": [],
+      "compare_fields": []
     }
   ],
   "nodes": [
@@ -4880,6 +4892,265 @@ window.ATLAS_REGISTRY = {
       "page": "papers/visual-generation-knowledge.html",
       "reading": "papers/visual-generation-knowledge.html",
       "tldr": "作者把虚构实体的属性只放进文生图训练图像，训练后只用文字提问，检验统一多模态模型能否说出画图时学到的知识。三个模型画对的都远多于说对的；在一半实体上加入“先画再答”的交错图文对齐后，另一半从未被问过的实体也更容易答对，但即使画对了，多数知识仍然说不出来。"
+    },
+    {
+      "id": "ut",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Universal Transformer",
+      "full_title": "Universal Transformers",
+      "authors": ["Mostafa Dehghani", "Stephan Gouws", "Oriol Vinyals", "Jakob Uszkoreit", "Łukasz Kaiser"],
+      "org": "University of Amsterdam · DeepMind · Google Brain",
+      "date": "2018-07",
+      "venue": "ICLR 2019",
+      "arxiv": "1807.03819",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/1807.03819" }
+      ],
+      "page": "papers/universal-transformers.html",
+      "reading": "papers/universal-transformers.html",
+      "tldr": "这篇论文把 Transformer 的多个不同层换成同一个块在深度上反复使用，并用 ACT 让每个位置自己决定算几步，在 bAbI、LAMBADA 和算法任务上明显好于当时的 Transformer，翻译上高 0.9 BLEU。翻译的对比只对齐了参数量：UT base 每个 token 的计算量约是 Transformer base 的 4 倍。"
+    },
+    {
+      "id": "looped-computers",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "循环 Transformer 作为可编程计算机",
+      "full_title": "Looped Transformers as Programmable Computers",
+      "authors": ["Angeliki Giannou", "Shashank Rajput", "Jy-yong Sohn", "Kangwook Lee", "Jason D. Lee", "Dimitris Papailiopoulos"],
+      "org": "University of Wisconsin-Madison; Yonsei University; Princeton University",
+      "date": "2023-01",
+      "venue": "ICML 2023",
+      "arxiv": "2301.13196",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2301.13196" }
+      ],
+      "page": "papers/looped-programmable-computers.html",
+      "reading": "papers/looped-programmable-computers.html",
+      "tldr": "作者不训练模型，而是手工设定权重，证明一个不超过 13 层的 Transformer 只要把输出反复喂回输入，就能像单指令计算机那样逐条执行写在输入里的程序，进而充当计算器、做矩阵求逆，甚至在上下文里跑反向传播。这是“存在这样的权重”的表达能力结论，不说明训练能学到它，而且循环省下的是参数，不是计算。"
+    },
+    {
+      "id": "latent-thoughts",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "潜在思考：循环 Transformer 的推理能力",
+      "full_title": "Reasoning with Latent Thoughts: On the Power of Looped Transformers",
+      "authors": ["Nikunj Saunshi", "Nishanth Dikkala", "Zhiyuan Li", "Sanjiv Kumar", "Sashank J. Reddi"],
+      "org": "Google Research; Toyota Technological Institute at Chicago",
+      "date": "2025-02",
+      "venue": "ICLR 2025",
+      "arxiv": "2502.17416",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2502.17416" }
+      ],
+      "page": "papers/reasoning-latent-thoughts.html",
+      "reading": "papers/reasoning-latent-thoughts.html",
+      "tldr": "把 k 层 Transformer 循环 L 次，在加法、多跳查找和合成数学题上几乎追平真正有 kL 层的模型；在 1B 规模的预训练中，它和同计算量的深模型相比困惑度与知识问答更差，但推理类任务差得少、在简单的上下文查找上还反超。作者还证明 T 次循环可以模拟 T 步思维链，并提出一个让各层彼此接近的正则项，在不损失困惑度的情况下提高推理分数。"
+    },
+    {
+      "id": "huginn",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Huginn：循环深度的潜空间推理",
+      "full_title": "Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach",
+      "authors": ["Jonas Geiping", "Sean McLeish", "Neel Jain", "John Kirchenbauer", "Siddharth Singh", "Brian R. Bartoldson", "Bhavya Kailkhura", "Abhinav Bhatele", "Tom Goldstein"],
+      "org": "ELLIS Institute Tübingen / MPI-IS · University of Maryland · LLNL",
+      "date": "2025-02",
+      "venue": "NeurIPS 2025",
+      "arxiv": "2502.05171",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2502.05171" },
+        { "label": "Model", "url": "https://huggingface.co/tomg-group-umd/huginn-0125" },
+        { "label": "Code", "url": "https://github.com/seal-rg/recurrent-pretraining" }
+      ],
+      "page": "papers/huginn.html",
+      "reading": "papers/huginn.html",
+      "tldr": "把 Transformer 中间几层做成可反复执行的循环块，训练时随机抽循环次数，测试时多循环几次就能在潜空间里多算；3.5B 的 Huginn-0125 循环 32 次后，数学与代码分数大幅上升。代价是每个 token 的计算量随循环次数成倍增加：按训练算力看它与 OLMo-2-7B 相当，而综合分数明显落后。"
+    },
+    {
+      "id": "ouro",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Ouro：循环语言模型",
+      "full_title": "Scaling Latent Reasoning via Looped Language Models",
+      "authors": ["Rui-Jie Zhu", "Zixuan Wang", "Kai Hua", "Tianyu Zhang", "Ziniu Li", "Haoran Que", "Boyi Wei", "Zixin Wen", "Fan Yin", "He Xing", "Lu Li", "Jiajun Shi", "Kaijing Ma", "Shanda Li", "Taylor Kergan", "Andrew Smith", "Xingwei Qu", "Mude Hui", "Bohong Wu", "Qiyang Min", "Hongzhi Huang", "Xun Zhou", "Wei Ye", "Jiaheng Liu", "Jian Yang", "Yunfeng Shi", "Chenghua Lin", "Enduo Zhao", "Tianle Cai", "Ge Zhang", "Wenhao Huang", "Yoshua Bengio", "Jason Eshraghian"],
+      "org": "ByteDance Seed · UC Santa Cruz · Princeton · Mila / Université de Montréal 等",
+      "date": "2025-10",
+      "venue": "arXiv 预印本",
+      "arxiv": "2510.25741",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2510.25741" },
+        { "label": "Project", "url": "https://ouro-llm.github.io" }
+      ],
+      "page": "papers/ouro.html",
+      "reading": "papers/ouro.html",
+      "tldr": "把同一组 Transformer 层循环 4 遍，并用一个退出门学习每个 token 用几遍；在 7.7T token 上训练的 1.4B / 2.6B 模型在推理类基准上接近 4B / 8B 的稠密模型。这是同参数量的比较：它每个 token 的计算量比 Qwen3-4B 还多，KV 缓存默认是 4 倍；后来同数据、同计算量的对照显示，循环在每个参数上很划算，在每次计算上不如增加独立的层。"
+    },
+    {
+      "id": "mor",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Mixture-of-Recursions",
+      "full_title": "Mixture-of-Recursions: Learning Dynamic Recursive Depths for Adaptive Token-Level Computation",
+      "authors": ["Sangmin Bae", "Yujin Kim", "Reza Bayat", "Sungnyun Kim", "Jiyoun Ha", "Tal Schuster", "Adam Fisch", "Hrayr Harutyunyan", "Ziwei Ji", "Aaron Courville", "Se-Young Yun"],
+      "org": "KAIST AI, Mila, Google DeepMind, Google Research, Google Cloud, Université de Montréal",
+      "date": "2025-07",
+      "venue": "NeurIPS 2025",
+      "arxiv": "2507.10524",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2507.10524" },
+        { "label": "Code", "url": "https://github.com/raymin0223/mixture_of_recursions" }
+      ],
+      "page": "papers/mixture-of-recursions.html",
+      "reading": "papers/mixture-of-recursions.html",
+      "tldr": "MoR 让一叠共享的层最多循环几遍，由一个小路由器为每个 token 决定循环几遍，每一轮只缓存还在计算的 token 的 KV。在 135M–1.7B 规模、相同训练 FLOPs 下，它用约一半到三分之一的参数达到与普通模型相近的质量，推理更快；但在数据充足的设置和 1.7B 的实验里，普通模型仍然更好。"
+    },
+    {
+      "id": "trm",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "TRM：小网络递归推理",
+      "full_title": "Less is More: Recursive Reasoning with Tiny Networks",
+      "authors": ["Alexia Jolicoeur-Martineau"],
+      "org": "Samsung SAIL Montréal",
+      "date": "2025-10",
+      "venue": "arXiv 预印本（ARC Prize 2025 论文奖第一名）",
+      "arxiv": "2510.04871",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2510.04871" }
+      ],
+      "page": "papers/tiny-recursive-model.html",
+      "reading": "papers/tiny-recursive-model.html",
+      "tldr": "TRM 把 HRM 简化成一个只有 2 层的网络，反复改写“推理草稿”和“当前答案”两个状态，并对一整轮递归做完整的反向传播，用 5–7M 参数在难数独、大迷宫和 ARC-AGI 上超过了 27M 的 HRM。这些成绩来自每个基准单独训练、在评估题示范上训练并对 1000 个变体投票的专用模型，ARC Prize 在半私有集上复核为 ARC-AGI-1 40%、ARC-AGI-2 6.2%。"
+    },
+    {
+      "id": "parcae",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Parcae：稳定循环语言模型的扩展律",
+      "full_title": "Parcae: Scaling Laws For Stable Looped Language Models",
+      "authors": ["Hayden Prairie", "Zachary Novack", "Taylor Berg-Kirkpatrick", "Daniel Y. Fu"],
+      "org": "UC San Diego · Together AI",
+      "date": "2026-04",
+      "venue": "arXiv 预印本",
+      "arxiv": "2604.12946",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2604.12946" }
+      ],
+      "page": "papers/parcae.html",
+      "reading": "papers/parcae.html",
+      "tldr": "论文把循环模型的逐圈更新看成残差流上的动力系统，发现训练爆炸来自状态转移矩阵的谱半径不小于 1，于是用负对角矩阵加离散化从结构上保证稳定。在此基础上，它得到了固定参数量时循环次数与数据量一起增长的幂律和测试时的饱和指数律；比较对齐的是参数量和数据量，不是计算量。"
+    },
+    {
+      "id": "iso-depth",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "一次循环值多少参数：等深度扩展律",
+      "full_title": "How Much Is One Recurrence Worth? Iso-Depth Scaling Laws for Looped Language Models",
+      "authors": ["Kristian Schwethelm", "Daniel Rückert", "Georgios Kaissis"],
+      "org": "TUM · Imperial College London · MCML · HPI / Universität Potsdam",
+      "date": "2026-04",
+      "venue": "arXiv 预印本",
+      "arxiv": "2604.21106",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2604.21106" }
+      ],
+      "page": "papers/iso-depth-scaling.html",
+      "reading": "papers/iso-depth-scaling.html",
+      "tldr": "作者让四种模型都执行 20 层、只改变共享层的多少，在相同训练算力下比较，测得循环 r 遍只相当于 r^0.46 个独立的块。例如循环 4 遍、4.1 亿参数的模型，损失和 5.8 亿参数的普通模型相当，训练成本却和 10 亿参数的模型一样。"
+    },
+    {
+      "id": "smelt",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "SMELT：算力对齐的 MoE 循环扩展律",
+      "full_title": "SMELT: Scaling Laws for Compute-Matched MoE Looped Transformers",
+      "authors": ["Shaowen Wang", "Ge Zhang", "Kairong Luo", "Yuhao Wu", "Shaofan Liu", "Jiaheng Liu", "Wenhao Huang", "Shen Yan", "Jian Li"],
+      "org": "Tsinghua University · ByteDance Seed · M-A-P · TokenWave.AI",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "arxiv": "2609.01343",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2609.01343" },
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=RFvMxqnGL9" }
+      ],
+      "page": "papers/smelt.html",
+      "reading": "papers/smelt.html",
+      "tldr": "在 MoE 模型上把每 token 计算量、总参数和 KV 缓存三项同时对齐后，把中间一半的层循环两遍（SMELT）仍比不循环的基线损失更低，按分别拟合的扩展律，在 10²⁰–10²¹ FLOPs 的算力最优前沿上省 6.8–18.0% 的训练算力。实验最大到 1.6B 激活、54B 总参数，每个配置只训练一次，模型和数据都没有公开。"
+    },
+    {
+      "id": "loop-mup",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "Loop-μP：循环模型的残差缩放与超参迁移",
+      "full_title": "Loop-μP: Residual Scaling and Hyperparameter Transfer in Looped Transformers",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "links": [
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=vnYE7hZoKz" }
+      ],
+      "page": "papers/loop-mup.html",
+      "reading": "papers/loop-mup.html",
+      "tldr": "循环各圈共用同一套权重，加进残差流的增量方向相近、总量按循环次数 N 线性增长，所以残差分支要乘 1/N 而不是深度方向的 1/√N，学习率则不必随 N 改变。L 层循环 N 次时按 a/(N√L) 缩放，在 4.4 亿参数以内的实验中，同一个基础学习率在循环 1–8 次、执行深度最多 384 层时都是最优（匿名投稿，审稿中）。"
+    },
+    {
+      "id": "elr",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "ELR：一个模型、多种深度",
+      "full_title": "One Model, Many Depths: A Recipe for Elastic-Depth Latent Recurrent Language Models",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "links": [
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=L1JPtkVuTw" }
+      ],
+      "page": "papers/elastic-latent-recurrence.html",
+      "reading": "papers/elastic-latent-recurrence.html",
+      "tldr": "循环语言模型只跑 1 圈时通常不如同样成本的普通模型，这个差距叫“单圈税”。这篇 ICLR 2027 匿名投稿用门控状态更新和“在同一次更新里混合圈数”的训练，让 4B 与 30B-A3B 模型跑 1 圈时与同数据训练的普通模型相近，每多跑一圈再涨分，训练成本约为普通模型的 1.16 倍。"
+    },
+    {
+      "id": "loop-storage",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "循环能替代多少参数",
+      "full_title": "How Much Can Loops Replace Parameters? Sharp Storage–Computation Frontiers for Looped Neural Networks",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "links": [
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=mEE3hChoIx" }
+      ],
+      "page": "papers/loops-vs-parameters.html",
+      "reading": "papers/loops-vs-parameters.html",
+      "tldr": "这篇理论投稿证明：用 J 个大小固定的 ReLU 模块、总共调用 T 次去逼近 d 维的 Lipschitz 函数，最优的最坏情况误差恰好是 (JT)^(−1/d) 的阶，所以少存一半模块可以用多一倍的调用补回来。它还证明调用顺序有影响：只有在见过足够多模块之后还剩足够多的调用，才能保住这条前沿；结论建立在无限精度的实数参数上，不涉及训练和注意力。"
+    },
+    {
+      "id": "arloop",
+      "track": "looped",
+      "kind": "paper",
+      "lane": "",
+      "title": "ARLoop：深度方向注意力残差的循环 Transformer",
+      "full_title": "ARLoop: Strong Fully-Open Looped Transformers with Attention Residuals",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "links": [
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=i1h0zQU3cl" }
+      ],
+      "page": "papers/arloop.html",
+      "reading": "papers/arloop.html",
+      "tldr": "循环 Transformer 反复使用同一组层，每一圈的输出都被加进同一条残差流，后面的层没法挑着用。ARLoop 让每个子层用注意力从前面各块的输出里按需取用（循环较多时只看最近 3 块加词向量），在 140M/370M 受控实验中困惑度略低于 PreNorm 和 Parcae 等设计，0.6B 同数据对比中数学提升明显；论文仍在 ICLR 2027 匿名评审中。"
     }
   ],
   "edges": [

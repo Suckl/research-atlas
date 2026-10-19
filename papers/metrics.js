@@ -3,6 +3,11 @@ window.ATLAS_METRICS = {
  "fetched": "2026-10-19",
  "source": "Semantic Scholar",
  "papers": {
+  "1807.03819": {
+   "citations": 1138,
+   "influential": 107,
+   "s2": "ac4dafdef1d2b685b7f28a11837414573d39ff4e"
+  },
   "1909.08053": {
    "citations": 3293,
    "influential": 407,
@@ -14,7 +19,7 @@ window.ATLAS_METRICS = {
    "s2": "00c957711b12468cb38424caccdf5291bb354033"
   },
   "2010.02502": {
-   "citations": 13992,
+   "citations": 13991,
    "influential": 1857,
    "s2": "014576b866078524286802b1d0e18628520aa886"
   },
@@ -47,6 +52,11 @@ window.ATLAS_METRICS = {
    "citations": 1444,
    "influential": 176,
    "s2": "ee57e4d7a125f4ca8916284a857c3760d7d378d3"
+  },
+  "2301.13196": {
+   "citations": 288,
+   "influential": 17,
+   "s2": "d4c60620570801a231a7756f931dda1740288fb9"
   },
   "2303.01469": {
    "citations": 2350,
@@ -183,6 +193,11 @@ window.ATLAS_METRICS = {
    "influential": 10,
    "s2": "cb19bc5b16c9244269638626a978b20023fb179a"
   },
+  "2502.05171": {
+   "citations": 473,
+   "influential": 100,
+   "s2": "cbc1363d0c55abb60aa9c0e5a7ca0798ce86a752"
+  },
   "2502.06768": {
    "citations": 237,
    "influential": 39,
@@ -197,6 +212,11 @@ window.ATLAS_METRICS = {
    "citations": 118,
    "influential": 23,
    "s2": "b9eb8ba8467d4e8d50c41d4e66f96fa6ec173193"
+  },
+  "2502.17416": {
+   "citations": 279,
+   "influential": 35,
+   "s2": "b39e8ff1babf6b5276c0af68ab766c46487e1df7"
   },
   "2503.03751": {
    "citations": 391,
@@ -333,6 +353,11 @@ window.ATLAS_METRICS = {
    "influential": 35,
    "s2": "61024282f1523543a5b06326cb58c9b6ad14cdd1"
   },
+  "2507.10524": {
+   "citations": 162,
+   "influential": 19,
+   "s2": "875418bb21265276be9298b50e52a6c53ff3a202"
+  },
   "2507.15857": {
    "citations": 72,
    "influential": 12,
@@ -432,6 +457,11 @@ window.ATLAS_METRICS = {
    "citations": 186,
    "influential": 37,
    "s2": "55087e6f6392d26af8b341000f20a4cf24db03bf"
+  },
+  "2510.25741": {
+   "citations": 180,
+   "influential": 41,
+   "s2": "8fbfef893c78989432a30ed2c0bbd58139bcbfbe"
   },
   "2510.26692": {
    "citations": 205,
@@ -583,6 +613,16 @@ window.ATLAS_METRICS = {
    "influential": 30,
    "s2": "1694aa9399cb95268eb39b2af1eb9706e7dafa0d"
   },
+  "2604.12946": {
+   "citations": 60,
+   "influential": 17,
+   "s2": "ac53b4ca75527e889130719ac9a7d534fad461ea"
+  },
+  "2604.21106": {
+   "citations": 28,
+   "influential": 2,
+   "s2": "901f1745460e4a94e70ed102d48242357754c45c"
+  },
   "2605.12496": {
    "citations": 11,
    "influential": 0,
@@ -652,6 +692,11 @@ window.ATLAS_METRICS = {
    "citations": 8,
    "influential": 3,
    "s2": "40962bfd131c0e45eff5aa588254c46b3fdffadb"
+  },
+  "2609.01343": {
+   "citations": 19,
+   "influential": 1,
+   "s2": "932212d447db50b8c350e730c17281ffe0a287bb"
   },
   "2609.28923": {
    "citations": 0,

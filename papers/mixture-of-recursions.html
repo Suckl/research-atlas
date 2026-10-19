@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mixture-of-Recursions 精读</title>
+<meta name="description" content="Mixture-of-Recursions（MoR，NeurIPS 2025）逐节精读：参数共享方式、按递归深度的路由（专家选择与 token 选择）、两种 KV 缓存策略、同训练 FLOPs 的比较与结果的份量、连续深度批处理与 2.06 倍吞吐的条件。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="looped" data-node="mor">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 循环 Transformer · NeurIPS 2025</div>
+  <h1>混合递归：为每个 token 学出各自的递归深度</h1>
+  <p class="en-title">Mixture-of-Recursions: Learning Dynamic Recursive Depths for Adaptive Token-Level Computation</p>
+  <div class="paper-authors">Sangmin Bae<sup>1,*</sup>, Yujin Kim<sup>1,*</sup>, Reza Bayat<sup>2,*</sup>, Sungnyun Kim<sup>1</sup>, Jiyoun Ha<sup>3</sup>, Tal Schuster<sup>4</sup>, Adam Fisch<sup>4</sup>, Hrayr Harutyunyan<sup>5</sup>, Ziwei Ji<sup>4</sup>, Aaron Courville<sup>2,6,†</sup>, Se-Young Yun<sup>1,†</sup></div>
+  <div class="paper-affil"><sup>1</sup>KAIST AI　<sup>2</sup>Mila　<sup>3</sup>Google Cloud　<sup>4</sup>Google DeepMind　<sup>5</sup>Google Research　<sup>6</sup>Université de Montréal　<sup>*</sup>共同一作　<sup>†</sup>通讯作者</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2507.10524" target="_blank" rel="noopener">arXiv 2507.10524 ↗</a>
+    <a class="pill" href="https://neurips.cc/virtual/2025/poster/118085" target="_blank" rel="noopener">NeurIPS 2025 ↗</a>
+    <a class="pill" href="https://github.com/raymin0223/mixture_of_recursions" target="_blank" rel="noopener">Code: raymin0223/mixture_of_recursions ↗</a>
+    <a class="pill" href="https://arxiv.org/abs/2410.20672" target="_blank" rel="noopener">前作：Relaxed Recursive Transformers（ICLR 2025）↗</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>642</b><span>GitHub star（截至 2026-10-19）</span></div>
+    <div><b>135M–1.7B</b><span>实验规模（按对应的普通模型计）</span></div>
+    <div><b>16.5×10¹⁸</b><span>主表的训练预算（前向 FLOPs）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。本页的节号是本页自己的编号，每节开头的问题框里注明对应原文的哪一节。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 CC BY 4.0 许可发布，所以原图直接放在讲到它的地方，并说明这张图怎么看；原图没画到的地方，用本站的示意图补上。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大语言模型越大越强，但训练和部署也越贵。想省钱，常见的有两条路。第一条是<b>少存参数</b>：让好几层共用同一套权重（叫参数共享或层绑定），模型占的显存和通信量就小了。第二条是<b>少做计算</b>：让“容易”的 token 少算几层就交卷（叫自适应计算，典型做法是早退出），总的计算量就少了。这两条路过去基本各走各的：共享参数的模型通常对每个 token 一视同仁地算满，早退出的模型通常每层都有自己的权重。</p>
+<p>这篇论文提出的 <b>Mixture-of-Recursions（MoR）</b>想把两条路放进同一个模型。模型中间是一叠共享的层（称为递归块），每个 token 最多可以反复穿过它 \(N_r\) 次；一个很小的<b>路由器</b>（router）在训练中学会为每个 token 决定它要穿过几次。因为层是共享的，要存的参数只有普通模型的大约 \(1/N_r\)；因为容易的 token 早早停下，训练和推理的计算都减少了；作者还让每一轮递归只缓存仍在计算的 token 的 KV，于是 KV 缓存也变小了。把“少参数、少计算、少 KV”放在一个结构里，是这篇论文的主要卖点。</p>
+<p>先把结果的份量说清楚，后面每一节都会回到这一点。实验规模是 135M 到 1.7B 参数（按对应的普通模型计），全部在 FineWeb-Edu 上从零预训练。主表在相同的训练 FLOPs（\(16.5\times10^{18}\)）下比较：递归 2 次的 MoR 只有普通模型约一半的参数，验证集负对数似然（NLL）从 2.7824 降到 2.7511，6 项 few-shot 平均准确率从 42.3% 升到 43.1%。这是真实但很小的提升；同一张表里，递归 3 次、4 次的 MoR 在 NLL 上已经不如普通模型。论文标题级的“2.06 倍推理吞吐”，对应的是质量略差于普通模型的 MoR-4。所以读这一页时要一直问：这个比较里，什么是对齐的，什么不是。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>递归 Transformer 是怎么把参数降到约 \(1/N_r\) 的？四种参数共享方式有什么区别，为什么最后选 Middle-Cycle？前作 Relaxed Recursive Transformers 做到了哪一步？</li>
+  <li>路由器怎么决定每个 token 递归几次？“专家选择”和“token 选择”各有什么毛病？为什么说专家选择在推理时违反因果，又怎么补救？</li>
+  <li>一个 token 提前停下后，后面的 token 在更深的轮次里还要不要读它的 KV？两种 KV 策略各自省了什么、没省什么？</li>
+  <li>“同样训练 FLOPs、参数更少、效果更好”是怎么算出来的？为什么 MoR 能多看 35%–50% 的训练 token？</li>
+  <li>2.06 倍吞吐是在什么设置下测出来的？</li>
+  <li>换成更公平的比较（每个预算下各自最好的模型、更大的规模），这些优势还剩多少？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：参数共享和自适应计算，为什么想合在一起</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>论文从“大模型太贵”出发，指出省钱的两条路线——共享参数和按需计算——各自都有进展，却一直没有一个结构能同时拿到两者的好处。那么，为什么以前合不到一起？递归 Transformer 为什么被选作统一的底座？MoR 声称同时解决了哪三件事？</div>
+
+<div class="note-pre"><b>先补一点背景：参数共享（层绑定）。</b>
+<p>一个普通的 Transformer 有 \(L\) 层，每层都有自己的一套权重。层绑定的做法是让若干层共用同一套权重。最早系统地这么做的是 Universal Transformer（2018），它把同一个块反复使用（见<a href="universal-transformers.html">本站的 Universal Transformers 精读</a>）；ALBERT 也在所有层之间共享权重。这样做的好处是要存、要传的参数少了，显存和多卡通信的压力随之下降。代价是表达能力下降：在同样的深度下，共享参数的模型通常比不共享的模型差。</p>
+<p>有一点特别容易被忽略：<b>共享参数并不减少计算</b>。一个展开后有 30 层的模型，即使只存了 10 层的权重，每个 token 也仍然要算满 30 层。参数省下来的是存储，不是算力。</p>
+</div>
+
+<div class="note-pre"><b>再补一点背景：早退出，以及它的两个工程难题。</b>
+<p>早退出让模型在中间层就“交卷”：如果一个 token 在第 10 层时模型已经很有把握，就跳过后面的层，直接用这一层的表示去预测下一个 token。代表工作是 CALM（Schuster 等，NeurIPS 2022），本文的两位 Google DeepMind 作者 Tal Schuster 和 Adam Fisch 正是 CALM 的作者。</p>
+<p>早退出在生成文字时有两个麻烦。第一是<b>漏掉的 KV</b>：一个 token 在第 10 层退出，第 11 层以后就没有为它算 key 和 value；后面的 token 在第 11 层以后做注意力时，要读前面所有 token 的 KV，这个 token 的那一份却不存在。第二是<b>批处理里的空泡</b>：推理时一批 token 一起逐层往上算，提前退出的 token 只能在深层空等，等同批里最慢的那个算完，它的位置才能让给新的 token。此外，早退出通常需要在主训练之后另加一个训练阶段，教中间层也能做预测，这一步常常让最后一层的质量下降。</p>
+</div>
+
+<p>作者的出发点是：<b>递归 Transformer 天然适合早退出</b>。因为每一轮用的都是同一套权重，一个 token 提前停下后，它在批里的位置可以马上交给另一个 token 的任意一轮计算（<a href="#n-7">本页第 7 节</a>的“连续深度批处理”会画出来），空泡问题有了解法。剩下要解决的是两件事：怎样在不加额外训练阶段的情况下让模型学会“该停就停”，以及停下的 token 留下的 KV 空缺怎么办。</p>
+<p>MoR 的回答是：在预训练时就端到端地训练一个轻量的路由器，让它给每个 token 分配递归深度；KV 缓存按递归轮次分开存，每一轮只存真正参与这一轮计算的 token。作者把好处概括成三句话：绑定权重，减少参数；路由 token，减少冗余计算；按递归缓存 KV，减少显存读写。</p>
+
+<figure class="paper-fig"><div class="imgs"><img src="mixture-of-recursions/fig/overview_main1.svg" alt="原文图 1 左：一个递归步" loading="lazy"><img src="mixture-of-recursions/fig/overview_main2.svg" alt="原文图 1 中：整体结构" loading="lazy"><img src="mixture-of-recursions/fig/overview_main3.png" alt="原文图 1 右：每个 token 的递归深度" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左图是一个递归步的内部：路由器读入 token 的隐藏状态 \(x_t\)，给出一个分数 \(g\)（图中是 0.7）；共享的那几层（Layer 1 到 Layer \(L-2\)）算出的结果乘上这个分数，再加回进入这一步之前的状态。中图是整个模型：最下面的 Layer 0 和最上面的 Layer \(L-1\) 不参与共享，中间的递归块最多循环 \(N_r\) 次（右上角的弯箭头）；底部一排是进入这一轮的 token，用实线箭头穿过递归块、在顶部变成红色的是这一轮被选中继续计算的 token，只画了虚线短箭头、保持蓝色的是这一轮不再计算、状态原样往上传的 token。右图是真实文本上的路由结果：上半部分横轴是序列位置、纵轴是层，深色格子表示这一层真的算了，浅色表示跳过；下半部分按递归次数给文字着色（紫色 1 次、蓝色 2 次、红色 3 次）。要注意，一个位置的深度是“为了预测<b>下一个</b> token”而分配的。比如 defensively 被切成 def 和 ensively 两个子词，看到 def 之后猜 ensively 很容易，所以 def 这个位置只递归了 1 次。</figcaption></figure>
+
+<p>论文还把 MoR 说成一种“潜空间推理”的预训练框架：token 不必写出思考过程，而是在深度方向上多“想”几遍，而且想几遍因 token 而异。这个说法与<a href="huginn.html">Huginn</a>、<a href="reasoning-latent-thoughts.html">Reasoning with Latent Thoughts</a> 等工作一脉相承。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这里的“多想几遍”，具体是让一个大约 10 层的共享块多跑 1 到 3 遍，而且每一轮能跑的 token 比例是预先定好的。论文没有任何推理类任务的评测，评测只有语言建模损失和 6 个常识类 few-shot 任务；作者自己在 §7.1 把“在推理数据上训练 MoR”列为未来工作。所以“潜空间推理”在这篇论文里是动机和解读，不是被实验验证过的能力。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：递归 Transformer、四种共享方式和前作 RRT</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>递归 Transformer 具体怎样把参数降到约 \(1/N_r\)？共享的层按什么顺序排列，有哪几种排法，哪一种最好？作者的前一篇论文 Relaxed Recursive Transformers 已经做到了哪一步，又留下了哪些没解决的问题？这一节对应原文 §2.1，是后面所有设计的出发点。</div>
+
+<div class="note-pre"><b>先补一点背景：Transformer 的层和残差流。</b>
+<p>一个 token 进入模型后变成一个向量，叫隐藏状态 \(h\)。每一层做两件事：注意力（从前面的 token 那里取信息）和前馈网络（对自己的向量做变换），两者的结果都加回到 \(h\) 上，这叫残差连接。所以可以把一层写成</p>
+<div class="formula">$$h_t^{\ell+1}=f\big(h_t^{\ell};\,\Phi_{\ell}\big),\qquad \ell=0,\dots,L-1$$</div>
+<p>意思是：第 \(\ell\) 层用它自己的参数 \(\Phi_{\ell}\)，把位置 \(t\) 的状态往前推一步。普通模型有 \(L\) 套互不相同的 \(\Phi_{\ell}\)。</p>
+</div>
+
+<p><b>递归 Transformer</b> 把这 \(L\) 层分成 \(N_r\) 个“递归块”，所有块共用同一池参数 \(\Phi'\)。展开以后，有效深度还是 \(L\) 层，所以每个 token 的计算量不变；但需要存的参数大约只剩 \(1/N_r\)。</p>
+
+<h4 id="n-2-1">2.1 四种共享方式：层按什么顺序复用</h4>
+<p>同样是“10 层权重用 3 遍”，排列顺序可以不同。论文比较了四种：</p>
+<ul>
+  <li><b>Cycle（循环）</b>：整块依次重复，展开后是 \((0,1,2),(0,1,2),(0,1,2)\)。第 \(\ell\) 层用的参数是 \(\Phi'_{\ell \bmod (L/N_r)}\)。</li>
+  <li><b>Sequence（顺序）</b>：每层连续用几次再换下一层，展开后是 \((0,0,0),(1,1,1),(2,2,2)\)。</li>
+  <li><b>Middle-Cycle</b> 和 <b>Middle-Sequence</b>：第一层和最后一层保留独立的参数 \(\Phi_0\) 和 \(\Phi_{L-1}\)，只让中间的层按 Cycle 或 Sequence 的方式共享。Middle-Cycle 中间第 \(\ell\) 层用的参数是 \(\Phi'_{((\ell-1)\bmod((L-2)/N_r))+1}\)。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：四种共享方式（\(N_r=3\)，同色、同编号的格子共用一套权重）</div>
+  <div class="dia-row"><span class="lbl">Cycle（9 层）</span><div class="cells"><span class="cell a">0</span><span class="cell b">1</span><span class="cell c">2</span><span class="cell a">0</span><span class="cell b">1</span><span class="cell c">2</span><span class="cell a">0</span><span class="cell b">1</span><span class="cell c">2</span></div></div>
+  <div class="dia-row"><span class="lbl">Sequence（9 层）</span><div class="cells"><span class="cell a">0</span><span class="cell a">0</span><span class="cell a">0</span><span class="cell b">1</span><span class="cell b">1</span><span class="cell b">1</span><span class="cell c">2</span><span class="cell c">2</span><span class="cell c">2</span></div></div>
+  <div class="dia-out">两者都只存 3 层权重、展开后都是 9 层，区别只在顺序。</div>
+  <div class="dia-row"><span class="lbl">Middle-Cycle（11 层）</span><div class="cells"><span class="cell">首</span><span class="cell a">1</span><span class="cell b">2</span><span class="cell c">3</span><span class="cell a">1</span><span class="cell b">2</span><span class="cell c">3</span><span class="cell a">1</span><span class="cell b">2</span><span class="cell c">3</span><span class="cell">末</span></div></div>
+  <div class="dia-row"><span class="lbl">Middle-Sequence（11 层）</span><div class="cells"><span class="cell">首</span><span class="cell a">1</span><span class="cell a">1</span><span class="cell a">1</span><span class="cell b">2</span><span class="cell b">2</span><span class="cell b">2</span><span class="cell c">3</span><span class="cell c">3</span><span class="cell c">3</span><span class="cell">末</span></div></div>
+  <div class="dia-out">灰色的“首”“末”两层各有独立权重，只有中间 9 层按 3 层一组共享，一共存 5 层权重。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2507.10524#A1.T5" target="_blank" rel="noopener">原文表 5 ↗</a>（原文表 1 只列了 Cycle 和 Middle-Cycle）。Cycle 和 Sequence 的 9 层例子是原文 §2.1 的例子；Middle 的两行是本站按原文公式画的。</div>
+</div>
+<p>为什么要把第一层和最后一层单独拿出来？直觉是这两层的分工很特殊：第一层要把词嵌入“读进来”，最后一层要把表示“写成”下一个 token 的概率分布，让它们和中间层共用权重，等于逼一套参数同时干三种不同的活。<a href="huginn.html">Huginn</a> 的“前奏—循环块—尾声”结构也是同样的思路。<a href="#n-8-1">第 8.1 节</a>的消融会证明 Middle-Cycle 最好，所以论文里所有的 Recursive 基线和 MoR 都用它。</p>
+<p>落到实际配置上，以 360M 的普通模型为例：它有 32 层、3.15 亿个非嵌入参数。改成 \(N_r=3\) 的 Middle-Cycle 以后是“1 + 10 + 1”：首尾各 1 层，中间 10 层循环 3 遍，展开后仍是 \(1+30+1=32\) 层，但只存 12 层权重，非嵌入参数降到 1.18 亿。层数不能被整除时，作者会加层凑整：135M 的普通模型有 30 层，递归版本加了 2 层，变成 \(1+10\times3+1=32\) 层，为此少训练几步来保持 FLOPs 预算不变。</p>
+
+<h4 id="n-2-2">2.2 前作：Relaxed Recursive Transformers（RRT）</h4>
+<p>MoR 的第一作者此前发表了 <a href="https://arxiv.org/abs/2410.20672" target="_blank" rel="noopener">Relaxed Recursive Transformers</a>（Bae 等，ICLR 2025），MoR 的很多设计都从这里来。RRT 做了三件事：</p>
+<ul>
+  <li><b>从已训练好的模型“改造”出递归模型。</b>RRT 不从零训练，而是拿 Gemma 2B、TinyLlama 1.1B、Pythia 1B 这样的现成模型，只保留一块层，循环使用，再用少量数据继续训练（论文称为 uptraining）。共享层的初始值有三种取法：Stepwise（每隔几层挑一层）、Average（把要绑在一起的层取平均）、Lower（直接用最前面几层）。</li>
+  <li><b>“放松”严格的共享。</b>给每一轮循环里的每一层各加一个小的 LoRA 低秩修正，并用截断 SVD 初始化，让“共享权重 + 低秩修正”尽量还原原模型各层的权重。秩为 0 时就是严格的递归模型，秩足够大时就接近原模型。</li>
+  <li><b>提出连续深度批处理。</b>因为每一轮用同一套权重，处在不同轮次的 token 可以放进同一个批里一起算；再配上早退出，RRT 在理论估算（模拟）中得出吞吐量可提高 2–3 倍。它的早退出是在 uptraining 之后另做的一个训练阶段，让中间轮次的输出也能做预测。</li>
+</ul>
+<p>RRT 的主要结果是：由 Gemma 2B 改造出的递归 Gemma 1B，few-shot 表现超过同等大小的 TinyLlama 1.1B 和 Pythia 1B，比从零训练的非递归 Gemma 1B 最多高 13.5 个百分点。</p>
+
+<h4 id="n-2-3">2.3 递归结构带来的效率，以及前人留下的问题</h4>
+<p>论文指出递归结构还有两个“附送”的效率好处。第一个与分布式训练有关。FSDP（全分片数据并行）把每层的参数切成片分散在各张 GPU 上，算某一层之前要先做一次 all-gather，把这一层的完整参数拼回来。递归模型的共享块拼回来一次，可以连续用 \(N_r\) 轮，通信次数随之减少。不过论文只是提出了这一点，没有测量；官方仓库的维护者在 GitHub issue #13 里也表示这一点还需要实际验证。第二个好处是连续深度批处理，<a href="#n-7">第 7 节</a>详细讲。</p>
+<p>前人的递归模型留下了三个问题，正是 MoR 要解决的：</p>
+<ol>
+  <li><b>KV 缓存没有变小。</b>参数虽然共享了，每一轮循环通常还是各存一份 KV。推理时读 KV 往往是瓶颈，所以光共享参数，推理并不会快多少。</li>
+  <li><b>所有 token 的递归次数相同。</b>大多数递归模型对每个 token 都循环同样多次。早退出能带来一些灵活性，但它是事后加上去的，需要单独训练，还会掉点。理想的做法是在预训练时就学会因 token 而异的深度。</li>
+  <li><b>动态深度带来漏掉的 KV。</b>如果训练时就让 token 在不同轮次退出，退出的 token 在更深的轮次里没有 KV，后面的 token 就查不到它。以前的补救办法（比如作者的 FREE 框架用的并行解码）需要相当复杂的工程。</li>
+</ol>
+<div class="note-warn"><b>贯穿全文的一个要点：参数少不等于计算少。</b>固定深度的递归 Transformer 每个 token 的 FLOPs 和同样展开深度的普通模型完全一样。本文的“Recursive”基线就是这样：参数约为 1/3，训练 FLOPs 与普通模型相同，同样预算下看的 token 也一样多（主表里都是 20B）。MoR 的计算节省<b>全部来自路由</b>——让一部分 token 少跑几轮。记住这一点，后面的每个比较才读得懂。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A1.SS1" target="_blank" rel="noopener">附录 A.1（共享方式）↗</a> · <a href="https://arxiv.org/html/2410.20672#S2" target="_blank" rel="noopener">RRT 原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 路由：每个 token 递归几次由谁决定</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoR 要让不同 token 走不同的递归深度，就需要一个“分配者”。这个分配者借用了混合专家（MoE）里的路由器：把“第 1 轮、第 2 轮、第 3 轮”当成三个专家。MoE 里有两种成熟的路由方式——专家挑 token，或者 token 挑专家——搬到递归深度上，各自会遇到什么问题？为什么专家选择虽然训练效果好，推理时却“违反因果”？这一节对应原文 §2.2.1 和附录 A.2。</div>
+
+<div class="note-pre"><b>先补一点背景：MoE 的两种路由，以及 Mixture-of-Depths。</b>
+<p>MoE 层里有多个“专家”（通常是多个前馈网络），路由器给每个 token 对每个专家打一个分。接下来有两种分配办法（DeepSeek-V3 的路由可参考<a href="deepseek-v3.html#n-2-2">本站精读的 MoE 一节</a>）：</p>
+<ul>
+  <li><b>token 选择（token-choice）</b>：每个 token 挑自己分数最高的专家。决定只依赖这个 token 自己，简单、天然满足因果；但专家之间的负载可能极不均衡，比如所有 token 都挤向同一个专家。通常要加一个负载均衡损失，或者用 DeepSeek 提出的“无辅助损失”做法——给每个专家加一个偏置，被挤爆的专家偏置调低（见<a href="deepseek-v3.html#n-2-3">负载均衡一节</a>）。</li>
+  <li><b>专家选择（expert-choice）</b>：反过来，每个专家从一批 token 里挑分数最高的 \(k\) 个。每个专家处理的 token 数固定，负载天然完全均衡；但一个 token 会不会被选中，取决于同一批里其他 token 的分数。</li>
+</ul>
+<p><b>Mixture-of-Depths（MoD，Raposo 等，2024）</b>把“这一层要不要算”变成一个路由问题：每层一个路由器，从序列中挑出分数最高的 top-\(k\) 个 token 走完整的这一层，其余 token 沿残差直接跳过。被选中的比例叫容量（capacity），事先固定，所以总计算量是静态的。MoR 的专家选择路由，就是把 MoD 搬到递归结构上，把“第 \(r\) 轮递归”当作一个专家。</p>
+</div>
+
+<h4 id="n-3-1">3.1 专家选择路由：每一轮挑出一部分 token 继续</h4>
+<p>在第 \(r\) 轮，路由器读入 token \(t\) 进入这一轮之前的状态 \(\mathcal{H}^r_t\)，用自己的参数 \(\theta_r\) 算出一个标量分数 \(g^r_t=\mathcal{G}(\theta_r^{\top}\mathcal{H}^r_t)\)，其中 \(\mathcal{G}\) 是 sigmoid 或 tanh。然后只有分数排在前 \(k\) 名的 token 穿过递归块：</p>
+<div class="formula">$$\mathcal{H}^{r+1}_t=\begin{cases} g^r_t\, f\big(\mathcal{H}^r_t;\,\Phi'\big)+\mathcal{H}^r_t, &amp; \text{if } g^r_t&gt;P_{\beta}(G^r)\\[2pt] \mathcal{H}^r_t, &amp; \text{otherwise}\end{cases}$$</div>
+<p>这里 \(f\) 是整个递归块（几层共享的 Transformer 层），\(P_{\beta}(G^r)\) 是这一轮所有分数的 \(\beta\) 分位数，也就是“前 \(k\) 名”的门槛。被选中的 token，递归块的输出乘上路由分数再加回原状态；没被选中的，状态原样往上传。乘上分数这一步很关键：路由分数因此出现在前向计算里，梯度可以传回路由器，路由器才学得动。</p>
+<p>作者还加了一条<b>层层筛选</b>的规则：只有在第 \(r\) 轮被选中的 token，才有资格参加第 \(r+1\) 轮的评选。这样一来，一个 token 一旦落选就相当于“退出”了，行为和早退出一样，只是这个退出规则是从零开始训练出来的。</p>
+<p>每一轮挑多少个？作者让专家选择的容量和“完全均衡的 token 选择”对齐，以便两种路由在同样计算量下比较。完全均衡时，每个 token 以相同概率 \(1/N_r\) 被分到深度 1、2、……、\(N_r\)，于是第 \(j\) 轮要处理的比例是 \((N_r-j+1)/N_r\)。\(N_r=3\) 时，三轮分别处理 100%、2/3、1/3 的 token。专家选择就照这个比例设定每轮的 top-\(k\)。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：专家选择和 token 选择在 6 个 token 上各走一遍（\(N_r=3\)）</div>
+<svg class="dg" viewBox="0 0 960 330" role="img" aria-label="专家选择与 token 选择路由的玩具例子" style="--dg-min:760px">
+<text x="20" y="18" class="t-b">专家选择：每一轮从上一轮留下的 token 里挑分数最高的一部分</text>
+<text x="137.0" y="42" class="t-c t-sm">t1</text>
+<text x="185.0" y="42" class="t-c t-sm">t2</text>
+<text x="233.0" y="42" class="t-c t-sm">t3</text>
+<text x="281.0" y="42" class="t-c t-sm">t4</text>
+<text x="329.0" y="42" class="t-c t-sm">t5</text>
+<text x="377.0" y="42" class="t-c t-sm">t6</text>
+<text x="20" y="73.0" class="t-sm">第 1 轮</text>
+<rect class="tk enc" x="120" y="56" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="168" y="56" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="216" y="56" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="264" y="56" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="312" y="56" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="360" y="56" width="34" height="34" rx="5"/>
+<text x="412" y="73.0" class="t-sm">6 / 6</text>
+<text x="137.0" y="110" class="t-c t-sm">.91</text>
+<text x="185.0" y="110" class="t-c t-sm">.12</text>
+<text x="233.0" y="110" class="t-c t-sm" style="fill:var(--c-loss);font-weight:650">.58</text>
+<text x="281.0" y="110" class="t-c t-sm">.83</text>
+<text x="329.0" y="110" class="t-c t-sm">.77</text>
+<text x="377.0" y="110" class="t-c t-sm" style="fill:var(--c-loss);font-weight:650">.64</text>
+<text x="20" y="137.0" class="t-sm">第 2 轮</text>
+<rect class="tk enc" x="120" y="120" width="34" height="34" rx="5"/>
+<rect class="tk off" x="168" y="120" width="34" height="34" rx="5"/>
+<rect class="tk off" x="216" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="264" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="312" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="360" y="120" width="34" height="34" rx="5"/>
+<text x="412" y="137.0" class="t-sm">挑 4 个</text>
+<text x="137.0" y="174" class="t-c t-sm">.88</text>
+<text x="281.0" y="174" class="t-c t-sm">.30</text>
+<text x="329.0" y="174" class="t-c t-sm">.71</text>
+<text x="377.0" y="174" class="t-c t-sm">.45</text>
+<text x="20" y="201.0" class="t-sm">第 3 轮</text>
+<rect class="tk enc" x="120" y="184" width="34" height="34" rx="5"/>
+<rect class="tk off" x="168" y="184" width="34" height="34" rx="5"/>
+<rect class="tk off" x="216" y="184" width="34" height="34" rx="5"/>
+<rect class="tk off" x="264" y="184" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="312" y="184" width="34" height="34" rx="5"/>
+<rect class="tk off" x="360" y="184" width="34" height="34" rx="5"/>
+<text x="412" y="201.0" class="t-sm">挑 2 个</text>
+<text x="20" y="242" class="t-sm">第 2 轮只能留 4 个：t3（0.58）输给了它后面的 t6（0.64）。</text>
+<text x="20" y="260" class="t-sm">训练时整段序列都在手里，这样选没问题；生成 t3 时 t6 还不存在，</text>
+<text x="20" y="278" class="t-sm">按这个规则就没法决定 t3 要不要进第 2 轮——这就是“违反因果”。</text>
+<text x="20" y="302" class="t-sm" style="fill:var(--c-enc)">结果：t1、t5 跑 3 轮，t4、t6 跑 2 轮，t2、t3 跑 1 轮。</text>
+<text x="500" y="18" class="t-b">token 选择：一开始就给每个 token 定好轮数</text>
+<text x="597.0" y="42" class="t-c t-sm">t1</text>
+<text x="645.0" y="42" class="t-c t-sm">t2</text>
+<text x="693.0" y="42" class="t-c t-sm">t3</text>
+<text x="741.0" y="42" class="t-c t-sm">t4</text>
+<text x="789.0" y="42" class="t-c t-sm">t5</text>
+<text x="837.0" y="42" class="t-c t-sm">t6</text>
+<text x="500" y="62" class="t-xs">路由器给的轮数</text>
+<text x="597.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">3</text>
+<text x="645.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">1</text>
+<text x="693.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">3</text>
+<text x="741.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">3</text>
+<text x="789.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">2</text>
+<text x="837.0" y="62" class="t-c t-sm" style="fill:var(--c-pred);font-weight:650">3</text>
+<text x="500" y="89.0" class="t-sm">第 1 轮</text>
+<rect class="tk enc" x="580" y="72" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="628" y="72" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="676" y="72" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="724" y="72" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="772" y="72" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="820" y="72" width="34" height="34" rx="5"/>
+<text x="860" y="89.0" class="t-sm">6/6（预期 6）</text>
+<text x="500" y="137.0" class="t-sm">第 2 轮</text>
+<rect class="tk enc" x="580" y="120" width="34" height="34" rx="5"/>
+<rect class="tk off" x="628" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="676" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="724" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="772" y="120" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="820" y="120" width="34" height="34" rx="5"/>
+<text x="860" y="137.0" class="t-sm" style="fill:var(--c-loss);font-weight:650">5/6（预期 4）</text>
+<text x="500" y="185.0" class="t-sm">第 3 轮</text>
+<rect class="tk enc" x="580" y="168" width="34" height="34" rx="5"/>
+<rect class="tk off" x="628" y="168" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="676" y="168" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="724" y="168" width="34" height="34" rx="5"/>
+<rect class="tk off" x="772" y="168" width="34" height="34" rx="5"/>
+<rect class="tk enc" x="820" y="168" width="34" height="34" rx="5"/>
+<text x="860" y="185.0" class="t-sm" style="fill:var(--c-loss);font-weight:650">4/6（预期 2）</text>
+<text x="500" y="226" class="t-sm">每个 token 只看自己的状态做决定，天然满足因果。</text>
+<text x="500" y="244" class="t-sm">但没有约束时，路由器可能把大多数 token 都派去最深一档：</text>
+<text x="500" y="262" class="t-sm">第 3 轮挤进 4 个（预期 2 个），算力没有省下来。</text>
+<text x="500" y="286" class="t-sm" style="fill:var(--c-enc)">所以要加均衡损失，或者 loss-free 的偏置调整。</text>
+</svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2507.10524#S2.F2" target="_blank" rel="noopener">原文图 2（a）（b）↗</a>。分数是为说明规则虚构的；蓝色方块 = 这一轮参与计算的 token，灰色方块 = 已经停下、状态沿残差原样带到最后的 token。</div>
+</div>
+
+<h4 id="n-3-2">3.2 专家选择的毛病：训练时偷看了后面的 token</h4>
+<p>上面的示意图里，第 2 轮要从 6 个 token 里留 4 个。t3 的分数是 0.58，排在第 5，被它后面 t6 的 0.64 挤掉了。训练时整段文本一次性送进模型，这样挑没有任何困难；但模型生成文字时是一个 token 一个 token 往外吐的，生成 t3 的那一刻 t6 还不存在，按“前 \(k\) 名”的规则根本无法决定 t3 要不要进第 2 轮。</p>
+<p>更深一层的问题是<b>信息泄漏</b>：训练时，位置 3 有没有被多算一轮，取决于后面 token 的分数，而这些分数又是从后面 token 的隐藏状态算出来的。模型因此有可能间接利用“未来”的信息，而推理时这条信息通道并不存在，训练和推理的行为就对不上了。这个问题在 MoE 的专家选择和 MoD 里都存在，并不是 MoR 独有的。</p>
+<p>论文试了两种补救办法（附录 A.2）：</p>
+<ul>
+  <li><b>辅助路由器</b>：另训一个小网络，只看 token 自己的状态，去预测“这个 token 会不会进前 \(k\) 名”。它用二元交叉熵训练，目标就是主路由器的选择结果；它的梯度被截断，不影响主模型。推理时扔掉主路由器，改用这个辅助路由器。</li>
+  <li><b>辅助损失</b>：不另建网络，而是直接给主路由器加一个二元交叉熵损失，把前 \(k\) 名的分数推向 1、其余推向 0。训练好以后，主路由器的分数几乎是非 0 即 1 的，推理时只要看单个 token 的分数是否超过 0.5 就能决定它是否继续，不需要知道别的 token。</li>
+</ul>
+<p><a href="#n-8-2">第 8.2 节</a>的消融显示辅助损失更好，于是成为最终方案。官方仓库维护者在 GitHub issue #9 里确认：生成时就是按“分数大于 0.5 就继续”来路由的。论文用“采样准确率”衡量这种因果规则和训练时 top-\(k\) 规则的吻合程度：最终设计约为 99.3%（附录表 13），也就是每一轮里大约每 140 个 token 有 1 个的去留判断不一致（推算）。</p>
+
+<h4 id="n-3-3">3.3 token 选择路由：一开始就定好轮数</h4>
+<p>token 选择反过来：在第一轮之前，路由器只看 token 自己的状态 \(\mathcal{H}^1_t\)（用 Middle-Cycle 时就是第一层的输出），对 \(N_r\) 个“专家”打分，取最高的一个（top-1）。被分给专家 \(i\) 的意思是：这个 token 要连续穿过递归块 \(i\) 次。跑满 \(i\) 次以后，最终输出乘上路由分数，再加回进入递归之前的状态 \(\mathcal{H}^1_t\)。</p>
+<p>它的优点是天然因果：每个 token 只根据自己做决定，训练和推理完全一致。缺点是负载不均衡：路由器可能把大多数 token 都派到最深的一档（算力没省下来），也可能都派到最浅的一档（模型变弱）。作者用了两种 MoE 里常见的办法来拉平负载：</p>
+<div class="formula">$$\mathcal{L}_{\text{Balance}}=\alpha\sum_{i=1}^{N_r} f_i P_i,\qquad f_i=\frac{N_r}{T}\sum_{t=1}^{T}\mathbb{1}\big(\text{token } t \text{ 选了专家 } i\big),\qquad P_i=\frac{1}{T}\sum_{t=1}^{T} g_t^{i}$$</div>
+<p>\(f_i\) 是实际被分给专家 \(i\) 的 token 比例（乘了 \(N_r\)，完全均衡时等于 1），\(P_i\) 是路由器给专家 \(i\) 的平均分。两者的乘积在某个专家“又被选得多、分数又给得高”时最大，所以最小化这个损失会把 token 往冷门的专家推。另一种是“无辅助损失”做法：每个专家带一个偏置 \(b_i\)，每个训练批次统计各专家拿到的 token 数，超载的专家把偏置调低 \(u\)，欠载的调高 \(u\)；偏置只影响“选谁”，不影响乘在输出上的分数。衡量均衡程度的指标叫 MaxVio：最忙的专家比平均负载多出的比例，0 表示完全均衡。</p>
+<p>在 MoR 里，均衡比在普通 MoE 里更难。普通 MoE 的专家彼此对称，而这里的“专家”是不对称的：深度 3 的代价是深度 1 的三倍，而且分到深度 3 的 token 必须先经过第 1、2 轮。论文报告，即使加了均衡损失，模型在将近一半的训练步里都没有达到均衡。</p>
+
+<figure class="paper-fig"><div class="imgs"><img src="mixture-of-recursions/fig/method_expert_choice.svg" alt="原文图 2a：专家选择路由" loading="lazy"><img src="mixture-of-recursions/fig/method_token_choice.svg" alt="原文图 2b：token 选择路由" loading="lazy"></div>
+<figcaption><b>原文图 2（a）（b）。怎么看：</b>左图是专家选择：从下往上三轮（Loop 1–3），每轮有自己的路由器，从上一轮留下来的 token 里挑一部分继续，虚线方块是没被选中、已经停下的 token，所以越往上实心方块越少。右图是 token 选择：只有一个路由器，在一开始就把每个 token 分到“跑 1 轮”“跑 2 轮”“跑 3 轮”三个盒子之一；方块的颜色对应它被分到的盒子。</figcaption></figure>
+
+<div class="table-wrap"><table>
+<tr><th></th><th>专家选择</th><th>token 选择</th></tr>
+<tr><td>优点</td><td>每轮处理的 token 数固定，计算量静态、负载完全均衡</td><td>只看自己，没有信息泄漏，训练与推理一致</td></tr>
+<tr><td>缺点</td><td>top-\(k\) 依赖同批其他 token，违反因果</td><td>负载不均衡，深浅档挤兑</td></tr>
+<tr><td>补救</td><td>辅助路由器，或辅助损失（最终选后者）</td><td>均衡损失，或无辅助损失的偏置法</td></tr>
+</table></div>
+<p class="w-note">对应原文表 2 左半部分，本站用中文重写。</p>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>这里的“专家”不是 MoE 里那种各自独立的前馈网络。所有“专家”共用同一套递归块参数，“专家 \(r\)”只是“第 \(r\) 轮”的代号。MoR 没有增加任何专家参数，路由器本身也只是一个线性层（最终设计）。</li>
+  <li>专家选择的容量在训练时是固定的：每段 2K 长的文本里，恰好 1/3 的 token 进入第 3 轮。模型不能决定“这篇文章整体很难，多算一点”。论文在局限性里也承认，由于辅助损失让路由分数几乎非 0 即 1，训练好以后很难再通过调 top-\(k\) 来在速度和质量之间换挡。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S2.SS2.SSS1" target="_blank" rel="noopener">英文原文 §2.2.1 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A1.SS2" target="_blank" rel="noopener">附录 A.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 KV 缓存：提前停下的 token，后面的 token 还看得见吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了路由，不同 token 的递归深度不同了。一个 token 在第 1 轮就停下，它在第 2、3 轮就没有 key 和 value；而后面跑到第 3 轮的 token 做注意力时，按理要读前面所有 token 在第 3 轮的 KV。这个空缺怎么处理？论文给了两种 KV 策略，它们在显存、读写量和注意力计算量上各省了多少？这一节对应原文 §2.2.2 和表 2 右半部分。</div>
+
+<div class="note-pre"><b>先补一点背景：KV 缓存为什么既占显存又费时间。</b>
+<p>生成文字时，每生成一个新 token，每一层都要用它的 query 去和前面所有 token 的 key 做比较，再按权重把 value 加起来。前面 token 的 key 和 value 在之前的步骤里已经算过，所以存起来复用，这就是 KV 缓存（详见<a href="vllm.html#n-2-2">本站 vLLM 精读的 2.2 节</a>）。它的大小正比于“层数 × token 数”。生成阶段每一步的计算量很小，却要把参数和整份 KV 缓存从显存里读一遍，所以速度主要被显存带宽卡住：KV 越大，读得越久；KV 越大，一张卡上能同时服务的请求也越少。</p>
+</div>
+
+<p>动态深度的模型都会遇到 KV 一致性的问题：一个 token 提前退出后，它在更深层的 KV 就是缺的，而这些 KV 对后面的 token 可能很重要。以前有人用“过期的”浅层状态顶替（CALM），也有人用并行解码把缺的 KV 补算出来（FREE），但这些办法都增加了开销和复杂度。MoR 设计了两种更简单的策略。</p>
+
+<h4 id="n-4-1">4.1 两种策略</h4>
+<p><b>按递归缓存（recursion-wise KV caching）</b>：受 MoD 启发，只有被路由到第 \(r\) 轮的 token，才在第 \(r\) 轮存自己的 KV；第 \(r\) 轮的注意力也只在这些 token 之间做。换句话说，每一轮都是一个“小圈子”：停下的 token 在更深的轮次里干脆不存在，后面的 token 也不去读它。这样，每一轮 KV 缓存的大小正好等于这一轮的容量（专家选择），或者等于实际分到这一轮的 token 数（token 选择）。</p>
+<p><b>递归 KV 共享（recursive KV sharing）</b>：MoR 的一个设计是所有 token 至少要跑完第 1 轮。利用这一点，只在第 1 轮缓存所有 token 的 KV，之后的每一轮都复用它。于是越往后，查询（query）越来越少，但键和值始终覆盖完整的序列。好处是每个 token 在每一轮都能看到全部上文，不需要任何补算；代价是第 2、3 轮看到的是第 1 轮的表示，和这一轮实际的表示存在分布上的错位。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：两种 KV 策略下，每一轮存哪些 KV、算哪些注意力</div>
+<svg class="dg" viewBox="0 0 960 480" role="img" aria-label="两种 KV 策略在 6 个 token 上的注意力格子" style="--dg-min:760px">
+<text x="20" y="16" class="t-sm">同一个例子（t1、t5 跑 3 轮，t4、t6 跑 2 轮，t2、t3 跑 1 轮），每格 = 一个查询（行）读一个键（列）</text>
+<text x="20" y="135" class="t-b">按递归缓存</text>
+<text x="20" y="155" class="t-xs">（recursion-wise）</text>
+<text x="226" y="40" class="t-c t-b">第 1 轮</text>
+<rect class="tk enc" x="177" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="194" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="211" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="228" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="245" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="262" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="86" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="103" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="120" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="137" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="154" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="171" width="13" height="13" rx="2"/>
+<rect x="175" y="84" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="209" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="226" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="101" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="101" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="226" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="118" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="118" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="118" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="260" y="152" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="260" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="226" y="204" class="t-c t-sm">注意力格子 21 个</text>
+<text x="226" y="222" class="t-c t-sm">新存 KV 6 份</text>
+<text x="506" y="40" class="t-c t-b">第 2 轮</text>
+<rect class="tk enc" x="457" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="474" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="491" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="508" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="525" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="542" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="86" width="13" height="13" rx="2"/>
+<rect class="tk off" x="433" y="103" width="13" height="13" rx="2"/>
+<rect class="tk off" x="433" y="120" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="137" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="154" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="171" width="13" height="13" rx="2"/>
+<rect x="455" y="84" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="472" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="489" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="506" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="101" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="472" y="101" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="506" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="472" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="506" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="472" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="506" y="135" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="523" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="472" y="152" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="152" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="506" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="523" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="540" y="152" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="472" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="506" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="523" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="540" y="169" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="506" y="204" class="t-c t-sm">注意力格子 10 个</text>
+<text x="506" y="222" class="t-c t-sm">新存 KV 4 份</text>
+<text x="786" y="40" class="t-c t-b">第 3 轮</text>
+<rect class="tk enc" x="737" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="754" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="771" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="788" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="805" y="62" width="13" height="13" rx="2"/>
+<rect class="tk off" x="822" y="62" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="713" y="86" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="103" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="120" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="137" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="713" y="154" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="171" width="13" height="13" rx="2"/>
+<rect x="735" y="84" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="752" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="769" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="786" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="84" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="101" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="101" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="786" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="101" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="118" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="118" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="135" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="803" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="135" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="752" y="152" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="152" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="152" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="803" y="152" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="820" y="152" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="803" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="820" y="169" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<text x="786" y="204" class="t-c t-sm">注意力格子 3 个</text>
+<text x="786" y="222" class="t-c t-sm">新存 KV 2 份</text>
+<text x="861" y="118" class="t-sm">合计</text>
+<text x="861" y="138" class="t-sm t-b">格子 34</text>
+<text x="861" y="158" class="t-sm t-b">KV 12 份</text>
+<text x="20" y="351" class="t-b">递归 KV 共享</text>
+<text x="20" y="371" class="t-xs">（recursive sharing）</text>
+<text x="226" y="256" class="t-c t-b">第 1 轮</text>
+<rect class="tk tgt" x="177" y="278" width="13" height="13" rx="2"/>
+<rect class="tk tgt" x="194" y="278" width="13" height="13" rx="2"/>
+<rect class="tk tgt" x="211" y="278" width="13" height="13" rx="2"/>
+<rect class="tk tgt" x="228" y="278" width="13" height="13" rx="2"/>
+<rect class="tk tgt" x="245" y="278" width="13" height="13" rx="2"/>
+<rect class="tk tgt" x="262" y="278" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="302" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="319" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="336" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="353" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="370" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="153" y="387" width="13" height="13" rx="2"/>
+<rect x="175" y="300" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="209" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="226" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="317" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="317" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="226" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="334" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="334" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="334" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="243" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="351" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="351" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="351" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="351" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="260" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="368" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="368" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="368" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="368" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="368" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="260" y="368" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="175" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="192" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="209" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="226" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="243" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<rect x="260" y="385" width="17" height="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="226" y="420" class="t-c t-sm">注意力格子 21 个</text>
+<text x="226" y="438" class="t-c t-sm">新存 KV 6 份</text>
+<text x="506" y="256" class="t-c t-b">第 2 轮</text>
+<rect class="tk tgt" x="457" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="474" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="491" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="508" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="525" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="542" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk enc" x="433" y="302" width="13" height="13" rx="2"/>
+<rect class="tk off" x="433" y="319" width="13" height="13" rx="2"/>
+<rect class="tk off" x="433" y="336" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="353" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="370" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="433" y="387" width="13" height="13" rx="2"/>
+<rect x="455" y="300" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="472" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="489" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="506" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="317" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="472" y="317" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="506" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="472" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="489" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="506" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="523" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="351" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="472" y="351" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="489" y="351" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="506" y="351" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="523" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="540" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="472" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="489" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="506" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="523" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="540" y="368" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="455" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="472" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="489" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="506" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="523" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="540" y="385" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<text x="506" y="420" class="t-c t-sm">注意力格子 16 个</text>
+<text x="506" y="438" class="t-c t-sm">新存 KV 0 份</text>
+<text x="786" y="256" class="t-c t-b">第 3 轮</text>
+<rect class="tk tgt" x="737" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="754" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="771" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="788" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="805" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk tgt" x="822" y="278" width="13" height="13" rx="2" style="opacity:.45"/>
+<rect class="tk enc" x="713" y="302" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="319" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="336" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="353" width="13" height="13" rx="2"/>
+<rect class="tk enc" x="713" y="370" width="13" height="13" rx="2"/>
+<rect class="tk off" x="713" y="387" width="13" height="13" rx="2"/>
+<rect x="735" y="300" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="752" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="769" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="786" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="300" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="317" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="317" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="786" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="317" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="334" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="803" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="334" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="351" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="351" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="351" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="351" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="803" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="820" y="351" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="752" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="769" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="786" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="803" y="368" width="17" height="17" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1"/>
+<rect x="820" y="368" width="17" height="17" style="fill:var(--surface-3);stroke:var(--surface);stroke-width:1"/>
+<rect x="735" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="752" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="769" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="786" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="803" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<rect x="820" y="385" width="17" height="17" style="fill:var(--surface);stroke:var(--border);stroke-width:1"/>
+<text x="786" y="420" class="t-c t-sm">注意力格子 6 个</text>
+<text x="786" y="438" class="t-c t-sm">新存 KV 0 份</text>
+<text x="861" y="334" class="t-sm">合计</text>
+<text x="861" y="354" class="t-sm t-b">格子 43</text>
+<text x="861" y="374" class="t-sm t-b">KV 6 份</text>
+<text x="20" y="466" class="t-xs">对照：3 轮全算的普通递归模型 = 每轮 21 个格子、共 63 个；每轮各存 6 份 KV、共 18 份。左侧方块 = 本轮的查询，上方方块 = 本轮能读到的键。</text>
+</svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2507.10524#S2.F2" target="_blank" rel="noopener">原文图 2（c）↗</a>。用的是<a href="#n-3-1">第 3 节</a>那个 6 token 例子的路由结果。蓝色格子 = 这一轮实际计算的“查询—键”对；紫色格子 = 读的是第 1 轮缓存下来的 KV；白色格子 = 因果上允许、但这一策略下不算；灰色的右上三角 = 因果掩码挡掉的未来位置。</div>
+</div>
+
+<h4 id="n-4-2">4.2 走一遍例子：省了什么，没省什么</h4>
+<p>先看<b>存多少 KV</b>。普通递归模型每一轮都给 6 个 token 各存一份，3 轮共 18 份。按递归缓存只给参与这一轮的 token 存：6 + 4 + 2 = 12 份，是 18 的 2/3。递归共享只在第 1 轮存 6 份，是 18 的 1/3。</p>
+<p>再看<b>注意力要算多少个“查询—键”对</b>。普通递归模型每轮有 6 × 7 ÷ 2 = 21 对（因果掩码下的下三角），3 轮共 63 对。按递归缓存时，第 2 轮只在 4 个活跃 token 之间算，有 10 对；第 3 轮只在 2 个之间算，有 3 对；合计 34 对。递归共享时，第 2 轮的 4 个查询要读到全部上文：t1 读 1 个、t4 读 4 个、t5 读 5 个、t6 读 6 个，共 16 对；第 3 轮 t1 和 t5 共 6 对；合计 43 对。</p>
+<p>最后看<b>生成时每一步要读多少 KV</b>，这决定了解码速度。假设新来一个 token 要跑满 3 轮。按递归缓存，它在第 1 轮读 6 份、第 2 轮读 4 份、第 3 轮读 2 份，共 12 份；递归共享虽然只存了 6 份，但它在每一轮都要把这 6 份完整读一遍，3 轮共 18 份，和普通模型一样多。这就是共享策略的软肋：<b>存储省了，读写没省</b>。</p>
+<p>把这个例子推广到一般情况，就得到论文表 2 右半部分的公式（只比较递归块，不算首尾两层；\(k\) 是某一轮的活跃 token 数，\(N_{\text{ctx}}\) 是序列长度）：</p>
+<div class="table-wrap"><table>
+<tr><th>相对普通模型（= 1）</th><th>按递归缓存</th><th>递归 KV 共享</th></tr>
+<tr><td>KV 显存（全模型）</td><td>\((N_r+1)/2N_r\)</td><td>\(1/N_r\)</td></tr>
+<tr><td>KV 读写量（全模型）</td><td>\((N_r+1)/2N_r\)</td><td>1</td></tr>
+<tr><td>注意力 FLOPs（每层）</td><td>\((k/N_{\text{ctx}})^2\)</td><td>\(k/N_{\text{ctx}}\)</td></tr>
+</table></div>
+<p>第一行的 \((N_r+1)/2N_r\) 是这样来的：各轮容量依次是 \(N_r/N_r,\dots,1/N_r\)，取平均就是 \(\frac{1}{N_r}\sum_{r=1}^{N_r}\frac{N_r-r+1}{N_r}=\frac{N_r+1}{2N_r}\)。\(N_r=3\) 时是 2/3，和例子一致。注意力那一行是平方对线性的区别：按递归缓存时查询和键都只剩 \(k\) 个，所以按 \((k/N_{\text{ctx}})^2\) 缩小，第 3 轮（\(k/N_{\text{ctx}}=1/3\)）只剩 1/9；共享时键还是全长，只按 \(k/N_{\text{ctx}}\) 缩小。</p>
+<p>换成一个真实的尺寸感受一下（推算）。360M 的普通模型有 32 层，每层 5 个 KV 头、每头 64 维；按 bf16（每个数 2 字节）算，每个 token 每层的 KV 是 2 × 5 × 64 × 2 = 1,280 字节，32 层合计 40 KB，一条 2K token 的序列约 80 MB。换成 \(N_r=3\) 的 MoR（1 + 10×3 + 1）后：按递归缓存时，首尾 2 层照常存，中间 10 层的三轮合起来相当于 10 × (1 + 2/3 + 1/3) = 20 层，共 22/32 ≈ 69%，约 27.5 KB/token；递归共享时，中间只存第 1 轮的 10 层，共 12/32 ≈ 38%，约 15 KB/token。这个 69% 和<a href="#n-7">第 7 节</a>吞吐实验里 MoR-3 能开大的批（48 对 32，即 1.5 倍，其中还包含参数变少省下的显存）大致对得上。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/method_caching.svg" alt="原文图 2c：两种 KV 缓存" loading="lazy"></div>
+<figcaption><b>原文图 2（c）。怎么看：</b>每个方阵的行是查询 token、列是被读的键，涂色的格子表示“这个查询读了这个键”。上方阵是按递归缓存：只有本轮被选中的 token（实线方块）存了键，注意力也只在它们之间做（蓝色）。下方阵是递归共享：所有前面 token 的键都在第一轮存好（紫色方块），之后每一轮被选中的查询都可以读全部上文。</figcaption></figure>
+
+<p>递归共享还有一个额外的潜在好处：如果用的是 Cycle 方式共享，处理长提示词（prefill）时只需要跑第一轮就能得到所有 KV，后面的轮次可以省掉 KV 投影甚至整个 prefill，这和 YOCO（Sun 等，2024）“只缓存一次”的思路类似。论文说这对上百万 token 的提示词可能带来很大加速，但没有做实验。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“按递归缓存”不是把缺的 KV 补上了，而是<b>改变了模型</b>：第 3 轮的 token 本来就只看得见第 3 轮的同伴。这个限制在训练时就存在，所以训练和推理一致，但它意味着深层的注意力只能看到稀疏的一部分上文。</li>
+  <li>表 2 里的比例只针对递归块。首尾两层不共享、所有 token 都过，所以全模型的实际比例要略高一些（上面算出的 69% 而不是 67%）。</li>
+  <li>递归共享省的是显存，不是带宽。如果解码瓶颈是读 KV 的带宽，共享不会让每一步变快；它的价值在于显存装得下更大的批或更长的上下文。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S2.SS2.SSS2" target="_blank" rel="noopener">英文原文 §2.2.2 ↗</a> · <a href="https://arxiv.org/html/2507.10524#S2.T2" target="_blank" rel="noopener">原文表 2 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A1.SS3" target="_blank" rel="noopener">附录 A.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 主结果：同样训练 FLOPs，参数更少，效果略好</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoR 和普通 Transformer、固定深度的递归 Transformer 比，到底好多少？“同样的训练算力”具体是怎么对齐的？为什么同一笔算力，MoR 能多训练 35%–50% 的 token？这些差别里，哪些有意义、哪些落在测量噪声里？这一节对应原文 §3 开头和 §3.1、表 3。</div>
+
+<div class="note-pre"><b>先补一点背景：NLL、困惑度和这六个 few-shot 任务。</b>
+<p><b>NLL</b>（负对数似然）是模型给“正确的下一个 token”的概率取负对数后，在验证集上的平均值，越低越好。它的指数就是困惑度：NLL 2.78 对应困惑度 \(e^{2.78}\approx16\)，可以粗略理解为“模型平均在 16 个候选里犹豫”。NLL 差 0.03，困惑度大约差 3%。</p>
+<p>六个 few-shot 任务是 LAMBADA（LD，猜一段话的最后一个词）、HellaSwag（HS，四选一续写）、PIQA（PQ，二选一的物理常识）、WinoGrande（WG，二选一的指代）、ARC（Easy 和 Challenge 的平均，多为四选一的科学题）和 MMLU（四选一的知识题，这里用“续写”格式评测）。<b>随机猜的水平</b>很重要：WG 和 PIQA 是 50%，HS、ARC、MMLU 大约是 25%。在几亿参数、几百亿 token 的规模上，WG 和 MMLU 通常还贴着随机水平。</p>
+</div>
+
+<div class="note-pre"><b>再补一点背景：论文怎么数 FLOPs。</b>
+<p>论文按 Kaplan 等（2020）的近似来数：线性层的前向计算按“2 × 参数量”每 token 计；注意力只算 \(QK^\top\) 和乘 \(V\) 两步，而且只算因果掩码下有效的那一半；FlashAttention、归一化、激活函数的开销都不计。<b>论文只数前向 FLOPs</b>（反向大约是前向的两倍，各模型同比例，不影响比较），所以“\(16.5\times10^{18}\)”指的是前向计算，按惯例折合成完整训练大约是它的 3 倍（推算）。对 MoR，每一轮只按实际参与的 token 数计；token 选择因为每步分配都在变，按完全均衡来近似。</p>
+</div>
+
+<p><b>实验设置。</b>模型是 Llama 结构，配置参照开源的 SmolLM 系列（135M、360M、730M、1.7B 四档，词表 49K，上下文 2K）。数据是 SmolLM-Corpus 里去重后的 FineWeb-Edu（约 2,200 亿 token 的教育类网页）。训练用 4 张 H100 或 A100。主实验和 isoFLOP 实验用“梯形”学习率（预热约 5%、平台、最后 20% 降温），其余实验用余弦退火。主表（表 3）全部基于 360M 档：普通模型 32 层、3.15 亿非嵌入参数。</p>
+
+<div class="table-wrap"><table>
+<tr><th>模型</th><th>路由 / KV</th><th>\(N_r\)</th><th>非嵌入参数</th><th>训练 FLOPs（×10¹⁸）</th><th>训练 token</th><th>NLL ↓</th><th>few-shot 平均 ↑</th></tr>
+<tr><td>Vanilla</td><td>—</td><td>—</td><td>315M</td><td>16.5</td><td>20B</td><td>2.7824</td><td>42.3</td></tr>
+<tr><td>Recursive</td><td>—</td><td>2</td><td>167M</td><td>16.5</td><td>20B</td><td>2.8079</td><td>42.6</td></tr>
+<tr><td>Recursive</td><td>—</td><td>3</td><td>118M</td><td>16.5</td><td>20B</td><td>2.8466</td><td>41.5</td></tr>
+<tr><td>Recursive</td><td>—</td><td>4</td><td>98M</td><td>16.5</td><td>19B</td><td>2.8781</td><td>41.0</td></tr>
+<tr><td><b>MoR</b></td><td>专家 / 按递归缓存</td><td>2</td><td>167M</td><td>16.5</td><td>27B</td><td><b>2.7511</b></td><td><b>43.1</b></td></tr>
+<tr><td>MoR</td><td>专家 / 按递归缓存</td><td>3</td><td>118M</td><td>16.5</td><td>30B</td><td>2.7925</td><td>42.6</td></tr>
+<tr><td>MoR</td><td>专家 / 按递归缓存</td><td>4</td><td>98M</td><td>16.5</td><td>30B</td><td>2.8204</td><td>41.6</td></tr>
+<tr><td>MoR（同 token）</td><td>专家 / 按递归缓存</td><td>2</td><td>167M</td><td>12.3</td><td>20B</td><td>2.7749</td><td>42.9</td></tr>
+<tr><td>MoR（同 token）</td><td>专家 / 按递归缓存</td><td>3</td><td>118M</td><td>11.0</td><td>20B</td><td>2.8246</td><td>41.8</td></tr>
+<tr><td>MoR（同 token）</td><td>专家 / 按递归缓存</td><td>4</td><td>98M</td><td>11.0</td><td>20B</td><td>2.8519</td><td>41.5</td></tr>
+<tr><td>MoR</td><td>token / 按递归缓存</td><td>3</td><td>118M</td><td>16.5</td><td>30B</td><td>2.9163</td><td>40.0</td></tr>
+<tr><td>MoR</td><td>专家 / 递归共享</td><td>3</td><td>118M</td><td>16.5</td><td>31B</td><td>2.7983</td><td>41.9</td></tr>
+</table></div>
+<p class="w-note">数字全部来自原文表 3（360M 档，FineWeb-Edu）。Recursive 和 MoR 都用 Middle-Cycle 共享。完整的六项分数见原文。</p>
+
+<h4 id="n-5-1">5.1 为什么同一笔算力，MoR 能多看这么多 token</h4>
+<p>普通模型和 Recursive 都是每个 token 算满 32 层，所以 \(16.5\times10^{18}\) 只够它们看 20B token。MoR 让一部分 token 少跑几轮，平均每个 token 的计算量下降了，同一笔预算就能多看 token。下面按“线性层计算 ∝ 实际经过的层数”粗算一遍：</p>
+<div class="dia">
+  <div class="dia-title">示意图：每个 token 平均要算多少层（360M 档，32 层为 1 份）</div>
+  <div class="dia-row"><span class="lbl">Vanilla / Recursive</span><div class="dia-track"><span class="dia-seg kv" style="flex:32">32 层全算</span></div></div>
+  <div class="dia-out">16.5×10¹⁸ FLOPs 只够看 20B token。</div>
+  <div class="dia-row"><span class="lbl">MoR-2（1+15×2+1）</span><div class="dia-track"><span class="dia-seg w" style="flex:1">首</span><span class="dia-seg kv" style="flex:15">第 1 轮 15 层×100%</span><span class="dia-seg kv" style="flex:7.5">第 2 轮×1/2</span><span class="dia-seg w" style="flex:1">末</span><span class="dia-seg oth" style="flex:7.5">省下</span></div></div>
+  <div class="dia-out">平均 24.5 层，约 77% → 可看约 26B token（推算）；论文实际为 27B。</div>
+  <div class="dia-row"><span class="lbl">MoR-3（1+10×3+1）</span><div class="dia-track"><span class="dia-seg w" style="flex:1">首</span><span class="dia-seg kv" style="flex:10">第 1 轮×100%</span><span class="dia-seg kv" style="flex:6.67">第 2 轮×2/3</span><span class="dia-seg kv" style="flex:3.33">×1/3</span><span class="dia-seg w" style="flex:1">末</span><span class="dia-seg oth" style="flex:10">省下</span></div></div>
+  <div class="dia-out">平均 22 层，约 69% → 可看约 29B token（推算）；论文实际为 30B。</div>
+  <div class="dia-note">推算只计线性层，注意力在后几轮按平方缩小，所以论文实际能看的 token 比推算略多。MoR-4 为了整除加了 2 层（1+8×4+1=34 层），平均也是 22 层，因此和 MoR-3 一样是 30B token；对应的 Recursive-4 因为多了 2 层，只能看 19B。</div>
+</div>
+
+<h4 id="n-5-2">5.2 三组比较，分别说明了什么</h4>
+<p><b>第一组：同训练 FLOPs。</b>递归 2 次的 MoR 只有 1.67 亿参数（普通模型的 53%），NLL 从 2.7824 降到 2.7511（困惑度从约 16.2 降到约 15.7，低约 3%，推算），few-shot 平均从 42.3% 升到 43.1%。论文把原因归结为 MoR 计算效率高、同样预算下多看了 7B token。递归 3 次和 4 次时，MoR 的参数更少（1.18 亿、0.98 亿），few-shot 平均仍在普通模型的 ±0.7 个百分点以内（42.6%、41.6%），但 NLL 分别是 2.7925 和 2.8204，已经<b>比普通模型差</b>。在每一个 \(N_r\) 上，MoR 都明显好于同样 \(N_r\) 的固定深度 Recursive（NLL 低 0.05–0.06）。</p>
+<p><b>第二组：同训练 token（20B）。</b>这组比较让数据量相同，以便单看结构的差别。MoR-2 只用了 \(12.3\times10^{18}\) FLOPs（比普通模型少 25%），NLL 2.7749，仍略好于普通模型的 2.7824，few-shot 42.9%。论文说实际训练时间少 19%、峰值显存少 25%；官方仓库维护者在 issue #3 里给出的原始数字是普通模型 115 小时、每卡 74 GiB，MoR-2 93 小时、每卡 55 GiB。FLOPs 省了 25%，时间只省了 19%，说明按 token 挑选、收集、散回这些操作有额外开销（推算）。MoR-3、MoR-4 在同 token 下 NLL 都比普通模型差（2.8246、2.8519）。</p>
+<p><b>第三组：MoR 内部的变体（\(N_r=3\)）。</b>换成 token 选择路由，NLL 从 2.7925 恶化到 2.9163，few-shot 从 42.6% 掉到 40.0%，差距很大；作者认为路由的粒度（每轮重新挑 vs 一开始定死）对效果至关重要。换成递归 KV 共享，NLL 2.7983、few-shot 41.9%，比按递归缓存略差，但换来了更小的 KV。</p>
+
+<div class="note-warn"><b>这些小差别要怎么读：</b>
+<ul>
+  <li>WinoGrande 是二选一，表 3 所有模型的 WG 都在 50.5%–52.6% 之间，几乎就是随机猜；MMLU 是四选一，所有模型都在 26.8%–28.1% 之间，也贴着 25% 的随机线。这两项占了六项平均的三分之一，它们之间的差别基本是噪声。</li>
+  <li>一个旁证：Recursive-2 的 NLL（2.8079）明显比普通模型（2.7824）差，few-shot 平均（42.6%）却比普通模型（42.3%）高。可见在这个规模上，平均准确率 1 个百分点以内的差别不能说明谁更好，NLL 更可靠。</li>
+  <li>所有结果都是单次运行，没有报告不同随机种子的波动。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2507.10524#S3.T3" target="_blank" rel="noopener">原文表 3 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A2" target="_blank" rel="noopener">附录 B（实验设置）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 isoFLOP 分析：换四个规模、三个预算再比一次</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个新结构好不好，关键看规模变大以后优势是否还在。作者在 4 个规模 × 3 个训练预算上比较了普通模型、Recursive 和 MoR，并得出“MoR 在 360M 以上追平甚至超过普通模型”的结论。这个结论在什么条件下成立？把原始数字摆开看，会发现什么？这一节对应原文 §3.2、图 3 和附录 D（表 9）。</div>
+
+<div class="note-pre"><b>先补一点背景：isoFLOP 曲线和“计算最优”。</b>
+<p>固定一笔训练算力 \(C\)，模型越大，每个 token 越贵，能训练的 token 就越少（大致 \(D\propto C/N\)）。于是同一笔算力下，太小的模型“吃撑了”（数据多、容量不够），太大的模型“没吃饱”（容量大、数据不够），损失随模型大小画出来是一条 U 形曲线，U 的底部就是这笔算力下的计算最优模型。Chinchilla 的经验是，计算最优时每个参数大约对应 20 个训练 token。</p>
+<p>由此可以得出一个读 isoFLOP 实验的要点：<b>在固定预算下，如果拿来对比的普通模型远远没吃饱，那么任何“每个 token 更便宜”的结构都会显得更好</b>，因为它同样的钱能多喂数据。这不一定说明结构本身更强。</p>
+</div>
+
+<p><b>实验设置。</b>四个规模（135M、360M、730M、1.7B，均按普通模型计），Recursive 和 MoR 都固定 \(N_r=3\)，所以唯一参数大约是普通模型的 1/3 到 2/5；三个预算是 \(2\times10^{18}\)、\(5\times10^{18}\)、\(16.5\times10^{18}\)。MoR 用专家选择路由和按递归缓存。为了省算力，每个结构只按最大预算训练一次：梯形学习率的平台阶段会保存中间检查点，从相应的检查点开始做 20% 的降温，就得到小预算的结果。所以三个预算的结果不是三次独立训练。</p>
+
+<figure class="paper-fig"><div class="imgs"><img src="mixture-of-recursions/fig/135M_base.svg" alt="原文图 3a：135M" loading="lazy"><img src="mixture-of-recursions/fig/360M_base.svg" alt="原文图 3b：360M" loading="lazy"><img src="mixture-of-recursions/fig/800M_base.svg" alt="原文图 3c：730M" loading="lazy"><img src="mixture-of-recursions/fig/1.7b_base.svg" alt="原文图 3d：1.7B" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>四张小图依次是 135M、360M、730M、1.7B 规模；横轴是训练预算（×10¹⁸ FLOPs，三个点 2.0、5.0、16.5），纵轴是验证损失（注意四张图的纵轴范围不同）。绿色是普通模型（Vanilla），蓝色是固定深度的 Recursive，橙红色是 MoR。蓝线在每张图里都最高，说明只共享参数而不路由，代价很明显。在 360M 及以上的三张图里，橙红线在小预算处远低于绿线，但在最右边（16.5）和绿线挤在一起：135M 时 MoR 一直在绿线上方，360M 和 730M 在最右端略高于绿线，只有 1.7B 时三个点都在绿线下方。</figcaption></figure>
+
+<p>论文对这张图的解读是：MoR 在所有规模和预算上都胜过 Recursive；在最小的 135M 上不如普通模型，作者推测是递归结构的容量瓶颈；但从 360M 往上，MoR 不仅追平，而且常常超过普通模型，尤其在低和中等预算下。</p>
+<p>把附录表 9 的原始数字直接相减，可以看得更清楚：</p>
+<div class="dia">
+  <div class="dia-title">示意图：同训练预算下，MoR 与普通模型的 NLL 之差</div>
+<svg class="dg" viewBox="0 0 760 400" role="img" aria-label="表 9 中 MoR 与普通模型的 NLL 差" style="--dg-min:620px">
+<text x="20" y="20" class="t-sm">MoR 的验证 NLL 减去同规模普通模型的 NLL（负数 = MoR 更好），数据来自原文表 9</text>
+<text x="265.0" y="46" class="t-c t-sm t-b">训练预算 2.0×10¹⁸ FLOPs</text>
+<text x="455.0" y="46" class="t-c t-sm t-b">训练预算 5.0×10¹⁸ FLOPs</text>
+<text x="645.0" y="46" class="t-c t-sm t-b">训练预算 16.5×10¹⁸ FLOPs</text>
+<text x="20" y="81.0" class="t-b">135M 规模</text>
+<text x="20" y="99.0" class="t-xs">（递归 3 次）</text>
+<rect x="174" y="60" width="182" height="58" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.2"/>
+<text x="265.0" y="80" class="t-c t-b" style="fill:var(--c-loss)">+0.015</text>
+<text x="265.0" y="102" class="t-c t-xs">普通模型每参数 61 个 token</text>
+<rect x="364" y="60" width="182" height="58" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.2"/>
+<text x="455.0" y="80" class="t-c t-b" style="fill:var(--c-loss)">+0.073</text>
+<text x="455.0" y="102" class="t-c t-xs">普通模型每参数 152 个 token</text>
+<rect x="554" y="60" width="182" height="58" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.2"/>
+<text x="645.0" y="80" class="t-c t-b" style="fill:var(--c-loss)">+0.106</text>
+<text x="645.0" y="102" class="t-c t-xs">普通模型每参数 503 个 token</text>
+<text x="20" y="145.0" class="t-b">360M 规模</text>
+<text x="20" y="163.0" class="t-xs">（递归 3 次）</text>
+<rect x="174" y="124" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="265.0" y="144" class="t-c t-b" style="fill:var(--c-act)">-0.276</text>
+<text x="265.0" y="166" class="t-c t-xs">普通模型每参数 7.6 个 token</text>
+<rect x="364" y="124" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="455.0" y="144" class="t-c t-b" style="fill:var(--c-act)">-0.094</text>
+<text x="455.0" y="166" class="t-c t-xs">普通模型每参数 19 个 token</text>
+<rect x="554" y="124" width="182" height="58" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.2"/>
+<text x="645.0" y="144" class="t-c t-b" style="fill:var(--c-loss)">+0.010</text>
+<text x="645.0" y="166" class="t-c t-xs">普通模型每参数 63 个 token</text>
+<text x="20" y="209.0" class="t-b">730M 规模</text>
+<text x="20" y="227.0" class="t-xs">（递归 3 次）</text>
+<rect x="174" y="188" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="265.0" y="208" class="t-c t-b" style="fill:var(--c-act)">-0.386</text>
+<text x="265.0" y="230" class="t-c t-xs">普通模型每参数 1.8 个 token</text>
+<rect x="364" y="188" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="455.0" y="208" class="t-c t-b" style="fill:var(--c-act)">-0.075</text>
+<text x="455.0" y="230" class="t-c t-xs">普通模型每参数 4.7 个 token</text>
+<rect x="554" y="188" width="182" height="58" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.2"/>
+<text x="645.0" y="208" class="t-c t-b" style="fill:var(--c-loss)">+0.039</text>
+<text x="645.0" y="230" class="t-c t-xs">普通模型每参数 15 个 token</text>
+<text x="20" y="273.0" class="t-b">1.7B 规模</text>
+<text x="20" y="291.0" class="t-xs">（递归 3 次）</text>
+<rect x="174" y="252" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="265.0" y="272" class="t-c t-b" style="fill:var(--c-act)">-1.017</text>
+<text x="265.0" y="294" class="t-c t-xs">普通模型每参数 0.4 个 token</text>
+<rect x="364" y="252" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="455.0" y="272" class="t-c t-b" style="fill:var(--c-act)">-0.402</text>
+<text x="455.0" y="294" class="t-c t-xs">普通模型每参数 0.9 个 token</text>
+<rect x="554" y="252" width="182" height="58" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+<text x="645.0" y="272" class="t-c t-b" style="fill:var(--c-act)">-0.034</text>
+<text x="645.0" y="294" class="t-c t-xs">普通模型每参数 3.0 个 token</text>
+<text x="20" y="338" class="t-b">每列的最好成绩</text>
+<text x="20" y="356" class="t-xs">（各规模里最低的 NLL）</text>
+<rect x="174" y="324" width="182" height="52" rx="6" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1"/>
+<text x="265.0" y="341" class="t-c t-sm">普通 3.092（135M）</text>
+<text x="265.0" y="360" class="t-c t-sm">MoR 3.103（360M）</text>
+<rect x="364" y="324" width="182" height="52" rx="6" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1"/>
+<text x="455.0" y="341" class="t-c t-sm">普通 2.946（135M）</text>
+<text x="455.0" y="360" class="t-c t-sm">MoR 2.916（360M）</text>
+<rect x="554" y="324" width="182" height="52" rx="6" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1"/>
+<text x="645.0" y="341" class="t-c t-sm">普通 2.705（730M）</text>
+<text x="645.0" y="360" class="t-c t-sm">MoR 2.744（730M）</text>
+</svg>
+  <div class="dia-note">本站根据原文表 9 计算并绘制，对应 <a href="https://arxiv.org/html/2507.10524#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 与 <a href="https://arxiv.org/html/2507.10524#A4.T9" target="_blank" rel="noopener">表 9 ↗</a>。绿色格 = MoR 更好，红色格 = 普通模型更好；“每参数 token 数”= 普通模型的训练 token ÷ 非嵌入参数（推算）。</div>
+</div>
+
+<p>这张表读出三件事。</p>
+<ol>
+  <li><b>MoR 对 Recursive 是 12 战 12 胜。</b>在同样的 \(N_r\) 和同样的预算下，加了路由的 MoR 总比固定深度的 Recursive 好，差距从 0.006 到 1.21 不等。这一条结论是稳的。</li>
+  <li><b>MoR 对普通模型的胜负，几乎完全由“普通模型吃没吃饱”决定。</b>MoR 赢得最多的格子，都是普通模型严重缺数据的地方：1.7B 在 \(2\times10^{18}\) 下只训练了 0.6B token，每个参数不到 0.4 个 token，NLL 高达 5.13。反过来，普通模型数据充足的地方（135M 的三个预算，每参数 61–503 个 token；360M、730M 的最大预算），MoR 都输，而且 135M 上差距随预算增大而扩大（+0.016 → +0.073 → +0.106）。原因就在背景框里说的：MoR 每个 token 只花约 69% 的计算，同样预算多看约 50% 的 token，这在数据是瓶颈时是巨大的优势；数据不再是瓶颈时，参数只有 1/3 的容量劣势就显露出来。</li>
+  <li><b>按“每个预算下各自最好的模型”比，MoR 三局一胜。</b>真正部署时，人们会在给定预算下挑最合适的模型大小，所以更公平的比较是每一列的最低 NLL。\(2\times10^{18}\) 时普通模型最好（3.092 对 3.103），\(5\times10^{18}\) 时 MoR 最好（2.916 对 2.946），\(16.5\times10^{18}\) 时又是普通模型最好（2.705 对 2.744）。只有四个规模的网格很粗，真正的最优点可能落在格点之间，但至少在最大的预算上，最好的普通模型明显好于最好的 MoR。</li>
+</ol>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>论文说“MoR 在更大规模上追平或超过普通模型”，这里的“更大规模”是在<b>固定预算</b>下把模型变大，而固定预算下模型越大、普通模型就越吃不饱。所以这句话更准确的读法是“在普通模型数据不足的设置下，MoR 更好”，而不是“规模越大，MoR 的优势越大”。真正把预算和规模一起放大的证据只有附录表 7 的 1.7B 实验（见<a href="#n-7-w">第 7 节末尾的“结果的份量”</a>），那里普通模型反而更好。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A4" target="_blank" rel="noopener">附录 D ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 推理吞吐：连续深度批处理与 2.06 倍</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoR 声称推理吞吐量最高是普通模型的 2.06 倍。这个加速从哪里来——是少算了层、KV 小了能开更大的批，还是“连续深度批处理”消除了空泡？测量是在什么条件下做的，有哪些开销没算进去？这一节对应原文 §3.3、图 4（a）和附录 E，最后用一小节把全文的结果放在一起称一称份量。</div>
+
+<div class="note-pre"><b>先补一点背景：连续批处理。</b>
+<p>推理服务把多个请求放进一个批里一起算，读一遍参数就能为多个请求各生成一个 token，所以批越大吞吐量越高。Orca 和 vLLM 采用的“连续批处理”（按迭代成批）让请求每一步都可以加入或离开：一个请求生成完就立刻让出位置，新请求下一步就能补进来，不必等整批结束（详见<a href="vllm.html#n-2-3">本站 vLLM 精读的 2.3 节</a>）。论文把这叫做“连续按序列批处理”。</p>
+</div>
+
+<p><b>连续深度批处理</b>是 RRT 提出、MoR 沿用的推理方式，它在“序列”之外又多了一个维度：深度。普通模型的各层权重不同，一批 token 只能整齐地一层一层往上走；如果其中某个 token 提前退出，它在更深的层里只能空等，直到整批走完最后一层，新的 token 才能从第一层进来。递归模型的每一轮用的是同一套权重，所以“A 的第 3 轮”和“D 的第 1 轮”可以放在同一次前向计算里一起算。一个 token 一停下，队列里的下一个 token 立刻补上它的位置，批始终是满的。</p>
+<div class="dia">
+  <div class="dia-title">示意图：为什么共享权重才能“随时补位”</div>
+<svg class="dg" viewBox="0 0 960 370" role="img" aria-label="普通早退出与连续深度批处理的时间表" style="--dg-min:760px">
+<text x="20" y="22" class="t-b">（a）层不共享的普通早退出：一批要等最慢的 token 跑完 3 段，新 token 才能进来</text>
+<text x="206.0" y="42" class="t-c t-xs">步 1</text>
+<text x="298.0" y="42" class="t-c t-xs">步 2</text>
+<text x="390.0" y="42" class="t-c t-xs">步 3</text>
+<text x="482.0" y="42" class="t-c t-xs">步 4</text>
+<text x="574.0" y="42" class="t-c t-xs">步 5</text>
+<text x="666.0" y="42" class="t-c t-xs">步 6</text>
+<text x="758.0" y="42" class="t-c t-xs">步 7</text>
+<text x="850.0" y="42" class="t-c t-xs">步 8</text>
+<text x="20" y="67.0" class="t-sm">批里的第 1 个位置</text>
+<rect x="162" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="67.0" class="t-c t-sm">A 第1轮</text>
+<rect x="254" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="298.0" y="67.0" class="t-c t-sm">A 第2轮</text>
+<rect x="346" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="390.0" y="67.0" class="t-c t-sm">A 第3轮</text>
+<rect x="438" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="67.0" class="t-c t-sm">E 第1轮</text>
+<rect x="530" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="574.0" y="67.0" class="t-c t-sm">E 第2轮</text>
+<rect x="622" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="666.0" y="67.0" class="t-c t-sm">E 第3轮</text>
+<rect x="714" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="67.0" class="t-c t-sm">I 第1轮</text>
+<rect x="806" y="52" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="850.0" y="67.0" class="t-c t-sm">I 第2轮</text>
+<text x="20" y="103.0" class="t-sm">批里的第 2 个位置</text>
+<rect x="162" y="88" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="103.0" class="t-c t-sm">B 第1轮</text>
+<rect x="254" y="88" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="298.0" y="103.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="346" y="88" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="390.0" y="103.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="438" y="88" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="103.0" class="t-c t-sm">F 第1轮</text>
+<rect x="530" y="88" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="574.0" y="103.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="622" y="88" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="666.0" y="103.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="714" y="88" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="103.0" class="t-c t-sm">J 第1轮</text>
+<rect x="806" y="88" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="850.0" y="103.0" class="t-c t-sm">J 第2轮</text>
+<text x="20" y="139.0" class="t-sm">批里的第 3 个位置</text>
+<rect x="162" y="124" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="139.0" class="t-c t-sm">C 第1轮</text>
+<rect x="254" y="124" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="298.0" y="139.0" class="t-c t-sm">C 第2轮</text>
+<rect x="346" y="124" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="390.0" y="139.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="438" y="124" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="139.0" class="t-c t-sm">G 第1轮</text>
+<rect x="530" y="124" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="574.0" y="139.0" class="t-c t-sm">G 第2轮</text>
+<rect x="622" y="124" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="666.0" y="139.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<rect x="714" y="124" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="139.0" class="t-c t-sm">K 第1轮</text>
+<rect x="806" y="124" width="88" height="30" rx="4" style="fill:url(#hatch);stroke:var(--c-loss);stroke-width:1"/>
+<text x="850.0" y="139.0" class="t-c t-xs" style="fill:var(--c-loss)">空等</text>
+<text x="160" y="174" class="t-sm">24 格里有 17 格在干活（71%）；斜纹格是早退出留下的空泡。</text>
+<text x="20" y="200" class="t-b">（b）层共享 + 连续深度批处理：任何位置一空出来，队列里的下一个 token 立刻补上</text>
+<text x="206.0" y="220" class="t-c t-xs">步 1</text>
+<text x="298.0" y="220" class="t-c t-xs">步 2</text>
+<text x="390.0" y="220" class="t-c t-xs">步 3</text>
+<text x="482.0" y="220" class="t-c t-xs">步 4</text>
+<text x="574.0" y="220" class="t-c t-xs">步 5</text>
+<text x="666.0" y="220" class="t-c t-xs">步 6</text>
+<text x="758.0" y="220" class="t-c t-xs">步 7</text>
+<text x="850.0" y="220" class="t-c t-xs">步 8</text>
+<text x="20" y="245.0" class="t-sm">批里的第 1 个位置</text>
+<rect x="162" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="245.0" class="t-c t-sm">A 第1轮</text>
+<rect x="254" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="298.0" y="245.0" class="t-c t-sm">A 第2轮</text>
+<rect x="346" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="390.0" y="245.0" class="t-c t-sm">A 第3轮</text>
+<rect x="438" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="245.0" class="t-c t-sm">E 第1轮</text>
+<rect x="530" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="574.0" y="245.0" class="t-c t-sm">E 第2轮</text>
+<rect x="622" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="666.0" y="245.0" class="t-c t-sm">E 第3轮</text>
+<rect x="714" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="245.0" class="t-c t-sm">J 第1轮</text>
+<rect x="806" y="230" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="850.0" y="245.0" class="t-c t-sm">J 第2轮</text>
+<text x="20" y="281.0" class="t-sm">批里的第 2 个位置</text>
+<rect x="162" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="281.0" class="t-c t-sm">B 第1轮</text>
+<rect x="254" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="298.0" y="281.0" class="t-c t-sm">D 第1轮</text>
+<rect x="346" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="390.0" y="281.0" class="t-c t-sm">D 第2轮</text>
+<rect x="438" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="281.0" class="t-c t-sm">F 第1轮</text>
+<rect x="530" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="574.0" y="281.0" class="t-c t-sm">H 第1轮</text>
+<rect x="622" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="666.0" y="281.0" class="t-c t-sm">H 第2轮</text>
+<rect x="714" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="281.0" class="t-c t-sm">H 第3轮</text>
+<rect x="806" y="266" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="850.0" y="281.0" class="t-c t-sm">L 第1轮</text>
+<text x="20" y="317.0" class="t-sm">批里的第 3 个位置</text>
+<rect x="162" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="206.0" y="317.0" class="t-c t-sm">C 第1轮</text>
+<rect x="254" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="298.0" y="317.0" class="t-c t-sm">C 第2轮</text>
+<rect x="346" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="390.0" y="317.0" class="t-c t-sm">G 第1轮</text>
+<rect x="438" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="482.0" y="317.0" class="t-c t-sm">G 第2轮</text>
+<rect x="530" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="574.0" y="317.0" class="t-c t-sm">I 第1轮</text>
+<rect x="622" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="666.0" y="317.0" class="t-c t-sm">K 第1轮</text>
+<rect x="714" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="758.0" y="317.0" class="t-c t-sm">K 第2轮</text>
+<rect x="806" y="302" width="88" height="30" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+<text x="850.0" y="317.0" class="t-c t-sm">M 第1轮</text>
+<text x="160" y="352" class="t-sm">24 格全部在干活，同样 8 步完成的“token·轮”更多（示意，不是论文数据）。</text>
+</svg>
+  <div class="dia-note">本站示意图，思路对应 RRT 的图 3。每一格是“递归块的一次前向计算”。（a）里早退出留下的空泡要等整批跑完 3 段才能填；（b）里递归块是共享的，空出来的位置立刻由新 token 的第 1 轮填上。</div>
+</div>
+<p>MoR 的实际系统还要处理不共享的部分：一个 token 跑完它的递归以后，还要经过最后一层、输出层，生成的新 token 再经过词嵌入和第一层，才能重新排进递归块的队列。作者的做法是把退出的 token 攒到一个最大批，再一起过这些不共享的层，然后按先进先出的顺序重新排队。</p>
+
+<p><b>测量设置。</b>模型是第 5 节那三个 360M 档的 MoR（\(N_r=\)2、3、4，用 \(16.5\times10^{18}\) FLOPs 训练），测的是解码吞吐。每个样本生成的 token 数从均值 256 的正态分布里抽，<b>没有输入提示词</b>，从空前缀开始生成；队列里共 1K 个 FineWeb-Edu 验证集样本。对照的普通模型使用连续按序列批处理。MoR-4 因为加了 2 层，对照的是一个同样 34 层的普通模型。批大小有两种设定：固定为 32；或者“相对最大批”——按参数和 KV 占用估算两种模型在 H100 上的最大批，用两者之比乘以 32，得到 MoR-2、MoR-3、MoR-4 分别可开到 42、48、51。实现上用了支持变长 KV 的 FlashAttention-2、静态 KV 缓存和 <code>torch.compile</code>，测量前先预热 100 步。作者明确说明：<b>缓存和更新 KV 的时间没有计入</b>，留待以后用更好的工程实现来精确比较。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/throughput_256.svg" alt="原文图 4a：吞吐与对数似然的帕累托前沿" loading="lazy"></div>
+<figcaption><b>原文图 4（a）。怎么看：</b>横轴是相对于普通模型的吞吐倍数，纵轴是对数似然（越高越好，它就是表 3 里 NLL 的相反数）。绿色星号是普通模型（吞吐 1.0，对数似然约 −2.78）。蓝色点是批大小固定为 32，橙红点是相对最大批；菱形、圆形、方形分别是 MoR-2、MoR-3、MoR-4。递归越多的模型越靠右（越快）、越靠下（越差）。只有菱形（MoR-2）同时在星号的右边和上边。</figcaption></figure>
+
+<div class="table-wrap"><table>
+<tr><th>模型</th><th>吞吐（批 = 32）</th><th>吞吐（相对最大批）</th><th>最大批</th><th>NLL（表 3）</th><th>与普通模型比</th></tr>
+<tr><td>Vanilla</td><td>1.00×</td><td>1.00×</td><td>32</td><td>2.7824</td><td>—</td></tr>
+<tr><td>MoR-2</td><td>1.23×</td><td>1.60×</td><td>42</td><td>2.7511</td><td>更快且更好</td></tr>
+<tr><td>MoR-3</td><td>1.33×</td><td>1.95×</td><td>48</td><td>2.7925</td><td>更快，NLL 差 0.010</td></tr>
+<tr><td>MoR-4</td><td>1.42×</td><td>2.06×</td><td>51</td><td>2.8204</td><td>更快，NLL 差 0.038</td></tr>
+</table></div>
+<p class="w-note">吞吐倍数读自原文图 4（a）的标注，最大批来自附录 E，NLL 来自表 3。</p>
+
+<p>这些数字可以拆开来理解（推算）。固定批大小时，加速主要来自少算的层：MoR-3 平均每个 token 只算约 69% 的层，理想加速约 1.45 倍，实测 1.33 倍；MoR-2 理想约 1.31 倍，实测 1.23 倍。换成相对最大批时，再乘上批大小的比例：1.23 × 42/32 ≈ 1.61，1.33 × 48/32 ≈ 2.0，和图上的 1.60、1.95 很接近（MoR-4 按此估算会是 2.26，实测 2.06）。也就是说，“相对最大批”下的倍数，大约一半来自少算层，另一半来自 KV 和参数变小后能开更大的批。</p>
+<div class="note-warn"><b>读这个 2.06 倍时要注意：</b>
+<ul>
+  <li>2.06 倍属于 MoR-4，它的 NLL 比普通模型差 0.038，few-shot 平均低 0.7 个百分点。质量不输普通模型的只有 MoR-2，它的加速是 1.23 倍（固定批）或 1.60 倍（相对最大批）。</li>
+  <li>“相对最大批”是按显存比例换算出来的：MoR 开 42–51，普通模型固定在 32。360M 的模型在 80GB 的 H100 上实际能开的批远大于 32，到那时解码可能不再是“批越大越快”的线性关系，倍数未必保持。</li>
+  <li>没有提示词、不计 KV 更新时间、只测了 360M 一个规模、只测了解码。这些都让测量偏向“理想情况”。</li>
+  <li>官方仓库只包含训练代码。维护者在 GitHub issue #9 和 #13 中说明，推理和连续深度批处理用的是另一套未整理的代码，尚未公开；截至 2026-10-19 仓库里仍没有推理代码，所以这个吞吐结果目前无法独立复现。</li>
+</ul></div>
+
+<h4 id="n-7-w">结果的份量：这些提升到底有多大</h4>
+<p>把前面三节放在一起，逐项称一称。</p>
+<p><b>规模。</b>主表是 360M 档（MoR 的唯一参数 0.98 亿到 1.67 亿），训练 19B–31B token；最大的实验是 1.7B 档。数据只有 FineWeb-Edu 一种，所有结果都是单次运行。</p>
+<p><b>每个比较对齐了什么。</b>MoR 的主比较是按训练 FLOPs 对齐的，这一点比很多循环模型论文更公平——后者常常拿“循环 L 次的小模型”和“参数相同的大模型”比，循环模型实际花了 L 倍的计算。但 MoR 的比较里参数和训练 token 都不对齐，读结论时要分清：</p>
+<div class="table-wrap"><table>
+<tr><th>比较</th><th>训练 FLOPs</th><th>唯一参数</th><th>训练 token</th><th>每 token 计算 / KV</th><th>结果</th></tr>
+<tr><td>表 3，MoR-2 对 Vanilla（同 FLOPs）</td><td>相同</td><td>MoR 少 47%</td><td>MoR 多 35%</td><td>MoR 约 0.77×（推算）</td><td>NLL −0.031，few-shot +0.8</td></tr>
+<tr><td>表 3，MoR-3 / MoR-4 对 Vanilla</td><td>相同</td><td>MoR 少 63% / 69%</td><td>MoR 多 50%</td><td>约 0.69×（推算）</td><td>NLL +0.010 / +0.038</td></tr>
+<tr><td>表 3，同 token</td><td>MoR 少 25%–33%</td><td>MoR 少</td><td>相同 20B</td><td>MoR 少</td><td>MoR-2 略好，MoR-3/4 更差</td></tr>
+<tr><td>图 3 / 表 9，isoFLOP</td><td>相同</td><td>MoR 约 1/3–2/5</td><td>MoR 多约 50%</td><td>约 0.69×（推算）</td><td>取决于普通模型是否缺数据；按每列最好成绩三局一胜</td></tr>
+<tr><td>附录表 8，同参数（118M）加深递归</td><td>MoR 多 1.4–1.8 倍（推算）</td><td>相同</td><td>相同 10B</td><td>MoR 多</td><td>NLL 从 2.968 降到 2.921 / 2.911</td></tr>
+<tr><td>附录表 7，1.7B（同 FLOPs）</td><td>相同</td><td>MoR 0.87B / 0.67B 对 1.61B</td><td>MoR 多 30%–35%</td><td>MoR 少</td><td>few-shot：Vanilla 48.9，MoR 48.4 / 46.7</td></tr>
+<tr><td>图 4（a），吞吐</td><td>同预算训练的模型</td><td>MoR 少</td><td>—</td><td>相对最大批时 MoR 的批更大</td><td>1.23×–2.06×，越快的越差</td></tr>
+</table></div>
+<p><b>提升有多小。</b>最好的情况（MoR-2，同 FLOPs）是 NLL 低 0.031、困惑度低约 3%、few-shot 平均高 0.8 个百分点。few-shot 里 WinoGrande 和 MMLU 贴着随机水平，平均分 1 个百分点以内的差别不可靠。附录 C.1 的 1.7B 实验（\(68.5\times10^{18}\) FLOPs）里普通模型的 few-shot 平均是 48.9%，MoR-2 和 MoR-3 分别是 48.4% 和 46.7%；作者自己写道，这“也可能说明 MoR 当前的结构不适合扩展”。按每个预算下最好的模型比（第 6 节），在最大的预算上普通模型更好。综合来看，MoR 的稳定收益是<b>用大约一半到三分之一的参数，达到和普通模型相近的质量，同时推理更快、KV 更小</b>；它并没有在同等训练算力下给出明显更低的损失。</p>
+<p><b>对照组。</b>Vanilla 和 Recursive 都是作者用同一套代码、同一组超参数（配置文件里学习率都是 3e-3）自己训练的，这让比较在流程上是一致的，但没有为每种结构单独调参。论文没有和 Mixture-of-Depths 这类同样按 token 路由计算的方法做同算力对比，也没有和 RRT 那样的“递归 + LoRA 放松”在同设置下比较（附录表 16 只在 Recursive 上试了 LoRA 放松，从零训练时没有明显好处）。</p>
+<p><b>评测路径。</b>维护者在 issue #9 中说明，few-shot 评测只用了只需要 prefill 的任务，并且用训练代码评测；本站读公开代码看到，评测时专家选择仍是在整段序列上取 top-\(k\)，而不是生成时用的“分数大于 0.5”规则。由于两者在约 99.3% 的判断上一致（第 3 节），影响大概很小，但论文没有单独报告按因果规则评测的 NLL。</p>
+<p><b>开放程度与独立验证。</b>训练代码以 Apache-2.0 开源，360M 档主表模型的检查点放在 Google Drive 上；没有 Hugging Face 版本（维护者在 2026-09 的 issue #3 中说尚未整合）。2026-09 有用户在 issue #17 中发现，公开代码在整理时把专家选择版本里注意力层的权重共享弄丢了；维护者修复了代码，并说明已发布的检查点来自原始训练、共享是正确的。截至 2026-10-19，本站没有找到对 MoR 主结果的独立复现。</p>
+<p><b>和本系列其他论文对照。</b><a href="iso-depth-scaling.html">Iso-Depth</a> 在同训练算力下测得“多循环一次”只值一个独立块的 φ = 0.46（95% 置信区间 0.41–0.53）；<a href="smelt.html">SMELT</a> 在每 token FLOPs、总参数和 KV 缓存全部对齐的 MoE 设置下，发现把中间一半的层循环两次，可在计算最优前沿上节省 6.8%–18.0% 的训练 FLOPs。这些结果和 MoR 的结论方向一致：循环（共享参数）主要换来的是参数效率，在严格对齐算力时，质量上的收益是有限的、要精打细算的。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A5" target="_blank" rel="noopener">附录 E（吞吐测量）↗</a> · <a href="https://arxiv.org/html/2507.10524#A3" target="_blank" rel="noopener">附录 C（1.7B 与同参数实验）↗</a> · <a href="https://github.com/raymin0223/mixture_of_recursions/issues/9" target="_blank" rel="noopener">GitHub issue #9 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 消融：共享方式、路由器设计、KV 策略</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoR 的最终配置——Middle-Cycle 共享、带辅助损失的线性专家选择路由器、按递归缓存——是怎么一步步选出来的？每个选择背后的实验差距有多大？这一节对应原文 §4 和附录 F、G、H。</div>
+
+<h4 id="n-8-1">8.1 共享方式：Middle-Cycle 最稳</h4>
+<p>作者在固定深度的 Recursive 模型上比较四种共享方式，规模是 135M 和 360M，递归 2 次和 3 次，每个模型训练 10B token。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/revisit_sharing_rec3.svg" alt="原文图 4b：四种共享方式的 NLL" loading="lazy"></div>
+<figcaption><b>原文图 4（b）。怎么看：</b>\(N_r=3\)，左组 135M、右组 360M；四根柱子依次是 Seq、M-Seq、Cyc、M-Cyc 的验证 NLL，越低越好。红色虚线是完整的普通模型，黑色虚线是参数相当（约 1/3 大小）的普通模型。两组里都是 M-Cyc（绿色）最低，Sequence 类最差；360M 时 M-Cyc 明显低于黑线，但仍高于红线。</figcaption></figure>
+<p>具体数字（附录表 10，360M，\(N_r=3\)）：Middle-Cycle 2.8760，Cycle 2.9363，Middle-Sequence 2.9753，Sequence 3.0245；完整普通模型 2.8471，10 层的小普通模型（参数相当）2.9449。135M 递归 2 次时 Cycle 略好于 Middle-Cycle（3.0071 对 3.0330），其余设置都是 Middle-Cycle 最好。在“从现成 SmolLM 检查点继续训练 5B token”的设置下（附录表 12），两种 Middle 方式也都最好。</p>
+<div class="note-warn"><b>这里对齐的是什么：</b>这组实验对齐了训练 token（10B），没有对齐计算。和“参数相当的普通模型”比，递归 3 次的模型每个 token 的计算多了约 3 倍（30 多层对 10 层，推算），它好于这条黑线是意料之中的；它和完整普通模型计算相当，却仍然更差，这才是参数共享的代价。另外，附录表 11 在 730M 档、唯一参数相同（2.52 亿）的条件下比较 Middle-Cycle 和 Cycle：2.7552 对 2.7573，差别很小。</div>
+
+<h4 id="n-8-2">8.2 路由器设计</h4>
+<p>消融在 360M 档、\(N_r=3\)、按递归缓存的 MoR 上进行（训练 10B token）。对专家选择，作者还引入一个指标叫<b>死 token 比例</b>：在验证集的一批样本里，有多少比例的序列位置在最后一轮从来没被选中过。比例高说明路由器有位置偏好，比如总是挑某几个固定位置，而不是按内容挑。</p>
+<div class="table-wrap"><table>
+<tr><th>专家选择配置</th><th>死 token</th><th>NLL</th><th>few-shot</th></tr>
+<tr><td>辅助路由器，sigmoid，MLP</td><td>0.0%</td><td>2.8893</td><td>39.4</td></tr>
+<tr><td>辅助路由器，tanh，MLP</td><td>66.7%</td><td>2.8720</td><td>36.2</td></tr>
+<tr><td>辅助损失，sigmoid，MLP</td><td>0.0%</td><td>2.8816</td><td>40.0</td></tr>
+<tr><td>辅助损失，tanh，MLP</td><td>0.0%</td><td>2.9933</td><td>38.8</td></tr>
+<tr><td><b>辅助损失，sigmoid，线性</b></td><td>0.1%</td><td><b>2.8667</b></td><td><b>40.1</b></td></tr>
+<tr><td>辅助损失，sigmoid，宽 MLP</td><td>0.4%</td><td>2.8716</td><td>39.4</td></tr>
+<tr><td>辅助损失，sigmoid，线性，加 z-loss</td><td>0.0%</td><td>2.8824</td><td>40.0</td></tr>
+<tr><td>对照：随机路由</td><td>0.0%</td><td>2.9335</td><td>39.1</td></tr>
+</table></div>
+<p class="w-note">来自原文表 4 左和附录表 13。</p>
+<p>读法：辅助损失比辅助路由器更适合推理；sigmoid 比 tanh 好；最简单的线性路由器反而最好；z-loss（惩罚路由器输出过大的 logit，让训练更稳定）对准确率几乎没有影响，只是让死 token 略少。值得注意的是最后一行：把路由分数换成随机数，NLL 是 2.9335，比学出来的路由差 0.067。这说明“挑哪些 token 多算”确实是学到了东西，而不只是“少算一部分”本身。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/weight_values.svg" alt="原文图 5b：路由分数的分布" loading="lazy"></div>
+<figcaption><b>原文图 5（b）。怎么看：</b>三张小图对应第 1、2、3 轮（Rec #1–#3），横轴是路由器输出的分数（0 到 1），纵轴是归一化的计数；蓝色是被选中的 token，橙色是没被选中的。用了辅助损失以后，被选中的分数全部挤在 1.0 附近，没被选中的全部挤在 0.0 附近，两堆完全分开。第 1 轮所有 token 都被选中，所以只有蓝色。这正是推理时能用“大于 0.5”来代替 top-\(k\) 的原因。</figcaption></figure>
+
+<p>对 token 选择，衡量均衡的指标是 MaxVio（越低越均衡）。结果呈现出明显的取舍：均衡损失系数取 0.1 时 MaxVio 低到 0.200，但 NLL 是 3.0239；系数取 0.01 时 MaxVio 升到 0.682，NLL 却降到 2.9118；不用损失、只调偏置时 MaxVio 0.852、NLL 2.9081。也就是说，越强行拉平负载，模型越差。作者最终选择显式的均衡损失，理由是路由更稳定；但即便如此，模型在将近一半的训练步里都没能达到均衡。作者把原因归结为这些“专家”本身就不对称（不同深度的计算量不同），而专家选择不存在这个问题，这也是第 5 节里 token 选择大幅落后的原因之一。</p>
+
+<h4 id="n-8-3">8.3 KV 策略：共享在普通模型里没坏处，在 MoR 里有得有失</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/kv_sharing_loss.svg" alt="原文图 4c：KV 共享对 NLL 的影响" loading="lazy"></div>
+<figcaption><b>原文图 4（c）。怎么看：</b>四组柱子分别是普通模型、Recursive、专家选择 MoR（MoR-E）、token 选择 MoR（MoR-T），都是 360M 档、训练 10B token；绿色是不共享 KV，蓝色是共享 KV。普通模型共享后反而更好（约 2.807 → 2.789），Recursive 和 MoR-E 共享后变差，MoR-T 共享后变好。</figcaption></figure>
+<p>附录表 15 的数字：普通模型（30 层）共享后 NLL 从 2.8069 降到约 2.79（按 Sequence 或 Cycle 方式共享分别是 2.7879 和 2.7890），作者认为共享起到了正则化的作用；Middle-Cycle 的 Recursive 从 2.8760 升到 2.8854；专家选择 MoR 从 2.8667 升到 2.8895，退化最明显；token 选择 MoR 从 2.9358 降到 2.9155，反而受益。作者的解释是：专家选择的路由很精确，让每一轮只和本轮的同伴交流更有利；token 选择的路由不太准，共享的 KV 让每个 token 都能看到完整上文，正好弥补了路由的失误。</p>
+<p>为什么在参数共享的模型里，KV 共享也只带来很小的损失？作者把每一层的 key 和 value 拆成大小和方向两部分来看，发现共享同一套参数的层（相隔 10 层）产生的 key 和 value 在大小上呈现明显的周期性，在方向上也高度相似：</p>
+<figure class="paper-fig"><div class="imgs"><img src="mixture-of-recursions/fig/dir_key.png" alt="原文图 8b：key 的层间余弦相似度" loading="lazy"><img src="mixture-of-recursions/fig/dir_value_cbar.png" alt="原文图 8c：value 的层间余弦相似度" loading="lazy"></div>
+<figcaption><b>原文图 8（b）（c）。怎么看：</b>360M、Middle-Cycle、\(N_r=3\) 的 Recursive 模型，32 层两两之间 key（左）和 value（右）的余弦相似度，红色越深越相似。除了主对角线，还能看到与主对角线平行、相隔 10 层的几条红色斜线，那就是共用同一套参数的层（比如第 1、11、21 层）。key 的斜线比 value 的更清楚，说明 value 更难共享。</figcaption></figure>
+<p>作者还尝试用 LoRA、DoRA、提示前缀等方式“放松”共享约束（附录表 16），从零训练时都没有带来明显提升，和 RRT 里“放松”有效的结论不同——RRT 是从已训练好的模型改造，LoRA 有原权重可以逼近。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A6" target="_blank" rel="noopener">附录 F ↗</a> · <a href="https://arxiv.org/html/2507.10524#A7" target="_blank" rel="noopener">附录 G ↗</a> · <a href="https://arxiv.org/html/2507.10524#A8" target="_blank" rel="noopener">附录 H ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 分析：计算最优的走向、路由学到了什么、测试时扩展</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>如果要按计算最优的方式扩大 MoR，应该多加参数还是多加数据？路由器给哪些 token 多分了深度，有没有可解释的规律？“测试时扩展”——推理时多递归几轮效果更好——在 MoR 里具体指什么、能走多远？这一节对应原文 §5。</div>
+
+<h4 id="n-9-1">9.1 计算最优：MoR 更偏向“大模型、短训练”</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/scaling_law_one_figure.svg" alt="原文图 5a：计算最优分析" loading="lazy"></div>
+<figcaption><b>原文图 5（a）。怎么看：</b>横轴是模型大小（对数坐标，单位百万；对 Recursive 和 MoR 计的是唯一参数，所以它们的曲线整体偏左），纵轴是验证损失。颜色区分结构（绿 = 普通、蓝 = Recursive、橙红 = MoR），线型区分预算：点线、虚线、实线依次对应 \(2\)、\(5\)、\(16.5\times10^{18}\) FLOPs。每条曲线是对第 6 节数据点拟合的多项式，星号是拟合出的最低点，即这个预算下的最优模型大小。看最下面的三条实线：绿色星号的损失仍略低于橙红星号。</figcaption></figure>
+<p>论文的结论是：连接 MoR 各个星号的“最优路径”斜率更平，说明 MoR 从增加参数中获益更多、对数据没那么饥渴；作者推测这是因为共享块本身的质量变得比多喂数据更重要，所以扩大 MoR 时应该偏向更大的模型、更短的训练。</p>
+<div class="note-warn"><b>这个结论的证据比较薄：</b>每个结构只有 4 个规模 × 3 个预算的数据点，曲线是多项式拟合，星号的位置对拟合方式很敏感；小预算的结果来自大预算训练的中间检查点；横轴对 MoR 计的是唯一参数，它的星号偏左一部分是计数方式造成的。另外从图上可以直接看到，在最大的预算下，拟合出的普通模型最优点损失仍低于 MoR 的最优点，这与第 6 节按原始数据得出的结论一致。</div>
+
+<h4 id="n-9-2">9.2 路由学到了什么</h4>
+<p>原文图 1 右和附录表 17 展示了每个 token 被分配的递归次数（360M 档、\(N_r=3\)、训练 30B token 的模型）。作者观察到，深度反映的是<b>下一个 token 在上下文中有多好猜</b>：一个词被切成几个子词时，后半部分往往很容易猜，所以前一个子词的位置只需要很少的递归；而像破折号、括号、句号、逗号这类功能性符号，“打开”它们似乎很容易，但猜出它们的“闭合”部分或者紧跟其后的第一个 token 可能更难。图 5（b）已经说明，用了辅助损失的专家选择路由器能把选中和未选中的 token 完全分开。</p>
+
+<h4 id="n-9-3">9.3 测试时扩展：只在训练过的深度以内</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="mixture-of-recursions/fig/test_time_scale.svg" alt="原文图 5c：测试时扩展" loading="lazy"></div>
+<figcaption><b>原文图 5（c）。怎么看：</b>三根柱子是 MoR-2、MoR-3、MoR-4（都基于 360M 档，所以递归越多唯一参数越少）。纵轴是对数似然（越高越好），每根柱子按颜色分段：紫色段是“最多只允许递归 1 轮”时的水平，加上蓝色段是“最多 2 轮”，再加红色、黄色段是“最多 3 轮”“最多 4 轮”。读图约为：MoR-3 从 −3.01（1 轮）到 −2.81（2 轮）再到 −2.79（3 轮）；MoR-4 的第 4 轮几乎没有增益（约 0.002）。在 500 个样本上测量。</figcaption></figure>
+<p>论文据此认为，更深的递归不仅提供了更多计算，而且每一轮都在自己的深度上专门化地精炼 token 的表示，所以 MoR 支持测试时扩展：推理时允许更多的递归轮数可以提高生成质量。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这里的“测试时扩展”是在<b>训练时用过的最大深度以内</b>，把允许的轮数从 1 逐步放开到 \(N_r\)。它说明的是“截断递归会掉很多分”，而不是“推理时多跑几轮能超过训练时的水平”。MoR 的路由器和容量都是按固定的 \(N_r\) 训练的，论文没有测试超过 \(N_r\) 的轮数，最后一轮的增益也已经很小。这和 <a href="huginn.html">Huginn</a> 那种训练时随机采样循环次数、推理时可以自由调节循环次数的做法不是一回事。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2507.10524#A9" target="_blank" rel="noopener">附录 I（路由的定性结果）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 相关工作、结论与局限</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoR 在已有工作的版图里处在什么位置？作者自己承认了哪些局限、计划往哪里走？这一节对应原文 §6 和 §7。</div>
+<p>论文把相关工作分成五类。<b>递归 Transformer</b>：Universal Transformer 表明反复使用一个块可以达到不共享深层模型的表达能力；循环 Transformer 被证明可以充当可编程计算机（见<a href="looped-programmable-computers.html">本站精读</a>）、学习迭代式的拟合算法、在算法任务上外推到更长的输入；RRT 用 LoRA 缓解共享带来的损失；Huginn 等工作展示了循环深度上的潜空间推理。<b>自适应计算</b>：早退出（CALM 等）和 MoD 把“算不算这一层”交给路由器决定；MoR 把这个思路搬到共享权重的递归结构上，参数量不变，计算深度可以超出模型的物理层数。<b>路由机制</b>：MoE 的 token 选择和专家选择。<b>KV 缓存</b>：量化、丢弃不重要的条目、多查询/分组查询注意力，以及相邻层共享 KV 的 CLA；MoR 的递归共享提供了另一条路，而且可以只在 prefill 时跑第一轮。<b>潜空间推理</b>：暂停 token、填充符号、把隐藏状态循环喂回去模拟思维链（如 <a href="reasoning-latent-thoughts.html">Reasoning with Latent Thoughts</a>）等；作者认为它们大多采用固定的推理深度，不能按需分配，这正是循环与自适应深度结合的动机。</p>
+<div class="note-warn"><b>关于“第一个统一三者的结构”：</b>论文在贡献里说 MoR 是第一个把参数共享、token 级自适应深度和省显存的 KV 缓存统一起来的结构。只看前两项，<a href="universal-transformers.html">Universal Transformer</a>（2018）已经在共享的块上用 ACT 让每个位置自适应地停止。MoR 的新意更准确地说是：用 MoD 式的路由在语言模型预训练中稳定地学会按 token 分配深度，并配套解决了动态深度带来的 KV 缓存和批处理问题。</div>
+<p>作者在 §7.1 列出的局限和未来方向：</p>
+<ul>
+  <li><b>推理模型。</b>在真实的推理数据上做后训练，让路由器学会按推理的复杂度调整深度。</li>
+  <li><b>继续扩大。</b>受算力所限只做到 1.7B；下一步想做 3B 以上、更多数据。可能的办法包括加大不共享的部分、给每个深度加专属的 LoRA 或专家，以及从现成的普通模型继续训练（uptraining）。</li>
+  <li><b>自适应的容量控制。</b>专家选择的容量在训练时固定，而辅助损失让路由分数几乎非 0 即 1，训练后很难改变各轮的 top-\(k\)。需要能在训练和推理时使用不同容量的设计。</li>
+  <li><b>与稀疏方法结合。</b>剪枝、量化、结构化稀疏等都被认为和 MoR 互补。</li>
+  <li><b>多模态。</b>递归块与模态无关，可以用于视觉、语音和长视频、长音频流。</li>
+</ul>
+<p>论文的结论可以这样概括：MoR 在一个结构里同时利用了参数共享、自适应递归深度和高效的 KV 缓存；在 135M 到 1.7B 的规模上，它在同训练 FLOPs 下以更少的参数取得了相近或略好的验证损失和 few-shot 准确率，并带来更高的推理吞吐。结合第 6、7 节的分析，“相近”比“更好”更能概括这些数字。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2507.10524#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2507.10524#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>MoR 于 2025 年 7 月挂上 arXiv，被 NeurIPS 2025 接收为 poster。它的直接影响主要在两个方向：把“按 token 路由递归深度”搬到别的模态和领域，以及循环 Transformer 这一整条线对“算力是否对齐”的反思。下面只列本站核实过的后续工作。</p>
+<ul>
+  <li><b>Vision-MoR</b>（He 等，AAAI 2026，<a href="https://doi.org/10.1609/aaai.v40i6.42471" target="_blank" rel="noopener">DOI ↗</a>）：把 MoR 搬到视觉 Transformer，在图块（patch）级别分配递归深度，路由器用带移位窗口注意力的“空间感知”设计。作者报告 Small 版本在 ImageNet-1K 上以 5.7M 参数、140M FLOPs 达到 74.6% 的 top-1，X-Large 版本 80.4%，在 COCO 检测上 39.1 AP。</li>
+  <li><b>Soft Mixture-of-Recursions</b>（Lee 与 Park，<a href="https://arxiv.org/abs/2607.00774" target="_blank" rel="noopener">arXiv 2607.00774 ↗</a>，2026-07）：认为在视觉 Transformer 里单纯加深递归并不可靠，因为中间轮次的表示被浪费了。它不再“硬”选深度，而是为每个 token 学一组权重，把所有轮次的输出软性地混合起来（SR-ViT）。作者报告 SR-ViT-S 的递归深度从 1 加到 4 时，ImageNet-1K top-1 从 79.83% 升到 82.48%，只多 1.7M 参数。</li>
+  <li><b>bioMoR</b>（Howlader 等，<a href="https://arxiv.org/abs/2608.06727" target="_blank" rel="noopener">arXiv 2608.06727 ↗</a>，2026-08）：把 MoR 用于基因和通路级别的组学数据，在三个位置加入生物学知识：用图结构细化 token 嵌入、给注意力加结构偏置、让路由器参考图上的邻居来决定递归深度。作者报告在 8 个基准上比最强的不含生物知识的 MoR 基线 macro-F1 高 8.2 个百分点，参数比不递归的 Transformer 少 75%，FLOPs 最多少 58%。</li>
+</ul>
+<p>在本站这一批循环 Transformer 的精读里，可以接着读这些和 MoR 直接相关的工作：</p>
+<ul>
+  <li><a href="ouro.html">Ouro / LoopLM</a>：同样让循环语言模型在预训练中自己学会分配深度（用带熵正则的训练目标），但训练数据多得多（7.7T token）；读的时候注意它的基座模型在预训练阶段就见过 SFT 类数据，和其他基座模型的比较受数据影响。</li>
+  <li><a href="iso-depth-scaling.html">Iso-Depth 扩展律</a>与 <a href="loops-vs-parameters.html">循环能替代多少参数</a>：在严格对齐训练算力的条件下，量化“多循环一次”值多少个独立的块。</li>
+  <li><a href="smelt.html">SMELT</a>：在 MoE 中做循环，同时对齐每 token FLOPs、总参数和 KV 缓存。</li>
+  <li><a href="parcae.html">Parcae</a> 和 <a href="elastic-latent-recurrence.html">One Model, Many Depths（ELR）</a>：分别从训练稳定性和“一个检查点支持多种循环圈数”的角度继续这条线；后者关心的“同一个模型在推理时换用不同深度”，正是 MoR 在局限里提到、却没有解决的问题。</li>
+</ul>
+<p>官方仓库截至 2026-10-19 有 642 个 star、100 个 fork，仍只包含训练代码和 360M 档的检查点；推理与连续深度批处理的代码没有公开，Hugging Face 的整合也尚未完成。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、论文署名。论文脚注说明：Google 的合作者只起顾问作用，基于 Llama 结构的实验没有 Google 顾问的指导或参与。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Sangmin Bae</b>（共同一作）<div class="aff">KAIST AI（金在哲 AI 研究生院）博士生，OSI Lab，导师 Se-Young Yun</div>前作 Relaxed Recursive Transformers（ICLR 2025，署名注明为在 Google DeepMind 实习期间完成）和早退出框架 FREE（EMNLP 2023）的第一作者。</div>
+  <div class="author-card"><b>Yujin Kim</b>（共同一作）<div class="aff">KAIST AI</div></div>
+  <div class="author-card"><b>Reza Bayat</b>（共同一作）<div class="aff">Mila</div></div>
+  <div class="author-card"><b>Sungnyun Kim</b><div class="aff">KAIST AI</div></div>
+  <div class="author-card"><b>Jiyoun Ha</b><div class="aff">Google Cloud</div></div>
+  <div class="author-card"><b>Tal Schuster</b><div class="aff">Google DeepMind</div>早退出方法 CALM（NeurIPS 2022 oral）的第一作者；RRT 的通讯作者。</div>
+  <div class="author-card"><b>Adam Fisch</b><div class="aff">Google DeepMind</div>CALM 和 RRT 的合作者。</div>
+  <div class="author-card"><b>Hrayr Harutyunyan</b><div class="aff">Google Research</div>RRT 的合作者。</div>
+  <div class="author-card"><b>Ziwei Ji</b><div class="aff">Google DeepMind</div>RRT 的合作者。</div>
+  <div class="author-card senior"><b>Aaron Courville</b>（通讯作者）<div class="aff">Université de Montréal 教授，Mila</div>与 Ian Goodfellow、Yoshua Bengio 合著教材《Deep Learning》（MIT Press，2016）。</div>
+  <div class="author-card senior"><b>Se-Young Yun</b>（通讯作者）<div class="aff">KAIST AI 教授</div>据 Sangmin Bae 的个人主页，是其硕士与博士阶段的导师。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：NeurIPS 2025（poster）。arXiv v1 2025-07-14，v3 2025-10-25（本页依据 v3）。</li>
+  <li><b>开源</b>：<a href="https://github.com/raymin0223/mixture_of_recursions" target="_blank" rel="noopener">raymin0223/mixture_of_recursions</a>，Apache-2.0，642 star、100 fork（截至 2026-10-19）；包含训练与评测代码、360M 档 Vanilla / Recursive / MoR 检查点（Google Drive），不含推理与连续深度批处理代码。</li>
+  <li><b>后续采用</b>：已有把 MoR 用于视觉（Vision-MoR，AAAI 2026；Soft MoR）和组学数据（bioMoR）的工作，见“后来怎么样了”。截至 2026-10-19，本站没有查到对其语言模型主结果的独立复现。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>本系列（循环 Transformer）：<a href="universal-transformers.html">Universal Transformers</a> · <a href="looped-programmable-computers.html">Looped Transformers as Programmable Computers</a> · <a href="reasoning-latent-thoughts.html">Reasoning with Latent Thoughts</a> · <a href="huginn.html">Huginn</a> · <a href="ouro.html">Ouro</a> · <a href="tiny-recursive-model.html">TRM</a> · <a href="parcae.html">Parcae</a> · <a href="iso-depth-scaling.html">Iso-Depth</a> · <a href="smelt.html">SMELT</a> · <a href="loop-mup.html">Loop-μP</a> · <a href="elastic-latent-recurrence.html">ELR</a> · <a href="loops-vs-parameters.html">循环能替代多少参数</a> · <a href="arloop.html">ARLoop</a></li>
+  <li>背景：<a href="vllm.html">vLLM / PagedAttention</a>（KV 缓存与连续批处理）· <a href="deepseek-v3.html">DeepSeek-V3</a>（MoE 路由与无辅助损失均衡）· <a href="flashattention.html">FlashAttention</a>（注意力的计算与访存代价）</li>
+  <li>前作原文：<a href="https://arxiv.org/abs/2410.20672" target="_blank" rel="noopener">Relaxed Recursive Transformers（arXiv 2410.20672）↗</a> · Mixture-of-Depths：<a href="https://arxiv.org/abs/2404.02258" target="_blank" rel="noopener">arXiv 2404.02258 ↗</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Sangmin Bae, Yujin Kim, Reza Bayat, Sungnyun Kim, Jiyoun Ha, Tal Schuster, Adam Fisch, Hrayr Harutyunyan, Ziwei Ji, Aaron Courville, Se-Young Yun. <em>Mixture-of-Recursions: Learning Dynamic Recursive Depths for Adaptive Token-Level Computation.</em> NeurIPS 2025. <a href="https://arxiv.org/abs/2507.10524" target="_blank" rel="noopener">arXiv:2507.10524</a>（v3，2025-10-25），以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布。本页标注为“原文图”的图片取自 arXiv HTML 版原文，未做修改；其余示意图与正文均为本站撰写和绘制，并非翻译。数字与结论以原文为准，标“推算”的为本站计算；关于代码与评测路径的说明来自官方仓库（Apache-2.0）及其 GitHub issue 中维护者的回复。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

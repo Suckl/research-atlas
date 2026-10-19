@@ -158,8 +158,9 @@
     const items = [];
     if (m.citations != null) items.push([fmtN(m.citations), `被引次数（Semantic Scholar，${esc(fetched || "")}）`]);
     if (m.influential != null) items.push([fmtN(m.influential), "高影响力引用"]);
-    if (n.date) items.push([esc(n.date), n.arxiv ? `arXiv 首版（${esc(n.arxiv)}）` : "发表时间"]);
-    if (n.venue) items.push([esc(String(n.venue).split(/[（(；;]/)[0]), "发表"]);
+    const unpublished = /投稿|审稿|预印本/.test(n.venue || "");   // under review / preprint: not "published"
+    if (n.date) items.push([esc(n.date), n.arxiv ? `arXiv 首版（${esc(n.arxiv)}）` : unpublished ? "投稿时间" : "发表时间"]);
+    if (n.venue) items.push([esc(String(n.venue).split(/[（(；;]/)[0]), unpublished ? (/预印本/.test(n.venue) ? "状态" : "状态：审稿中") : "发表"]);
     host.insertAdjacentHTML("afterbegin", items.map(([b, s]) => `<div><b>${b}</b><span>${s}</span></div>`).join(""));
   }
 
