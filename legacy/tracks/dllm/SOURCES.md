@@ -837,7 +837,7 @@ Read: d1 arXiv v2 (2025-06-03) + official repo dllm-reasoning/d1 (`diffu-grpo/sl
 | LoRA r 128 / α 64, 4-bit, Flash-Attn 2, lr 3e-6, 8×A100-80G; code tasks 4×A5000 | d1 App. D.1 | ✅ |
 | Inference: N/2 steps, 2 tokens/step, block 32 | d1 App. D | ✅ |
 | SFT on s1K (1000 traces), seq 4096, PAD loss, pad to max length | d1 §3.3, App. D.2 | ✅ |
-| Official config: num_generations 6, num_iterations 12, beta 0.04, epsilon 0.5, diffusion_steps 128, block 32, sync_ref_model every 64 | `train.yaml`, `run.sh` | ✅ (paper vs code) |
+| Official config: num_generations 6, num_iterations 12, beta 0.04, epsilon 0.5, diffusion_steps 128, block 32; sync_ref_model every 64 is set but has no effect with LoRA (reference = adapter disabled, i.e. the starting model) | `train.yaml`, `run.sh`, `diffu_grpo_trainer.py` | ✅ (paper vs code; corrected 2026-10-19) |
 | k3 KL estimator exp(Δ) − Δ − 1 | `diffu_grpo_trainer.py` lines ~100–106 | ✅ |
 | RL checkpoints: eval every 100 steps from step 600, report best | d1 §4.1 | ✅ |
 | Tab. 1 values at 256 / 512 (GSM8K, MATH500, Countdown, Sudoku) | d1 Tab. 1 | ✅ |

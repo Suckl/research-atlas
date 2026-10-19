@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fast-dLLM 精读</title>
+<meta name="description" content="Fast-dLLM（ICLR 2026）逐节精读：双向扩散语言模型为什么用不了标准 KV 缓存，块级近似缓存与 DualCache 怎么做，置信度阈值并行解码与它的定理保证了什么，以及 27.6 倍加速是在什么条件下测出来的。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="fast-dllm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ICLR 2026</div>
+  <h1>Fast-dLLM：不重新训练，让扩散语言模型用上 KV 缓存和并行解码</h1>
+  <p class="en-title">Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding</p>
+  <div class="paper-authors">Chengyue Wu<sup>1,2,*</sup>, Hao Zhang<sup>2,*</sup>, Shuchen Xue<sup>4</sup>, Zhijian Liu<sup>2</sup>, Shizhe Diao<sup>2</sup>, Ligeng Zhu<sup>2</sup>, Ping Luo<sup>1</sup>, Song Han<sup>2,3</sup>, Enze Xie<sup>2</sup></div>
+  <div class="paper-affil"><sup>1</sup>香港大学　<sup>2</sup>NVIDIA　<sup>3</sup>MIT　<sup>4</sup>独立研究者　<sup>*</sup>共同一作（按 arXiv v3 署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2505.22618" target="_blank" rel="noopener">arXiv 2505.22618 ↗</a>
+    <a class="pill" href="https://nvlabs.github.io/Fast-dLLM/" target="_blank" rel="noopener">ICLR 2026 · 项目主页 ↗</a>
+    <a class="pill" href="https://github.com/NVlabs/Fast-dLLM" target="_blank" rel="noopener">Code: NVlabs/Fast-dLLM ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/14-kv-cache.html">旧版结构拆解：缓存与并行解码架构图、简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>1,106</b><span>GitHub star（NVlabs/Fast-dLLM，截至 2026-10-19）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。标“推算”的数字是本站根据论文数据算出来的，标“读自原图”的数字是从原文图中读出的约值，都不是论文原话。本页依据 arXiv v3（2025-07-03）。原文以 CC BY-NC-ND 4.0 许可发布，不允许改编转载，所以本页的图都是本站自己画的示意图，或用论文报告的数字重画的简图，旁边附原图链接。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>扩散语言模型（diffusion LLM，下文简称 dLLM）是自回归模型之外的另一种写文字的方式。它先在要写答案的地方放一排“空格”（掩码），然后反复让模型去猜，每一轮把其中一部分空格填上，直到全部填满。因为一轮可以同时填好几个位置，人们自然期待它比一个字一个字往外吐的自回归模型更快。商业产品也确实报出了很快的数字：论文引言提到，Mercury 每秒能生成 1,000 多个 token，Gemini Diffusion 超过 1,400 个。</p>
+<p>可是开源的 LLaDA、Dream 实际跑起来，往往比同样大小的自回归模型还慢。论文把原因归结为两件事。第一，这些模型用双向注意力，每填进一个词，所有位置的中间结果都会跟着变，所以它们没法像自回归模型那样把算过的 key 和 value 存起来复用（也就是 KV 缓存），每一轮都得把提示和整段答案从头算一遍。第二，一轮同时填好几个空格时质量会下降，所以评测时通常一轮只填一个，并行的优势根本没用上。</p>
+<p>Fast-dLLM 不改模型、不做任何训练，只改推理的过程，针对这两件事各给了一个办法。针对第一件，它把答案切成长度 32 的块，从左到右一块一块地写；在写某一块的那几轮里，把块外位置的 key/value 当作不变，直接从缓存里读，等这一块写完再整段重算一次、刷新缓存。它的 DualCache 版本连块后面那些还没写的空格也一起缓存。针对第二件，它不再规定每轮必须填几个，而是只填模型“有把握”的位置（预测概率的最大值超过 0.9），并用一个定理说明：当每个位置的把握都足够高时，各位置分别挑最可能的词，和按整体挑最可能的一组词，结果是一样的。</p>
+<p>两招合起来，在一张 A100 上、一次只处理一条请求时，LLaDA 做 GSM8K（8-shot、生成长度 1024）的速度从每秒 0.7 个 token 提到 19.3 个，这就是标题里的 27.6 倍，准确率从 77.3% 变为 76.0%。在更常见的生成长度 256 上，倍数是 LLaDA 约 8.1 倍、Dream 约 5.3 倍（都在 GSM8K 上）。要特别记住，这些倍数都是和“每轮只填 1 个空格、不用任何缓存”的原版扩散模型比出来的，不是和优化过的自回归推理引擎比；第 5 节的“结果的份量”会把这一点拆开讲。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么双向注意力的扩散模型不能直接用 KV 缓存？Fast-dLLM 的缓存“近似”在哪里，凭什么说误差小？</li>
+  <li>PrefixCache 和 DualCache 各自省掉了哪些计算，各自在什么情况下更快？</li>
+  <li>一轮同时填好几个空格为什么会出错？“high card / full house”的例子说明了什么？</li>
+  <li>置信度阈值规则背后的定理到底保证了什么，又没有保证什么？</li>
+  <li>27.6 倍是在什么条件下测出来的？换成大批量、换成和自回归推理引擎比，结论还成立吗？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2505.22618" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="../legacy/tracks/dllm/14-kv-cache.html">本站旧版结构拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：号称能并行的模型，为什么反而慢</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散语言模型的卖点是“一次生成很多 token”，为什么开源模型实际跑起来反而比自回归模型慢？论文认为慢在哪两件事上？在不重新训练模型的前提下，作者打算分别怎么解决？</div>
+
+<div class="note-pre"><b>先补一点背景：自回归模型为什么能“越写越省”——KV 缓存。</b>
+<p>自回归模型一个 token 一个 token 地写。每写一个新 token，模型都要通过注意力去“看”前面所有的 token，看的是前面每个 token 在每一层算出来的 key 和 value 两个向量。自回归模型用的是因果注意力：每个位置只能看它前面的位置，看不到后面。因此，前面某个 token 的 key/value 一旦算出来，就永远不会再变，因为后来写的 token 影响不到它。推理系统于是把这些 key/value 存起来，这份存储叫 <b>KV 缓存</b>。每写一个新 token，只需要为这个新 token 算一次 key/value，再拿它的 query 去和缓存里的内容做注意力。写 \(L\) 个 token，每个位置只需要算一遍。KV 缓存的来龙去脉，以及它为什么占显存、怎么管理，见本站 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>。</p>
+<p>扩散语言模型用的是<b>双向注意力</b>：每个位置既看前面，也看后面。第 3 节会讲清楚，正是这一点让它没法直接用 KV 缓存。</p>
+</div>
+
+<p>论文开头先摆出一个反差：商业扩散模型宣称每秒上千 token，开源的 LLaDA、Dream 却常常比不上同尺寸的自回归模型。作者认为原因主要有两个。</p>
+<ul>
+  <li><b>没有 KV 缓存。</b>自回归模型靠 KV 缓存避免重复计算，而扩散模型每一轮都要把提示和整段答案重新送进模型算一遍。提示越长、答案越长，这部分浪费就越大。</li>
+  <li><b>一轮多填几个 token，质量就掉。</b>LLaDA 自己的实验显示，每轮只填 1 个 token 时效果最好，多填几个就开始变差。所以评测时常常把轮数设成和生成长度一样多：要生成 256 个 token，就跑 256 轮。这等于完全放弃了并行。</li>
+</ul>
+<p>对应地，Fast-dLLM 有两个部件。第一个是专为双向模型设计的<b>近似 KV 缓存</b>：按块生成，块内复用缓存，块写完再刷新；它的 DualCache 版本把块后面那些还是掩码的位置也缓存起来。作者用可视化说明相邻几轮之间 key/value 非常接近，再用实验说明这样近似基本不伤精度。第二个是<b>置信度感知的并行解码</b>：作者认为一轮多填几个 token 会掉质量的根本原因，是把几个互相依赖的 token 当成了彼此独立来同时生成；于是只同时填那些置信度超过阈值的位置，并给出定理说明高置信时这样做是安全的。LLaDA 原来的做法是每轮固定挑置信度最高的 \(K\) 个位置，Fast-dLLM 改成按阈值挑，挑几个由模型的把握决定。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：总时间 = 步数 × 每步耗时（数字取自原文图 1(c)）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="四种设置下生成一条样本的步数与每步耗时，面积表示总时间" style="--dg-min:720px">
+    <text x="20" y="82" class="t-b">原版 LLaDA</text>
+    <text x="20" y="102" class="t-sm">每步定稿 1 个 token</text>
+    <g class="tgt"><rect class="box" x="160" y="40" width="768" height="104" rx="3"/></g>
+    <text x="544" y="82" class="t-c">1024 步 × 0.26 秒/步 ≈ 266 秒</text>
+    <text x="544" y="106" class="t-c t-sm">吞吐 0.7 token/秒</text>
+    <text x="20" y="262" class="t-b">加速后</text>
+    <line class="axis" x1="160" y1="300" x2="640" y2="300"/>
+    <g class="pred"><rect class="box" x="160" y="196" width="75" height="104" rx="3"/></g>
+    <text x="197" y="160" class="t-c t-b">+ 并行解码</text>
+    <text x="197" y="180" class="t-c t-sm">约 100 步 × 0.26 秒 ≈ 26 秒</text>
+    <g class="enc"><rect class="box" x="330" y="244" width="105" height="56" rx="3"/></g>
+    <text x="382" y="208" class="t-c t-b">+ PrefixCache</text>
+    <text x="382" y="228" class="t-c t-sm">约 140 步 × 0.14 秒 ≈ 20 秒</text>
+    <g class="act"><rect class="box" x="520" y="264" width="105" height="36" rx="3"/></g>
+    <text x="572" y="228" class="t-c t-b">+ DualCache</text>
+    <text x="572" y="248" class="t-c t-sm">约 140 步 × 0.09 秒 ≈ 12 秒</text>
+    <text x="690" y="200" class="t-sm">宽 = 解码步数</text>
+    <text x="690" y="220" class="t-sm">高 = 每一步的耗时</text>
+    <text x="690" y="240" class="t-sm">面积 = 一条样本的总耗时</text>
+    <text x="690" y="262" class="t-sm">准确率 77.3% → 76.0%（DualCache）</text>
+  </svg>
+  <div class="dia-note">本站按原文数字重画，对应 <a href="https://arxiv.org/html/2505.22618v3#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a> 的 (c) 栏。设置：LLaDA，GSM8K 8-shot，生成长度 1024，单张 A100，一次一条请求。<b>怎么看：</b>每个色块的宽度是解码步数，高度是每一步的耗时，面积就是生成一条样本的时间。原版每步只定稿 1 个 token，要跑 1024 步；只加并行解码，步数降到约 100，每步耗时不变；再加 PrefixCache 或 DualCache，步数回升到约 140，但每一步便宜得多。四种设置的吞吐依次为 0.7、9.3、13.0、19.3 token/秒。</div>
+</div>
+<p>这张图把两个部件的分工看得很清楚：并行解码减少的是“要跑多少步”，缓存减少的是“每一步要算多少”。两者相乘，才得到 27.6 倍。论文列出的三条贡献也正对应于此：块级近似 KV 缓存（含 DualCache）；置信度感知的并行解码；以及在 LLaDA、Dream 两个模型和 GSM8K、MATH、HumanEval、MBPP 四个常用基准上的系统实验，其中生成长度越长，加速越大，1024 时最高 27.6 倍。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>标题里的 training-free 指的是不改模型权重。但它改变了生成过程本身，近似缓存和并行定稿都会让输出和原版不完全一样，所以准确率会有变化：多数设置在 1–2 个百分点以内，个别设置更多（见第 5、6 节）。另外，图中加了缓存后步数（约 140）反而比只加并行（约 100）多，论文没有解释；本站推测是近似缓存让模型的置信度略有下降，每步能过阈值的 token 变少了。原文图 1(b) 里每步平均定稿数从只并行的 3.25 降到并行加缓存的 3.01，也是同一个方向。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：掩码扩散模型怎样一轮轮写出答案</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散模型是怎么训练、怎么生成文字的？LLaDA 实际评测时用的“分块、按置信度一个个揭开”具体是怎么一回事？为什么一轮同时揭开好几个位置会出问题？这一节交代的正是 Fast-dLLM 后面要改造的那个生成过程。</div>
+
+<h4 id="n-2-1">2.1 掩码扩散模型：把字一个个涂掉，再学着填回去</h4>
+<div class="note-pre"><b>先补一点背景：离散数据上的扩散。</b>
+<p>图像扩散模型往图片上一点点加高斯噪声，再训练网络一步步把噪声去掉。文字是离散的 token，没法加“一点点”噪声。D3PM 等工作把“加噪”改成按某个转移矩阵随机替换 token；后来最成功的一类叫<b>掩码扩散模型</b>（masked diffusion model，MDM，也叫吸收态扩散）：加噪就是把 token 换成一个特殊的 [MASK] 符号，一旦换掉就不会再变回别的词（“吸收”）。本站的 <a href="d3pm.html">D3PM</a>、<a href="mdlm.html">MDLM</a> 精读页有完整推导，这里只讲用得到的部分。</p>
+</div>
+<p>前向（加噪）过程写成公式是这样的：</p>
+<div class="formula">$$q_{t|0}(x_t\mid x_0)=\prod_{i=1}^{n}\mathrm{Cat}\Big(x_t^i;\ (1-t)\,\delta_{x_0^i}+t\,\delta_{[\mathrm{MASK}]}\Big)$$</div>
+<p>意思是：时间 \(t\) 从 0 走到 1，每个 token 各自独立地以概率 \(t\) 被换成 [MASK]，以概率 \(1-t\) 保持原样。\(t=0\) 时是原文，\(t=1\) 时整行都是 [MASK]。</p>
+<p>训练时，模型 \(p_\theta\) 看着一个被部分涂掉的句子 \(x_t\)，去预测每个被涂掉位置原来的 token；损失只算在被涂掉的位置上，并按 \(1/t\) 加权。MDLM、RADD 等工作证明，这个损失是负对数似然的一个上界（ELBO），所以训练它就是在做最大似然：</p>
+<div class="formula">$$-\log p_\theta(x)\le\int_0^1\frac{1}{t}\,\mathbb{E}_{q_{t|0}(x_t\mid x_0)}\Big[\sum_{i:\,x_t^i=[\mathrm{MASK}]}-\log p_\theta\big(x_0^i\mid x_t\big)\Big]\,\mathrm{d}t$$</div>
+<p>这里有一点后面会反复用到：模型做一次前向，会对<b>每一个</b>被涂掉的位置各给出一个词表上的概率分布，但这些分布是<b>分别</b>给出的。模型并不直接告诉你“这几个位置合起来最可能填什么”，也就是说，它输出的是每个位置的边缘分布，不是几个位置的联合分布。</p>
+
+<h4 id="n-2-2">2.2 生成：从一整行 [MASK] 开始，一轮轮揭开</h4>
+<p>生成时反过来走：先把答案区域全部设成 [MASK]，接在提示后面，然后一轮轮把 [MASK] 换成词。严格地反演前向过程，每一步只能改一个 token，太慢；常用的近似叫 τ-leaping，一步从噪声水平 \(t\) 跳到更小的 \(s\)（\(s&lt;t\)）：已经填好的位置保持不变；还是 [MASK] 的位置，以概率 \(s/t\) 继续保持 [MASK]，否则按模型给出的分布采样一个词填进去。</p>
+<div class="formula">$$q_{s|t}\big(x_s^i\mid x_t\big)=\begin{cases}1, &amp; x_t^i\neq[\mathrm{MASK}],\ x_s^i=x_t^i\\[2pt] \dfrac{s}{t}, &amp; x_t^i=[\mathrm{MASK}],\ x_s^i=[\mathrm{MASK}]\\[6pt] \dfrac{t-s}{t}\,q_{0|t}\big(x_s^i\mid x_t\big), &amp; x_t^i=[\mathrm{MASK}],\ x_s^i\neq[\mathrm{MASK}]\end{cases}$$</div>
+<p>其中 \(q_{0|t}\) 就是模型给出的那个词表上的分布；有提示 \(p\) 时，它还要以提示为条件，写作 \(q_{0|t}(x_s^i\mid x_t,p)\)。注意公式对每个位置是分开写的：同一步里被揭开的几个位置，各自独立地从自己的分布里采样。</p>
+<p>实际的 LLaDA 并不随机挑位置，而是用<b>低置信度重掩码</b>：每一轮让模型对所有 [MASK] 位置给出预测，取每个位置最可能的那个词和它的概率（称为<b>置信度</b>），只保留置信度最高的 \(K\) 个，其余的重新盖回 [MASK]。\(K\) 等于生成长度除以总步数，步数是事先定好的超参数。</p>
+<p>另一个实际细节是<b>分块（半自回归）生成</b>：把答案切成长度相同的块，从左往右一块一块地揭开，当前块全部揭开之前不碰后面的块；但后面那些 [MASK] 仍然作为输入送进模型。LLaDA 论文报告，它的指令模型用这种分块方式在 GSM8K 和 MATH 上明显更好（78.6、42.2，整段一起生成时是 69.4、31.9），原因是监督微调数据在短回答后面补了大量结束符，整段生成时模型容易过早写出结束符。Fast-dLLM 官方评测脚本里，LLaDA 的原版基线就是块长 32、每步揭开 1 个 token。</p>
+<div class="dia">
+  <div class="dia-title">示意图：LLaDA 原版的分块生成（为便于画图取块长 4，每步揭开 1 个最有把握的位置）</div>
+  <div class="dia-row"><span class="lbl">第 0 步</span><div class="cells"><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span style="width:12px"></span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span></div></div>
+  <div class="dia-row"><span class="lbl">第 1 步</span><div class="cells"><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell a">3</span><span class="cell">[M]</span><span style="width:12px"></span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span></div></div>
+  <div class="dia-row"><span class="lbl">第 2 步</span><div class="cells"><span class="cell a">共</span><span class="cell">[M]</span><span class="cell b">3</span><span class="cell">[M]</span><span style="width:12px"></span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span></div></div>
+  <div class="dia-row"><span class="lbl">第 3 步</span><div class="cells"><span class="cell b">共</span><span class="cell">[M]</span><span class="cell b">3</span><span class="cell a">卷</span><span style="width:12px"></span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span></div></div>
+  <div class="dia-row"><span class="lbl">第 4 步</span><div class="cells"><span class="cell b">共</span><span class="cell a">需要</span><span class="cell b">3</span><span class="cell b">卷</span><span style="width:12px"></span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span><span class="cell">[M]</span></div></div>
+  <div class="dia-out">第 1 块写完，才开始第 2 块；后面每步同样只揭开 1 个。</div>
+  <div class="dia-row"><span class="lbl">第 8 步</span><div class="cells"><span class="cell b">共</span><span class="cell b">需要</span><span class="cell b">3</span><span class="cell b">卷</span><span style="width:12px"></span><span class="cell b">。</span><span class="cell b">EOS</span><span class="cell b">EOS</span><span class="cell b">EOS</span></div></div>
+  <div class="dia-note">本站示意图。提示在左边，图中省略。蓝色 = 这一步刚揭开的位置，绿色 = 之前已经揭开的位置，[M] = 还是掩码。答案写完后剩下的位置会被填成结束符（EOS），这些位置也要一步步“生成”。</div>
+</div>
+<div class="note-warn"><b>容易混淆的一点：</b>这里的“一步”指模型的一次完整前向，论文和后续工作也叫一次函数评估（NFE）。原版 LLaDA 生成 256 个 token 要跑 256 步，而且每一步都要把“提示 + 全部 256 个位置”整段送进模型。和自回归模型的“一步”相比，它每一步算的东西多得多。</div>
+
+<h4 id="n-2-3">2.3 并行解码的“诅咒”：每个位置都对，拼起来却错</h4>
+<p>如果一步只揭开一个 token，下一步模型就能看到它，据此调整其他位置的预测，前后自然一致。如果一步同时揭开两个位置 \(i\) 和 \(j\)，实际是从两个边缘分布的乘积 \(p(x^i\mid x_t)\cdot p(x^j\mid x_t)\) 里采样；而正确的联合分布是 \(p(x^i\mid x_t)\cdot p(x^j\mid x_t,x^i)\)，第二个词本该取决于第一个词填了什么。两者不一样，就可能拼出单看每个位置都合理、合在一起却不成立的组合。同时揭开的位置越多，这种不一致越严重。</p>
+<p>论文借用了 Song 与 Zhou 的一个例子：“由两个英文单词组成的扑克牌型有：__ __”。合理的答案有 high card、two pair、full house、straight flush 等，两个词之间强相关；独立地各抽一个，就可能抽出 high house 这种不存在的牌型。下面用一组本站假设的数字把这个例子算一遍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：联合分布和“边缘分布相乘”差在哪里（数字为本站假设）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="扑克牌型例子：左为联合分布，右为边缘分布乘积" style="--dg-min:760px">
+    <text x="250" y="22" class="t-c t-b">模型的联合分布 p：只有 5 种合法牌型</text>
+    <text x="716" y="22" class="t-c t-b">边缘分布相乘 q：并行解码实际用的分布</text>
+    <text x="159" y="50" class="t-c t-sm">card</text><text x="217" y="50" class="t-c t-sm">pair</text><text x="275" y="50" class="t-c t-sm">house</text><text x="333" y="50" class="t-c t-sm">flush</text><text x="395" y="50" class="t-c t-sm">p₁</text>
+    <text x="122" y="79" class="t-r t-sm">high</text><text x="122" y="113" class="t-r t-sm">two</text><text x="122" y="147" class="t-r t-sm">full</text><text x="122" y="181" class="t-r t-sm">straight</text><text x="122" y="215" class="t-r t-sm">royal</text>
+    <g class="enc"><rect class="box" x="130" y="62" width="58" height="34"/></g><text x="159" y="79" class="t-c">.23</text>
+    <rect class="panel" x="188" y="62" width="58" height="34"/><text x="217" y="79" class="t-c t-xs">0</text>
+    <rect class="panel" x="246" y="62" width="58" height="34"/><text x="275" y="79" class="t-c t-xs">0</text>
+    <rect class="panel" x="304" y="62" width="58" height="34"/><text x="333" y="79" class="t-c t-xs">0</text>
+    <rect class="panel" x="130" y="96" width="58" height="34"/><text x="159" y="113" class="t-c t-xs">0</text>
+    <g class="enc"><rect class="box" x="188" y="96" width="58" height="34"/></g><text x="217" y="113" class="t-c">.15</text>
+    <rect class="panel" x="246" y="96" width="58" height="34"/><text x="275" y="113" class="t-c t-xs">0</text>
+    <rect class="panel" x="304" y="96" width="58" height="34"/><text x="333" y="113" class="t-c t-xs">0</text>
+    <rect class="panel" x="130" y="130" width="58" height="34"/><text x="159" y="147" class="t-c t-xs">0</text>
+    <rect class="panel" x="188" y="130" width="58" height="34"/><text x="217" y="147" class="t-c t-xs">0</text>
+    <g class="enc"><rect class="box" x="246" y="130" width="58" height="34"/></g><text x="275" y="147" class="t-c">.30</text>
+    <rect class="panel" x="304" y="130" width="58" height="34"/><text x="333" y="147" class="t-c t-xs">0</text>
+    <rect class="panel" x="130" y="164" width="58" height="34"/><text x="159" y="181" class="t-c t-xs">0</text>
+    <rect class="panel" x="188" y="164" width="58" height="34"/><text x="217" y="181" class="t-c t-xs">0</text>
+    <rect class="panel" x="246" y="164" width="58" height="34"/><text x="275" y="181" class="t-c t-xs">0</text>
+    <g class="enc"><rect class="box" x="304" y="164" width="58" height="34"/></g><text x="333" y="181" class="t-c">.12</text>
+    <rect class="panel" x="130" y="198" width="58" height="34"/><text x="159" y="215" class="t-c t-xs">0</text>
+    <rect class="panel" x="188" y="198" width="58" height="34"/><text x="217" y="215" class="t-c t-xs">0</text>
+    <rect class="panel" x="246" y="198" width="58" height="34"/><text x="275" y="215" class="t-c t-xs">0</text>
+    <g class="enc"><rect class="box" x="304" y="198" width="58" height="34"/></g><text x="333" y="215" class="t-c">.20</text>
+    <text x="395" y="79" class="t-c t-sm">.23</text><text x="395" y="113" class="t-c t-sm">.15</text><text x="395" y="147" class="t-c t-b">.30</text><text x="395" y="181" class="t-c t-sm">.12</text><text x="395" y="215" class="t-c t-sm">.20</text>
+    <text x="122" y="252" class="t-r t-sm">p₂</text><text x="159" y="252" class="t-c t-sm">.23</text><text x="217" y="252" class="t-c t-sm">.15</text><text x="275" y="252" class="t-c t-sm">.30</text><text x="333" y="252" class="t-c t-b">.32</text>
+    <text x="629" y="50" class="t-c t-sm">card</text><text x="687" y="50" class="t-c t-sm">pair</text><text x="745" y="50" class="t-c t-sm">house</text><text x="803" y="50" class="t-c t-sm">flush</text>
+    <text x="592" y="79" class="t-r t-sm">high</text><text x="592" y="113" class="t-r t-sm">two</text><text x="592" y="147" class="t-r t-sm">full</text><text x="592" y="181" class="t-r t-sm">straight</text><text x="592" y="215" class="t-r t-sm">royal</text>
+    <g class="enc"><rect class="box" x="600" y="62" width="58" height="34"/></g><text x="629" y="79" class="t-c t-sm">.053</text>
+    <rect class="panel" x="658" y="62" width="58" height="34"/><text x="687" y="79" class="t-c t-sm">.035</text>
+    <rect class="panel" x="716" y="62" width="58" height="34"/><text x="745" y="79" class="t-c t-sm">.069</text>
+    <rect class="panel" x="774" y="62" width="58" height="34"/><text x="803" y="79" class="t-c t-sm">.074</text>
+    <rect class="panel" x="600" y="96" width="58" height="34"/><text x="629" y="113" class="t-c t-sm">.035</text>
+    <g class="enc"><rect class="box" x="658" y="96" width="58" height="34"/></g><text x="687" y="113" class="t-c t-sm">.023</text>
+    <rect class="panel" x="716" y="96" width="58" height="34"/><text x="745" y="113" class="t-c t-sm">.045</text>
+    <rect class="panel" x="774" y="96" width="58" height="34"/><text x="803" y="113" class="t-c t-sm">.048</text>
+    <rect class="panel" x="600" y="130" width="58" height="34"/><text x="629" y="147" class="t-c t-sm">.069</text>
+    <rect class="panel" x="658" y="130" width="58" height="34"/><text x="687" y="147" class="t-c t-sm">.045</text>
+    <g class="enc"><rect class="box" x="716" y="130" width="58" height="34"/></g><text x="745" y="147" class="t-c t-sm">.090</text>
+    <g class="loss"><rect class="box" x="774" y="130" width="58" height="34"/></g><text x="803" y="147" class="t-c t-b">.096</text>
+    <rect class="panel" x="600" y="164" width="58" height="34"/><text x="629" y="181" class="t-c t-sm">.028</text>
+    <rect class="panel" x="658" y="164" width="58" height="34"/><text x="687" y="181" class="t-c t-sm">.018</text>
+    <rect class="panel" x="716" y="164" width="58" height="34"/><text x="745" y="181" class="t-c t-sm">.036</text>
+    <g class="enc"><rect class="box" x="774" y="164" width="58" height="34"/></g><text x="803" y="181" class="t-c t-sm">.038</text>
+    <rect class="panel" x="600" y="198" width="58" height="34"/><text x="629" y="215" class="t-c t-sm">.046</text>
+    <rect class="panel" x="658" y="198" width="58" height="34"/><text x="687" y="215" class="t-c t-sm">.030</text>
+    <rect class="panel" x="716" y="198" width="58" height="34"/><text x="745" y="215" class="t-c t-sm">.060</text>
+    <g class="enc"><rect class="box" x="774" y="198" width="58" height="34"/></g><text x="803" y="215" class="t-c t-sm">.064</text>
+    <text x="250" y="290" class="t-c t-sm">逐位取最大：第 1 空 full（.30），第 2 空 flush（.32）</text>
+    <text x="250" y="310" class="t-c t-sm">拼成 full flush，它在 p 里的概率是 0</text>
+    <text x="716" y="290" class="t-c t-sm">蓝框（合法组合）加起来只有 0.27</text>
+    <text x="716" y="310" class="t-c t-sm">最大的一格恰好是不合法的 full flush（红框）</text>
+  </svg>
+  <div class="dia-note">本站示意图，用来说明 <a href="https://arxiv.org/html/2505.22618v3#S2.SS2" target="_blank" rel="noopener">原文 §2.2 ↗</a> 的例子。<b>怎么看：</b>行是第 1 个空的候选词，列是第 2 个空的候选词。左图是模型对两个空的联合分布，只有 5 个格子不为零；最右一列 p₁ 和最下一行 p₂ 是由它算出的两个边缘分布。右图把 p₁ 和 p₂ 相乘，得到并行解码实际使用的分布 q：每个格子都不为零，概率被大量分给了不存在的牌型。</div>
+</div>
+<p>用这组数字比较三种做法：</p>
+<ol>
+  <li><b>并行地各取最可能的词（贪心）。</b>第 1 个空最可能的是 full（0.30），第 2 个空最可能的是 flush（0.32），拼出 full flush，这不是任何牌型，它在联合分布里的概率是 0。</li>
+  <li><b>并行地各自抽样。</b>两个词按各自的边缘分布独立抽取，拼出合法牌型的概率是 \(0.23^2+0.15^2+0.30^2+0.12\times0.32+0.20\times0.32\approx0.27\)（推算），也就是大约四次里有三次拼错。</li>
+  <li><b>一次只揭开一个。</b>先揭开最有把握的位置，即第 2 个空的 flush（0.32）。下一步模型看到了 flush，第 1 个空的分布就变成 straight 0.375、royal 0.625（按联合分布推算），于是写出 royal flush，合法。</li>
+</ol>
+<p>这个例子说明，问题不在模型“算错了”：两个边缘分布本身完全正确，错在把它们当成彼此独立来使用。论文据此判断，dLLM 并行解码掉质量的根本原因，就是这条条件独立假设；而且一步揭开的位置越多、它们之间的依赖越强，问题越严重。</p>
+<div class="note-warn"><b>先记住一个细节：</b>这个例子里两个空的置信度都只有 0.3 左右。第 4 节会看到，Fast-dLLM 的办法正是不让没把握的位置同时揭开。反过来，如果两个位置的置信度都在 0.99 以上，联合分布几乎全部集中在同一个组合上，独立揭开也几乎不会出错。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S2.SS2" target="_blank" rel="noopener">§2.2 ↗</a> · 本站：<a href="llada.html">LLaDA 精读</a>、<a href="../legacy/tracks/dllm/01-foundations.html">扩散 LLM 从头讲起</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 块级近似 KV 缓存与 DualCache</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>双向注意力为什么让 KV 缓存失效？既然没法精确缓存，能不能退一步，在一小段时间里假装 key/value 不变？这样做的依据是什么？DualCache 又在 PrefixCache 的基础上多省了什么？省下来的计算到底有多少？</div>
+
+<h4 id="n-3-1">3.1 为什么双向模型没有“标准”的 KV 缓存</h4>
+<div class="note-pre"><b>先补一点背景：一个位置的 key/value 取决于哪些 token。</b>
+<p>在 Transformer 的第一层，每个位置的 key/value 只由这个位置自己的 token（和位置编码）决定。从第二层开始，每个位置的输入已经是上一层注意力混合过的结果，所以它的 key/value 取决于它在上一层“看得到”的所有位置。在因果注意力里，第 \(i\) 个位置只看得到第 1 到第 \(i\) 个位置；在双向注意力里，它看得到整段序列。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：生成一个词以后，哪些位置的 key/value 会变</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="自回归模型与掩码扩散模型在生成一个词前后 key/value 是否变化的对比" style="--dg-min:720px">
+    <rect class="frame" x="10" y="8" width="455" height="272" rx="8"/>
+    <rect class="frame" x="495" y="8" width="455" height="272" rx="8"/>
+    <text x="237" y="30" class="t-c t-b">自回归：因果注意力</text>
+    <text x="722" y="30" class="t-c t-b">掩码扩散：双向注意力</text>
+    <text x="24" y="74" class="t-sm">第 s 步</text>
+    <rect class="box" x="90" y="58" width="80" height="32" rx="4"/><text x="130" y="74" class="t-c">The</text>
+    <rect class="box" x="180" y="58" width="80" height="32" rx="4"/><text x="220" y="74" class="t-c">cat</text>
+    <rect class="box" x="270" y="58" width="80" height="32" rx="4"/><text x="310" y="74" class="t-c">sat</text>
+    <text x="24" y="164" class="t-sm">第 s+1 步</text>
+    <rect class="box" x="90" y="148" width="80" height="32" rx="4"/><text x="130" y="164" class="t-c">The</text>
+    <rect class="box" x="180" y="148" width="80" height="32" rx="4"/><text x="220" y="164" class="t-c">cat</text>
+    <rect class="box" x="270" y="148" width="80" height="32" rx="4"/><text x="310" y="164" class="t-c">sat</text>
+    <rect class="box" x="360" y="148" width="80" height="32" rx="4"/><text x="400" y="164" class="t-c t-b">on</text>
+    <path class="edge" d="M237,96 L237,140"/>
+    <text x="246" y="120" class="t-sm">写出 on</text>
+    <g class="tgt"><rect class="box" x="90" y="190" width="80" height="24" rx="3"/><rect class="box" x="180" y="190" width="80" height="24" rx="3"/><rect class="box" x="270" y="190" width="80" height="24" rx="3"/></g>
+    <g class="enc"><rect class="box" x="360" y="190" width="80" height="24" rx="3"/></g>
+    <text x="130" y="202" class="t-c t-sm">K/V 复用</text><text x="220" y="202" class="t-c t-sm">K/V 复用</text><text x="310" y="202" class="t-c t-sm">K/V 复用</text><text x="400" y="202" class="t-c t-sm">K/V 新算</text>
+    <text x="237" y="238" class="t-c t-sm">前 3 个词看不到 on，它们的 K/V 和上一步完全相同</text>
+    <text x="237" y="258" class="t-c t-sm">→ 存进 KV 缓存，每步只算 1 个新位置</text>
+    <text x="509" y="74" class="t-sm">第 s 步</text>
+    <rect class="box" x="575" y="58" width="66" height="32" rx="4"/><text x="608" y="74" class="t-c t-sm">提示</text>
+    <rect class="box" x="648" y="58" width="66" height="32" rx="4"/><text x="681" y="74" class="t-c t-sm">提示</text>
+    <rect class="tk mask" x="721" y="58" width="66" height="32" rx="4"/><text x="754" y="74" class="t-c t-sm">[M]</text>
+    <rect class="tk mask" x="794" y="58" width="66" height="32" rx="4"/><text x="827" y="74" class="t-c t-sm">[M]</text>
+    <rect class="tk mask" x="867" y="58" width="66" height="32" rx="4"/><text x="900" y="74" class="t-c t-sm">[M]</text>
+    <text x="509" y="164" class="t-sm">第 s+1 步</text>
+    <rect class="box" x="575" y="148" width="66" height="32" rx="4"/><text x="608" y="164" class="t-c t-sm">提示</text>
+    <rect class="box" x="648" y="148" width="66" height="32" rx="4"/><text x="681" y="164" class="t-c t-sm">提示</text>
+    <rect class="tk mask" x="721" y="148" width="66" height="32" rx="4"/><text x="754" y="164" class="t-c t-sm">[M]</text>
+    <rect class="box" x="794" y="148" width="66" height="32" rx="4"/><text x="827" y="164" class="t-c t-b">on</text>
+    <rect class="tk mask" x="867" y="148" width="66" height="32" rx="4"/><text x="900" y="164" class="t-c t-sm">[M]</text>
+    <path class="edge" d="M827,96 L827,140"/>
+    <text x="818" y="120" class="t-r t-sm">揭开一个 [M]</text>
+    <g class="loss"><rect class="box" x="575" y="190" width="66" height="24" rx="3"/><rect class="box" x="648" y="190" width="66" height="24" rx="3"/><rect class="box" x="721" y="190" width="66" height="24" rx="3"/><rect class="box" x="794" y="190" width="66" height="24" rx="3"/><rect class="box" x="867" y="190" width="66" height="24" rx="3"/></g>
+    <text x="608" y="202" class="t-c t-sm">变了</text><text x="681" y="202" class="t-c t-sm">变了</text><text x="754" y="202" class="t-c t-sm">变了</text><text x="827" y="202" class="t-c t-sm">变了</text><text x="900" y="202" class="t-c t-sm">变了</text>
+    <text x="722" y="238" class="t-c t-sm">on 被所有位置看到：从第 2 层起，所有 K/V 都变了（含提示）</text>
+    <text x="722" y="258" class="t-c t-sm">→ 严格说没有可复用的 K/V，原版只好每步整段重算</text>
+  </svg>
+  <div class="dia-note">本站示意图。左：自回归模型写出第 4 个词时，前 3 个词看不到它，它们在每一层的 key/value 一点都不会变。右：掩码扩散模型某一步把一个 [MASK] 换成了 on，因为每个位置都看得到它，从第二层起所有位置（包括提示）的 key/value 都变了。</div>
+</div>
+<p>所以对掩码扩散模型来说，严格意义上每一步的 key/value 都和上一步不同，任何缓存都只能是近似。原版 LLaDA 干脆每一步都把“提示 + 整个答案区”全部重算。设提示长 \(P\)、答案区长 \(L\)，每步定稿一个 token 就要跑 \(L\) 步，每步处理 \(P+L\) 个位置，总共要处理 \(L\,(P+L)\) 个位置；带 KV 缓存的自回归模型总共只需处理 \(P+L\) 个位置（推算，只数位置，没算注意力随长度增长的那部分）。只看注意力这一项，原版扩散每步要做 \(O\big((P+L)^2\big)\) 的计算，总共 \(O\big(L\,(P+L)^2\big)\)；同期的 dKV-Cache 论文把这个差距概括为 \(O(L^3)\) 对自回归的 \(O(L^2)\)。</p>
+
+<h4 id="n-3-2">3.2 退一步：按块生成，块内假装 key/value 不变</h4>
+<p>Fast-dLLM 的做法建立在上一节的分块生成之上。设块长为 \(B\)，默认 32。生成过程是这样的：</p>
+<ol>
+  <li>开始写第 1 块之前，把整段（提示 + 全是 [MASK] 的答案区）送进模型算一次。这一次前向既用来揭开第 1 块的第一批 token，也顺便把所有位置的 key/value 存下来。</li>
+  <li>在第 1 块内部的后续每一步，只把“当前块 + 它后面的部分”送进模型重算，提示部分的 key/value 直接从缓存里读。这叫 <b>PrefixCache</b>（前缀缓存）。</li>
+  <li>当前块全部揭开之后，再把整段送进模型算一次，刷新所有位置的缓存（不只是刚生成的那些 token），同时揭开下一块的第一批 token。</li>
+  <li>如此往复，直到最后一块。前缀会越来越长：写第 \(k\) 块时，提示和前 \(k-1\) 块都在缓存里。</li>
+</ol>
+<p>因为第 3 步那次整段前向同时就是下一块的第一步解码，作者说刷新缓存“相比不用缓存没有额外计算”。近似发生在第 2 步：当前块里的 token 每一步都在变，严格来说前缀的 key/value 也应该跟着变，但在一块之内，缓存里用的始终是这一块开始时的值。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每一步把哪些位置送进模型重算（以写第 2 块为例）</div>
+  <div class="dia-row"><span class="lbl">原版 LLaDA（每一步）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3">提示</span><span class="dia-seg cmp" style="flex:1.2">第 1 块（已完成）</span><span class="dia-seg cmp" style="flex:1.2">第 2 块（当前）</span><span class="dia-seg cmp" style="flex:3">后缀：全是 [MASK]</span></div></div>
+  <div class="dia-row"><span class="lbl">PrefixCache（块内每一步）</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">提示：读缓存</span><span class="dia-seg kv" style="flex:1.2">第 1 块：读缓存</span><span class="dia-seg cmp" style="flex:1.2">第 2 块：重算</span><span class="dia-seg cmp" style="flex:3">后缀：重算</span></div></div>
+  <div class="dia-row"><span class="lbl">DualCache（块内每一步）</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">提示：读缓存</span><span class="dia-seg kv" style="flex:1.2">第 1 块：读缓存</span><span class="dia-seg cmp" style="flex:1.2">第 2 块：重算</span><span class="dia-seg kv" style="flex:3">后缀：读缓存</span></div></div>
+  <div class="dia-row"><span class="lbl">每块结束时（两种都要）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:8.4">整段重算一次：刷新缓存，同时揭开下一块的第一批 token</span></div></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2505.22618v3#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。蓝色 = 这一步直接读缓存，绿色 = 这一步送进模型重算。PrefixCache 每步要重算当前块和它后面所有的 [MASK]；DualCache 只重算当前块。两者每写完一块都要整段重算一次。</div>
+</div>
+
+<h4 id="n-3-3">3.3 凭什么可以假装：相邻几步的 key/value 几乎一样</h4>
+<div class="note-pre"><b>先补一点背景：余弦相似度。</b>
+<p>两个向量的余弦相似度是它们夹角的余弦：1 表示方向完全相同，0 表示互相垂直。拿它比较同一个位置在第 \(i\) 步和第 \(j\) 步的 key（或 value）向量，越接近 1，说明从第 \(i\) 步到第 \(j\) 步这个位置的表示变化越小。</p>
+</div>
+<p>作者在 LLaDA-Instruct 上做了这样的统计（原文图 3）：对提示里的每个 token，计算它在任意两步 \(i\)、\(j\) 之间 key/value 的余弦相似度，再对所有提示 token 取平均，画成一张以步数为横轴和纵轴的热图。另一张图对最后一块的 token 做同样的事；最后一块在轮到它之前一直属于“后缀”，所以它代表了后缀里那些 [MASK] 位置的变化。</p>
+<p>两张图的规律相同：对角线附近（\(i\approx j\)，也就是相隔几步之内）相似度接近 1，离对角线越远越低；原图色标的下端约为 0.84（提示）和 0.88（最后一块）。作者用红框框出的正是“同一块之内的那几步”，框内几乎全是接近 1 的颜色。由此得出两个结论：在一块的解码期间，提示和后缀的 key/value 变化很小，冻结它们带来的误差可以忽略；而跨过很多块之后，变化会累积起来，所以每块结束都要刷新一次。</p>
+<div class="dia">
+  <div class="dia-title">示意图：缓存里的值在块内冻结、块末刷新</div>
+  <svg class="dg" viewBox="0 0 960 270" role="img" aria-label="缓存值在块内保持不变、在块结束时刷新，与每步重算的真实值之间的差距" style="--dg-min:720px">
+    <line class="axis" x1="80" y1="220" x2="900" y2="220"/>
+    <line class="axis" x1="80" y1="220" x2="80" y2="40"/>
+    <line class="grid-ln" x1="353" y1="40" x2="353" y2="220" style="stroke-dasharray:4 4"/>
+    <line class="grid-ln" x1="627" y1="40" x2="627" y2="220" style="stroke-dasharray:4 4"/>
+    <text x="353" y="32" class="t-c t-xs">第 1 块结束：整段重算，刷新缓存</text>
+    <text x="627" y="52" class="t-c t-xs">第 2 块结束：再刷新一次</text>
+    <polygon points="80,150 353,150 353,110 290,120 220,128 150,140" style="fill:var(--c-loss-bg)"/>
+    <polygon points="353,110 627,110 627,86 560,92 490,96 420,104" style="fill:var(--c-loss-bg)"/>
+    <polygon points="627,86 900,86 900,74 840,76 770,78 700,82" style="fill:var(--c-loss-bg)"/>
+    <polyline points="80,150 150,140 220,128 290,120 353,110 420,104 490,96 560,92 627,86 700,82 770,78 840,76 900,74" style="fill:none;stroke:var(--text-2);stroke-width:1.8;stroke-dasharray:6 4"/>
+    <path d="M80,150 H353 V110 H627 V86 H900" style="fill:none;stroke:var(--c-enc);stroke-width:3"/>
+    <circle cx="353" cy="110" r="4.5" style="fill:var(--c-enc)"/>
+    <circle cx="627" cy="86" r="4.5" style="fill:var(--c-enc)"/>
+    <text x="230" y="168" class="t-c t-xs">近似误差</text>
+    <text x="216" y="238" class="t-c t-sm">第 1 块</text><text x="490" y="238" class="t-c t-sm">第 2 块</text><text x="763" y="238" class="t-c t-sm">第 3 块</text>
+    <text x="490" y="260" class="t-c t-sm">解码步 →</text>
+    <text x="34" y="130" class="t-c t-sm" transform="rotate(-90 34 130)">某个前缀 token 的 K/V（示意）</text>
+    <line x1="660" y1="160" x2="700" y2="160" style="stroke:var(--c-enc);stroke-width:3"/><text x="708" y="160" class="t-sm">缓存里实际用的值（块内冻结）</text>
+    <line x1="660" y1="182" x2="700" y2="182" style="stroke:var(--text-2);stroke-width:1.8;stroke-dasharray:6 4"/><text x="708" y="182" class="t-sm">如果每步都重算会得到的值</text>
+    <rect x="660" y="196" width="40" height="12" style="fill:var(--c-loss-bg)"/><text x="708" y="202" class="t-sm">两者之差 = 近似误差</text>
+  </svg>
+  <div class="dia-note">本站示意图，不是论文数据，对应 <a href="https://arxiv.org/html/2505.22618v3#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 想说明的道理。<b>怎么看：</b>虚线是“每一步都重算”时某个前缀 token 的 key/value 随解码推进的缓慢变化；实线是缓存里实际使用的值，块内保持不变，块结束时追上最新值。阴影就是近似误差：块越长，冻结得越久，误差越大；块越短，刷新越频繁，速度越慢。</div>
+</div>
+<div class="note-warn"><b>读的时候要分清的一点：</b>余弦相似度接近 1 只说明向量方向变化小，并不直接等于“对最终答案没有影响”，因为注意力经过 softmax 之后，key 的小变化也可能被放大。真正支持“这种近似可以用”的证据是第 5、6 节的准确率表；那里也能看到，在生成长度 512 的一组消融里，缓存版本比原版低了 3.5–4.1 个点，并不是处处都可以忽略。</div>
+
+<h4 id="n-3-4">3.4 DualCache：后缀里的 [MASK] 也缓存起来</h4>
+<p>PrefixCache 每一步仍要重算当前块后面的所有 [MASK] 位置。生成长度 1024、块长 32 时，写第 1 块的那几步要重算约 1000 个后缀位置，这成了 PrefixCache 剩下的大头。作者注意到，在分块生成下，后缀全是 [MASK]，在当前块解码期间它们的 key/value 同样几乎不变（原文图 3b），于是把后缀也缓存起来，称为 <b>DualCache</b>（双向缓存）：块内的每一步只把当前块的 \(B\) 个位置送进模型，当前块的 query 去和“缓存的前缀 + 缓存的后缀 + 当前块刚算出的”key/value 一起做注意力。</p>
+<p>在官方代码里，这一步是这样实现的：每块开头那次整段前向得到整段的 key/value 缓存；块内每一步用一个 <code>replace_position</code> 掩码，只把缓存里当前块那一段替换成新算的值，其余部分原样保留。</p>
+<div class="note-warn"><b>DualCache 并不总是更快：</b>8-shot GSM8K、生成长度 256 时，PrefixCache 是 10.0 倍，DualCache 是 9.4 倍，前者反而略快；生成越长、后缀越长，DualCache 的优势才越明显（512 时 13.9 倍对 15.8 倍，1024 时 18.6 倍对 27.6 倍，原文表 5）。论文正文的主表默认用的是 PrefixCache，标题里的 27.6 倍用的是 DualCache。</div>
+
+<h4 id="n-3-5">3.5 算一笔账：每一步还剩多少计算（推算）</h4>
+<p>以图 1(c) 的设置为例（生成长度 \(L=1024\)，块长 32，共 32 块），只数“每一步送进模型的位置数”：</p>
+<ul>
+  <li><b>原版：</b>每一步都是“提示 + 1024”个位置。</li>
+  <li><b>PrefixCache：</b>写第 \(k\) 块时，每步送进 \(1024-32(k-1)\) 个位置，从 1024 一路降到 32，平均约 528 个；另外每块开头还有一次整段前向。</li>
+  <li><b>DualCache：</b>每步只送 32 个位置；另外每块开头也有一次整段前向。</li>
+</ul>
+<p>由此可以看出，长生成时 DualCache 的瓶颈转移到了“刷新”上。按图 1(c) 的数字粗算：DualCache 一共约 140 步，其中 32 步是每块开头的整段前向。如果每次整段前向和原版的一步一样耗时约 0.26 秒，32 次合计约 8.3 秒，占这条样本 12 秒中的三分之二左右；剩下约 108 个块内小步一共只用了约 3.7 秒，平均每步约 0.03 秒（推算，图中数字都经过四舍五入）。这也解释了为什么块不能切得太小：块越小，整段刷新的次数越多。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S3.SS2" target="_blank" rel="noopener">§3.2 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> · 旧版：<a href="../legacy/tracks/dllm/14-kv-cache.html#c-blockcache">块级缓存拆解</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 置信度感知并行解码：什么时候可以一次揭开好几个</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>既然同时揭开互相依赖的位置会出错，那么什么时候同时揭开是安全的？论文的回答是：模型足够有把握的时候。具体规则是什么？背后的定理到底证明了什么，前提又有哪些？由定理导出的“因子规则”和阈值规则有什么不同？</div>
+
+<h4 id="n-4-1">4.1 规则：只揭开有把握的位置</h4>
+<div class="note-pre"><b>先补一点背景：置信度和贪心解码。</b>
+<p>模型对一个 [MASK] 位置输出的是词表上的概率分布（softmax 之后的结果）。取其中最大的概率作为这个位置的<b>置信度</b>：0.99 表示模型几乎肯定是某个词，0.3 表示它在几个词之间犹豫。温度为 0 时做的是<b>贪心解码</b>，每个位置填的正是这个最大概率对应的词。LLaDA 的官方评测代码就是温度 0。</p>
+</div>
+<p>Fast-dLLM 的规则只有三句话。每一步，对当前块里所有还是 [MASK] 的位置算出置信度；把置信度不低于阈值 \(\tau\) 的位置全部揭开；如果一个都没过阈值，就只揭开置信度最高的那一个，保证每一步至少前进一个 token，不会卡死。其余的位置留到下一步重新预测。默认 \(\tau=0.9\)。</p>
+<p>和 LLaDA 原来的“每步揭开置信度最高的 \(K\) 个”相比，区别在于个数不固定。容易的地方（比如答案后面成片的结束符、算式里已经确定的数字）一步可以揭开很多个；难的地方（比如推理中决定方向的那个词）自动退回一步一个。回到上一节的扑克例子：两个空的置信度都只有 0.3 左右，阈值规则一步只会揭开其中一个，于是自然避开了 full flush。</p>
+<p>下面的小演示可以直接调阈值。画布是一句订机票的话，出发地和目的地都是两个词的城市名（New York、San Diego……），同一个城市名的前后两半必须配对，出发地和目的地也不能相同。调低阈值，平均每步揭开的 token 会变多、步数变少，但两半被同一步揭开、拼出 New Diego 这类错误组合的概率也会上升（演示里的概率是精确算出来的；它按温度 1 抽样，比论文的贪心设置更容易暴露问题）。</p>
+<div data-widget="dllm-decode" data-focus="threshold"></div>
+
+<h4 id="n-4-2">4.2 定理 1：高置信时，“逐位取最大”等于“整体取最大”</h4>
+<div class="note-pre"><b>先补一点背景：定理用到的记号和两个距离。</b>
+<p>记已经确定的内容（提示和已揭开的 token）为 \(E\)。假设这一步要同时揭开 \(n\) 个位置，它们的取值记为 \(\boldsymbol X=(X_{i_1},\dots,X_{i_n})\)。\(p(\boldsymbol X\mid E)\) 是模型“心里”的联合分布；\(p_j(X_{i_j}\mid E)\) 是第 \(j\) 个位置的边缘分布，模型实际输出的就是它。并行解码相当于用边缘分布的乘积 \(q(\boldsymbol X\mid E)=\prod_{j=1}^{n}p_j(X_{i_j}\mid E)\) 来代替联合分布。</p>
+<p>衡量两个分布差多远，定理用了两个量。<b>总变差距离</b> \(D_{\mathrm{TV}}(p,q)\) 是两个分布给同一个事件的概率之差的最大值，在 0 到 1 之间。<b>KL 散度</b> \(D_{\mathrm{KL}}(p\Vert q)\) 是用 \(q\) 去近似 \(p\) 时平均多付出的信息量，单位是 nat。</p>
+</div>
+<p>定理的前提是：存在一组取值 \(x^*\)，使每个位置的边缘概率都超过 \(1-\epsilon\)，即 \(p_j(X_{i_j}=x^*_{i_j}\mid E)&gt;1-\epsilon\)。结论分两部分。</p>
+<p><b>第一部分（贪心等价）。</b>如果 \((n+1)\epsilon\le1\)，那么</p>
+<div class="formula">$$\arg\max_{\boldsymbol z}\,p(\boldsymbol z\mid E)=\arg\max_{\boldsymbol z}\,q(\boldsymbol z\mid E)=x^*$$</div>
+<p>也就是说，各个位置分别挑最可能的词，和按联合分布挑最可能的一整组词，得到同一个结果。而且这个界是紧的：只要 \(\epsilon&gt;1/(n+1)\)，就能构造出满足前提、两者却不一致的分布。</p>
+<p>证明很短，值得走一遍（原文附录 A）：</p>
+<ol>
+  <li>每个位置在 \(x^*\) 上的边缘概率超过 \(1-\epsilon\)，而 \((n+1)\epsilon\le1\) 意味着 \(\epsilon\le1/2\)，所以这个概率超过一半，\(x^*\) 在每个位置上都是唯一的最大值点，自然也是乘积 \(q\) 的最大值点。</li>
+  <li>“\(n\) 件事同时发生的概率”至少是“1 减去每件事不发生的概率之和”（Bonferroni 不等式）。每个位置不取 \(x^*\) 的概率都小于 \(\epsilon\)，所以 \(p(x^*\mid E)&gt;1-n\epsilon\)。</li>
+  <li>任何别的组合 \(\boldsymbol z\neq x^*\) 至少在一个位置上和 \(x^*\) 不同，它的联合概率不可能超过“那个位置不取 \(x^*\)”的概率，所以 \(p(\boldsymbol z\mid E)&lt;\epsilon\)。</li>
+  <li>只要 \(1-n\epsilon\ge\epsilon\)，也就是 \((n+1)\epsilon\le1\)，\(x^*\) 的联合概率就比任何别的组合都大。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：定理条件满足与不满足的两种情况</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="定理一的直观说明与一个紧性反例" style="--dg-min:740px">
+    <rect class="frame" x="10" y="8" width="455" height="272" rx="8"/>
+    <rect class="frame" x="495" y="8" width="455" height="272" rx="8"/>
+    <text x="237" y="30" class="t-c t-b">条件满足：n = 2，ε = 0.1</text>
+    <text x="140" y="74" class="t-r t-sm">x* 的联合概率</text>
+    <g class="enc"><rect class="box" x="150" y="62" width="200" height="24" rx="3"/></g>
+    <rect x="350" y="62" width="50" height="24" style="fill:none;stroke:var(--c-enc);stroke-dasharray:4 3"/>
+    <text x="250" y="74" class="t-c t-sm">&gt; 1 − nε = 0.8</text>
+    <text x="140" y="118" class="t-r t-sm">任何别的组合</text>
+    <g class="loss"><rect class="box" x="150" y="106" width="25" height="24" rx="3"/></g>
+    <text x="184" y="118" class="t-sm">&lt; ε = 0.1</text>
+    <text x="237" y="168" class="t-c">(n+1)ε = 0.3 ≤ 1</text>
+    <text x="237" y="192" class="t-c">⇒ 逐位取最大 = 整体取最大 = x*</text>
+    <text x="237" y="234" class="t-c t-sm">两个位置的置信度都 &gt; 0.9 时，x* 至少占 0.8，</text>
+    <text x="237" y="254" class="t-c t-sm">别的组合每个都不到 0.1，不可能选错</text>
+    <text x="722" y="30" class="t-c t-b">条件不满足：n = 2，ε = 0.36（反例）</text>
+    <text x="630" y="66" class="t-r t-sm">(0,0) = x*</text>
+    <g class="pred"><rect class="box" x="640" y="54" width="150" height="22" rx="3"/></g><text x="798" y="66" class="t-sm">0.30</text>
+    <text x="630" y="96" class="t-r t-sm">(1,0)</text>
+    <g class="enc"><rect class="box" x="640" y="84" width="175" height="22" rx="3"/></g><text x="823" y="96" class="t-sm">0.35</text>
+    <text x="630" y="126" class="t-r t-sm">(0,1)</text>
+    <g class="enc"><rect class="box" x="640" y="114" width="175" height="22" rx="3"/></g><text x="823" y="126" class="t-sm">0.35</text>
+    <text x="630" y="156" class="t-r t-sm">(1,1)</text>
+    <text x="648" y="156" class="t-sm">0</text>
+    <text x="722" y="192" class="t-c t-sm">每个位置取 0 的边缘概率 = 0.30 + 0.35 = 0.65 &gt; 1 − ε = 0.64</text>
+    <text x="722" y="214" class="t-c t-sm">逐位取最大 → (0,0)，联合分布里却是 (1,0)、(0,1) 更大</text>
+    <text x="722" y="236" class="t-c t-sm">(n+1)ε = 1.08 &gt; 1：定理条件恰好不满足</text>
+  </svg>
+  <div class="dia-note">本站示意图。左：两个位置、置信度都超过 0.9 时，\(x^*\) 的联合概率超过 0.8，任何别的组合都不到 0.1。右：本站构造的紧性反例（思路与原文附录 A 第 3 步相同）：两个二值位置，联合分布为 p(0,0)=0.30、p(1,0)=p(0,1)=0.35、p(1,1)=0。两个位置的边缘分布都偏向 0，逐位取最大得到 (0,0)，但它在联合分布里并不是最大的。</div>
+</div>
+<p>把阈值规则代进来看：阈值 \(\tau\) 等于要求每个被揭开的位置满足 \(\epsilon=1-\tau\)。\(\tau=0.9\) 时 \(\epsilon=0.1\)，定理要求 \(n\le9\)；也就是说，同一步揭开 9 个以内置信度在 0.9 以上的位置，即使在最坏情况下也和联合分布的最优组合一致（推算）。但阈值规则本身并不限制 \(n\)：如果一个块里有 20 个位置的置信度都恰好是 0.93，它们会被一次全部揭开，而这时定理的保证已经覆盖不到了。下面的因子规则正是为了补上这个缺口。</p>
+<p><b>第二部分（分布距离）。</b>当 \(n&gt;1\) 时，</p>
+<div class="formula">$$D_{\mathrm{TV}}(p,q)&lt;\frac{3n-1}{2}\,\epsilon,\qquad D_{\mathrm{KL}}(p\,\Vert\,q)&lt;(n-1)\Big(H_b(\epsilon)+\epsilon\ln\big(|\mathcal V|-1\big)\Big)$$</div>
+<p>其中 \(H_b(\epsilon)=-\epsilon\ln\epsilon-(1-\epsilon)\ln(1-\epsilon)\) 是二元熵，\(|\mathcal V|\) 是词表大小；附录还给出了一般 \(L_p\) 距离的界。代入数字看看这两个界有多松（推算，LLaDA 词表大小 126,464）：两个位置、置信度 0.99（\(\epsilon=0.01\)）时，总变差距离小于 0.025，KL 小于约 0.17 nat；置信度降到 0.9（\(\epsilon=0.1\)）时，总变差的界变成 0.25，KL 的界变成约 1.5 nat，后者主要来自 \(\epsilon\ln|\mathcal V|\) 这一项。所以对 0.9 这个阈值而言，真正有分量的保证是第一部分的贪心等价，而不是分布距离。</p>
+<div class="note-warn"><b>这个定理容易被读得太强，有三点要分清：</b>
+<ul>
+  <li>它比较的是“并行贪心”和“按模型自己的联合分布做贪心”，保证的是两者一致，不保证答案正确。模型如果很有把握地错了，并行和逐个揭开会一起错。在这个条件下，逐个揭开的贪心解码也会得到同一个 \(x^*\)（本站补充，证明思路与上面相同）。</li>
+  <li>它假设存在一个自洽的联合分布，各位置的边缘分布都由它导出。掩码扩散模型是对每个位置分别输出条件分布的，这些分布未必能拼成一个一致的联合分布。作者在附录 A 的 Remark 1 里承认这一点，并认为模型越大越接近这个假设。</li>
+  <li>界来自最坏情况。实际的依赖通常比反例温和，所以 \((n+1)\epsilon\) 略大于 1 时结论往往仍成立；反过来，定理也说明不了阈值调低以后准确率会掉多少，那只能靠实验回答。</li>
+</ul></div>
+
+<h4 id="n-4-3">4.3 因子规则：一步揭开几个，直接跟着定理走</h4>
+<p>作者把定理的条件直接改写成一条选择规则。把当前块里各位置的置信度从高到低排成 \(c^{(1)}\ge c^{(2)}\ge\cdots\)，找出满足下式的最大的 \(n\)，然后揭开置信度最高的 \(n\) 个（至少 1 个）：</p>
+<div class="formula">$$(n+1)\big(1-c^{(n)}\big)&lt;f$$</div>
+<p>这里 \(1-c^{(n)}\) 是前 \(n\) 个位置里最没把握的那一个的“不确定度”，扮演定理里 \(\epsilon\) 的角色；\(f\) 是一个超参数，叫解码因子。\(f=1\) 时，这条规则几乎就是定理第一部分的条件；\(f\) 大于 1 则是有意放宽，用一点风险换更多并行。走两个例子（推算，\(f=1\)）：</p>
+<ul>
+  <li>置信度依次为 0.99、0.97、0.95、0.90、0.85、0.60。\(n=5\) 时 \(6\times0.15=0.9&lt;1\)，\(n=6\) 时 \(7\times0.40=2.8\)，所以揭开前 5 个。阈值 0.9 只会揭开前 4 个：这里因子规则更大胆。</li>
+  <li>20 个位置的置信度都是 0.93。阈值规则会一次全部揭开；因子规则在 \(n=13\) 时 \(14\times0.07=0.98&lt;1\)，\(n=14\) 时 \(15\times0.07=1.05\)，所以只揭开 13 个：这里因子规则更保守。</li>
+</ul>
+<p>换句话说，阈值规则给每个位置单独设门槛，因子规则给“同时揭开的这一组”整体设门槛：一次揭开得越多，要求越严。附录 C.2 比较了两者（原文表 11）：因子规则的吞吐比阈值规则高约 1.3–1.5 倍，准确率低 0.8–2.4 个点。原文图 8 标出的主结果设置是 \(f=1.0\)，平均每步约 4.41 个 token（读自原图）；官方脚本的默认值也是 1.0。</p>
+<div class="table-wrap"><table>
+<tr><th>任务（LLaDA）</th><th class="num">生成长度</th><th class="num">阈值 0.9</th><th class="num">因子规则</th></tr>
+<tr><td>GSM8K（5-shot）</td><td class="num">256</td><td class="num">78.5 · 54.4（8.1×）</td><td class="num">77.5 · 78.5（11.7×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">77.2 · 35.3（11.0×）</td><td class="num">74.8 · 47.1（14.7×）</td></tr>
+<tr><td>MATH（4-shot）</td><td class="num">256</td><td class="num">33.2 · 51.7（5.7×）</td><td class="num">32.0 · 78.3（8.6×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">36.0 · 47.1（5.9×）</td><td class="num">35.2 · 64.6（8.1×）</td></tr>
+</table></div>
+<p class="w-note">每格为“准确率（%）· 吞吐（token/秒）（相对原版 LLaDA 的倍数）”，都开了缓存。数字取自原文附录表 11。</p>
+
+<h4 id="n-4-4">4.4 合起来：算法 1 的流程</h4>
+<p>把缓存和并行解码放到一起，就是原文的算法 1。下面是本站按官方代码整理的简化版（PyTorch 风格的伪代码，下标对齐等细节略去）：</p>
+<pre><code class="lang-py">def fast_dllm_generate(model, prompt, gen_len, B=32, tau=0.9, dual_cache=True):
+    x = concat(prompt, [MASK] * gen_len)            # 答案区一开始全部是掩码
+    for blk in range(gen_len // B):                 # 块从左到右
+        s = len(prompt) + blk * B; e = s + B        # 当前块的位置范围 [s, e)
+        logits, kv = model(x, return_kv=True)       # 整段前向：刷新缓存，同时解第一批
+        unmask_confident(x, logits, s, e, tau)
+        if not dual_cache:
+            kv = kv[:, :s]                          # PrefixCache：只保留当前块之前的部分
+        while (x[s:e] == MASK).any():
+            if dual_cache:                          # 只算当前块，前缀和后缀都读缓存
+                logits = model(x[s:e], past_kv=kv, replace=(s, e))
+            else:                                   # 算当前块和全部后缀，前缀读缓存
+                logits = model(x[s:], past_kv=kv)
+            unmask_confident(x, logits, s, e, tau)
+    return x
+
+def unmask_confident(x, logits, s, e, tau):
+    conf, tok = softmax(logits).max(-1)             # 温度 0：每个位置最可能的词及其概率
+    cand = [i for i in range(s, e) if x[i] == MASK] # 只看当前块里仍是掩码的位置
+    pick = [i for i in cand if conf[i] >= tau]
+    if not pick:                                    # 一个都没过阈值：只揭开最有把握的
+        pick = [max(cand, key=lambda i: conf[i])]
+    for i in pick:
+        x[i] = tok[i]</code></pre>
+<p>有两点和直觉不同，后面会用到。第一，答案后面补的结束符也在被“生成”：分块生成不会在写出结束符后提前停下，而是把所有块都走完，所以答案区设得越长，后面要填的结束符就越多。第二，阈值只在当前块内比较；块后面的位置即使置信度已经很高，也要等轮到它们所在的块。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/pdf/2505.22618v3" target="_blank" rel="noopener">附录 A（证明）与 C.2 在 PDF 第 12–17 页 ↗</a> · 旧版：<a href="../legacy/tracks/dllm/14-kv-cache.html#c-threshold">阈值并行解码拆解</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实验：快了多少，掉了多少，和谁比</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在两种开源扩散模型、四个常用基准上，Fast-dLLM 到底快了多少、准确率变了多少？这些倍数是和什么比出来的，在什么条件下最大？读完主表之后，本节最后用“结果的份量”一段把每个数字背后的比较条件讲清楚。</div>
+
+<h4 id="n-5-1">5.1 实验是怎么设的</h4>
+<ul>
+  <li><b>硬件与批大小：</b>全部在一张 NVIDIA A100 80GB 上，一次只处理一条请求（batch size 1），不用任何推理加速框架（原文图 1 图注、§4.1）。</li>
+  <li><b>模型：</b>LLaDA（官方脚本用的是 LLaDA-8B-Instruct），附录另测 LLaDA-1.5；Dream（Dream-v0-Base-7B）；以及多模态的 LLaDA-V。</li>
+  <li><b>基准：</b>GSM8K（5-shot，小学数学应用题）、MATH（4-shot，竞赛数学）、HumanEval（0-shot，补全 Python 函数）、MBPP（3-shot，写 Python 小程序），统一用 lm-eval 评测；主表的生成长度为 256 和 512，消融里还有 GSM8K 8-shot、生成长度 1024。</li>
+  <li><b>默认超参：</b>PrefixCache，块长 32，阈值 0.9。设置部分称块长在 4–32、阈值在 0.5–1.0 之间调整过（图 4 的块长扫描实际做到了 256）。</li>
+  <li><b>吞吐的定义：</b>平均每秒输出的 token 数，从开始生成一直算到结束符。官方评测代码里，GSM8K 这类任务先按停止串截断答案，再数非结束符的 token；HumanEval 则数整段生成区里所有非结束符的 token。所以不同任务之间的吞吐不宜直接比较。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：表格里每一列是什么。</b>
+<p>“LLaDA”“Dream”两列是不加任何加速的原版。LLaDA 原版每步揭开 1 个 token（步数 = 生成长度），块长 32，按置信度挑位置；Dream 原版也是每步 1 个 token，但不分块，整段按熵（另一种衡量把握大小的量）挑位置。“+缓存”只加 PrefixCache（Dream 加缓存时同时改成块长 32 的分块生成），“+并行”只加阈值并行解码，最后一列两者都加，也就是 Fast-dLLM。所有倍数都是相对原版那一列算的。</p>
+</div>
+
+<h4 id="n-5-2">5.2 LLaDA 上的结果（原文表 1）</h4>
+<div class="table-wrap"><table>
+<tr><th>任务</th><th class="num">生成长度</th><th class="num">原版 LLaDA</th><th class="num">+缓存</th><th class="num">+并行</th><th class="num">Fast-dLLM（两者）</th></tr>
+<tr><td>GSM8K（5-shot）</td><td class="num">256</td><td class="num">79.3 · 6.7</td><td class="num">79.5 · 21.2（3.2×）</td><td class="num">79.2 · 16.5（2.5×）</td><td class="num">78.5 · 54.4（8.1×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">77.5 · 3.2</td><td class="num">77.0 · 10.4（3.3×）</td><td class="num">77.6 · 18.6（5.8×）</td><td class="num">77.2 · 35.3（11.0×）</td></tr>
+<tr><td>MATH（4-shot）</td><td class="num">256</td><td class="num">33.5 · 9.1</td><td class="num">33.3 · 23.7（2.6×）</td><td class="num">33.4 · 24.8（2.7×）</td><td class="num">33.2 · 51.7（5.7×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">37.2 · 8.0</td><td class="num">36.2 · 19.7（2.5×）</td><td class="num">36.8 · 23.8（3.0×）</td><td class="num">36.0 · 47.1（5.9×）</td></tr>
+<tr><td>HumanEval（0-shot）</td><td class="num">256</td><td class="num">41.5 · 30.5</td><td class="num">42.7 · 40.7（1.3×）</td><td class="num">43.9 · 101.5（3.3×）</td><td class="num">43.3 · 114.1（3.7×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">43.9 · 18.4</td><td class="num">45.7 · 29.3（1.6×）</td><td class="num">43.3 · 57.1（3.1×）</td><td class="num">44.5 · 73.7（4.0×）</td></tr>
+<tr><td>MBPP（3-shot）</td><td class="num">256</td><td class="num">29.4 · 6.0</td><td class="num">29.6 · 17.0（2.8×）</td><td class="num">28.4 · 24.8（4.1×）</td><td class="num">28.2 · 44.8（7.5×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">14.8 · 4.3</td><td class="num">13.4 · 10.1（2.3×）</td><td class="num">15.0 · 22.3（5.1×）</td><td class="num">13.8 · 39.5（9.2×）</td></tr>
+</table></div>
+<p class="w-note">每格为“准确率（%）· 吞吐（token/秒）（相对原版的倍数）”。数字取自 <a href="https://arxiv.org/html/2505.22618v3#S4.T1" target="_blank" rel="noopener">原文表 1 ↗</a>。</p>
+<p>这张表可以这样读：</p>
+<ul>
+  <li>单独加缓存，大多带来 2.3–3.3 倍，只有 HumanEval 是 1.3–1.6 倍。本站推测原因是 HumanEval 为 0-shot，提示短，能缓存的前缀少；第 6 节的表 4 也显示提示越长缓存越有用。</li>
+  <li>单独加并行，带来 2.5–5.8 倍；多数任务生成越长倍数越大，HumanEval 是例外（3.3 倍降到 3.1 倍）。</li>
+  <li>两者合起来是 3.7–11.0 倍，最大的是 GSM8K 生成 512 的 11.0 倍。论文称两种方法“高度互补”。合并后的倍数总是大于任一单项，但多数情况下小于两者相乘：GSM8K 生成 256 时 3.2 × 2.5 ≈ 8.0，实际 8.1，几乎相乘；生成 512 时 3.3 × 5.8 ≈ 19，实际只有 11.0（推算）。可见两种加速并不完全独立：并行把块内步数压下去以后，每块开头那次整段前向占的比例变大，缓存能省的部分相对变少（本站的解释）。</li>
+  <li>Fast-dLLM 一列与原版相比，准确率差在 −1.2 到 +1.8 个点之间。要注意 MBPP 生成 512 这一行：原版自己只有 14.8%（生成 256 时是 29.4%），说明 LLaDA 在这个设置下本身就不稳，这一行 9.2 倍的加速建立在很低的准确率上。</li>
+</ul>
+
+<h4 id="n-5-3">5.3 Dream 上的结果（原文表 2）</h4>
+<div class="table-wrap"><table>
+<tr><th>任务</th><th class="num">生成长度</th><th class="num">原版 Dream</th><th class="num">+缓存</th><th class="num">+并行</th><th class="num">Fast-dLLM（两者）</th></tr>
+<tr><td>GSM8K（5-shot）</td><td class="num">256</td><td class="num">75.0 · 9.1</td><td class="num">74.3 · 32.5（3.6×）</td><td class="num">74.2 · 14.2（1.6×）</td><td class="num">74.8 · 48.2（5.3×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">76.0 · 7.7</td><td class="num">74.3 · 25.6（3.3×）</td><td class="num">73.4 · 14.6（1.9×）</td><td class="num">74.0 · 42.9（5.6×）</td></tr>
+<tr><td>MATH（4-shot）</td><td class="num">256</td><td class="num">38.4 · 11.4</td><td class="num">36.8 · 34.3（3.0×）</td><td class="num">37.9 · 27.3（2.4×）</td><td class="num">37.6 · 66.8（5.9×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">39.8 · 9.6</td><td class="num">38.0 · 26.8（2.8×）</td><td class="num">39.5 · 31.6（3.2×）</td><td class="num">39.3 · 63.3（6.5×）</td></tr>
+<tr><td>HumanEval（0-shot）</td><td class="num">256</td><td class="num">49.4 · 23.3</td><td class="num">53.7 · 35.2（1.5×）</td><td class="num">49.4 · 45.6（2.0×）</td><td class="num">54.3 · 62.0（2.8×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">54.3 · 16.3</td><td class="num">54.9 · 27.8（1.7×）</td><td class="num">51.8 · 29.8（1.8×）</td><td class="num">54.3 · 52.8（3.2×）</td></tr>
+<tr><td>MBPP（3-shot）</td><td class="num">256</td><td class="num">56.6 · 11.2</td><td class="num">53.2 · 34.5（3.1×）</td><td class="num">53.8 · 31.8（2.8×）</td><td class="num">56.4 · 76.0（6.8×）</td></tr>
+<tr><td></td><td class="num">512</td><td class="num">55.6 · 9.4</td><td class="num">53.8 · 26.7（2.8×）</td><td class="num">55.4 · 37.6（4.0×）</td><td class="num">55.2 · 73.6（7.8×）</td></tr>
+</table></div>
+<p class="w-note">格式同上，数字取自 <a href="https://arxiv.org/html/2505.22618v3#S4.T2" target="_blank" rel="noopener">原文表 2 ↗</a>。</p>
+<p>Dream 上两者合并是 2.8–7.8 倍，比 LLaDA 小一些。一个有意思的差别是：Dream 上单独加并行的收益最小（GSM8K 只有 1.6–1.9 倍），单独加缓存反而更大（3.3–3.6 倍）。本站推测这和 Dream 原版不分块有关：不分块时阈值规则要在整段答案区里找高置信位置，而“+缓存”那一列同时引入了块长 32 的分块生成，改变的不止一件事。准确率方面，Fast-dLLM 一列与原版相差 −2.0 到 +4.9 个点（HumanEval 256 从 49.4 升到 54.3）；单独加缓存时 MBPP 256 掉了 3.4 个点（56.6 → 53.2）。</p>
+
+<h4 id="n-5-4">5.4 多模态的 LLaDA-V</h4>
+<p>作者还把方法用到了图文模型 LLaDA-V 上，在 MathVista 和 MathVerse（看图解数学题）上测试。LLaDA-V 对块长非常敏感：MathVista 上块长从 96 降到 8，准确率从 59.7% 掉到 50.7%（附录表 9）。所以这里没有用小块缓存，而是保持整块长度 96，每隔若干步刷新一次缓存。附录表 10 显示，刷新间隔从 2 加大到 32，吞吐从 15.9 升到 28.2 token/秒，准确率从 59.2% 降到 56.6%。</p>
+<p>主结果（原文表 3）是：MathVista 上准确率 59.2% → 56.6%，吞吐 2.84 → 28.2 token/秒（9.9 倍）；MathVerse 上准确率 28.5% → 28.6%，吞吐 2.75 → 23.3 token/秒（8.5 倍）。表里还有一列“步数减半”：MathVista 59.7%、1.96 倍，MathVerse 28.3%、1.88 倍，说明原版的步数设置本身就留有余量。附录图 6 给了一个看图写描述的例子，生成时间从 63.0 秒降到 6.8 秒。</p>
+<div class="note-warn"><b>注意：</b>LLaDA-V 上用的其实是 Fast-dLLM 的一个变体（整块长度加定期刷新），不是正文描述的“小块 + 块末刷新”；而且 MathVista 上掉了 2.6 个点，比文本任务上的变化大。</div>
+
+<h4 id="n-5-5">5.5 结果的份量</h4>
+<p>这一部分不打分，只把每个数字背后“和谁比、在什么条件下比”说清楚。</p>
+<p><b>倍数的分母是什么。</b>所有倍数的分母都是原版扩散模型最慢的那种设置：每步只揭开 1 个 token（生成 1024 个 token 就跑 1024 步），每步整段重算，用 Hugging Face 的实现，batch size 1。这是 LLaDA、Dream 为了保证质量常用的设置，用它做分母是合理的，但它也是最容易被大幅超越的分母。把 27.6 倍拆开看：只加并行解码已经有 13.3 倍（0.7 → 9.3 token/秒），缓存在此基础上再贡献约 2.1 倍（9.3 → 19.3，推算）。</p>
+<p><b>公平的对照在哪里。</b>要判断阈值规则本身好不好，应该在“每步揭开的 token 数相同”的条件下比准确率，原文图 5 就是这样比的（第 6 节有重画的图）。平均每步 4 个左右时，阈值规则（\(\tau=0.8\)，每步 4.24 个）的 GSM8K 准确率约 77.7%，而每步固定揭开 4 个只有约 66.5%（读自原图）。这比任何加速倍数都更能说明阈值规则的价值。</p>
+<p><b>倍数为什么随生成长度上涨。</b>原文表 5（8-shot GSM8K）里，生成长度 256、512、1024 时 DualCache 版本的倍数是 9.4、15.8、27.6。但看绝对值会发现，Fast-dLLM 自己也在变慢（46.3 → 36.4 → 19.3 token/秒），倍数变大主要是因为原版垮得更快（4.9 → 2.3 → 0.7）。原因与吞吐的算法有关：GSM8K 的答案长度并不会因为“生成长度”这个设置变大而变长，设成 1024 时，答案后面是几百个结束符或被截掉的内容，原版却仍要一步一个地把它们填完。按图 1(c) 推算，原版每条样本 266 秒、0.7 token/秒，只输出了约 186 个有效 token，1024 个位置里八成以上是答案之后的部分（推算，受四舍五入影响）。这些位置大多是模型很有把握的结束符，阈值规则可以用很少几步填完一块（本站推测）。所以“生成越长加速越大”，有相当一部分是在省填充位置的步数；如果原版遇到结束符就提前停下，或者生成长度设得贴近答案长度，倍数会小得多。</p>
+<p><b>吞吐不等于延迟。</b>吞吐按“有效 token 数 ÷ 时间”计算，而不同方法输出的有效 token 数并不完全相同。按图 1(c)，只加并行时每条样本约 26 秒、9.3 token/秒，约 242 个有效 token，比原版的约 186 个多（推算）。所以按单条样本的延迟算，原版到只加并行是约 10 倍（266 → 26 秒），到 DualCache 是约 22 倍（266 → 12 秒，推算），都低于吞吐口径的 13.3 倍和 27.6 倍。</p>
+<p><b>和自回归模型比。</b>原文图 1(a) 把 LLaMA-3-8B 和 Qwen2.5-7B 也放在同一条件下测了（A100、batch 1、不用推理框架、GSM8K 5-shot、生成长度 256）：读图约为 37 token/秒、77.9%（LLaMA-3-8B）和 40 token/秒、83.5%（Qwen2.5-7B）；加速后的 LLaDA 是 54.4 token/秒、78.5%。所以“dLLM 追上甚至超过自回归模型”只在单条请求、两边都不用推理引擎时成立；论文没有和 vLLM、SGLang 这类推理引擎里的自回归模型比。附录 C.5 测了批大小，但只开缓存、不开并行（作者说批量时并行解码会受填充 token 影响，为公平起见不测）：batch 32 时 PrefixCache 约 141–211 token/秒，而 LLaMA 约 435–650 token/秒（读自原文图 9，生成长度 16–64，提示长 256）。批越大，自回归模型越占优，论文在“局限”一段里也承认了这一点。</p>
+<p><b>准确率的变化。</b>主表里 Fast-dLLM 与原版的差距大多在 2 个点以内，但并非处处如此：表 5 生成长度 512 时，PrefixCache 低 4.1 个点、DualCache 低 3.5 个点；LLaDA-V 的 MathVista 低 2.6 个点。还要记住样本量：HumanEval 只有 164 题，1 道题就是 0.61 个点（推算），所以 HumanEval 上 ±2 个点的涨落只相当于三道题左右；GSM8K 测试集有 1,319 题，1 个点约 13 题。论文没有报告多次运行或误差范围；温度为 0 时结果基本是确定的，但 1–2 个点的差异仍可能只是少数几道题的翻转。</p>
+<p><b>基准的性质。</b>四个基准都是标准的数学和代码任务，少样本提示很长，这恰好有利于缓存。这些任务里，同一步揭开的几个 token 之间很少有强依赖；后来的 ParallelBench 专门构造了依赖很强的任务，发现阈值类并行解码在上面会明显掉点（见“后来怎么样了”）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S4.SS1" target="_blank" rel="noopener">英文原文 §4.1 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S4.SS2" target="_blank" rel="noopener">§4.2 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S4.T3" target="_blank" rel="noopener">原文表 3 ↗</a> · 本站：<a href="llada.html">LLaDA 精读</a>、<a href="dream.html">Dream 精读</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 消融与分析：倍数随什么变，代价在哪里</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>加速比随哪些因素变化？PrefixCache 和 DualCache 怎么选，块长和阈值怎么定？阈值规则比“每步固定揭开 \(k\) 个”好在哪里？方法的局限又在哪里？内容来自原文 §4.3 和附录 B、C。</div>
+
+<h4 id="n-6-1">6.1 提示越长、生成越长，加速越大（原文表 4、表 5）</h4>
+<div class="dia">
+  <div class="dia-title">简图：生成长度对吞吐的影响（LLaDA，GSM8K 8-shot，数字取自原文表 5）</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="三种生成长度下四种设置的吞吐柱状图" style="--dg-min:760px">
+    <line class="grid-ln" x1="70" y1="224" x2="930" y2="224"/><line class="grid-ln" x1="70" y1="178" x2="930" y2="178"/><line class="grid-ln" x1="70" y1="132" x2="930" y2="132"/><line class="grid-ln" x1="70" y1="86" x2="930" y2="86"/><line class="grid-ln" x1="70" y1="40" x2="930" y2="40"/>
+    <line class="axis" x1="70" y1="270" x2="930" y2="270"/>
+    <text x="62" y="270" class="t-r t-xs">0</text><text x="62" y="224" class="t-r t-xs">10</text><text x="62" y="178" class="t-r t-xs">20</text><text x="62" y="132" class="t-r t-xs">30</text><text x="62" y="86" class="t-r t-xs">40</text><text x="62" y="40" class="t-r t-xs">50</text>
+    <text x="24" y="155" class="t-c t-sm" transform="rotate(-90 24 155)">吞吐（token/秒）</text>
+    <g class="tgt"><rect class="box" x="120" y="247.5" width="44" height="22.5"/><rect class="box" x="400" y="259.4" width="44" height="10.6"/><rect class="box" x="680" y="266.8" width="44" height="3.2"/></g>
+    <g class="pred"><rect class="box" x="170" y="194.6" width="44" height="75.4"/><rect class="box" x="450" y="205.6" width="44" height="64.4"/><rect class="box" x="730" y="227.2" width="44" height="42.8"/></g>
+    <g class="enc"><rect class="box" x="220" y="43.7" width="44" height="226.3"/><rect class="box" x="500" y="122.8" width="44" height="147.2"/><rect class="box" x="780" y="210.2" width="44" height="59.8"/></g>
+    <g class="act"><rect class="box" x="270" y="57" width="44" height="213"/><rect class="box" x="550" y="102.6" width="44" height="167.4"/><rect class="box" x="830" y="181.2" width="44" height="88.8"/></g>
+    <text x="142" y="228" class="t-c t-xs">4.9</text><text x="142" y="240" class="t-c t-xs">1×</text>
+    <text x="192" y="175" class="t-c t-xs">16.4</text><text x="192" y="187" class="t-c t-xs">3.3×</text>
+    <text x="242" y="24" class="t-c t-xs">49.2</text><text x="242" y="36" class="t-c t-xs">10.0×</text>
+    <text x="292" y="38" class="t-c t-xs">46.3</text><text x="292" y="50" class="t-c t-xs">9.4×</text>
+    <text x="422" y="240" class="t-c t-xs">2.3</text><text x="422" y="252" class="t-c t-xs">1×</text>
+    <text x="472" y="186" class="t-c t-xs">14.0</text><text x="472" y="198" class="t-c t-xs">6.1×</text>
+    <text x="522" y="103" class="t-c t-xs">32.0</text><text x="522" y="115" class="t-c t-xs">13.9×</text>
+    <text x="572" y="83" class="t-c t-xs">36.4</text><text x="572" y="95" class="t-c t-xs">15.8×</text>
+    <text x="702" y="247" class="t-c t-xs">0.7</text><text x="702" y="259" class="t-c t-xs">1×</text>
+    <text x="752" y="208" class="t-c t-xs">9.3</text><text x="752" y="220" class="t-c t-xs">13.3×</text>
+    <text x="802" y="191" class="t-c t-xs">13.0</text><text x="802" y="203" class="t-c t-xs">18.6×</text>
+    <text x="852" y="162" class="t-c t-xs">19.3</text><text x="852" y="174" class="t-c t-xs">27.6×</text>
+    <text x="217" y="288" class="t-c t-sm">生成长度 256</text><text x="497" y="288" class="t-c t-sm">生成长度 512</text><text x="777" y="288" class="t-c t-sm">生成长度 1024</text>
+    <text x="217" y="306" class="t-c t-xs">准确率 77.6 / 77.9 / 77.3 / 76.9</text><text x="497" y="306" class="t-c t-xs">准确率 78.9 / 78.9 / 74.8 / 75.4</text><text x="777" y="306" class="t-c t-xs">准确率 77.3 / 78.0 / 75.7 / 76.0</text>
+    <g class="tgt"><rect class="box" x="120" y="320" width="12" height="12"/></g><text x="138" y="326" class="t-sm">原版 LLaDA</text>
+    <g class="pred"><rect class="box" x="290" y="320" width="12" height="12"/></g><text x="308" y="326" class="t-sm">+并行（不缓存）</text>
+    <g class="enc"><rect class="box" x="480" y="320" width="12" height="12"/></g><text x="498" y="326" class="t-sm">+并行 +PrefixCache</text>
+    <g class="act"><rect class="box" x="680" y="320" width="12" height="12"/></g><text x="698" y="326" class="t-sm">+并行 +DualCache</text>
+  </svg>
+  <div class="dia-note">本站用 <a href="https://arxiv.org/html/2505.22618v3#S4.SS3" target="_blank" rel="noopener">原文表 5 ↗</a> 的数字重画。<b>怎么看：</b>每组四根柱子从左到右是原版、只并行、并行加 PrefixCache、并行加 DualCache，柱顶标的是吞吐和相对原版的倍数，组下方是四者的准确率。随着生成长度变长，所有设置的绝对吞吐都在下降；倍数上涨，主要是因为原版下降得更快。</div>
+</div>
+<p>表 4 固定生成长度 1024，比较 5-shot 和 8-shot 两种提示长度：原版吞吐从 1.1 降到 0.7 token/秒；只并行的倍数从 10.6 升到 13.3；PrefixCache 从 13.1 升到 18.6；DualCache 从 19.6 升到 27.6。准确率方面，5-shot 时原版 77.0%、DualCache 74.7%，8-shot 时原版 77.3%、DualCache 76.0%。道理很直接：提示越长，原版每一步要重算的位置越多，缓存能省下的也越多。表 5 固定 8-shot、改变生成长度，结论同上图。作者把这归结为“计算分摊到更长的序列上，效率收益更明显”；第 5.5 节已经说明，其中相当一部分来自答案之后那些填充位置。</p>
+
+<h4 id="n-6-2">6.2 PrefixCache 还是 DualCache</h4>
+<p>表 5 已经给出答案：短生成时两者差不多（256 时 PrefixCache 甚至略快，10.0 倍对 9.4 倍），长生成时 DualCache 明显更快（1024 时 27.6 倍对 18.6 倍）。准确率两者相近（512 时 74.8% 对 75.4%，1024 时 75.7% 对 76.0%），但在 512 和 1024 时都比“只并行、不缓存”的版本低 2–4 个点（256 时只低不到 1 个点），这部分可以看作近似缓存的代价，而且生成越长代价越明显。附录 B 的单题案例里，原版、PrefixCache、DualCache 对同一道算术题给出几乎相同的推理过程，都答对了，只是措辞略有不同。</p>
+
+<h4 id="n-6-3">6.3 块长：32 是折中</h4>
+<p>原文图 4（LLaDA，GSM8K 5-shot，生成长度 256，只开缓存、不开并行）扫描了块长。读图结果如下：</p>
+<div class="table-wrap"><table>
+<tr><th>块长</th><th class="num">4</th><th class="num">8</th><th class="num">16</th><th class="num">32</th><th class="num">64</th><th class="num">128</th><th class="num">256</th><th class="num">不开缓存</th></tr>
+<tr><td>准确率（%）</td><td class="num">约 79.5</td><td class="num">约 80.0</td><td class="num">约 78.4</td><td class="num">约 79.2</td><td class="num">约 77.3</td><td class="num">约 71.7</td><td class="num">约 53.6</td><td class="num">79.3</td></tr>
+<tr><td>吞吐（token/秒）</td><td class="num">约 14.8</td><td class="num">约 18.3</td><td class="num">约 20.7</td><td class="num">约 22.0</td><td class="num">约 21.9</td><td class="num">约 21.5</td><td class="num">约 21.8</td><td class="num">6.7</td></tr>
+</table></div>
+<p class="w-note">数值读自 <a href="https://arxiv.org/html/2505.22618v3#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a>，为约值。</p>
+<p>块越小，刷新越频繁，吞吐越低（块长 4 时约 14.8 token/秒）；块长到 32 以后吞吐基本饱和在约 22 token/秒，比不开缓存的 6.7 快约 3.3 倍。准确率在块长 32 以内与不开缓存相当，64 时开始下降，128、256 时大幅下降。作者把大块时的掉点归因于“上下文失配”，也就是冻结的时间太长，于是选 32 作为折中。</p>
+<div class="note-warn"><b>这个消融里混着两个因素：</b>块长在这里同时控制两件事，一是缓存多久刷新一次，二是分块生成的块有多大。生成长度 256 时，块长 256 就等于整段一起生成；而第 2 节提到，LLaDA 的指令模型整段生成时在 GSM8K 上本来就差很多（LLaDA 论文报告 69.4% 对分块的 78.6%）。所以块长 128、256 时的掉点不能全部算在缓存近似头上。这是本站的判断，论文没有把两个因素拆开测。</div>
+
+<h4 id="n-6-4">6.4 阈值规则 vs 每步固定揭开 k 个</h4>
+<div class="dia">
+  <div class="dia-title">简图：同样每步揭开几个 token，谁的准确率更高（LLaDA，GSM8K 5-shot，生成长度 256）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="置信度阈值规则与固定每步揭开数的准确率对比" style="--dg-min:720px">
+    <line class="grid-ln" x1="90" y1="224" x2="890" y2="224"/><line class="grid-ln" x1="90" y1="178" x2="890" y2="178"/><line class="grid-ln" x1="90" y1="132" x2="890" y2="132"/><line class="grid-ln" x1="90" y1="86" x2="890" y2="86"/><line class="grid-ln" x1="90" y1="40" x2="890" y2="40"/>
+    <line class="axis" x1="90" y1="270" x2="890" y2="270"/><line class="axis" x1="90" y1="270" x2="90" y2="40"/>
+    <text x="82" y="270" class="t-r t-xs">30</text><text x="82" y="224" class="t-r t-xs">40</text><text x="82" y="178" class="t-r t-xs">50</text><text x="82" y="132" class="t-r t-xs">60</text><text x="82" y="86" class="t-r t-xs">70</text><text x="82" y="40" class="t-r t-xs">80</text>
+    <text x="90" y="288" class="t-c t-xs">0</text><text x="190" y="288" class="t-c t-xs">1</text><text x="290" y="288" class="t-c t-xs">2</text><text x="390" y="288" class="t-c t-xs">3</text><text x="490" y="288" class="t-c t-xs">4</text><text x="590" y="288" class="t-c t-xs">5</text><text x="690" y="288" class="t-c t-xs">6</text><text x="790" y="288" class="t-c t-xs">7</text><text x="890" y="288" class="t-c t-xs">8</text>
+    <text x="490" y="312" class="t-c t-sm">平均每步揭开的 token 数</text>
+    <text x="30" y="155" class="t-c t-sm" transform="rotate(-90 30 155)">GSM8K 准确率（%）</text>
+    <polyline points="190,43.2 290,64.4 490,102.1 890,266.8" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:7 4"/>
+    <polyline points="190,43.2 415,44.1 514,50.6 602,57 707,75 791,101.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.6"/>
+    <circle cx="190" cy="43.2" r="4.5" style="fill:var(--text-2)"/>
+    <circle cx="415" cy="44.1" r="4.5" style="fill:var(--c-enc)"/><circle cx="514" cy="50.6" r="4.5" style="fill:var(--c-enc)"/><circle cx="602" cy="57" r="4.5" style="fill:var(--c-enc)"/><circle cx="707" cy="75" r="4.5" style="fill:var(--c-enc)"/><circle cx="791" cy="101.6" r="4.5" style="fill:var(--c-enc)"/>
+    <circle cx="290" cy="64.4" r="4.5" style="fill:var(--c-pred)"/><circle cx="490" cy="102.1" r="4.5" style="fill:var(--c-pred)"/><circle cx="890" cy="266.8" r="4.5" style="fill:var(--c-pred)"/>
+    <text x="198" y="30" class="t-xs">每步 1 个（τ = 1.0）79.3</text>
+    <text x="423" y="32" class="t-xs">τ = 0.9：3.25 个，79.1</text>
+    <text x="522" y="64" class="t-xs">τ = 0.8：4.24 个，77.7</text>
+    <text x="610" y="45" class="t-xs">τ = 0.7：5.12 个，76.3</text>
+    <text x="715" y="66" class="t-xs">τ = 0.6：72.4</text>
+    <text x="799" y="96" class="t-xs">τ = 0.5：66.6</text>
+    <text x="284" y="82" class="t-r t-xs">固定 2 个：74.7</text>
+    <text x="440" y="122" class="t-xs">固定 4 个：66.5</text>
+    <text x="880" y="250" class="t-r t-xs">固定 8 个：30.7</text>
+    <path d="M502,54 L502,98" style="fill:none;stroke:var(--text-3);stroke-width:1.3;marker-start:url(#ah);marker-end:url(#ah)"/>
+    <text x="510" y="86" class="t-sm">相差约 11 个点</text>
+    <line x1="110" y1="214" x2="150" y2="214" style="stroke:var(--c-enc);stroke-width:2.6"/><text x="158" y="214" class="t-sm">置信度阈值（τ 从 1.0 降到 0.5）</text>
+    <line x1="110" y1="238" x2="150" y2="238" style="stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:7 4"/><text x="158" y="238" class="t-sm">每步固定揭开 k 个（k = 1、2、4、8）</text>
+  </svg>
+  <div class="dia-note">本站用读自 <a href="https://arxiv.org/html/2505.22618v3#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 的约值重画（每步揭开数是原图标注的数字，准确率为读图值）。<b>怎么看：</b>横轴是平均每步揭开几个 token，越往右越快；纵轴是准确率。蓝色实线是阈值规则，虚线是每步固定揭开 \(k\) 个。在同样的速度下，蓝线始终高于虚线。</div>
+</div>
+<p>原文图 5 有三个面板：(a) 阈值从 0.5 到 1.0 时的准确率，并标出平均每步揭开数；(b) 对应的总步数；(c) 以每步揭开数为横轴，把阈值规则和固定 \(k\) 放在一起比。读图的结果是：阈值从 1.0 降到 0.5，每步揭开数从 1 升到 7.01，总步数从 256 降到约 37，准确率在 0.9 以上几乎不变，0.7 以下明显下降。固定每步 2、4、8 个时，准确率约为 74.7%、66.5%、30.7%。差距最明显的是每步 4 个左右时的约 11 个点。原因可以用第 2 节的例子来理解：固定 \(k\) 时，不管模型有没有把握都要揭开 \(k\) 个，在难的地方就会把互相依赖、又都没把握的位置一起揭开；阈值规则则把并行度留给了容易的地方。</p>
+<p>附录还有两个相关观察。附录图 7 统计了因子规则下每一步平均揭开多少个：从开头逐渐增加，在第 30–60 步附近达到峰值，接近结尾又下降，结尾几步的波动也最大。附录 B 的单题案例中，阈值 0.7、0.8、0.9 都答对了，用的步数分别是 9、12、20。</p>
+
+<h4 id="n-6-5">6.5 换成更强的 LLaDA-1.5（附录 C.3）</h4>
+<p>LLaDA-1.5 是 LLaDA 经过偏好优化后的版本。用同样的 Fast-dLLM 设置，GSM8K 生成 256 时准确率 80.7%、59.4 token/秒；生成 512 时 80.4%、33.0 token/秒；MATH 生成 256、512 时分别是 32.6%、53.7 token/秒和 35.1%、41.1 token/秒（原文表 12）。说明这套免训练的加速可以直接套到改进后的模型上，准确率随底座提升，速度大致相当。</p>
+
+<h4 id="n-6-6">6.6 批量与局限（附录 C.5）</h4>
+<div class="note-pre"><b>先补一点背景：为什么批大小会改变谁快谁慢。</b>
+<p>自回归模型每一步只为每条请求算 1 个新 token，GPU 的时间主要花在把模型参数从显存里读出来上，算力大部分闲着；把 32 条请求放进一批，参数仍只读一遍，产出却是 32 倍，所以批越大吞吐越高，直到算力用满为止（详见 <a href="vllm.html#n-1">vLLM 精读 §1</a>）。扩散模型每一步本来就要处理几十到上千个位置，单条请求时算力已经用得比较满，批再大也很难再提速。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">简图：批大小从 1 到 32 时的吞吐（只开缓存，不开并行；提示长 256）</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="PrefixCache、原版 LLaDA 与 LLaMA 在不同批大小下的吞吐" style="--dg-min:760px">
+    <text x="270" y="22" class="t-c t-b">生成长度 16</text>
+    <text x="740" y="22" class="t-c t-b">生成长度 64</text>
+    <line class="grid-ln" x1="90" y1="204.3" x2="450" y2="204.3"/><line class="grid-ln" x1="90" y1="138.6" x2="450" y2="138.6"/><line class="grid-ln" x1="90" y1="72.9" x2="450" y2="72.9"/>
+    <line class="grid-ln" x1="560" y1="204.3" x2="920" y2="204.3"/><line class="grid-ln" x1="560" y1="138.6" x2="920" y2="138.6"/><line class="grid-ln" x1="560" y1="72.9" x2="920" y2="72.9"/>
+    <line class="axis" x1="90" y1="270" x2="450" y2="270"/><line class="axis" x1="90" y1="270" x2="90" y2="40"/>
+    <line class="axis" x1="560" y1="270" x2="920" y2="270"/><line class="axis" x1="560" y1="270" x2="560" y2="40"/>
+    <text x="82" y="270" class="t-r t-xs">0</text><text x="82" y="204.3" class="t-r t-xs">200</text><text x="82" y="138.6" class="t-r t-xs">400</text><text x="82" y="72.9" class="t-r t-xs">600</text>
+    <text x="552" y="270" class="t-r t-xs">0</text><text x="552" y="204.3" class="t-r t-xs">200</text><text x="552" y="138.6" class="t-r t-xs">400</text><text x="552" y="72.9" class="t-r t-xs">600</text>
+    <text x="100" y="288" class="t-c t-xs">1</text><text x="168" y="288" class="t-c t-xs">2</text><text x="236" y="288" class="t-c t-xs">4</text><text x="304" y="288" class="t-c t-xs">8</text><text x="372" y="288" class="t-c t-xs">16</text><text x="440" y="288" class="t-c t-xs">32</text>
+    <text x="570" y="288" class="t-c t-xs">1</text><text x="638" y="288" class="t-c t-xs">2</text><text x="706" y="288" class="t-c t-xs">4</text><text x="774" y="288" class="t-c t-xs">8</text><text x="842" y="288" class="t-c t-xs">16</text><text x="910" y="288" class="t-c t-xs">32</text>
+    <text x="270" y="306" class="t-c t-sm">批大小</text><text x="740" y="306" class="t-c t-sm">批大小</text>
+    <text x="34" y="155" class="t-c t-sm" transform="rotate(-90 34 155)">吞吐（token/秒）</text>
+    <polyline points="100,261.7 168,254 236,239.7 304,214.4 372,176.5 440,127.2" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:9 3 2 3"/>
+    <polyline points="100,260.4 168,251.8 236,236.4 304,215 372,205.5 440,200.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.6"/>
+    <polyline points="100,261.3 168,259.1 236,257.5 304,256.6 372,256.4 440,256" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2;stroke-dasharray:6 4"/>
+    <text x="446" y="122" class="t-xs">435</text><text x="446" y="196" class="t-xs">211</text><text x="446" y="252" class="t-xs">43</text>
+    <polyline points="570,261.9 638,254.1 706,238.5 774,208.5 842,152.8 910,56.4" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:9 3 2 3"/>
+    <polyline points="570,260.3 638,251.7 706,236.8 774,227.7 842,225.7 910,223.7" style="fill:none;stroke:var(--c-enc);stroke-width:2.6"/>
+    <polyline points="570,261.5 638,259.7 706,259 774,258 842,257.9 910,257.8" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2;stroke-dasharray:6 4"/>
+    <text x="916" y="52" class="t-xs">650</text><text x="916" y="219" class="t-xs">141</text><text x="916" y="252" class="t-xs">37</text>
+    <line x1="150" y1="326" x2="190" y2="326" style="stroke:var(--c-enc);stroke-width:2.6"/><text x="198" y="326" class="t-sm">LLaDA + PrefixCache</text>
+    <line x1="410" y1="326" x2="450" y2="326" style="stroke:var(--c-tgt);stroke-width:2.2;stroke-dasharray:6 4"/><text x="458" y="326" class="t-sm">原版 LLaDA</text>
+    <line x1="620" y1="326" x2="660" y2="326" style="stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:9 3 2 3"/><text x="668" y="326" class="t-sm">LLaMA（自回归）</text>
+  </svg>
+  <div class="dia-note">本站用读自原文附录图 9（<a href="https://arxiv.org/pdf/2505.22618v3" target="_blank" rel="noopener">PDF 第 20 页 ↗</a>）的约值重画，横轴按 2 的倍数等距排列。<b>怎么看：</b>batch 1 时三者都在每秒 25–30 个 token；原版 LLaDA 在 batch 8 以后几乎不再增长；PrefixCache 一路上升但逐渐变平；自回归的 LLaMA 几乎随批大小成比例增长，batch 32 时远远领先。线尾数字是 batch 32 时的吞吐。</div>
+</div>
+<p>这组实验在 A100 上固定提示长度 256，生成长度取 16、32、64，批大小从 1 到 32，只比较缓存（不开并行解码）。读图结果是：batch 1 时三者都在每秒 25–30 个 token；原版 LLaDA 在 batch 8 以后基本停在每秒 36–43 个；PrefixCache 在生成长度 16、batch 32 时达到约 211 个，约为原版的 5 倍（论文原文给出的就是 211 对 43）；LLaMA 则一路增长，batch 32 时约 435（生成 16）到 650（生成 64）个。作者的结论是：小批量时 PrefixCache 能和自回归模型相当甚至更快，批量变大后就追不上了；这是扩散模型每一步都要做整段注意力计算的共性问题。</p>
+<div class="note-warn"><b>这组实验能说明什么、不能说明什么：</b>它的生成长度只有 16–64，没有开并行解码，自回归一侧也没有说明用的是什么推理框架。所以它只能说明趋势（批越大，自回归越占优），不能直接换算成真实服务里两者的差距。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S4.SS3" target="_blank" rel="noopener">英文原文 §4.3 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a> · <a href="https://arxiv.org/pdf/2505.22618v3" target="_blank" rel="noopener">附录 B、C（PDF）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Fast-dLLM 在扩散语言模型和推理加速这两条脉络里处在什么位置？它和“块扩散”这类同样能用 KV 缓存的方法有什么本质区别？作者最后的结论是什么？</div>
+<p><b>扩散语言模型这条线。</b>论文把离散扩散的理论基础串了一遍：D3PM 用转移矩阵定义离散状态上的加噪过程，并用 ELBO 训练反向过程；CTMC 把它推广到连续时间；SEDD 换了一个思路，去学不同数据之间的概率比值；MDLM、RADD 则说明掩码扩散的几种参数化其实等价。在和预训练模型结合方面，Diffusion-NAT 把离散扩散和 BART 的非自回归解码统一起来；LLaDA 和 DiffuLLaMA 把扩散语言模型扩展到了 70 亿参数这一量级；LLaDA 和 Dream 在多个任务上和 LLaMA3 这样的自回归模型可比。</p>
+<p><b>推理加速这条线。</b>KV 缓存是自回归 Transformer 推理的基本优化，但在 LLaDA 这样的全注意力模型上用不了。块扩散（Block Diffusion）的思路是让模型一块一块地生成、块与块之间是因果的，这样已完成块的 key/value 就能精确缓存。非自回归生成最早用于机器翻译，一直面临“快但质量差”的问题；扩散语言模型是它的新形态，而 LLaDA 等先前工作恰恰因为并行时掉点而没能兑现速度。</p>
+<p><b>结论。</b>作者把开源扩散语言模型推理慢归结为两点：没有 KV 缓存，以及并行解码时的质量下降。对前者，他们利用分块生成提出了适配双向注意力的近似 KV 缓存；对后者，他们指出根源是条件独立假设破坏了 token 之间的依赖，并用置信度感知的并行解码来规避。在 LLaDA 和 Dream 上，两者合起来最高带来 27.6 倍加速，准确率损失很小。</p>
+<div class="note-warn"><b>和块扩散的区别：</b>块扩散（<a href="block-diffusion.html">BD3-LM 精读</a>）的缓存是精确的，因为模型训练时就用了块间因果的注意力；代价是要专门这样训练模型。Fast-dLLM 面对的是已经训练好的全双向模型，不改权重，所以它的缓存只能是近似的。同一团队后来的 Fast-dLLM v2 走的正是“改成块扩散再缓存”的路线（见下一节）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.22618v3#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2505.22618v3#S6" target="_blank" rel="noopener">§6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>“近似缓存 + 置信度阈值并行”很快成了扩散语言模型推理加速的一个基准做法，后来的工作大致沿三个方向推进：把缓存做得更准甚至精确，把并行度通过训练提上去，以及检验阈值规则在什么任务上会失效。在本站的扩散 LLM 路线里，可以接着读这些工作（下列数字均取自各论文摘要）：</p>
+<ul>
+  <li><a href="../legacy/tracks/dllm/14-kv-cache.html#dkv-cache">dKV-Cache</a>（新加坡国立大学，arXiv 首版 2025-05-21，比 Fast-dLLM 早一周，属于同期工作）：观察到一个 token 被定稿的那一步 key/value 变化最大、之后趋于稳定，于是只缓存已定稿的 token，并且延迟一步才写入；摘要报告 2–10 倍加速。它和 Fast-dLLM 是两种不同的近似：一个按“哪些 token 已经稳定”来缓存，一个按“哪一块正在写”来缓存。</li>
+  <li><a href="../legacy/tracks/dllm/14-kv-cache.html#d2f">D2F</a>（2025-08）：用非对称蒸馏把 LLaDA、Dream 改造成块间因果、块内双向的学生模型，换来精确的块级 KV 缓存，并让后面的块不必等前面的块写完就开始解码；摘要报告在 GSM8K 上比 LLaMA3 和 Qwen2.5 快 2.5 倍以上，比原版 LLaDA、Dream 快 50 倍以上。D2F 的实验把 Fast-dLLM 当作此前最好的加速方法来对照，并在解码时沿用了它的置信度阈值。</li>
+  <li><a href="../legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2">Fast-dLLM v2</a>（同一团队，2025-09）：不再在全双向模型上做近似，而是用约 10 亿 token 的微调把 Qwen2.5 改造成块扩散模型；块与块之间有精确的块级缓存，块内再用子块缓存和阈值并行解码；摘要报告相对标准自回归解码最高 2.5 倍。它的引言直接写道，v1 的 DualCache 这类近似缓存并没有从根本上解决扩散模型和 KV 缓存不兼容的问题。块扩散的原理见 <a href="block-diffusion.html">BD3-LM 精读</a>。</li>
+  <li><a href="../legacy/tracks/dllm/15-learned-parallel.html">dParallel</a>（2025-09）：认为并行度上不去的根源是掩码位置的置信度按顺序一个个收敛，于是用“确定性强制”蒸馏让模型更早、更同时地变得有把握；在 LLaDA-8B-Instruct 上把 GSM8K 的解码步数从 256 降到 30（8.5 倍）而不掉点。这条路线说明，阈值规则能并行多少，最终取决于模型本身有多少个位置“同时有把握”。</li>
+  <li><a href="../legacy/tracks/dllm/16-order-limits.html#parallelbench">ParallelBench</a>（2025-10）：指出数学、代码这类标准基准不足以暴露并行解码的问题，构造了对人和自回归模型都很简单、但 token 之间依赖很强的任务；结论之一是，现有的并行解码策略（包括阈值类）没法按任务难度调整并行度，难以在不掉质量的前提下真正提速。它的附录还测了 Fast-dLLM 的 PrefixCache，发现在这些任务上加缓存总体上会降低准确率。这正是第 4 节定理那几条前提在实践中的反面。</li>
+</ul>
+<p>工程上，官方仓库后来发展成一个系列（Fast-dLLM v2、面向图文的 Fast-dVLM、面向自动驾驶的 Fast-dDrive）。仓库公告称 Fast-dLLM 已集成进 LLaDA-V 的官方代码，把多模态推理延迟从 60 秒降到 6 秒；截至 2026-10-19，README 中“vLLM 支持”一项仍标为进行中。</p>
+<p>想看 Fast-dLLM 一步块内解码（DualCache + 置信度阈值）的可交互架构图，以及和 dKV-Cache、D2F 的逐项对照与配套简答题，见<a href="../legacy/tracks/dllm/14-kv-cache.html">旧版结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v3）。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Chengyue Wu</b>（共同一作）<div class="aff">香港大学；NVIDIA（论文署名）</div>个人主页：香港大学计算机系博士生，导师 Ping Luo 与 Wenping Wang；本科毕业于哈尔滨工业大学（2023）。也是 Fast-dLLM v2、Fast-dVLM 的第一作者。</div>
+  <div class="author-card"><b>Hao Zhang</b>（共同一作）<div class="aff">NVIDIA（论文署名）</div></div>
+  <div class="author-card"><b>Shuchen Xue</b><div class="aff">独立研究者（arXiv v3 署名；项目主页标为 NVIDIA）</div></div>
+  <div class="author-card"><b>Zhijian Liu</b><div class="aff">NVIDIA（论文署名）</div>个人主页：现为 UC San Diego 助理教授（Z Lab）并兼任 NVIDIA 研究科学家，MIT 博士，导师 Song Han；研究高效 AI，也是块扩散草稿模型 <a href="dflash.html">DFlash</a> 的作者之一。</div>
+  <div class="author-card"><b>Shizhe Diao</b><div class="aff">NVIDIA（论文署名）</div>个人主页：曾任 NVIDIA Research 高级研究科学家，现于 Thinking Machines Lab；2023 年获博士学位，导师 Tong Zhang；研究大模型后训练与强化学习。</div>
+  <div class="author-card"><b>Ligeng Zhu</b><div class="aff">NVIDIA（论文署名）</div>个人主页：NVIDIA 研究员，与 Song Han 合作；此前在 MIT（Song Han 组）、Simon Fraser University 和浙江大学。</div>
+  <div class="author-card senior"><b>Ping Luo</b><div class="aff">香港大学计算机系副教授</div>个人主页列出的工作涵盖图像与视频生成（如 PixArt-α、GenTron）和大模型量化（OmniQuant）等。</div>
+  <div class="author-card senior"><b>Song Han</b><div class="aff">MIT EECS 终身副教授；NVIDIA（论文署名）</div>斯坦福大学博士（导师 Bill Dally）。提出 Deep Compression（剪枝、量化）和 EIE 推理引擎；近年的 SmoothQuant、AWQ、StreamingLLM 等大模型量化与加速工作被 NVIDIA TensorRT-LLM 采用（据 MIT HAN Lab 主页）。</div>
+  <div class="author-card senior"><b>Enze Xie</b><div class="aff">NVIDIA Research 资深研究科学家（Staff Research Scientist）</div>个人主页：与 Song Han 合作，并为 MIT HAN Lab 访问研究员；2022 年获香港大学博士学位（导师 Ping Luo）；曾任华为诺亚方舟实验室生成式 AI 研究负责人；代表作包括 SegFormer、PVT、BEVFormer。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/NVlabs/Fast-dLLM" target="_blank" rel="noopener">NVlabs/Fast-dLLM</a> 仓库 1,106 个 star、144 个 fork（截至 2026-10-19），Apache-2.0 许可，创建于 2025-05-27；v1 的代码在仓库的 <code>v1/</code> 目录下，支持 LLaDA 和 Dream，另有在线演示。</li>
+  <li><b>采用</b>：仓库公告（2025-06-30）称 Fast-dLLM 已集成进 LLaDA-V 的官方代码。后续工作中，D2F 把 Fast-dLLM 的 PrefixCache、DualCache 当作主要对照的加速方法，并沿用了它的置信度阈值；Fast-dLLM v2 在块内直接沿用 DualCache 和阈值并行解码；ParallelBench 在附录里专门测了 PrefixCache 在其任务上的影响。</li>
+  <li><b>发表</b>：ICLR 2026（项目主页与官方仓库公告，2026-01-26 宣布与 Fast-dLLM v2 一同被接收）。arXiv 首版 2025-05-28，本页依据 v3（2025-07-03）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/14-kv-cache.html">旧版结构拆解：近似 KV 缓存与并行解码</a>（Fast-dLLM、dKV-Cache、D2F 对照，含简答题 Q27、Q28）</li>
+  <li><a href="llada.html">LLaDA 精读</a> · <a href="dream.html">Dream 精读</a>：本文加速的两个底座模型</li>
+  <li><a href="block-diffusion.html">BD3-LM（块扩散）精读</a>：用训练换来精确的块级 KV 缓存</li>
+  <li><a href="mdlm.html">MDLM 精读</a>：掩码扩散的训练目标与采样</li>
+  <li><a href="vllm.html">vLLM 精读</a>：自回归模型的 KV 缓存是什么、为什么占显存、批处理为什么能提吞吐</li>
+  <li><a href="speculative-decoding.html">投机解码精读</a>：自回归模型“一步多出几个 token”的另一条路（先草拟、再验证）</li>
+  <li><a href="../legacy/tracks/dllm/15-learned-parallel.html">学习式并行解码（dParallel 等）</a> · <a href="../legacy/tracks/dllm/16-order-limits.html">解码顺序与并行的极限（ParallelBench 等）</a> · <a href="../legacy/tracks/dllm/12-ar-to-block.html">从自回归转成块扩散（Fast-dLLM v2 等）</a></li>
+  <li><a href="../legacy/tracks/dllm/index.html">扩散 LLM 路线总览</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。原文以 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a> 许可发布，本页没有使用原文图片：所有图都是本站绘制的示意图，或依据论文表格与图中读出的数值重画的简图（读图数值为约值，已注明）。数字与结论以原文为准：<a href="https://arxiv.org/abs/2505.22618" target="_blank" rel="noopener">arXiv:2505.22618</a>（本页依据 v3，2025-07-03）。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

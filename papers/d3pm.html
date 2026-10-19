@@ -1,0 +1,1275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D3PM（离散状态空间扩散）精读</title>
+<meta name="description" content="NeurIPS 2021 论文 D3PM 的逐节精读：连续扩散为什么不能直接用在 token 上，转移矩阵、闭式边缘分布与后验怎么算，均匀 / 吸收态 / 离散高斯 / 嵌入近邻四种加噪方式，先猜 x0 的反向参数化与混合损失，它和 BERT、自回归、掩码语言模型的关系，以及 text8、LM1B、CIFAR-10 上的结果到底说明了什么。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="d3pm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · NeurIPS 2021</div>
+  <h1>离散状态空间上的结构化去噪扩散模型（D3PM）</h1>
+  <p class="en-title">Structured Denoising Diffusion Models in Discrete State-Spaces</p>
+  <div class="paper-authors">Jacob Austin<sup>*</sup>, Daniel D. Johnson<sup>*</sup>, Jonathan Ho, Daniel Tarlow, Rianne van den Berg<sup>†</sup></div>
+  <div class="paper-affil">Google Research, Brain Team　<sup>*</sup>共同一作　<sup>†</sup>论文脚注：现为 Microsoft Research</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2107.03006" target="_blank" rel="noopener">arXiv 2107.03006 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper/2021/hash/958c530554f78bcd8e97125b70e6973d-Abstract.html" target="_blank" rel="noopener">NeurIPS 2021 ↗</a>
+    <a class="pill" href="https://github.com/google-research/google-research/tree/master/d3pm" target="_blank" rel="noopener">Code: google-research/d3pm ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/01-foundations.html">旧版：扩散 LLM 从头讲起</a>
+  </div>
+  <div class="paper-stats" data-stats></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序（附录的内容并入它所补充的正文小节），用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文在 arXiv 上采用 CC BY-NC-SA 4.0 许可，不在本站允许转载原图的范围内，所以页面上的图全部是本站自己画的示意图，或者按论文报告的数字重画的简化图表，并附原图链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>2020 年的 DDPM 让扩散模型在图像生成上一举追上了 GAN。扩散模型的做法可以一句话说清：先规定一个“慢慢把数据弄脏”的过程，比如每一步往像素值上加一点高斯噪声，加到最后图像变成一片纯噪声；再训练一个神经网络学习反过来“一点点擦干净”，生成时从纯噪声出发，一步步擦回一张图。这套方法有一个默认前提：数据是连续的实数，“加一点噪声”才有意义。</p>
+<p>文字不满足这个前提。一句话是一串 <b>token</b>（词或词的片段），每个 token 只是词表里的一个编号。给编号 1532 加上 0.3 得不到任何东西，编号之间也没有“相近”的概念，所以高斯噪声没法直接加到 token 上。在这篇论文之前，Hoogeboom 等人（2021）提出过一种离散版本，叫多项式扩散（multinomial diffusion）：每一步以一定概率把 token 换成词表里随机挑的另一个 token。它能用，但在文本上离自回归模型（逐个往后写的普通语言模型）差得很远，也没有在大词表上验证过。</p>
+<p>D3PM（Discrete Denoising Diffusion Probabilistic Models）的核心想法是：<b>把“加噪”写成一个转移矩阵</b> \(Q_t\)。矩阵第 \(i\) 行第 \(j\) 列的数，就是“这一步里状态 \(i\) 变成状态 \(j\) 的概率”。只要选的矩阵满足几个简单条件，任意一步的加噪结果和反向训练需要的“后验分布”都能用矩阵乘法精确算出来，于是连续扩散的整套训练方法（变分下界）可以原封不动地搬到离散数据上。更重要的是，<b>矩阵怎么选变成了一个设计空间</b>：论文比较了均匀替换、变成 [MASK]（吸收态）、模仿高斯的“只往相邻值跳”、以及按词向量近邻替换四种。</p>
+<p>最重要的结果有三条。第一，在文本上，“变成 [MASK]”的吸收态加噪远好于其他几种：字符级数据集 text8 上 1.45 对均匀替换的 1.61 bits/char，LM1B 上困惑度 76.9 对 137.9。第二，在 CIFAR-10 图像上，模仿高斯的离散加噪配合新提出的混合损失，似然（3.435 bits/dim）超过了原始 DDPM，但图像质量（FID 7.34）仍不如它。第三，论文证明 BERT、自回归语言模型、生成式掩码语言模型都可以看成 D3PM 的特例；吸收态 D3PM 的训练目标化简以后，就是一个按 \(1/t\) 加权的掩码语言模型损失。三年后的 MDLM 和四年后的 LLaDA，用的正是这个目标的连续时间版本。同时也要看到它的位置：模型只有 7000 万参数，在 LM1B 上仍明显落后同样大小的自回归模型（76.9 对 43.6）。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>连续扩散的前向过程、反向过程和变分下界各是什么？训练时为什么需要“闭式边缘分布”和“可算的后验”这两个性质？</li>
+  <li>转移矩阵 \(Q_t\) 怎么定义，连乘以后为什么能一步跳到第 \(t\) 步？后验 \(q(x_{t-1}\mid x_t,x_0)\) 怎么用三个矩阵元素算出来？</li>
+  <li>四种转移矩阵各有什么性质，为什么吸收态在文本上最好，离散高斯在图像上最好？</li>
+  <li>“先猜 \(x_0\) 再倒推”的反向参数化有什么好处？混合损失 \(L_\lambda\) 加了什么、为什么有用、什么时候反而有害？</li>
+  <li>BERT、自回归模型、掩码语言模型分别在什么意义上是 D3PM？</li>
+  <li>text8、LM1B、CIFAR-10 上的数字是在什么条件下比出来的，哪些比较是公平的，哪些不是？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么要把扩散搬到离散数据上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>生成模型已经有 GAN、VAE、自回归模型、标准化流好几种，扩散模型凭什么值得做？它在图像和音频上成功了，为什么在文本、分割图这类离散数据上一直没做起来？这篇论文打算从哪里下手？</div>
+
+<div class="note-pre"><b>先补一点背景：自回归生成为什么慢，扩散为什么可能更快。</b>
+<p>今天的大语言模型几乎都是<b>自回归</b>（autoregressive, AR）模型：给定前面所有的 token，预测下一个 token，接上去再预测下一个。生成一段 256 个 token 的文字，就必须串行地做 256 次网络计算，因为第 \(n\) 个 token 要等前 \(n-1\) 个都确定了才能算。</p>
+<p>扩散模型的生成方式不同。它从一张“全是噪声”的画布出发，每一步让网络看一遍整张画布，同时修改所有位置，修改若干步以后得到结果。步数是事先选定的，和序列长度没有直接关系。如果 20 步就能修出一段 256 个 token 的文字，网络只需要算 20 次，而且每次都是对整段文字并行计算。这就是论文所说的“并行迭代精修”（parallel iterative refinement），也是人们想把扩散用到文本上的主要动机之一。另一个动机是：扩散模型每一步都能看到左右两边的上下文，天然适合填空、改写这类不是从左到右的任务。</p>
+</div>
+
+<p>论文先交代扩散模型的位置。它在图像（DDPM 等）和音频（WaveGrad、DiffWave）上，样本质量追上了 GAN，似然（衡量模型给真实数据打多高概率的指标）接近自回归模型，而且训练目标稳定：它和最大似然、得分匹配（score matching）都有直接联系，不像 GAN 那样容易训崩。</p>
+<p>扩散模型其实从 2015 年 Sohl-Dickstein 等人提出时起，就同时有连续和离散两种版本：原文用的离散例子是二值变量（0/1）。但后来几乎所有的进展都集中在连续空间的高斯扩散上。离散扩散只在 Hoogeboom 等人 2021 年的工作里被用到文本和图像分割上，也就是前面说的多项式扩散；Song 等人在 DDIM 的附录里推导过同样的扩展，但没有做实验。总之在这篇论文之前，离散扩散还没有在大规模文本或图像生成上表现出竞争力。</p>
+<p>论文的出发点是：<b>离散数据不需要先被“放松”或嵌入到连续空间里</b>，可以直接在离散状态之间定义加噪过程；而离散加噪的形式比“加高斯噪声”灵活得多，可以把领域知识写进转移矩阵。比如对图像的 256 个灰度值，可以让噪声更倾向于把一个灰度值换成相邻的灰度值，模仿连续扩散的局部性；对文本，可以让 token 被替换成意思相近的 token，或者直接变成一个专门的 [MASK] 符号。</p>
+<p>论文列出的贡献有这几项：</p>
+<ul>
+  <li>一个统一的离散扩散框架 D3PM，包含已有的均匀替换，以及新提出的离散高斯、嵌入近邻和吸收态（[MASK]）三种结构化加噪方式；</li>
+  <li>借助吸收态，把扩散模型和自回归模型、掩码语言模型联系起来；</li>
+  <li>一个能稳定训练的辅助损失，和一族基于互信息的噪声日程；</li>
+  <li>在字符级文本生成上明显超过各种非自回归基线，并把离散扩散扩展到 8192 个 token 的大词表和更长的序列；</li>
+  <li>在 CIFAR-10 上，似然超过、样本质量接近原始 DDPM。</li>
+</ul>
+<p>论文图 1 用一个二维的玩具例子把这件事画了出来：把“瑞士卷”形状的点云量化到网格上，每个点是一个二维的类别变量。上排是三种前向过程在 \(t=T/2\) 时把数据弄成什么样，每个小图角上附着对应转移矩阵的热力图：均匀加噪让点四散到整个网格；离散高斯让点只向邻近格子扩散，卷的形状还隐约可见；吸收态把一部分点直接“吸”到了网格边上的特殊状态。下排是学到的离散高斯反向过程，从均匀分布的噪声一步步恢复出瑞士卷。本站在 <a href="#n-4">第 4 节</a> 用一个 6 个状态的小例子重新画了这几种矩阵。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>“用扩散模型生成文字”有两条完全不同的路线。一条是本文这种<b>离散扩散</b>：状态始终是 token，噪声是“随机替换”。另一条是把 token 先映射成连续的词向量，在向量上加高斯噪声，最后再“取整”回最近的词，代表作是 2022 年的 Diffusion-LM（见本站 <a href="diffusion-lm.html">Diffusion-LM 精读</a>）。后来的 LLaDA 等大规模扩散语言模型走的是第一条路线，而且具体是本文的吸收态分支。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2107.03006#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：连续扩散模型是怎么工作的，为什么不能直接用在 token 上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散模型的“前向过程”“反向过程”“变分下界”具体是什么？训练一个扩散模型，对前向过程有哪两条硬性要求？高斯扩散为什么恰好满足这两条？而这些东西换到 token 上，卡在了哪里？后面整篇论文做的事情，就是给离散数据找一个同样满足这两条要求的前向过程。</div>
+
+<h4 id="n-2-1">2.1 前向过程：按固定规则一步步加噪</h4>
+<p>记干净的数据为 \(x_0\)（比如一张图片的全部像素值）。前向过程定义了一串越来越“脏”的版本 \(x_1,x_2,\dots,x_T\)，每一步只依赖上一步：</p>
+<div class="formula">$$q(x_{1:T}\mid x_0)=\prod_{t=1}^{T} q(x_t\mid x_{t-1})$$</div>
+<p>“只依赖上一步”叫<b>马尔可夫性质</b>：要知道 \(x_t\) 的分布，只需要知道 \(x_{t-1}\)，更早的历史不重要。连续扩散最常用的一步是：</p>
+<div class="formula">$$q(x_t\mid x_{t-1})=\mathcal{N}\big(x_t;\ \sqrt{1-\beta_t}\,x_{t-1},\ \beta_t I\big)$$</div>
+<p>意思是：先把上一步的值缩小一点（乘以 \(\sqrt{1-\beta_t}\)），再加上方差为 \(\beta_t\) 的高斯噪声。\(\beta_t\) 是一个事先定好的小数（DDPM 从 \(10^{-4}\) 线性增加到 0.02），叫<b>噪声日程</b>。这个过程没有任何要学的参数。</p>
+<p>它有一个很方便的性质：多步加噪可以合成一步。把 \(T\) 个高斯一步步叠起来，结果还是高斯，而且能直接写出来：</p>
+<div class="formula">$$q(x_t\mid x_0)=\mathcal{N}\big(x_t;\ \sqrt{\bar\alpha_t}\,x_0,\ (1-\bar\alpha_t) I\big),\qquad \bar\alpha_t=\prod_{s=1}^{t}(1-\beta_s)$$</div>
+<p>\(\bar\alpha_t\) 从接近 1 慢慢降到接近 0。当它接近 0 时，\(x_T\) 的分布就是标准高斯 \(\mathcal{N}(0,I)\)，不管 \(x_0\) 原来是什么。这个“最后忘掉起点”的分布叫<b>平稳分布</b>。可以把它想成一滴墨水滴进一杯水：一开始墨迹的形状还能看出来，搅得足够久以后，无论原来滴成什么形状，最后都是一杯均匀的淡灰色。</p>
+<div class="dia">
+  <div class="dia-title">示意图：扩散模型的两条链</div>
+  <svg class="dg" viewBox="0 0 960 262" role="img" aria-label="连续扩散的前向加噪与反向去噪链条" style="--dg-min:700px">
+<g class="data"><rect class="box" x="18" y="80" width="104" height="90" rx="8"/></g>
+<rect x="37.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<rect x="59.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.20"/>
+<rect x="81.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<rect x="37.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.20"/>
+<rect x="59.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<rect x="81.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.20"/>
+<rect x="37.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<rect x="59.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.20"/>
+<rect x="81.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<text x="70" y="190" class="t-c t-b">x<tspan dy="4" style="font-size:10px">0</tspan></text>
+<text x="70" y="212" class="t-c t-xs">数据</text>
+<g class="data"><rect class="box" x="178" y="80" width="104" height="90" rx="8"/></g>
+<rect x="197.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.81"/>
+<rect x="219.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.22"/>
+<rect x="241.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.85"/>
+<rect x="197.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.23"/>
+<rect x="219.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.86"/>
+<rect x="241.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.26"/>
+<rect x="197.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.91"/>
+<rect x="219.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.21"/>
+<rect x="241.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.87"/>
+<text x="230" y="190" class="t-c t-b">x<tspan dy="4" style="font-size:10px">1</tspan></text>
+<text x="230" y="212" class="t-c t-xs">加了一点噪声</text>
+<text x="390" y="125" class="t-c t-lg">…</text>
+<g class="data"><rect class="box" x="518" y="80" width="104" height="90" rx="8"/></g>
+<rect x="537.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.80"/>
+<rect x="559.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.25"/>
+<rect x="581.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.45"/>
+<rect x="537.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.59"/>
+<rect x="559.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.60"/>
+<rect x="581.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.26"/>
+<rect x="537.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.90"/>
+<rect x="559.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.39"/>
+<rect x="581.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.69"/>
+<text x="570" y="190" class="t-c t-b">x<tspan dy="4" style="font-size:10px">t</tspan></text>
+<text x="570" y="212" class="t-c t-xs">噪声更多</text>
+<text x="730" y="125" class="t-c t-lg">…</text>
+<g class="data"><rect class="box" x="838" y="80" width="104" height="90" rx="8"/></g>
+<rect x="857.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.77"/>
+<rect x="879.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.06"/>
+<rect x="901.0" y="92.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.71"/>
+<rect x="857.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.37"/>
+<rect x="879.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.09"/>
+<rect x="901.0" y="114.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.66"/>
+<rect x="857.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.93"/>
+<rect x="879.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.21"/>
+<rect x="901.0" y="136.0" width="20" height="20" rx="3" style="fill:var(--c-enc);fill-opacity:0.63"/>
+<text x="890" y="190" class="t-c t-b">x<tspan dy="4" style="font-size:10px">T</tspan></text>
+<text x="890" y="212" class="t-c t-xs">几乎纯噪声</text>
+<path class="edge pred" d="M125,70 C145,40 155,40 175,70"/>
+<path class="edge enc" d="M175,180 C155,224 145,224 125,180"/>
+<path class="edge pred" d="M285,70 C305,40 352,40 372,70"/>
+<path class="edge enc" d="M372,180 C352,224 305,224 285,180"/>
+<path class="edge pred" d="M408,70 C428,40 495,40 515,70"/>
+<path class="edge enc" d="M515,180 C495,224 428,224 408,180"/>
+<path class="edge pred" d="M625,70 C645,40 692,40 712,70"/>
+<path class="edge enc" d="M712,180 C692,224 645,224 625,180"/>
+<path class="edge pred" d="M748,70 C768,40 815,40 835,70"/>
+<path class="edge enc" d="M835,180 C815,224 768,224 748,180"/>
+<text x="480" y="24" class="t-c t-sm" style="fill:var(--c-pred)">前向过程 q：按固定规则一步步加噪，不需要学习</text>
+<text x="480" y="252" class="t-c t-sm" style="fill:var(--c-enc)">反向过程 pθ：神经网络学习一步步去噪；生成时从纯噪声出发，一步步走回数据</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每个方框是一个 3×3 的小“图像”，颜色深浅代表像素值。从左往右是前向过程（橙色箭头）：干净的棋盘格逐渐被噪声淹没，到 \(x_T\) 时已经看不出原来的图案。从右往左是反向过程（蓝色箭头）：训练好的网络每一步去掉一点噪声。前向过程是人定的、不需要学习；整个模型要学的只有反向过程。本站示意图，不是论文数据。</div>
+</div>
+
+<h4 id="n-2-2">2.2 反向过程与变分下界</h4>
+<p>生成模型是反过来走的这条链：</p>
+<div class="formula">$$p_\theta(x_{0:T})=p(x_T)\prod_{t=1}^{T}p_\theta(x_{t-1}\mid x_t)$$</div>
+<p>\(p(x_T)\) 是起点分布（先验），通常就取前向过程的平稳分布；\(p_\theta(x_{t-1}\mid x_t)\) 是神经网络，参数为 \(\theta\)，负责“看到第 \(t\) 步的脏数据，给出第 \(t-1\) 步稍干净一些的数据的分布”。连续扩散里它也是一个高斯，均值（有时还有方差）由网络给出。</p>
+<div class="note-pre"><b>先补一点背景：KL 散度与变分下界。</b>
+<p><b>KL 散度</b> \(D_{\mathrm{KL}}[q\,\|\,p]\) 衡量两个分布 \(q\) 和 \(p\) 有多不一样：两者完全相同时它等于 0，否则是正数。对离散分布，它就是 \(\sum_x q(x)\log\frac{q(x)}{p(x)}\)，把所有可能的取值加一遍。</p>
+<p>训练生成模型最理想的目标是最大化 \(\log p_\theta(x_0)\)，也就是让模型给真实数据打的概率尽量高（等价于最小化负对数似然 NLL）。麻烦在于 \(p_\theta(x_0)\) 要把所有可能的中间路径 \(x_1,\dots,x_T\) 都积分（求和）掉，算不出来。<b>变分下界</b>（ELBO）绕开了这个问题：借助前向过程 \(q\) 这个“辅助分布”，可以证明（用 Jensen 不等式）下面这个能算的量一定大于等于负对数似然。于是最小化它，就是在把负对数似然的一个上界往下压。报告结果时，这个上界本身就被当作 NLL 的估计，所以扩散模型的 NLL 前面常常带一个“≤”。</p>
+</div>
+<p>扩散模型的变分上界可以拆成三类项：</p>
+<div class="formula">$$L_{\mathrm{vb}}=\mathbb{E}_{q(x_0)}\Big[\underbrace{D_{\mathrm{KL}}[q(x_T\mid x_0)\,\|\,p(x_T)]}_{L_T}+\sum_{t=2}^{T}\underbrace{\mathbb{E}_{q(x_t\mid x_0)}D_{\mathrm{KL}}[q(x_{t-1}\mid x_t,x_0)\,\|\,p_\theta(x_{t-1}\mid x_t)]}_{L_{t-1}}\ \underbrace{-\ \mathbb{E}_{q(x_1\mid x_0)}\log p_\theta(x_0\mid x_1)}_{L_0}\Big]$$</div>
+<ul>
+  <li>\(L_T\)：加噪到最后得到的分布，和生成时的起点分布差多少。它不含网络参数。只要 \(T\) 足够大、并且先验就取平稳分布，它会趋于 0。</li>
+  <li>\(L_{t-1}\)（\(t=2,\dots,T\)）：网络给出的“往回走一步”的分布 \(p_\theta(x_{t-1}\mid x_t)\)，和“既知道 \(x_t\) 又偷看了答案 \(x_0\)”时往回走一步的真实分布 \(q(x_{t-1}\mid x_t,x_0)\) 差多少。后者叫<b>前向过程的后验</b>。这是训练的主体。</li>
+  <li>\(L_0\)：最后一步从 \(x_1\) 恢复出 \(x_0\) 的对数似然，相当于一个“解码”项。</li>
+</ul>
+<p>直观地说：网络在每一步只需要学会“像一个偷看了答案的人那样往回走一步”。偷看答案的那个人的行为（后验）是能精确写出来的，所以每一项都是两个已知形式的分布之间的 KL，可以直接算。</p>
+
+<h4 id="n-2-3">2.3 训练对前向过程的两条要求</h4>
+<p>前向过程 \(q(x_t\mid x_{t-1})\) 理论上可以随便定，但要让训练高效，论文指出它必须满足两条：</p>
+<ol>
+  <li><b>能直接从 \(q(x_t\mid x_0)\) 采样任意一步。</b>这样训练时就不必真的从 \(x_0\) 一步步加噪到 \(x_t\)：每次随机抽一个 \(t\)，一步跳到 \(x_t\)，只优化这一项 \(L_{t-1}\)。\(T\) 是 1000，如果每次都要走 1000 步，训练就慢了 1000 倍。</li>
+  <li><b>后验 \(q(x_{t-1}\mid x_t,x_0)\) 有可算的表达式。</b>否则 \(L_{t-1}\) 里的 KL 根本算不出来。</li>
+</ol>
+<p>高斯扩散两条都满足：\(q(x_t\mid x_0)\) 是上面那个闭式高斯；后验也是高斯，均值和方差都有公式；两个高斯之间的 KL 有解析式。另外还有一个让人放心的理论事实：当 \(T\) 趋于无穷、每一步的噪声都很小时，反向过程和前向过程具有相同的函数形式（Feller 1949），所以用高斯来参数化反向的每一步是合理的。</p>
+
+<h4 id="n-2-4">2.4 换到 token 上，卡在哪里</h4>
+<p>文本里的一个 token 是词表 \(\{1,\dots,K\}\) 中的一个编号。编号只是一个标签：第 1532 号是 “cat”、第 1533 号是 “sat”，两个编号相邻不代表两个词有任何关系。于是高斯扩散的每一个零件都失效了：</p>
+<ul>
+  <li>“把值缩小一点再加一点噪声”没有意义，加完以后得到 1532.3，它不是任何一个 token；</li>
+  <li>“一小步”的概念不存在：从 cat 走到 dog 算一小步还是一大步？编号说明不了；</li>
+  <li>反向过程用高斯参数化也就没有道理了，因为输出必须落在有限个类别上。</li>
+</ul>
+<p>当时有两种绕开的办法。一种是把离散数据嵌入到连续空间再做高斯扩散，论文提到图生成和符号音乐生成上有这样的工作，但都没有用在文本上（一年后的 Diffusion-LM 才把它用到文本，见 <a href="diffusion-lm.html">Diffusion-LM 精读</a>）。另一种是留在离散空间里，把“噪声”重新定义为<b>按概率把一个类别换成另一个类别</b>。D3PM 走的是第二条路，下一节的任务就是证明：只要把“替换的概率”写成矩阵，上面那两条训练要求都能满足。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一个 token 序列，两种“加噪”</div>
+  <div class="dia-row"><span class="lbl">原句（编号）</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">cat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">sat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">on</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">mat</span></div></div>
+  <div class="dia-out">词表编号，比如 the = 5，cat = 1532，sat = 1533，on = 12，mat = 4087（示意值）。</div>
+  <div class="dia-row"><span class="lbl">加高斯噪声</span><div class="cells"><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">5.3</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">1531.6</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">1533.9</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">11.2</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">4.8</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">4087.4</span></div></div>
+  <div class="dia-out">得到的不是 token。四舍五入回去，1534 号可能是一个和 cat 毫不相干的词：编号上的“近”不等于意思上的“近”。</div>
+  <div class="dia-row"><span class="lbl">D3PM：按概率替换</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">sat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">on</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">dog</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">mat</span></div></div>
+  <div class="dia-out">每个位置独立地以一定概率被换成别的类别（这里画了一个换成 [MASK]、一个换成随机词），结果仍然是合法的 token 序列。换成什么、以多大概率换，由转移矩阵规定。</div>
+  <div class="dia-note">本站示意图。</div>
+</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 离散状态空间上的扩散：用转移矩阵加噪</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>如果“噪声”是按概率把一个类别换成另一个类别，那么一步加噪怎么写？多步加噪能不能像高斯那样合成一步？反向训练需要的后验 \(q(x_{t-1}\mid x_t,x_0)\) 能不能精确算出来？这一节给出 D3PM 的全部基本公式，并用只有 3 个 token 的词表把每个公式都算一遍。</div>
+
+<div class="note-pre"><b>先补一点背景：one-hot 向量、类别分布与转移矩阵。</b>
+<p>设词表有 \(K\) 个 token。一个 token 可以写成一个长度为 \(K\) 的 <b>one-hot 行向量</b>：只有它自己那一格是 1，其余都是 0。比如词表是 {A, B, C}，那么 B 就是 \((0,1,0)\)。</p>
+<p>一个<b>类别分布</b> \(\mathrm{Cat}(x;p)\) 由一个概率行向量 \(p\) 给出，\(p\) 的第 \(j\) 格是“取到第 \(j\) 个类别”的概率，所有格加起来等于 1。比如 \(p=(0.8,0.1,0.1)\) 表示 80% 是 A，B 和 C 各 10%。</p>
+<p>一个 \(K\times K\) 的<b>转移矩阵</b> \(Q\) 描述“一步之内从哪个类别变到哪个类别”：第 \(i\) 行第 \(j\) 列 \([Q]_{ij}\) 是“现在是 \(i\)，下一步变成 \(j\)”的概率。每一行都是一个概率分布，所以每行加起来等于 1（这样的矩阵叫<b>行随机矩阵</b>）。一个 one-hot 行向量乘以 \(Q\)，正好把 \(Q\) 的对应那一行“挑”出来：\((0,1,0)\,Q\) 就是 \(Q\) 的第 2 行，也就是“现在是 B 时，下一步的分布”。</p>
+</div>
+
+<h4 id="n-3-1">3.1 一步加噪、多步合成、后验</h4>
+<p>D3PM 用一串转移矩阵 \(Q_1,\dots,Q_T\) 定义前向过程，第 \(t\) 步用 \(Q_t\)：</p>
+<div class="formula">$$[Q_t]_{ij}=q(x_t=j\mid x_{t-1}=i),\qquad q(x_t\mid x_{t-1})=\mathrm{Cat}\big(x_t;\ p=x_{t-1}Q_t\big)$$</div>
+<p>这里 \(x_{t-1}\) 是 one-hot 行向量，\(x_{t-1}Q_t\) 就是 \(Q_t\) 中对应那一行。对一个句子或一张图，论文假设<b>每个位置独立地用同一个 \(Q_t\) 加噪</b>，所以只需要对单个位置写公式，整个序列的概率是各位置的乘积。</p>
+<p><b>多步合成。</b>先从 \(x_0\) 走一步得到分布 \(x_0Q_1\)，再走一步就是 \(x_0Q_1Q_2\)。依此类推，走 \(t\) 步以后：</p>
+<div class="formula">$$q(x_t\mid x_0)=\mathrm{Cat}\big(x_t;\ p=x_0\overline{Q}_t\big),\qquad \overline{Q}_t=Q_1Q_2\cdots Q_t$$</div>
+<p>为什么是矩阵连乘？“第 \(t\) 步是 \(j\)”的概率，要把所有可能的中间状态都加起来：先从 \(x_0\) 到某个 \(k\)，再从 \(k\) 到 \(j\)，对 \(k\) 求和。这个“对中间状态求和”的操作恰好就是矩阵乘法的定义。于是第 1 条训练要求满足了：只要事先把 \(\overline{Q}_t\) 算好，任意一步都能从 \(x_0\) 一次性采样出来。</p>
+<p><b>后验。</b>用贝叶斯公式，加上马尔可夫性质 \(q(x_t\mid x_{t-1},x_0)=q(x_t\mid x_{t-1})\)：</p>
+<div class="formula">$$q(x_{t-1}\mid x_t,x_0)=\frac{q(x_t\mid x_{t-1})\,q(x_{t-1}\mid x_0)}{q(x_t\mid x_0)}=\mathrm{Cat}\!\left(x_{t-1};\ p=\frac{x_tQ_t^{\top}\odot x_0\overline{Q}_{t-1}}{x_0\overline{Q}_t\,x_t^{\top}}\right)$$</div>
+<p>这个式子看起来复杂，其实分子分母各是一个查表：</p>
+<ul>
+  <li>\(x_tQ_t^{\top}\) 是 \(Q_t\) 的第 \(x_t\) <b>列</b>：对每个候选的 \(x_{t-1}\)，“从它出发一步变成观测到的 \(x_t\)”的概率；</li>
+  <li>\(x_0\overline{Q}_{t-1}\) 是 \(\overline{Q}_{t-1}\) 的第 \(x_0\) <b>行</b>：“从 \(x_0\) 出发 \(t-1\) 步后是各个候选”的概率；</li>
+  <li>\(\odot\) 表示逐元素相乘；分母 \(x_0\overline{Q}_t x_t^{\top}\) 是 \(\overline{Q}_t\) 的第 \((x_0,x_t)\) 个元素，只是把分子归一化。</li>
+</ul>
+<p>于是第 2 条训练要求也满足了。\(L_{t-1}\) 里的 KL 是两个 \(K\) 类分布之间的 KL，对 \(K\) 个取值求和就能算出来；因为每个位置独立，整个序列的 KL 就是各位置之和。</p>
+
+<h4 id="n-3-2">3.2 用 3 个 token 的词表把公式算一遍</h4>
+<div class="dia">
+  <div class="dia-title">算例一：均匀加噪，词表 {A, B, C}，每步 \(\beta=0.3\)</div>
+  <p style="margin:4px 0">均匀加噪的矩阵是 \(Q=(1-\beta)I+\frac{\beta}{K}\mathbf{1}\mathbf{1}^{\top}\)：以概率 \(1-\beta\) 什么也不做，以概率 \(\beta\) 从整个词表里均匀地重新抽一个（可能抽回自己）。\(K=3\)、\(\beta=0.3\) 时，对角线是 \(0.7+0.1=0.8\)，其余是 0.1。</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th colspan="3">\(Q_1=Q_2\)（每步）</th><th colspan="3">\(\overline{Q}_2=Q_1Q_2\)（两步合成）</th></tr>
+    <tr><th>从（行）→ 到（列）</th><th class="num">A</th><th class="num">B</th><th class="num">C</th><th class="num">A</th><th class="num">B</th><th class="num">C</th></tr>
+    <tr><td>A</td><td class="num">0.8</td><td class="num">0.1</td><td class="num">0.1</td><td class="num">0.66</td><td class="num">0.17</td><td class="num">0.17</td></tr>
+    <tr><td>B</td><td class="num">0.1</td><td class="num">0.8</td><td class="num">0.1</td><td class="num">0.17</td><td class="num">0.66</td><td class="num">0.17</td></tr>
+    <tr><td>C</td><td class="num">0.1</td><td class="num">0.1</td><td class="num">0.8</td><td class="num">0.17</td><td class="num">0.17</td><td class="num">0.66</td></tr>
+  </table></div>
+  <p style="margin:4px 0">怎么算出 0.66：从 A 出发两步后还是 A，有三条路：A→A→A（\(0.8\times0.8=0.64\)）、A→B→A（\(0.1\times0.1=0.01\)）、A→C→A（0.01），合计 0.66。0.17 同理：A→A→B（0.08）+ A→B→B（0.08）+ A→C→B（0.01）。也可以用闭式验证：两步的“保留概率” \(\bar\alpha_2=0.7^2=0.49\)，对角线 \(=0.49+0.51/3=0.66\)，非对角 \(=0.51/3=0.17\)。</p>
+  <p style="margin:4px 0"><b>后验</b>：已知 \(x_0=\)A、\(x_2=\)B，问 \(x_1\) 是什么。按上面的公式，对每个候选 \(x_1\) 算“\(Q_2\) 的 B 列 × \(\overline{Q}_1\) 的 A 行”：\(x_1=\)A 得 \(0.1\times0.8=0.08\)，\(x_1=\)B 得 \(0.8\times0.1=0.08\)，\(x_1=\)C 得 \(0.1\times0.1=0.01\)。三者之和 0.17 正好等于 \(\overline{Q}_2\) 的 (A, B) 元素。归一化后 \(q(x_1\mid x_2{=}\mathrm{B},x_0{=}\mathrm{A})=(0.47,\,0.47,\,0.06)\)（推算）：中间那一步大概率要么还没变（是 A），要么已经变成了 B，绕道 C 的可能很小。</p>
+  <div class="dia-note">本站算例，数字都是推算。</div>
+</div>
+<div class="dia">
+  <div class="dia-title">算例二：吸收态加噪，词表 {A, B, [M]}，\(\beta_1=0.2\)、\(\beta_2=0.25\)</div>
+  <p style="margin:4px 0">吸收态的矩阵是 \(Q_t=(1-\beta_t)I+\beta_t\mathbf{1}\mathbf{e}_m^{\top}\)：普通 token 以概率 \(\beta_t\) 变成 [M]，否则不变；[M] 永远是 [M]。这里的 0.2 和 0.25 不是随便选的：它们正是 \(T=5\) 时第 5 节要讲的 \(\beta_t=1/(T-t+1)\) 日程的前两步（1/5 和 1/4）。</p>
+  <div class="table-wrap"><table>
+    <tr><th></th><th colspan="3">\(Q_1\)</th><th colspan="3">\(Q_2\)</th><th colspan="3">\(\overline{Q}_2=Q_1Q_2\)</th></tr>
+    <tr><th>从（行）→ 到（列）</th><th class="num">A</th><th class="num">B</th><th class="num">[M]</th><th class="num">A</th><th class="num">B</th><th class="num">[M]</th><th class="num">A</th><th class="num">B</th><th class="num">[M]</th></tr>
+    <tr><td>A</td><td class="num">0.8</td><td class="num">0</td><td class="num">0.2</td><td class="num">0.75</td><td class="num">0</td><td class="num">0.25</td><td class="num">0.6</td><td class="num">0</td><td class="num">0.4</td></tr>
+    <tr><td>B</td><td class="num">0</td><td class="num">0.8</td><td class="num">0.2</td><td class="num">0</td><td class="num">0.75</td><td class="num">0.25</td><td class="num">0</td><td class="num">0.6</td><td class="num">0.4</td></tr>
+    <tr><td>[M]</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">0</td><td class="num">0</td><td class="num">1</td><td class="num">0</td><td class="num">0</td><td class="num">1</td></tr>
+  </table></div>
+  <p style="margin:4px 0">两步以后还没被掩掉的概率是 \(0.8\times0.75=0.6\)，被掩掉的概率是 0.4。吸收态的连乘永远是这个样子：只需要记住一个数“到现在为止还没被掩的概率” \(\bar\alpha_t=\prod_{s\le t}(1-\beta_s)\)，\(\overline{Q}_t=\bar\alpha_tI+(1-\bar\alpha_t)\mathbf{1}\mathbf{e}_m^{\top}\)。</p>
+  <p style="margin:4px 0"><b>后验</b>：已知 \(x_0=\)A、\(x_2=\)[M]，问 \(x_1\)。\(Q_2\) 的 [M] 列是 \((0.25,\,0.25,\,1)\)，\(\overline{Q}_1\) 的 A 行是 \((0.8,\,0,\,0.2)\)，逐元素相乘得 \((0.2,\,0,\,0.2)\)，除以 \(\overline{Q}_2\) 的 (A, [M]) 元素 0.4，得到 \((0.5,\,0,\,0.5)\)（推算）。读法：这个 [M] 有一半可能是第 2 步刚被掩的（那么 \(x_1\) 还是 A），一半可能第 1 步就被掩了；但它绝不可能在第 1 步是 B，因为吸收态的 token 只能“保持原样”或“变成 [M]”。</p>
+  <div class="dia-note">本站算例，数字都是推算。第二个算例里后验的“零”很重要：它说明矩阵里的 0 会原样传到后验里，第 6 节会用到这一点。</div>
+</div>
+
+<h4 id="n-3-3">3.3 逐位置独立，以及它的代价</h4>
+<p>前面说过，前向过程对每个位置独立加噪。论文同时假设反向过程 \(p_\theta(x_{t-1}\mid x_t)\) 在给定整个 \(x_t\) 的条件下，<b>各位置也相互独立</b>：网络看的是整句话，但给出的是每个位置各自的分布，采样时各位置各抽各的。这样 KL 才能逐位置求和，计算量是“序列长度 × 词表大小”，而不是“词表大小的序列长度次方”。</p>
+<p>这个假设在每步只改动很少几个位置时无伤大雅，但如果一步之内要同时决定好几个彼此相关的位置，独立采样就可能拼出互相矛盾的组合。第 6 节讲少步数生成时会回到这个问题。</p>
+<p>剩下的工程问题是 \(\overline{Q}_t\) 怎么算。对小词表，可以把 \(T\) 个连乘结果全部预先算好存起来；对大词表和大 \(T\)，存储会爆炸。附录 A.4 给出了解决办法，放在 <a href="#n-4-6">4.6 节</a>讲。从这里开始，论文把所有离散状态空间上的扩散模型统称为 D3PM。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 转移矩阵怎么选：四种加噪方式</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>连续扩散几乎只有“加高斯噪声”一种选择，而 D3PM 的转移矩阵可以随便设计。设计时有哪些硬性约束？论文实际试了哪几种矩阵，各自代表什么样的“噪声”，各适合什么数据？词表很大时，这些矩阵还算得动吗？</div>
+
+<h4 id="n-4-1">4.1 两条约束与平稳分布</h4>
+<p>对 \(Q_t\) 只有两条要求。第一，每行加起来等于 1，否则概率不守恒。第二，连乘 \(\overline{Q}_t\) 的每一行在 \(t\) 很大时要收敛到一个<b>已知的平稳分布</b> \(\pi\)。有了第二条，生成时的起点就可以直接取 \(p(x_T)=\pi\)，变分下界里的 \(L_T\) 自然趋于 0。（如果不知道平稳分布，也可以学一个先验 \(p_\theta(x_T)\)；论文脚注指出，这等价于在前向过程末尾再接一个“忽略输入、输出固定值”的秩一矩阵。）</p>
+<div class="note-pre"><b>先补一点背景：双随机矩阵为什么收敛到均匀分布（附录 A.1）。</b>
+<p>如果一个矩阵的行和列都加起来等于 1，叫<b>双随机矩阵</b>。设均匀分布 \(\pi=(1/K,\dots,1/K)\)，那么 \(\pi Q\) 的每一格都是“某一列的和 × \(1/K\)”，也就是 \(1/K\)，所以 \(\pi Q=\pi\)：均匀分布是它的不动点。如果矩阵的元素还全部为正，Perron–Frobenius 定理保证从任何起点出发，反复乘这个矩阵都会收敛到这个不动点。算例一里的均匀矩阵就是这样：\(\overline{Q}_2\) 的对角线已经从 0.8 降到 0.66，继续乘下去，每一格都会趋于 1/3。论文进一步说明，即使每一步的 \(Q_t\) 不相同，只要它们都是双随机、不可约、非周期的，平稳分布也只能是均匀分布；实践中让 \(Q_t\) 随 \(t\) 增大加更多噪声，保证 \(\overline{Q}_T\) 已经非常接近均匀。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：四种转移矩阵（6 个状态，单步）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="四种转移矩阵的示意热力图" style="--dg-min:760px">
+<text x="142" y="22" class="t-c t-b">均匀（uniform）</text>
+<text x="142" y="42" class="t-c t-xs">列 = 到哪个状态 j</text>
+<text x="62" y="74.0" class="t-r t-mono">a</text>
+<text x="82.0" y="54" class="t-c t-mono">a</text>
+<rect x="70" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<rect x="94" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="118" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="142" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="166" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="190" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="62" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<text x="62" y="98.0" class="t-r t-mono">b</text>
+<text x="106.0" y="54" class="t-c t-mono">b</text>
+<rect x="70" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="94" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<rect x="118" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="142" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="166" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="190" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="86" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<text x="62" y="122.0" class="t-r t-mono">c</text>
+<text x="130.0" y="54" class="t-c t-mono">c</text>
+<rect x="70" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="94" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="118" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<rect x="142" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="166" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="190" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="110" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<text x="62" y="146.0" class="t-r t-mono">d</text>
+<text x="154.0" y="54" class="t-c t-mono">d</text>
+<rect x="70" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="94" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="118" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="142" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<rect x="166" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="190" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="134" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<text x="62" y="170.0" class="t-r t-mono">e</text>
+<text x="178.0" y="54" class="t-c t-mono">e</text>
+<rect x="70" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="94" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="118" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="142" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="166" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<rect x="190" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="158" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<text x="62" y="194.0" class="t-r t-mono">f</text>
+<text x="202.0" y="54" class="t-c t-mono">f</text>
+<rect x="70" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="70" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="94" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="94" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="118" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="118" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="142" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="142" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="166" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="166" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.29"/>
+<rect x="190" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="190" y="182" width="22" height="22" rx="3" style="fill:var(--c-enc);fill-opacity:0.76"/>
+<text x="142" y="226" class="t-c t-sm">对角之外处处相同</text>
+<text x="142" y="246" class="t-c t-xs">平稳分布：均匀</text>
+<text x="377" y="22" class="t-c t-b">吸收态（absorbing）</text>
+<text x="377" y="42" class="t-c t-xs">列 = 到哪个状态 j</text>
+<text x="297" y="74.0" class="t-r t-mono">a</text>
+<text x="317.0" y="54" class="t-c t-mono">a</text>
+<rect x="305" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="305" y="62" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<rect x="329" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="62" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<text x="297" y="98.0" class="t-r t-mono">b</text>
+<text x="341.0" y="54" class="t-c t-mono">b</text>
+<rect x="305" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="86" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<rect x="353" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="86" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<text x="297" y="122.0" class="t-r t-mono">c</text>
+<text x="365.0" y="54" class="t-c t-mono">c</text>
+<rect x="305" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="110" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<rect x="377" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="110" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<text x="297" y="146.0" class="t-r t-mono">d</text>
+<text x="389.0" y="54" class="t-c t-mono">d</text>
+<rect x="305" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="134" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<rect x="401" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="134" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<text x="297" y="170.0" class="t-r t-mono">e</text>
+<text x="413.0" y="54" class="t-c t-mono">e</text>
+<rect x="305" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="158" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<rect x="425" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="158" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:0.71"/>
+<text x="297" y="194.0" class="t-r t-mono">M</text>
+<text x="437.0" y="54" class="t-c t-mono">M</text>
+<rect x="305" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="329" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="353" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="377" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="401" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="425" y="182" width="22" height="22" rx="3" style="fill:var(--c-loss);fill-opacity:1.00"/>
+<text x="377" y="226" class="t-c t-sm">只能留在原地或跳进 [M]</text>
+<text x="377" y="246" class="t-c t-xs">平稳分布：全部质量在 [M]</text>
+<text x="612" y="22" class="t-c t-b">离散高斯（Gauss）</text>
+<text x="612" y="42" class="t-c t-xs">列 = 到哪个状态 j</text>
+<text x="532" y="74.0" class="t-r t-mono">0</text>
+<text x="552.0" y="54" class="t-c t-mono">0</text>
+<rect x="540" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="540" y="62" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.92"/>
+<rect x="564" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="62" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="588" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="62" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="612" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="636" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="660" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="532" y="98.0" class="t-r t-mono">1</text>
+<text x="576.0" y="54" class="t-c t-mono">1</text>
+<rect x="540" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="540" y="86" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="564" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="86" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.84"/>
+<rect x="588" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="86" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="612" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="86" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="636" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="660" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="532" y="122.0" class="t-r t-mono">2</text>
+<text x="600.0" y="54" class="t-c t-mono">2</text>
+<rect x="540" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="540" y="110" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="564" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="110" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="588" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="110" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.84"/>
+<rect x="612" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="110" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="636" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="636" y="110" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="660" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="532" y="146.0" class="t-r t-mono">3</text>
+<text x="624.0" y="54" class="t-c t-mono">3</text>
+<rect x="540" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="134" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="588" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="134" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="612" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="134" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.84"/>
+<rect x="636" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="636" y="134" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="660" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="660" y="134" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<text x="532" y="170.0" class="t-r t-mono">4</text>
+<text x="648.0" y="54" class="t-c t-mono">4</text>
+<rect x="540" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="158" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="612" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="158" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="636" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="636" y="158" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.84"/>
+<rect x="660" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="660" y="158" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<text x="532" y="194.0" class="t-r t-mono">5</text>
+<text x="672.0" y="54" class="t-c t-mono">5</text>
+<rect x="540" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="564" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="588" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="612" y="182" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.03"/>
+<rect x="636" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="636" y="182" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.38"/>
+<rect x="660" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="660" y="182" width="22" height="22" rx="3" style="fill:var(--c-act);fill-opacity:0.92"/>
+<text x="612" y="226" class="t-c t-sm">只往相邻的灰度值跳</text>
+<text x="612" y="246" class="t-c t-xs">平稳分布：均匀</text>
+<text x="847" y="22" class="t-c t-b">嵌入近邻（NN）</text>
+<text x="847" y="42" class="t-c t-xs">列 = 到哪个状态 j</text>
+<text x="767" y="74.0" class="t-r t-mono">a</text>
+<text x="787.0" y="54" class="t-c t-mono">a</text>
+<rect x="775" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="775" y="62" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.82"/>
+<rect x="799" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="62" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.51"/>
+<rect x="823" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="62" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.24"/>
+<rect x="847" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="62" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.10"/>
+<rect x="871" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="62" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.03"/>
+<rect x="895" y="62" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="767" y="98.0" class="t-r t-mono">e</text>
+<text x="811.0" y="54" class="t-c t-mono">e</text>
+<rect x="775" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="775" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.51"/>
+<rect x="799" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.69"/>
+<rect x="823" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="847" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.22"/>
+<rect x="871" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.09"/>
+<rect x="895" y="86" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="895" y="86" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.03"/>
+<text x="767" y="122.0" class="t-r t-mono">o</text>
+<text x="835.0" y="54" class="t-c t-mono">o</text>
+<rect x="775" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="775" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.24"/>
+<rect x="799" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="823" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.68"/>
+<rect x="847" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="871" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.22"/>
+<rect x="895" y="110" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="895" y="110" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.10"/>
+<text x="767" y="146.0" class="t-r t-mono">t</text>
+<text x="859.0" y="54" class="t-c t-mono">t</text>
+<rect x="775" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="775" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.10"/>
+<rect x="799" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.22"/>
+<rect x="823" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="847" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.68"/>
+<rect x="871" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="895" y="134" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="895" y="134" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.24"/>
+<text x="767" y="170.0" class="t-r t-mono">s</text>
+<text x="883.0" y="54" class="t-c t-mono">s</text>
+<rect x="775" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="775" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.03"/>
+<rect x="799" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.09"/>
+<rect x="823" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.22"/>
+<rect x="847" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.46"/>
+<rect x="871" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.69"/>
+<rect x="895" y="158" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="895" y="158" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.51"/>
+<text x="767" y="194.0" class="t-r t-mono">n</text>
+<text x="907.0" y="54" class="t-c t-mono">n</text>
+<rect x="775" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="799" y="182" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.03"/>
+<rect x="823" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="823" y="182" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.10"/>
+<rect x="847" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="847" y="182" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.24"/>
+<rect x="871" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="871" y="182" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.51"/>
+<rect x="895" y="182" width="22" height="22" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/>
+<rect x="895" y="182" width="22" height="22" rx="3" style="fill:var(--c-tgt);fill-opacity:0.82"/>
+<text x="847" y="226" class="t-c t-sm">沿近邻图扩散，远处很小</text>
+<text x="847" y="246" class="t-c t-xs">平稳分布：均匀</text>
+<text x="28" y="134" class="t-c t-xs" transform="rotate(-90 28 134)">行 = 从哪个状态 i</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每个小方阵是一个 6×6 的单步转移矩阵，行是“现在的状态”，列是“下一步的状态”，颜色越深概率越大（为了让小概率也看得见，颜色深浅按概率的平方根画）。均匀矩阵对角线以外处处一样浅；吸收态矩阵只有对角线和最后一列（[M]）有颜色，[M] 那一行只有自己；离散高斯只在对角线附近有颜色，离得越远越浅；嵌入近邻矩阵沿着近邻图扩散，本例把 a、e、o、t、s、n 排成一条链（a–e–o 是元音，t–s–n 是辅音，o–t 相连），所以颜色集中在对角线附近但比高斯更“胖”。参数是本站选的示意值（均匀与吸收态 \(\beta=0.5\)，高斯 \(\beta=0.1\)，近邻矩阵 \(Q=\exp(R)\)），对应 <a href="https://arxiv.org/html/2107.03006#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a> 里的矩阵小图。</div>
+</div>
+
+<h4 id="n-4-2">4.2 均匀（uniform）：多项式扩散</h4>
+<div class="formula">$$Q_t=(1-\beta_t)I+\frac{\beta_t}{K}\mathbf{1}\mathbf{1}^{\top},\qquad [Q_t]_{ij}=\begin{cases}1-\frac{K-1}{K}\beta_t &amp; i=j\\[2pt] \frac{1}{K}\beta_t &amp; i\ne j\end{cases}$$</div>
+<p>这是 Sohl-Dickstein 等人二值情形的推广，由 Hoogeboom 等人提出（多项式扩散），论文称为 D3PM-uniform。它是双随机矩阵且元素全为正，所以平稳分布是均匀分布：加噪到最后，每个位置是词表里随机的一个 token。</p>
+<p>它的弱点也很直观：一旦某个位置被换过一次，它就变成了一个和原词毫无关系的随机 token，原来的信息全部丢失；更麻烦的是，被换掉的 token 看起来和没被换的 token 一模一样。反向去噪时，网络既要判断“哪些位置是错的”，又要给出“正确的词是什么”。</p>
+
+<h4 id="n-4-3">4.3 吸收态（absorbing）：变成 [MASK]</h4>
+<div class="formula">$$Q_t=(1-\beta_t)I+\beta_t\mathbf{1}\mathbf{e}_m^{\top},\qquad [Q_t]_{ij}=\begin{cases}1 &amp; i=j=m\\ 1-\beta_t &amp; i=j\ne m\\ \beta_t &amp; j=m,\ i\ne m\end{cases}$$</div>
+<p>\(m\) 是一个专门的吸收态，\(\mathbf{e}_m\) 是在 \(m\) 处为 1 的向量。每个普通 token 要么保持不变，要么以概率 \(\beta_t\) 变成 \(m\)；一旦变成 \(m\) 就永远停在那里，所以叫“吸收”。平稳分布不是均匀分布，而是全部质量都在 \(m\) 上：加噪到最后整句都是 \(m\)。文本实验里 \(m\) 是放在词表最后（编号 \(K-1\)）的 [MASK]；图像实验里 \(m\) 是灰色像素 (128, 128, 128)，即编号 \(K/2\) 的那个值（\(K\) 为偶数）。</p>
+<p>论文说这个设计的灵感来自 BERT 和条件掩码语言模型（CMLM）在文本上的成功。和均匀加噪一样，它不假设类别之间有任何关系；不同的是，<b>被破坏的位置一眼就能认出来</b>：凡是 [MASK] 都是被破坏的，凡不是 [MASK] 的都还是原词。网络只需要回答“空格里填什么”，不需要先找错。后面的实验会显示，这个看似简单的区别让它在文本上大幅领先。</p>
+
+<h4 id="n-4-4">4.4 离散高斯（discretized Gaussian）：只往相近的值跳</h4>
+<p>对<b>有序</b>的离散数据，比如 8 位图像的 256 个灰度值，“相近”是有意义的：灰度 100 和 101 几乎一样，和 200 差别很大。论文用一个离散化、截断的高斯核来模仿连续扩散：</p>
+<div class="formula">$$[Q_t]_{ij}=\frac{\exp\!\left(-\frac{4|i-j|^2}{(K-1)^2\beta_t}\right)}{\sum_{n=-(K-1)}^{K-1}\exp\!\left(-\frac{4n^2}{(K-1)^2\beta_t}\right)}\quad (i\ne j),\qquad [Q_t]_{ii}=1-\sum_{l\ne i}[Q_t]_{il}$$</div>
+<p>离开对角线越远，概率按高斯形状迅速衰减；分母对 \(-(K-1)\) 到 \(K-1\) 的所有偏移求和，保证每行非对角元素之和小于 1，剩下的概率放回对角线。这样得到的矩阵是对称的、双随机的，平稳分布是均匀分布。\(\beta_t\) 起到“方差”的作用：\(\beta_t\) 越大，一步之内能跳得越远。上图第三个方阵就是 \(K=6\)、\(\beta=0.1\) 时的样子：中间行留在原地的概率约 0.71，跳到相邻值约 0.14，跳两格只有约 0.001（推算）。</p>
+<p>附录 A.2.5 还提到一种更硬的“带状对角”矩阵：只允许跳到距离不超过 \(v\) 的值，每个允许的跳法概率 \(\beta_t/K\)。论文没有在实验里用它。</p>
+
+<h4 id="n-4-5">4.5 词向量近邻（token embedding distance）：按意思相近替换</h4>
+<p>文本没有天然的顺序，但 token 之间可能有语义上的远近。论文的做法是：用一个预训练好的词向量空间，给每个 token 找 \(k\) 个最近邻，得到邻接矩阵 \(G\)（\(w_i\) 是 \(w_j\) 的近邻时 \([G]_{ij}=1\)）；把它对称化成 \(A=(G+G^{\top})/(2k)\)；再构造一个<b>速率矩阵</b> \(R\)：非对角元素等于 \(A_{ij}\)，对角元素等于该行其余元素之和的相反数，使每行加起来为 0。最后的转移矩阵是它的矩阵指数：</p>
+<div class="formula">$$Q_t=\exp(\alpha_tR)=\sum_{n=0}^{\infty}\frac{\alpha_t^n R^n}{n!}$$</div>
+<p>因为 \(R\) 对称且每行和为 0，\(Q_t\) 是双随机的；只要近邻图是连通的，平稳分布就是均匀分布。\(\alpha_t\) 随 \(t\) 增大，噪声就越来越多。效果是一句话会沿着近邻图“慢慢走远”：在字符级词表里，元音更常被换成别的元音而不是辅音；在词级词表里，dog 会被换成 cat 或 cow，而不是某个无关的词（附录图 4 的例子）。论文所有实验都用预训练好的词向量，没有在训练中动态更新近邻图。</p>
+<p>附录 A.2.6 还提到可以把几种矩阵组合起来，例如“吸收态 + 均匀”：\(Q=\alpha\mathbf{1}\mathbf{e}_m^{\top}+\beta\mathbf{1}\mathbf{1}^{\top}/K+(1-\alpha-\beta)I\)，既会被掩掉，也偶尔被换成随机词。第 8 节会看到，BERT 的训练恰好对应这种组合。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一句话在三种前向过程下，加噪到一半时的样子</div>
+  <div class="dia-row"><span class="lbl">原句 \(x_0\)</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">cat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">sat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">on</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">mat</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">today</span></div></div>
+  <div class="dia-row"><span class="lbl">均匀</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">piano</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">sat</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">of</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">mat</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">seven</span></div></div>
+  <div class="dia-out">被换过的位置（橙色）变成了词表里任意一个词，看起来和原词一样“正常”，网络得自己判断哪里出了错。</div>
+  <div class="dia-row"><span class="lbl">吸收态</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">sat</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">today</span></div></div>
+  <div class="dia-out">被破坏的位置一目了然，没被破坏的位置保证是原词。</div>
+  <div class="dia-row"><span class="lbl">嵌入近邻</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">dog</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">sits</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">on</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">rug</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">today</span></div></div>
+  <div class="dia-out">替换词在意思上和原词接近，句子“慢慢走样”。但实验表明这种结构对似然几乎没有帮助（第 9 节）。</div>
+  <div class="dia-note">本站示意图，句子与替换词都是编的；论文附录图 4 有类似的例子（吸收态 + 均匀、嵌入近邻两种）。</div>
+</div>
+
+<h4 id="n-4-6">4.6 词表很大时怎么算（附录 A.4、A.5）</h4>
+<p>预先存下所有的 \(\overline{Q}_t\) 需要 \(O(K^2T)\) 的内存。LM1B 实验的词表 \(K=8192\)、\(T=1000\)，那就是 \(8192^2\times1000\approx6.7\times10^{10}\) 个数，用 32 位浮点存约 268 GB（推算），显然不行。即使能按需算出单步的 \(Q_t\)，也不一定能高效算出它们的连乘。论文给了两条出路：</p>
+<ul>
+  <li><b>低秩结构。</b>把矩阵写成 \(Q_t=\beta_tA_t+(1-\beta_t)I\)，其中 \(A_t\) 是低秩矩阵。均匀加噪的 \(A=\mathbf{1}\mathbf{1}^{\top}/K\)、吸收态的 \(A=\mathbf{1}\mathbf{e}_m^{\top}\) 都是秩一，连乘仍然保持“单位阵 + 秩一”的形式，所以只需存几个系数。吸收态的闭式上面算过；均匀加噪利用 \(X=\mathbf{1}\mathbf{1}^{\top}/K\) 满足 \(X^2=X\)，可以把连乘当成关于 \(X\) 的一次多项式来乘，每乘一次就用 \(X^2=X\) 把高次项并回一次项，最后得到 \(\overline{Q}_t=\bar\alpha_tI+(1-\bar\alpha_t)X\)。</li>
+  <li><b>矩阵指数。</b>如果 \(Q_t=\exp(\alpha_tR)\)，那么 \(\overline{Q}_t=\exp\big(\sum_{s\le t}\alpha_sR\big)\)，连乘变成了指数里的求和。再让每个 \(\alpha_t\) 都是某个公共小量 \(\alpha'\) 的整数倍，预先算好 \(\exp(2^k\alpha'R)\) 这几个矩阵，任何一个 \(\overline{Q}_t\) 都能按二进制展开用其中几个相乘得到，内存从 \(O(K^2T)\) 降到 \(O(K^2\log)\)。这和“快速幂”是同一个技巧。嵌入近邻矩阵就是这样实现的。</li>
+</ul>
+<p>附录 A.5 还指出，矩阵指数的形式其实是一个<b>连续时间马尔可夫链</b>的离散化：如果状态以某个随时间变化的速率发生跳变，那么从时刻 \(s\) 到 \(t\) 的转移概率正是速率矩阵积分后的矩阵指数，\(\alpha_t\) 对应一段时间内累计的跳变速率。这为后来把离散扩散做成连续时间（Campbell 等 2022、SEDD 2023）埋下了伏笔。</p>
+<div class="note-warn"><b>读的时候容易忽略的代价：</b>低秩结构只覆盖均匀和吸收态两种。嵌入近邻矩阵是稠密的 \(K\times K\) 矩阵，每一步都要做大矩阵乘法，所以在 LM1B 上它生成一条样本要 21.29 秒（1000 步），而均匀和吸收态只要 1.8–1.9 秒（论文表 2、表 7）。“矩阵随便设计”这个自由度，在大词表上是要付钱的。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · 附录 A.1、A.2、A.4、A.5 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 噪声日程：每一步该加多少噪声</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>选好了矩阵的形状，还要决定每一步 \(\beta_t\)（或 \(\alpha_t\)）取多大，也就是噪声日程。连续扩散用“噪声方差”来衡量加了多少噪声，可在离散空间里，“加了多少噪声”该怎么衡量？论文提出用互信息来定日程，它和老的 \(1/(T-t+1)\) 日程是什么关系？</div>
+<p>论文对不同矩阵用了不同的日程：</p>
+<ul>
+  <li><b>离散高斯</b>：在离散化之前，让高斯的方差参数 \(\beta_t\) 线性增加，图像实验沿用 DDPM 的设置，从 \(10^{-4}\) 增加到 0.02。注意单步 \(Q_t\) 线性变化，并不意味着累计噪声 \(\overline{Q}_t\) 线性变化。</li>
+  <li><b>均匀</b>：用余弦日程，即让“累计发生过替换的概率”沿一条余弦曲线变化。它由 Nichol 与 Dhariwal 为连续扩散提出，Hoogeboom 等人改造到多项式扩散上。</li>
+  <li><b>一般的矩阵</b>（比如嵌入近邻）：老的日程不一定适用，论文提出按<b>互信息</b>定日程。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：熵与互信息。</b>
+<p>一个随机变量的<b>熵</b> \(H(x_0)\) 衡量它有多不确定：一个 token 在词表上分布得越分散，熵越大。两个变量的<b>互信息</b> \(I(x_t;x_0)\) 衡量“看到 \(x_t\) 以后，对 \(x_0\) 的不确定性减少了多少”。\(x_t=x_0\) 时互信息等于 \(H(x_0)\)（看到 \(x_t\) 就知道了 \(x_0\)）；\(x_t\) 是纯噪声时互信息等于 0（看到它也没用）。所以互信息正好可以当作“\(x_t\) 里还剩多少关于原数据的信息”的度量。</p>
+</div>
+<p><b>互信息日程</b>的想法是：让每一步都抹掉相同份额的信息，</p>
+<div class="formula">$$I(x_t;x_0)\approx\Big(1-\frac{t}{T}\Big)H(x_0)$$</div>
+<p>为什么不直接数“有多少比例的位置被换过”？对均匀和吸收态，位置一旦被换过一次，关于原 token 的信息就全没了，数“被换过的比例”是合理的。但对嵌入近邻这类有结构的矩阵，一个 token 被换成了它的近邻，新 token 仍然和原 token 高度相关，信息并没有全丢。这时只有互信息能如实反映“还剩多少信息”。</p>
+<p>实现上（附录 A.7），\(p(x_0)\) 用训练集里每个 token 的出现频率（unigram 频率）来估计；对 256 个在 \(10^{-4}\) 到 \(10^{5}\) 之间按对数均匀分布的指数 \(\bar\alpha\)，计算 \(\exp(\bar\alpha R)\) 对应的互信息；再用单调三次样条插值，找出让上式成立的那一串 \(\bar\alpha_t\)，并把它们取整为某个公共小量的整数倍（为了 4.6 节的快速幂）。最后令 \(Q_t=\exp\big((\bar\alpha_t-\bar\alpha_{t-1})R\big)\)。</p>
+<p><b>一个漂亮的巧合。</b>对吸收态，互信息日程恰好退化成 Sohl-Dickstein 等人当年给二值扩散设计的 \(\beta_t=1/(T-t+1)\)。推导很短：设到第 \(t\) 步为止某个位置已经被掩掉的概率是 \(m_t\)。因为 [MASK] 在数据里从不出现，可以算出 \(1-I(x_t;x_0)/H(x_0)=m_t\)，所以互信息日程要求 \(m_t=t/T\)，即被掩的比例随时间线性增长。再由 \(1-m_t=\prod_{s\le t}(1-\beta_s)\) 得</p>
+<div class="formula">$$\beta_t=1-\frac{1-m_t}{1-m_{t-1}}=1-\frac{1-t/T}{1-(t-1)/T}=1-\frac{T-t}{T-t+1}=\frac{1}{T-t+1}$$</div>
+<div class="dia">
+  <div class="dia-title">示意图：吸收态的 \(1/(T-t+1)\) 日程（以 \(T=10\) 为例）</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="吸收态日程：每步的掩码概率与累计掩码比例" style="--dg-min:680px">
+<line x1="90" y1="245" x2="890" y2="245" class="axis"/><line x1="90" y1="245" x2="90" y2="45" class="axis"/>
+<line x1="90" y1="245.0" x2="890" y2="245.0" class="grid-ln"/><text x="82" y="245.0" class="t-r t-xs">0.0</text>
+<line x1="90" y1="205.0" x2="890" y2="205.0" class="grid-ln"/><text x="82" y="205.0" class="t-r t-xs">0.2</text>
+<line x1="90" y1="165.0" x2="890" y2="165.0" class="grid-ln"/><text x="82" y="165.0" class="t-r t-xs">0.4</text>
+<line x1="90" y1="125.0" x2="890" y2="125.0" class="grid-ln"/><text x="82" y="125.0" class="t-r t-xs">0.6</text>
+<line x1="90" y1="85.0" x2="890" y2="85.0" class="grid-ln"/><text x="82" y="85.0" class="t-r t-xs">0.8</text>
+<line x1="90" y1="45.0" x2="890" y2="45.0" class="grid-ln"/><text x="82" y="45.0" class="t-r t-xs">1.0</text>
+<rect x="106.0" y="225.0" width="48.0" height="20.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="130.0" y="216.0" class="t-c t-xs" style="fill:var(--c-pred)">1/10</text>
+<text x="130.0" y="259" class="t-c t-xs">1</text>
+<rect x="186.0" y="222.8" width="48.0" height="22.2" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="210.0" y="213.8" class="t-c t-xs" style="fill:var(--c-pred)">1/9</text>
+<text x="210.0" y="259" class="t-c t-xs">2</text>
+<rect x="266.0" y="220.0" width="48.0" height="25.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="290.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">1/8</text>
+<text x="290.0" y="259" class="t-c t-xs">3</text>
+<rect x="346.0" y="216.4" width="48.0" height="28.6" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="370.0" y="207.4" class="t-c t-xs" style="fill:var(--c-pred)">1/7</text>
+<text x="370.0" y="259" class="t-c t-xs">4</text>
+<rect x="426.0" y="211.7" width="48.0" height="33.3" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="450.0" y="202.7" class="t-c t-xs" style="fill:var(--c-pred)">1/6</text>
+<text x="450.0" y="259" class="t-c t-xs">5</text>
+<rect x="506.0" y="205.0" width="48.0" height="40.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="530.0" y="196.0" class="t-c t-xs" style="fill:var(--c-pred)">1/5</text>
+<text x="530.0" y="259" class="t-c t-xs">6</text>
+<rect x="586.0" y="195.0" width="48.0" height="50.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="610.0" y="186.0" class="t-c t-xs" style="fill:var(--c-pred)">1/4</text>
+<text x="610.0" y="259" class="t-c t-xs">7</text>
+<rect x="666.0" y="178.3" width="48.0" height="66.7" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="690.0" y="169.3" class="t-c t-xs" style="fill:var(--c-pred)">1/3</text>
+<text x="690.0" y="259" class="t-c t-xs">8</text>
+<rect x="746.0" y="145.0" width="48.0" height="100.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="770.0" y="136.0" class="t-c t-xs" style="fill:var(--c-pred)">1/2</text>
+<text x="770.0" y="259" class="t-c t-xs">9</text>
+<rect x="826.0" y="45.0" width="48.0" height="200.0" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="850.0" y="36.0" class="t-c t-xs" style="fill:var(--c-pred)">1</text>
+<text x="850.0" y="259" class="t-c t-xs">10</text>
+<polyline points="130.0,225.0 210.0,205.0 290.0,185.0 370.0,165.0 450.0,145.0 530.0,125.0 610.0,105.0 690.0,85.0 770.0,65.0 850.0,45.0" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<circle cx="130.0" cy="225.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="210.0" cy="205.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="290.0" cy="185.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="370.0" cy="165.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="450.0" cy="145.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="530.0" cy="125.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="610.0" cy="105.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="690.0" cy="85.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="770.0" cy="65.0" r="4" style="fill:var(--c-enc)"/>
+<circle cx="850.0" cy="45.0" r="4" style="fill:var(--c-enc)"/>
+<text x="490.0" y="279" class="t-c t-sm">时间步 t（T = 10）</text>
+<rect x="110" y="40" width="14" height="12" rx="2" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="130" y="46" class="t-sm">柱：第 t 步新被掩掉的概率 β = 1/(T−t+1)（只对还没被掩的 token）</text>
+<line x1="110" y1="66" x2="124" y2="66" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="130" y="66" class="t-sm">折线：到第 t 步为止被掩掉的累计比例 = t/T</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>柱子是第 \(t\) 步里“一个还没被掩的 token 这一步被掩掉”的概率 \(\beta_t\)，从 1/10 一路涨到最后一步的 1；折线是到第 \(t\) 步为止被掩掉的累计比例，正好是一条从 0.1 到 1 的直线。两者并不矛盾：越到后面，还没被掩的 token 越少，所以每个幸存者被掩的概率必须越来越大，才能让“每步新掩掉的总量”保持为全体的 1/10。本站按公式画的示意图。</div>
+</div>
+<p>附录 A.6 还给了这个日程的连续时间解释：它对应一个跳变速率为 \(\gamma(t)=1/(T-t)\) 的连续时间过程，直观上就是“在剩下的时间里，均匀地安排这次跳变发生的时刻”。\(T\) 取得越大，只是把同一个连续过程切得越细。</p>
+<p><b>日程有多重要。</b>附录给了两组对照。在 text8 上用一个较小的 6 层模型、1000 步训练均匀 D3PM：\(1/(T-t+1)\) 日程得到 ≤ 2.37 bits/char，余弦日程 ≤ 1.73，互信息日程 ≤ 1.74（附录表 6）。在 CIFAR-10 上，均匀 D3PM 用线性日程（\(\beta_t\) 从 0.02 增加到 1）的 FID 是 79.86，余弦日程是 51.27（附录表 4）。</p>
+<div class="note-warn"><b>容易误解的两点：</b>第一，\(1/(T-t+1)\) 日程是为吸收态“量身定做”的：对均匀矩阵，它<b>不</b>等于互信息日程，而且在上面的 text8 对照里明显最差。第二，日程的好坏取决于看哪个指标：CIFAR-10 上线性日程的 FID 差得多，NLL 上界却略好（≤ 4.99 对余弦的 ≤ 5.08，附录表 4）。论文最后用 FID 更好的余弦日程。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · 附录 A.6、A.7、B.1、B.2 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 反向过程怎么参数化：先猜 \(x_0\)，再倒推一步</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>神经网络最终要给出 \(p_\theta(x_{t-1}\mid x_t)\)。最直接的做法是让网络输出这个分布的 logits。论文却让网络先猜“原始数据 \(x_0\) 是什么”，再借助前向过程的后验换算成 \(p_\theta(x_{t-1}\mid x_t)\)。这样绕一下有什么好处？它还顺带解决了什么问题？</div>
+<p><b>\(x_0\) 参数化。</b>网络 \(\mathrm{nn}_\theta(x_t)\) 对每个位置输出一个 \(K\) 类分布 \(\tilde p_\theta(\tilde x_0\mid x_t)\)，意思是“我猜这个位置原来是什么”。然后把它和前向过程结合：</p>
+<div class="formula">$$p_\theta(x_{t-1}\mid x_t)\ \propto\ \sum_{\tilde x_0}q(x_{t-1},x_t\mid\tilde x_0)\,\tilde p_\theta(\tilde x_0\mid x_t)$$</div>
+<p>读法：对网络猜的每一个可能的原词 \(\tilde x_0\)，按“假如原词真是它，前向过程从它出发、在第 \(t-1\) 步是 \(x_{t-1}\)、第 \(t\) 步是 \(x_t\) 的概率”加权，再按网络的置信度把各种猜测加权平均。这个思路沿用了 DDPM（预测噪声，等价于预测 \(x_0\)）和 Hoogeboom 等人的做法。</p>
+<div class="dia">
+  <div class="dia-title">示意图：\(x_0\) 参数化的一步（吸收态，沿用 3.2 节算例二的数字）</div>
+  <div class="dia-flow"><span class="dia-box">\(x_t\)（第 2 步）<small>某个位置是 [M]</small></span><span class="dia-arrow">→</span><span class="dia-box enc">神经网络 \(\mathrm{nn}_\theta\)<small>看整句，输出每个位置的 \(\tilde p_\theta(\tilde x_0\mid x_t)\)</small></span><span class="dia-arrow">→</span><span class="dia-box pred">猜原词<small>A：0.7，B：0.3</small></span><span class="dia-arrow">→</span><span class="dia-box reg">乘上前向过程<small>\(q(x_1,x_2{=}[\mathrm{M}]\mid\tilde x_0)\)</small></span><span class="dia-arrow">→</span><span class="dia-box act">\(p_\theta(x_1\mid x_2)\)<small>A 0.35，B 0.15，[M] 0.5</small></span></div>
+  <div class="dia-note">算法（推算）：对 \(x_1=\)A，只有猜 A 时有贡献：\(0.7\times\underbrace{0.8}_{q(x_1=\mathrm{A}\mid\mathrm{A})}\times\underbrace{0.25}_{q(x_2=[\mathrm{M}]\mid x_1=\mathrm{A})}=0.14\)；对 \(x_1=\)B，\(0.3\times0.8\times0.25=0.06\)；对 \(x_1=\)[M]，无论猜什么都是 \(0.2\times1=0.2\)，加权后仍是 0.2。总和 0.4，归一化得 (0.35, 0.15, 0.5)。读法：“这一步还保持 [M]”的概率 0.5 完全由日程决定，和网络无关；网络只决定“如果这一步揭开，揭成什么”，揭开的那 0.5 按 0.7 : 0.3 分给 A 和 B。</div>
+</div>
+<p>这种参数化有三个好处：</p>
+<ul>
+  <li><b>最优解一目了然。</b>如果 \(\tilde p_\theta\) 把全部概率都放在真实的 \(x_0\) 上，那么 \(p_\theta(x_{t-1}\mid x_t)\) 就恰好等于后验 \(q(x_{t-1}\mid x_t,x_0)\)，KL 为 0。网络的任务被归结为一个熟悉的分类问题：猜原词。</li>
+  <li><b>自动得到正确的“稀疏模式”。</b>3.2 节的后验公式说明，从 \(x_t\) 往回走只可能走到那些“一步之内能变成 \(x_t\)”的状态，\(Q_t\) 里的 0 会原样出现在理想的反向分布里。\(x_0\) 参数化把 \(q\) 直接写进了 \(p_\theta\)，所以学到的反向分布天然带着同样的 0。以吸收态为例：一个没被掩的位置，往回走只能是它自己（因为普通 token 只能保持或变成 [M]），无论网络输出什么都不会改变它；一个被掩的位置，往回走只能“保持 [M]”或“变成某个原词”，绝不会出现“从 A 变成 B”这种前向过程里不存在的跳法。如果让网络直接输出 \(p_\theta(x_{t-1}\mid x_t)\) 的 logits，这些约束就得靠它自己学。</li>
+  <li><b>可以一次跳多步。</b>把公式里的 \(t-1\) 换成 \(t-k\)：\(p_\theta(x_{t-k}\mid x_t)\propto\sum_{\tilde x_0}q(x_{t-k},x_t\mid\tilde x_0)\tilde p_\theta(\tilde x_0\mid x_t)\)。所以一个按 \(T=1000\) 训练的模型，生成或评估时可以只走 256 步、128 步甚至 20 步。论文所有文本实验都是这样做的：训练用 1000 步，评估时均匀地跳过若干步。</li>
+</ul>
+<p><b>实现细节（官方代码与附录 B.1）。</b>后验的乘法在 log 空间里做：\(\log(x_tQ_t^{\top})+\log(\tilde p_\theta\,\overline{Q}_{t-1})\)，其中 \(\tilde p_\theta\overline{Q}_{t-1}\) 一次性完成了对 \(\tilde x_0\) 的加权求和。采样用 Gumbel-max 技巧从每个位置的分布里抽样。生成的起点是平稳分布：吸收态从“全是 [M]”开始，均匀和高斯从每个位置随机取值开始。图像模型直接输出 logits 时，用的是 \(\mathrm{nn}_\theta(\text{归一化后的 }x_t)\) 再加上 \(x_t\) 的 one-hot，相当于默认“保持当前值”，网络只学需要修改的部分。</p>
+<p><b>有序数据的额外选择（附录 A.8）。</b>对图像这种有序数据，网络也可以不直接输出 256 个 logits，而是输出一个<b>截断离散 logistic 分布</b>的位置和尺度：在 \([-1,1]\) 上放一个 logistic 分布，把它切成 256 个等宽的小区间，每个区间的概率就是对应灰度值的概率。这给反向模型加了一个“相邻灰度值概率相近”的归纳偏置，论文说它同时改善了 FID 和似然（第 10 节的“Gauss + logistic”）。</p>
+
+<h4 id="n-6-1">6.1 吸收态模型实际上是怎么生成的</h4>
+<p>把 \(x_0\) 参数化和 \(1/(T-t+1)\) 日程放在一起，吸收态 D3PM 的生成过程可以说得非常具体（本站根据附录 A.3 的后验推算）：在第 \(t\) 步，每个还是 [M] 的位置，以 \(1/t\) 的概率被“揭开”，揭开时的词从网络的 \(\tilde p_\theta(\tilde x_0\mid x_t)\) 里抽；以 \((t-1)/t\) 的概率继续保持 [M]；已经揭开的位置从此不再改变。从 \(t=T\) 走到 \(t=1\)，第 1 步时所有剩下的 [M] 都会被揭开。平均下来每一步揭开大约 \(N/T\) 个 token（\(N\) 是序列长度）。LM1B 的序列长 128，用 1000 步生成时，平均每步只揭开约 0.13 个 token（推算），绝大多数步什么也没改；用 64 步时，平均每步揭开 2 个。</p>
+<p>步数一少，问题就来了。3.3 节说过，反向过程在给定 \(x_t\) 时对各位置独立。同一步揭开的几个位置，是各自从自己的边缘分布里独立抽样的。如果它们恰好彼此相关（比如一个城市名的两个词），独立抽样就可能拼出“New Diego”这种不存在的组合。网络再强也救不了：它给出的每个位置的边缘分布都是对的，错在“同时、独立地”抽。</p>
+<div data-widget="dllm-decode" data-focus="steps"></div>
+<p>上面这个交互组件用一张 16 个位置的“订机票”画布演示这件事：画布里有一对强相关的位置（出发城市和到达城市，每个城市名占两个词），其余位置要么确定、要么彼此独立。“模型”是精确的条件分布，所以出错只可能来自“同一步独立抽样”。把步数调小，每步揭开的位置变多，拼出无效组合的概率会明显上升。需要说明的是，组件里的采样器按置信度挑选要揭开的位置（这是后来 LLaDA 等工作的做法），而 D3PM 原文是随机挑选；但“同一步内各位置独立抽样”这一点两者完全相同。</p>
+<div class="note-warn"><b>容易误解的一点：</b>“可以一次跳多步”只说明公式上能算 \(p_\theta(x_{t-k}\mid x_t)\)，不说明跳多步不掉质量。跳步本身没有引入新的近似（\(\tilde p_\theta\) 还是同一个网络），但步数越少，每步同时决定的位置越多，独立抽样的误差越大。第 9 节 LM1B 的结果会显示：从 1000 步降到 64 步，吸收态的困惑度上界只从 76.9 升到 83.6，但原文图 2 里降到个位数步数时困惑度会急剧变差。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · 附录 A.8、B.1 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a> · 官方实现：<a href="https://github.com/google-research/google-research/blob/master/d3pm/images/diffusion_categorical.py" target="_blank" rel="noopener">diffusion_categorical.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 损失函数：变分界加上一个辅助交叉熵</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>按理说，直接最小化变分上界 \(L_{\mathrm{vb}}\) 就是在做最大似然，这是最有原则的选择。但连续扩散的经验是，换一个加权方式的损失往往效果更好。D3PM 加的辅助项是什么？它为什么能帮忙？什么情况下它反而有害？</div>
+<div class="note-pre"><b>先补一点背景：连续扩散里的损失之争。</b>
+<p>DDPM 发现，把 \(L_{\mathrm{vb}}\) 的各项重新加权、只保留“预测噪声”的均方误差（称为 \(L_{\mathrm{simple}}\)），图像质量更好，但似然变差。Improved DDPM（Nichol 与 Dhariwal）用 \(L_{\mathrm{hybrid}}=L_{\mathrm{simple}}+\lambda L_{\mathrm{vb}}\)：一项负责学均值，另一项负责学方差。他们还指出，\(L_{\mathrm{vb}}\) 里不同 \(t\) 的项大小相差悬殊（小 \(t\) 的项大得多），导致随机抽 \(t\) 训练时梯度噪声很大。</p>
+</div>
+<p>受此启发，D3PM 给 \(x_0\) 参数化加了一个辅助的去噪目标：在每一个时间步，都直接要求网络猜对原数据。</p>
+<div class="formula">$$L_\lambda=L_{\mathrm{vb}}+\lambda\,\mathbb{E}_{q(x_0)}\mathbb{E}_{q(x_t\mid x_0)}\big[-\log\tilde p_\theta(x_0\mid x_t)\big]$$</div>
+<p>几点说明：</p>
+<ul>
+  <li>辅助项就是每个位置上“猜原词”的交叉熵，在 \(t=1\) 时它和 \(L_{\mathrm{vb}}\) 里的 \(L_0\) 是同一项。</li>
+  <li>两项的最优解一致：由于 \(x_0\) 参数化，\(L_{\mathrm{vb}}\) 里的每个 KL 和辅助交叉熵，都恰好在 \(\tilde p_\theta\) 把全部概率放在真实 \(x_0\) 上时取到最小。所以加辅助项不会把模型“拉向别处”，只是改变了通往最优解的路径和各时间步的相对权重。</li>
+  <li>报告的似然仍然用 \(L_{\mathrm{vb}}\) 评估，所以表里的 NLL 依旧是合法的上界；只是训练时优化的不再严格是这个上界。</li>
+</ul>
+<p><b>论文给的解释。</b>交叉熵项的梯度噪声随 \(t\) 的变化比较小，而 \(L_{\mathrm{vb}}\) 中各 \(L_{t-1}\) 项的大小在小 \(t\) 时变化剧烈（引用 Nichol 与 Dhariwal 的观察）。加上辅助项，等于给训练信号加了一个在各时间步都比较“平稳”的成分。</p>
+<p><b>本站补充一个更具体的角度（推算）。</b>对吸收态加 \(1/(T-t+1)\) 日程，附录 A.3 的推导表明，第 \(t\) 步的 KL 对每个被掩位置等于 \(\frac{1}{t}\big(-\log\tilde p_\theta(x_0\mid x_t)\big)\)（下一节细讲）。官方文本代码每次计算损失时抽一个 \(t\)，损失是“这一步所有位置的 KL 之和 + \(\lambda\) × 所有位置的交叉熵之和”。于是一个被掩 token 在两项里的权重分别是 \(1/t\) 和 \(\lambda\)。文本实验用 \(\lambda=0.01\)、\(T=1000\)：当 \(t\gt 100\) 时，辅助项的权重就超过了 \(L_{\mathrm{vb}}\) 的权重，而抽到的 \(t\) 有 90% 落在这个范围。换句话说，在“大部分位置都被掩掉、上下文很少”的困难时间步，\(L_{\mathrm{vb}}\) 给每个 token 的权重很小，辅助项把这部分训练信号补了回来。</p>
+<div class="dia">
+  <div class="dia-title">示意图：吸收态下，一个被掩 token 在两项损失中的权重（推算）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="每个被掩 token 在两项损失里的权重" style="--dg-min:680px">
+<line x1="110" y1="250" x2="870" y2="250" class="axis"/><line x1="110" y1="250" x2="110" y2="50" class="axis"/>
+<line x1="110.0" y1="250" x2="110.0" y2="50" class="grid-ln"/><text x="110.0" y="264" class="t-c t-xs">1</text>
+<line x1="363.3" y1="250" x2="363.3" y2="50" class="grid-ln"/><text x="363.3" y="264" class="t-c t-xs">10</text>
+<line x1="616.7" y1="250" x2="616.7" y2="50" class="grid-ln"/><text x="616.7" y="264" class="t-c t-xs">100</text>
+<line x1="870.0" y1="250" x2="870.0" y2="50" class="grid-ln"/><text x="870.0" y="264" class="t-c t-xs">1000</text>
+<line x1="110" y1="50.0" x2="870" y2="50.0" class="grid-ln"/><text x="102" y="50.0" class="t-r t-xs">1</text>
+<line x1="110" y1="116.7" x2="870" y2="116.7" class="grid-ln"/><text x="102" y="116.7" class="t-r t-xs">0.1</text>
+<line x1="110" y1="183.3" x2="870" y2="183.3" class="grid-ln"/><text x="102" y="183.3" class="t-r t-xs">0.01</text>
+<line x1="110" y1="250.0" x2="870" y2="250.0" class="grid-ln"/><text x="102" y="250.0" class="t-r t-xs">0.001</text>
+<line x1="110.0" y1="50.0" x2="870.0" y2="250.0" style="stroke:var(--c-enc);stroke-width:2.5"/>
+<line x1="110.0" y1="183.3" x2="870.0" y2="183.3" style="stroke:var(--c-pred);stroke-width:2.5;stroke-dasharray:7 4"/>
+<circle cx="616.7" cy="183.3" r="5" style="fill:var(--c-loss)"/>
+<text x="626.7" y="169.3" class="t-sm" style="fill:var(--c-loss)">t = 100 处两者相等</text>
+<text x="138.9" y="116.7" class="t-sm" style="fill:var(--c-enc)">L_vb 里的权重 1/t</text>
+<text x="439.6" y="169.7" class="t-c t-sm" style="fill:var(--c-pred)">辅助项的权重 λ = 0.01</text>
+<text x="490.0" y="284" class="t-c t-sm">训练时抽到的时间步 t（对数坐标，T = 1000）</text>
+<text x="34" y="150.0" class="t-c t-sm" transform="rotate(-90 34 150.0)">每个被掩 token 的权重（对数）</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是训练时抽到的时间步 \(t\)，纵轴是一个被掩 token 的交叉熵在损失里乘的系数，两轴都是对数坐标。蓝色实线是 \(L_{\mathrm{vb}}\) 给的 \(1/t\)：\(t=1\) 时为 1，\(t=1000\) 时只有 0.001。橙色虚线是辅助项的 \(\lambda=0.01\)，与 \(t\) 无关。两线在 \(t=100\) 相交，右边 90% 的时间步由辅助项主导。这是本站按附录 A.3 的公式与官方代码的损失形式推算的，论文没有画这张图；它只适用于吸收态加线性掩码日程。</div>
+</div>
+<p><b>实验证据。</b>论文的结论是：辅助项对吸收态有帮助，对均匀加噪反而有害；图像上帮助很大，但 \(\lambda\) 不能大。</p>
+<ul>
+  <li>text8（1000 步，附录表 5）：吸收态从 \(L_{\mathrm{vb}}\) 的 ≤ 1.47 改善到 \(L_{\lambda=0.01}\) 的 ≤ 1.44 bits/char；均匀加噪却从 ≤ 1.61 变差到 ≤ 1.91，论文说训练变得不稳定。</li>
+  <li>LM1B：\(L_{\lambda=0.01}\) 对吸收态最好，对其他模型降低了性能（正文 §5.2，没有给出具体数字）。</li>
+  <li>CIFAR-10（\(\lambda=0.001\) 最好，表 3）：吸收态的 FID 从 41.28 降到 30.97、NLL 上界从 4.83 降到 4.40；离散高斯的 FID 从 15.30 降到 8.34，但 NLL 上界从 3.966 略升到 3.975。更大的 \(\lambda\)，以及只用辅助项训练，前期进步更快，但 NLL 停在更高的位置，FID 后来甚至回升。</li>
+</ul>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“混合损失更好”不是一个普遍结论。它对哪种矩阵、哪个指标有利各不相同：对均匀加噪的文本模型它明显有害；对离散高斯的图像模型，它换来了大幅更好的 FID，代价是似然略差。另外，文本和图像实验用的 \(\lambda\) 相差 10 倍（0.01 对 0.001），说明这个超参数需要按任务调。后来的 MDLM 等工作改用一个更简单的目标，不再需要这个辅助项（见 <a href="#n-impact">后来怎么样了</a>）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S3.SS4" target="_blank" rel="noopener">英文原文 §3.4 ↗</a> · 官方实现：<a href="https://github.com/google-research/google-research/blob/master/d3pm/text/diffusion.py" target="_blank" rel="noopener">text/diffusion.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 与已有文本模型的联系：BERT、自回归模型、掩码语言模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>“把 token 变成 [MASK] 再让网络填回去”，听起来就是 BERT 在做的事。那么吸收态 D3PM 和 BERT、和逐个生成的自回归模型、和 Mask-Predict 这类“从全 [MASK] 开始反复填空”的生成式掩码语言模型，到底是什么关系？论文给出了三个精确的对应，其中第三个（附录 A.3）是后来整条掩码扩散路线的理论起点。</div>
+<div class="note-pre"><b>先补一点背景：三种“填空”式的模型。</b>
+<p><b>BERT</b>（2018）的训练方法叫掩码语言模型（MLM）：把一句话里一部分 token 遮住，让双向的 Transformer 根据上下文猜被遮住的词。它是用来学表示的，不是用来生成的。</p>
+<p><b>条件掩码语言模型（CMLM）与 Mask-Predict</b>（Ghazvininejad 等，2019）把这个思路用到非自回归机器翻译：训练时随机选一个数 \(k\)，把目标句里 \(k\) 个词遮住让模型猜；生成时从“整句都是 [MASK]”开始，先一次猜出所有位置，再把最没把握的一些位置重新遮上、再猜，固定迭代若干轮。Wang 与 Cho（2019）也展示了可以直接从 BERT 里采样生成文字。</p>
+<p><b>自回归模型</b>就是从左往右逐个预测下一个词的普通语言模型，训练目标是每个位置“已知前文、猜这个词”的交叉熵。</p>
+</div>
+
+<h4 id="n-8-1">8.1 BERT 是一步的扩散模型</h4>
+<p>取一个“吸收态 + 均匀”的组合矩阵 \(Q=\alpha\mathbf{1}\mathbf{e}_m^{\top}+\beta\mathbf{1}\mathbf{1}^{\top}/K+(1-\alpha-\beta)I\)，并且只走一步（\(T=1\)）。如果 \(q(x_1\mid x_0)\) 把 10% 的 token 换成 [MASK]、5% 换成均匀随机的 token，那么 \(L_{\mathrm{vb}}\) 里只剩 \(L_T\) 和 \(L_0\) 两项。\(L_T\) 在先验固定时是常数，与参数无关，于是</p>
+<div class="formula">$$L_{\mathrm{vb}}-L_T=-\mathbb{E}_{q(x_1\mid x_0)}\big[\log p_\theta(x_0\mid x_1)\big]=L_{\mathrm{BERT}}$$</div>
+<p>也就是说，BERT 的训练目标正是一个单步 D3PM 的变分界（去掉常数项）。</p>
+<div class="note-warn"><b>细节上的差别：</b>论文举的“10% [MASK] + 5% 随机”是一个示意比例。BERT 原文的做法是先选 15% 的位置，其中 80% 换成 [MASK]、10% 换成随机词、10% 保持不变，折合约 12% [MASK]、1.5% 随机、1.5% 不变（推算）；而且 BERT 只在这 15% 的位置上算损失，单步扩散的 \(L_0\) 则对所有位置算。所以这个等价是“同一类目标”意义上的，不是逐位一致。</div>
+
+<h4 id="n-8-2">8.2 自回归模型是一种确定性的离散扩散</h4>
+<p>设序列长度为 \(N\)，取 \(T=N\)，前向过程<b>确定性地</b>从右往左每步遮住一个 token：</p>
+<div class="formula">$$q([x_t]_i\mid x_0)=\begin{cases}[x_0]_i &amp; i\lt N-t\\ {[\mathrm{MASK}]} &amp; \text{否则}\end{cases}$$</div>
+<p>因为过程是确定的，后验也是确定的：从 \(x_t\) 退回 \(x_{t-1}\)，只有位置 \(i=T-t\)（当前最左边那个 [MASK]）从 [MASK] 变回原词，其他位置一概不变。于是除了这个位置，所有位置的 KL 都是 0；这个位置的 KL 是 \(-\log p_\theta([x_0]_i\mid x_t)\)，而 \(x_t\) 此时恰好是“前 \(i\) 个原词 + 后面全是 [MASK]”。这正是自回归模型在第 \(i\) 个位置的交叉熵。生成时从全 [MASK] 出发，每步揭开最左边的一个，就是从左往右逐个生成。</p>
+<p>这里有一个技术细节：这个过程不是对每个位置独立施加同一个矩阵（遮哪个位置取决于位置编号）。论文的处理是把每个 token 连同它的位置一起看成一个状态，状态空间变成“位置 × 词表”，\(Q\) 是一个 \(N\times|\mathcal{V}|\times N\times|\mathcal{V}|\) 的稀疏矩阵，这样形式上又回到了“对每个元素独立加噪”。</p>
+
+<h4 id="n-8-3">8.3 生成式掩码语言模型是吸收态 D3PM（附录 A.3）</h4>
+<p>生成式掩码语言模型通常这样训练：抽一个序列 \(x_0\)，按某个日程选一个数 \(k\)，随机遮住 \(k\) 个 token，在被遮的位置上算交叉熵，并按 \(1/k\) 归一化：</p>
+<div class="formula">$$\min\ -\mathbb{E}_{q(x_0)}\,\mathbb{E}_{k}\,\frac{1}{k}\,\mathbb{E}_{x_k\text{：遮住 }k\text{ 个}}\sum_{i:\,[x_k]_i=m}\log p_\theta([x_0]_i\mid x_k)$$</div>
+<p>论文证明，用 \(x_0\) 参数化、按普通变分界训练的吸收态 D3PM，化简以后就是这个目标的一个重新加权版本。推导分三步：</p>
+<ol>
+  <li><b>没被掩的位置不贡献损失。</b>普通 token 只能保持原样或变成 [MASK]，所以一个在 \(x_t\) 里仍是原词的位置，退回 \(x_{t-1}\) 时只能还是原词；\(x_0\) 参数化又保证 \(p_\theta\) 也只能如此（第 6 节的稀疏模式），两者完全一致，KL 为 0。</li>
+  <li><b>被掩的位置，KL 正比于交叉熵。</b>对一个在 \(x_t\) 里是 [MASK] 的位置，后验只有两种可能：在 \(x_{t-1}\) 里已经是 [MASK]，或者是原词 \([x_0]_i\)。“是 [MASK]”这部分的概率与参数无关，只贡献常数；“是原词”这部分的概率是 \(\beta_t\prod_{s\lt t}(1-\beta_s)\) 除以归一化常数。于是 \(L_{t-1}\) 化成被掩位置上 \(-\log\tilde p_\theta([x_0]_i\mid x_t)\) 的加权和。</li>
+  <li><b>用 \(1/(T-t+1)\) 日程，权重恰好是 \(1/t\)。</b>这个日程下第 \(t\) 步被掩的概率是 \(t/T\)，可以算出 \(q([x_{t-1}]_i=[x_0]_i\mid[x_t]_i=m,x_0)=1/t\)（3.2 节算例二的 0.5，正是 \(t=2\) 时的 \(1/t\)），并且 \(L_T=0\)。把所有时间步加起来：</li>
+</ol>
+<div class="formula">$$L_{\mathrm{vb}}=-\mathbb{E}_{q(x_0)}\Big[\sum_{t=1}^{T}\frac{1}{t}\,\mathbb{E}_{q(x_t\mid x_0)}\sum_{i:\,[x_t]_i=m}\log\tilde p_\theta([x_0]_i\mid x_t)\Big]+C$$</div>
+<p>和上面的 MLM 目标对比：两者都是“在被掩位置上算交叉熵，再按被掩数量的倒数加权”。\(1/t\) 和 \(1/k\) 的作用相同，因为第 \(t\) 步被掩数量的期望是 \(Nt/T\)，\(1/t\) 正比于它的倒数。区别只有一处：D3PM 是每个位置独立地以概率 \(t/T\) 被掩，被掩的个数是随机的；MLM 通常是“恰好遮住 \(k\) 个”。论文指出，前者也是一种完全实用的遮法，有些方法本来就这么实现。按 D3PM 的方式，被掩个数 \(k\) 的分布是一族二项分布的混合：</p>
+<div class="formula">$$\alpha(k)=\frac{1}{T}\sum_{t=1}^{T}\binom{N}{k}\Big(\frac{t}{T}\Big)^{k}\Big(1-\frac{t}{T}\Big)^{N-k}$$</div>
+<div class="dia">
+  <div class="dia-title">图：吸收态 D3PM 隐含的“被掩个数”分布（\(N=T=50\)，按论文式 (14) 推算）</div>
+  <svg class="dg" viewBox="0 0 960 270" role="img" aria-label="被掩 token 个数 k 的权重分布" style="--dg-min:680px">
+<line x1="80" y1="225" x2="920" y2="225" class="axis"/><line x1="80" y1="225" x2="80" y2="55" class="axis"/>
+<line x1="80" y1="225.0" x2="920" y2="225.0" class="grid-ln"/><text x="72" y="225.0" class="t-r t-xs">0.00</text>
+<line x1="80" y1="176.4" x2="920" y2="176.4" class="grid-ln"/><text x="72" y="176.4" class="t-r t-xs">0.01</text>
+<line x1="80" y1="127.9" x2="920" y2="127.9" class="grid-ln"/><text x="72" y="127.9" class="t-r t-xs">0.02</text>
+<line x1="80" y1="79.3" x2="920" y2="79.3" class="grid-ln"/><text x="72" y="79.3" class="t-r t-xs">0.03</text>
+<rect x="81.0" y="170.4" width="14.5" height="54.6" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="88.2" y="239" class="t-c t-xs">0</text>
+<rect x="97.5" y="137.5" width="14.5" height="87.5" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="113.9" y="130.1" width="14.5" height="94.9" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="130.4" y="129.7" width="14.5" height="95.3" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="146.9" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="163.4" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="179.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="196.3" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="212.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="229.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="245.7" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="252.9" y="239" class="t-c t-xs">10</text>
+<rect x="262.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="278.6" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="295.1" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="311.6" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="328.1" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="344.5" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="361.0" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="377.5" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="393.9" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="410.4" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="417.6" y="239" class="t-c t-xs">20</text>
+<rect x="426.9" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="443.4" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="459.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="476.3" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="492.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="509.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="525.7" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="542.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="558.6" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="575.1" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="582.4" y="239" class="t-c t-xs">30</text>
+<rect x="591.6" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="608.1" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="624.5" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="641.0" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="657.5" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="673.9" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="690.4" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="706.9" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="723.4" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="739.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="747.1" y="239" class="t-c t-xs">40</text>
+<rect x="756.3" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="772.8" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="789.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="805.7" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="822.2" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="838.6" y="129.8" width="14.5" height="95.2" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="855.1" y="129.7" width="14.5" height="95.3" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="871.6" y="130.1" width="14.5" height="94.9" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="888.1" y="137.5" width="14.5" height="87.5" style="fill:var(--c-enc);fill-opacity:.75"/>
+<rect x="904.5" y="73.2" width="14.5" height="151.8" style="fill:var(--c-enc);fill-opacity:.75"/>
+<text x="911.8" y="239" class="t-c t-xs">50</text>
+<line x1="80" y1="129.8" x2="920" y2="129.8" style="stroke:var(--c-pred);stroke-width:1.8;stroke-dasharray:6 4"/>
+<text x="916" y="119.8" class="t-r t-xs" style="fill:var(--c-pred)">完全均匀 = 1/51 ≈ 0.0196</text>
+<text x="500.0" y="259" class="t-c t-sm">长度 50 的序列里被掩掉的 token 个数 k</text>
+<text x="88.2" y="160.4" class="t-c t-xs">0.011</text>
+<text x="911.8" y="63.2" class="t-c t-xs">0.031</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是长度 50 的序列里被掩掉的个数 \(k\)，柱高是 \(\alpha(k)\)，橙色虚线是“\(k\) 从 0 到 50 完全均匀”的 1/51。中间几乎所有的柱子都贴着虚线（约 0.0196），只有两端偏离：\(k=0,1,49\) 略低，\(k=50\) 因为最后一步 \(t=T\) 必然全掩而偏高。所以吸收态 D3PM 的训练分布和 Mask-Predict 那种“均匀地选 \(k\)”几乎一样。论文附录图 6 画的是同一个量，本站按公式自己重算重画；<a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">原图见 PDF 附录 A.3 ↗</a>。</div>
+</div>
+<p><b>一个后来变得非常重要的推论（本站推导）。</b>把上式的求和写成对 \(t\) 均匀抽样的期望，并令 \(\tau=t/T\)：\(\sum_{t=1}^{T}\frac{1}{t}(\cdots)=T\,\mathbb{E}_{t}\big[\frac{1}{t}(\cdots)\big]=\mathbb{E}_{\tau}\big[\frac{1}{\tau}(\cdots)\big]\)。当 \(T\to\infty\) 时 \(\tau\) 变成 \((0,1]\) 上的均匀分布，训练目标就是</p>
+<div class="formula">$$-\mathbb{E}_{\tau\sim U(0,1]}\ \mathbb{E}_{x_\tau}\Big[\frac{1}{\tau}\sum_{i:\,[x_\tau]_i=m}\log\tilde p_\theta([x_0]_i\mid x_\tau)\Big],\qquad x_\tau\text{：每个位置独立地以概率 }\tau\text{ 被掩}$$</div>
+<p>这一行和 2025 年 LLaDA 论文的训练损失（其式 (3)）逐项相同；2024 年的 MDLM 与 MD4 也把掩码扩散的连续时间变分界化简成“掩码语言模型损失的加权混合”。也就是说，后来的大规模掩码扩散语言模型，训练目标就是本节这个结论在 \(T\to\infty\) 时的形式，改进主要在参数化、工程和规模上（见 <a href="#n-impact">后来怎么样了</a>）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：四种模型的“加噪”方式，放在同一个框架里看（4 个 token 的句子 A B C D）</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-box enc" style="margin-bottom:6px">自回归（AR）<small>\(T=N\)，确定性，从右往左每步遮一个</small></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">t=1</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">A</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">B</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">C</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span></div></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">t=2</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">A</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">B</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span></div></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">t=4</span><div class="cells"><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span></div></div>
+    </div>
+    <div>
+      <div class="dia-box pred" style="margin-bottom:6px">BERT<small>\(T=1\)，约 10% 掩、5% 随机替换</small></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">t=1</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">A</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">C</span><span class="cell c" style="width:auto;min-width:30px;padding:0 6px">x</span></div></div>
+      <div class="dia-out" style="margin-left:0">只有一步：一次加噪，一次去噪。</div>
+    </div>
+    <div>
+      <div class="dia-box tgt" style="margin-bottom:6px">CMLM / Mask-Predict<small>先抽 \(k\)，恰好遮住 \(k\) 个</small></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">k=2</span><div class="cells"><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">B</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">D</span></div></div>
+      <div class="dia-out" style="margin-left:0">生成时会把没把握的位置重新遮上。</div>
+    </div>
+    <div>
+      <div class="dia-box act" style="margin-bottom:6px">吸收态 D3PM<small>每个位置独立地以概率 \(t/T\) 被掩</small></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">t/T=0.5</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">A</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span></div></div>
+      <div class="dia-out" style="margin-left:0">被掩个数随机（这里碰巧是 3 个）；揭开后不再改。</div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图。蓝色是原词，绿色是 [MASK]，橙色 x 是随机替换的词。四者的训练目标都是“在被破坏的位置上猜原词”的交叉熵，只是破坏的方式和各步的权重不同。</div>
+</div>
+<div class="note-warn"><b>容易混淆的一点：</b>这三个等价说的都是<b>训练目标</b>，不是生成方法。Mask-Predict 生成时会把低置信度的位置重新遮上再猜，D3PM 的祖先采样则是一旦揭开就不再改；自回归模型的“确定性扩散”也只是换个说法，并不会让它变快。论文自己的定位是：这些去噪自编码器和吸收态 D3PM 在特定日程和矩阵下非常相似，而 D3PM 的框架额外带来了可计算的似然，以及换别的转移矩阵的自由。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · 附录 A.3 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a> · 本站相关：<a href="../legacy/tracks/dllm/01-foundations.html#c-elbo">旧版“扩散 LLM 从头讲起”的 ELBO 推导</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 文本实验：text8 与 LM1B</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>四种矩阵在真实文本上谁好谁坏？离散扩散能不能扩展到大词表？和同样大小的自回归模型比差多少，生成速度又如何？读数字之前，要先弄清楚实验的设置和每个指标的含义，最后再看这些比较哪些是对齐的、哪些不是。</div>
+
+<h4 id="n-9-1">9.1 实验设置</h4>
+<p><b>数据。</b>text8 是从英文维基百科抽出的字符级数据集，词表只有 27 个符号（a–z 和空格），按惯例切成长度 256 的片段，不做任何预处理，训练/测试/验证集为 9000 万 / 500 万 / 50 万个字符。LM1B（One Billion Word）是一个打乱了句子顺序的大型英文新闻句子集，训练集 30,301,028 句、测试集 306,688 句；论文用 SentencePiece 切成 8192 个 token 的词表，把句子打包成长度 128 的序列。</p>
+<p><b>模型与训练。</b>所有文本模型都是 T5 结构的 Transformer 编码器（双向注意力），12 层、约 7000 万参数（12 个头、MLP 维度 3072、qkv 维度 768），在 TPUv2 或 TPUv3 上以批大小 512 训练 100 万步，学习率 \(5\times10^{-4}\)，前 1 万步预热，之后按步数平方根的倒数衰减，用 JAX/Flax 实现。所有扩散模型都按 \(T=1000\) 训练，评估时可以均匀地跳步。自回归基线是同样结构的 Transformer 解码器（加因果掩码），参数量相同。日程：均匀模型用余弦日程，吸收态和嵌入近邻用互信息日程（按 unigram 频率近似）。按这些设置推算，LM1B 训练了约 \(10^6\times512\times128\approx6.6\times10^{10}\) 个 token 位置，text8 约 \(1.3\times10^{11}\) 个字符位置，相当于把 9000 万字符的训练集过了约 1,456 遍（推算）。</p>
+<div class="note-pre"><b>先补一点背景：bits/char 与困惑度。</b>
+<p><b>bits/char（每字符比特数）</b>：模型给整个测试集打的负对数概率（以 2 为底），除以字符总数。1.45 bits/char 意味着平均每个字符要花 1.45 个比特来编码，等价于模型平均给每个正确字符约 \(2^{-1.45}\approx0.37\) 的概率（推算）。越低越好。</p>
+<p><b>困惑度（perplexity）</b>：\(\exp\)(平均每个单位的负对数似然)。困惑度 76.9 可以理解为“模型的不确定程度相当于在约 77 个选项里均匀地猜”。论文的 LM1B 困惑度是<b>按英文单词数归一化</b>的（包括模型预测的句末符号），不是按 SentencePiece token 数。</p>
+<p><b>上界与精确值</b>：扩散模型报告的是变分上界（表里的“≤”），真实的负对数似然只会更低；自回归模型的值是精确的。</p>
+</div>
+
+<h4 id="n-9-2">9.2 text8：吸收态最好，近邻结构几乎没用</h4>
+<div class="dia">
+  <div class="dia-title">图：text8 测试集 bits/char 随生成步数的变化（按原文表 1 重画）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="text8 上各模型的每字符比特数" style="--dg-min:700px">
+<line x1="90" y1="250" x2="650" y2="250" class="axis"/><line x1="90" y1="250" x2="90" y2="40" class="axis"/>
+<line x1="90" y1="250.0" x2="650" y2="250.0" class="grid-ln"/><text x="82" y="250.0" class="t-r t-xs">1.0</text>
+<line x1="90" y1="203.3" x2="650" y2="203.3" class="grid-ln"/><text x="82" y="203.3" class="t-r t-xs">1.2</text>
+<line x1="90" y1="156.7" x2="650" y2="156.7" class="grid-ln"/><text x="82" y="156.7" class="t-r t-xs">1.4</text>
+<line x1="90" y1="110.0" x2="650" y2="110.0" class="grid-ln"/><text x="82" y="110.0" class="t-r t-xs">1.6</text>
+<line x1="90" y1="63.3" x2="650" y2="63.3" class="grid-ln"/><text x="82" y="63.3" class="t-r t-xs">1.8</text>
+<text x="180" y="266" class="t-c t-sm">1000 步</text>
+<text x="370" y="266" class="t-c t-sm">256 步</text>
+<text x="560" y="266" class="t-c t-sm">20 步</text>
+<line x1="90" y1="196.3" x2="650" y2="196.3" style="stroke:var(--c-enc);stroke-width:1.8;stroke-dasharray:6 4"/>
+<text x="646" y="187.3" class="t-r t-xs" style="fill:var(--c-enc)">AR Transformer（同为 12 层，本文训练）1.23</text>
+<line x1="90" y1="231.3" x2="650" y2="231.3" style="stroke:var(--c-act);stroke-width:1.8;stroke-dasharray:2 4"/>
+<text x="646" y="222.3" class="t-r t-xs" style="fill:var(--c-act)">Transformer-XL（24 层）1.08</text>
+<polyline points="166.0,107.7 356.0,91.3 546.0,65.7" style="fill:none;stroke:var(--c-data);stroke-width:2"/>
+<circle cx="166.0" cy="107.7" r="4.5" style="fill:var(--c-data)"/>
+<text x="166.0" y="97.7" class="t-c t-xs" style="fill:var(--c-data)">1.61</text>
+<circle cx="356.0" cy="91.3" r="4.5" style="fill:var(--c-data)"/>
+<text x="356.0" y="81.3" class="t-c t-xs" style="fill:var(--c-data)">1.68</text>
+<circle cx="546.0" cy="65.7" r="4.5" style="fill:var(--c-data)"/>
+<text x="546.0" y="55.7" class="t-c t-xs" style="fill:var(--c-data)">1.79</text>
+<circle cx="690" cy="70" r="5" style="fill:var(--c-data)"/><text x="702" y="70" class="t-sm">D3PM uniform</text>
+<polyline points="180.0,112.3 370.0,100.7 560.0,75.0" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+<circle cx="180.0" cy="112.3" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="180.0" y="128.3" class="t-c t-xs" style="fill:var(--c-tgt)">1.59</text>
+<circle cx="370.0" cy="100.7" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="370.0" y="116.7" class="t-c t-xs" style="fill:var(--c-tgt)">1.64</text>
+<circle cx="560.0" cy="75.0" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="560.0" y="91.0" class="t-c t-xs" style="fill:var(--c-tgt)">1.75</text>
+<circle cx="690" cy="96" r="5" style="fill:var(--c-tgt)"/><text x="702" y="96" class="t-sm">D3PM NN</text>
+<polyline points="194.0,145.0 384.0,140.3 574.0,119.3" style="fill:none;stroke:var(--c-loss);stroke-width:2"/>
+<circle cx="194.0" cy="145.0" r="4.5" style="fill:var(--c-loss)"/>
+<text x="212.0" y="149.0" class="t-c t-xs" style="fill:var(--c-loss)">1.45</text>
+<circle cx="384.0" cy="140.3" r="4.5" style="fill:var(--c-loss)"/>
+<text x="402.0" y="144.3" class="t-c t-xs" style="fill:var(--c-loss)">1.47</text>
+<circle cx="574.0" cy="119.3" r="4.5" style="fill:var(--c-loss)"/>
+<text x="592.0" y="123.3" class="t-c t-xs" style="fill:var(--c-loss)">1.56</text>
+<circle cx="690" cy="122" r="5" style="fill:var(--c-loss)"/><text x="702" y="122" class="t-sm">D3PM absorbing</text>
+<text x="690" y="160" class="t-xs">D3PM 的值都是上界（≤）</text>
+<text x="690" y="178" class="t-xs">纵轴从 1.0 开始，不是从 0</text>
+<text x="34" y="145.0" class="t-c t-sm" transform="rotate(-90 34 145.0)">测试集 bits/char（越低越好）</text>
+<text x="370.0" y="290" class="t-c t-sm">生成（与评估）时用的步数</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是生成与评估时用的步数（训练都是 1000 步），纵轴是 bits/char，注意从 1.0 开始。三条实线是三种 D3PM：红色吸收态在每个步数下都最低，灰色均匀和紫色近邻挤在一起。两条虚线是自回归基线：蓝色是本文训练的同结构 12 层解码器（1.23），绿色是文献里的 24 层 Transformer-XL（1.08）。从 1000 步到 256 步几乎不变，降到 20 步才明显变差。本站按原文表 1 的数字重画，<a href="https://arxiv.org/html/2107.03006#S5.T1" target="_blank" rel="noopener">原文表 1 ↗</a>。</div>
+</div>
+<p>原文表 1 的要点（D3PM 的数字都是两个随机种子的平均，带“≤”）：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th class="num">步数</th><th class="num">bits/char</th><th class="num">生成一条样本（秒）</th></tr>
+  <tr><td>Discrete Flow（8×3 层）</td><td class="num">–</td><td class="num">1.23</td><td class="num">0.16</td></tr>
+  <tr><td>Argmax Coupling Flow</td><td class="num">–</td><td class="num">1.80</td><td class="num">0.40</td></tr>
+  <tr><td>IAF / SCF（由 Hoogeboom 等运行官方代码得到）</td><td class="num">–</td><td class="num">1.88</td><td class="num">0.04</td></tr>
+  <tr><td>多项式扩散（Hoogeboom 等，即均匀 D3PM）</td><td class="num">1000</td><td class="num">≤ 1.72</td><td class="num">26.6</td></tr>
+  <tr><td>D3PM uniform（本文）</td><td class="num">1000 / 256 / 20</td><td class="num">≤ 1.61 / 1.68 / 1.79</td><td class="num">3.6 / 0.58 / 0.077</td></tr>
+  <tr><td>D3PM NN（本文，\(L_{\mathrm{vb}}\)）</td><td class="num">1000 / 256 / 20</td><td class="num">≤ 1.59 / 1.64 / 1.75</td><td class="num">3.15 / 0.81 / 0.11</td></tr>
+  <tr class="hl"><td>D3PM absorbing（本文，\(L_{\lambda=0.01}\)）</td><td class="num">1000 / 256 / 20</td><td class="num">≤ 1.45 / 1.47 / 1.56</td><td class="num">3.4 / 0.60 / 0.079</td></tr>
+  <tr><td>Transformer 解码器（本文，自回归）</td><td class="num">256</td><td class="num">1.23</td><td class="num">0.357</td></tr>
+  <tr><td>Transformer 解码器（Al-Rfou 等）</td><td class="num">256</td><td class="num">1.18</td><td class="num">–</td></tr>
+  <tr><td>Transformer-XL（24 层）</td><td class="num">256</td><td class="num">1.08</td><td class="num">–</td></tr>
+</table></div>
+<p>论文从这张表读出四点。第一，吸收态是最好的 D3PM，在每个步数下都明显领先，论文认为这为“在去噪自编码器里用 [MASK]”提供了支持。第二，通过调超参数，本文的均匀模型把 Hoogeboom 等人的 1.72 改进到 1.61，而且在所有步数（一直到 20 步）上都更好。第三，在非自回归模型里，吸收态 D3PM 只输给 Discrete Flow（1.23）；论文特别注明 Discrete Flow 没有开源实现。第四，嵌入近邻只比均匀好一点点（1.59 对 1.61），作者称这是一个出乎意料的负面结果，说明“不是所有的结构都有意义”。附录图 8 还显示，从 1000 步减到约 250 步时似然几乎不变，再往下才较快变差。</p>
+<p>附录表 5 补充了 50 步的结果：均匀 ≤ 1.7、近邻 ≤ 1.62、吸收态 ≤ 1.53；还有一个“吸收态 + 近邻”的组合（\(L_{\lambda=0.01}\)、1000 步）≤ 1.53，比纯吸收态差。</p>
+
+<h4 id="n-9-3">9.3 LM1B：大词表能跑，吸收态仍然领先</h4>
+<p>在此之前，离散扩散还没有人在大规模文本和大词表上演示过。LM1B 实验的定位是“概念验证”：证明 D3PM 能扩展到 8192 个 token 的词表（靠 4.6 节的低秩与矩阵指数技巧），并且吸收态在这里仍然最好。</p>
+<div class="dia">
+  <div class="dia-title">图：LM1B 测试集困惑度随生成步数的变化（按原文表 2 重画）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="LM1B 上各模型的困惑度" style="--dg-min:700px">
+<line x1="90" y1="250" x2="650" y2="250" class="axis"/><line x1="90" y1="250" x2="90" y2="40" class="axis"/>
+<line x1="90" y1="250.0" x2="650" y2="250.0" class="grid-ln"/><text x="82" y="250.0" class="t-r t-xs">0</text>
+<line x1="90" y1="200.6" x2="650" y2="200.6" class="grid-ln"/><text x="82" y="200.6" class="t-r t-xs">40</text>
+<line x1="90" y1="151.2" x2="650" y2="151.2" class="grid-ln"/><text x="82" y="151.2" class="t-r t-xs">80</text>
+<line x1="90" y1="101.8" x2="650" y2="101.8" class="grid-ln"/><text x="82" y="101.8" class="t-r t-xs">120</text>
+<line x1="90" y1="52.4" x2="650" y2="52.4" class="grid-ln"/><text x="82" y="52.4" class="t-r t-xs">160</text>
+<text x="180" y="266" class="t-c t-sm">1000 步</text>
+<text x="370" y="266" class="t-c t-sm">128 步</text>
+<text x="560" y="266" class="t-c t-sm">64 步</text>
+<line x1="90" y1="196.1" x2="650" y2="196.1" style="stroke:var(--c-enc);stroke-width:1.8;stroke-dasharray:6 4"/>
+<text x="646" y="187.1" class="t-r t-xs" style="fill:var(--c-enc)">AR Transformer（同为 12 层，128 步）43.6</text>
+<line x1="90" y1="223.1" x2="650" y2="223.1" style="stroke:var(--c-act);stroke-width:1.8;stroke-dasharray:2 4"/>
+<text x="646" y="214.1" class="t-r t-xs" style="fill:var(--c-act)">Transformer-XL（24 层）21.8</text>
+<polyline points="166.0,79.7 356.0,78.0 546.0,70.9" style="fill:none;stroke:var(--c-data);stroke-width:2"/>
+<circle cx="166.0" cy="79.7" r="4.5" style="fill:var(--c-data)"/>
+<text x="166.0" y="94.7" class="t-c t-xs" style="fill:var(--c-data)">137.9（1.82 s）</text>
+<circle cx="356.0" cy="78.0" r="4.5" style="fill:var(--c-data)"/>
+<text x="356.0" y="93.0" class="t-c t-xs" style="fill:var(--c-data)">139.2（0.21 s）</text>
+<circle cx="546.0" cy="70.9" r="4.5" style="fill:var(--c-data)"/>
+<text x="546.0" y="85.9" class="t-c t-xs" style="fill:var(--c-data)">145（0.08 s）</text>
+<circle cx="690" cy="70" r="5" style="fill:var(--c-data)"/><text x="702" y="70" class="t-sm">D3PM uniform</text>
+<polyline points="180.0,65.3 370.0,54.1 560.0,51.9" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+<circle cx="180.0" cy="65.3" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="180.0" y="54.3" class="t-c t-xs" style="fill:var(--c-tgt)">149.5（21.29 s）</text>
+<circle cx="370.0" cy="54.1" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="370.0" y="43.1" class="t-c t-xs" style="fill:var(--c-tgt)">158.6（6.69 s）</text>
+<circle cx="560.0" cy="51.9" r="4.5" style="fill:var(--c-tgt)"/>
+<text x="560.0" y="40.9" class="t-c t-xs" style="fill:var(--c-tgt)">160.4（5.88 s）</text>
+<circle cx="690" cy="96" r="5" style="fill:var(--c-tgt)"/><text x="702" y="96" class="t-sm">D3PM NN</text>
+<polyline points="194.0,155.0 384.0,151.1 574.0,146.7" style="fill:none;stroke:var(--c-loss);stroke-width:2"/>
+<circle cx="194.0" cy="155.0" r="4.5" style="fill:var(--c-loss)"/>
+<text x="194.0" y="144.0" class="t-c t-xs" style="fill:var(--c-loss)">76.9（1.9 s）</text>
+<circle cx="384.0" cy="151.1" r="4.5" style="fill:var(--c-loss)"/>
+<text x="384.0" y="140.1" class="t-c t-xs" style="fill:var(--c-loss)">80.1（0.19 s）</text>
+<circle cx="574.0" cy="146.7" r="4.5" style="fill:var(--c-loss)"/>
+<text x="574.0" y="135.7" class="t-c t-xs" style="fill:var(--c-loss)">83.6（0.1 s）</text>
+<circle cx="690" cy="122" r="5" style="fill:var(--c-loss)"/><text x="702" y="122" class="t-sm">D3PM absorbing</text>
+<text x="690" y="160" class="t-xs">括号里是生成一条样本的时间</text>
+<text x="690" y="178" class="t-xs">AR 生成一条样本 0.26 s</text>
+<text x="690" y="196" class="t-xs">D3PM 的值都是上界（≤）</text>
+<text x="34" y="145.0" class="t-c t-sm" transform="rotate(-90 34 145.0)">测试集困惑度（越低越好）</text>
+<text x="370.0" y="290" class="t-c t-sm">生成（与评估）时用的步数</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>纵轴是按单词数归一化的困惑度，三条实线是三种 D3PM，括号里是生成一条长度 128 的样本所用的秒数。吸收态（红）在 1000 步时为 76.9，减到 64 步只升到 83.6；均匀（灰）在 138–145 之间；近邻（紫）最差，而且因为要做稠密矩阵运算，生成最慢（1000 步要 21.29 秒）。蓝色虚线是同结构的 12 层自回归模型 43.6，绿色虚线是 24 层的 Transformer-XL 21.8。本站按原文表 2 的数字重画，<a href="https://arxiv.org/html/2107.03006#S5.T2" target="_blank" rel="noopener">原文表 2 ↗</a>。</div>
+</div>
+<p>论文的读法：吸收态“表现相对不错”，向同样大小的自回归模型靠近，并且能缩减到少得多的步数；均匀加噪明显更差；近邻在似然上甚至比均匀还差（149.5 对 137.9），尽管它的生成过程在定性上有独特之处，作者据此认为“词向量相似”可能不是扩散过程里有意义的局部性。\(L_{\lambda=0.01}\) 对吸收态最好，对另外两种有害。</p>
+<p>原文图 2 左边画的是困惑度随推理步数（从 2 步到 1024 步，对数横轴）的变化：两条曲线在 2 步时都非常高（均匀上千、吸收态数百），到 10 步左右吸收态已经降到约 100 上下，32 步以后两条曲线都几乎走平（读图估计）。论文据此说“只用 10 步就能得到不错的结果”。图 2 右边和附录图 10–12 展示了样本：用吸收态模型补全被部分遮住的测试句子，以及从全 [MASK] 开始一步步揭开的完整过程。</p>
+<div class="dia">
+  <div class="dia-title">示意图：吸收态模型从全 [MASK] 开始生成（句子是本站编的）</div>
+  <div class="dia-row"><span class="lbl">t = T</span><div class="cells"><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span></div></div>
+  <div class="dia-row"><span class="lbl">t ≈ 3T/4</span><div class="cells"><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">said</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">.</span></div></div>
+  <div class="dia-row"><span class="lbl">t ≈ T/2</span><div class="cells"><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">officials</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">said</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">market</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">.</span></div></div>
+  <div class="dia-row"><span class="lbl">t ≈ T/4</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">City</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">officials</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">said</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">market</span><span class="cell b" style="width:auto;min-width:30px;padding:0 6px">[M]</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">reopen</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">.</span></div></div>
+  <div class="dia-row"><span class="lbl">t = 0</span><div class="cells"><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">City</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">officials</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">said</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">the</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">market</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">would</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">reopen</span><span class="cell a" style="width:auto;min-width:30px;padding:0 6px">.</span></div></div>
+  <div class="dia-note">本站示意图。揭开的顺序是随机的，常见的高频词和标点往往先被确定，内容词后填；一旦揭开就不再改。原文附录图 10、11 展示了真实模型的这种过程：样本在局部通顺，但整段的语义常常不连贯。</div>
+</div>
+
+<h4 id="n-9-4">9.4 结果的份量</h4>
+<p><b>和自回归模型比，对齐了什么。</b>本文的自回归基线和 D3PM 用同样的 12 层结构、同样的参数量（约 7000 万），附录说文本实验的所有模型都训练 100 万步、批大小 512；按这个说法，参数量和训练量也是对齐的（论文没有单列自回归基线的训练细节）。在这个对齐的比较里，差距是实实在在的：text8 上 1.45 对 1.23 bits/char，D3PM 的上界多出约 18%；LM1B 上 76.9 对 43.6，换算成每词的负对数似然是 4.34 对 3.78 nats，多出约 15%（推算）。正文说吸收态“接近同样大小的自回归模型”，这个措辞偏乐观。表里的 Transformer-XL 则不是同等条件：它的 text8 模型有 24 层、2.77 亿参数，LM1B 模型（Large）有 8 亿参数（Transformer-XL 论文表 3、表 4），所以 1.08 和 21.8 只能当作“当时的最好水平”参考，不能拿来衡量方法本身的差距。</p>
+<p><b>上界对精确值。</b>D3PM 的数字是变分上界，自回归是精确值。所以真实差距不会比表里更大，可能更小，但论文没法告诉我们小多少。</p>
+<p><b>速度要连同质量和条件一起看。</b>表里的“生成时间”是生成<b>一条</b>样本（text8 长 256、LM1B 长 128）的时间，论文没有写计时用的硬件，也没有说自回归基线是否使用了 KV 缓存。按表 1 自己的数字：1000 步时 D3PM 吸收态要 3.4 秒，比自回归的 0.357 秒慢约 10 倍；256 步时 0.598 秒，仍然比自回归慢；只有降到 20 步（0.0785 秒）才比自回归快约 4.5 倍，而此时质量是 1.56 对 1.23 bits/char（推算）。正文写的是“比同样大小的自回归 Transformer 快近 20 倍”，这个倍数无法从表 1 的数字算出来，本站推测它可能来自附录图 9 中步数更少的点，但无法核实。LM1B 上，64 步的吸收态（0.10 秒）比自回归（0.26 秒）快约 2.6 倍，困惑度是 83.6 对 43.6（推算）。另外，表 1 里多项式扩散 26.6 秒对本文均匀 D3PM 3.6 秒，用的是同样的 1000 步、本质上同一种模型，差了 7 倍多，说明这类计时很大程度上反映的是实现，而不是方法。只看批大小为 1 的计时也偏向并行生成的方法：批量大时，自回归模型的吞吐量会追上来。</p>
+<p><b>评测范围很窄。</b>文本实验只报告无条件生成的似然和样本，没有下游任务、没有条件生成，也没有对填空、改写这类“扩散天然擅长”的任务做定量评测。附录里的样本在局部通顺，但成段读下来语义不连贯。</p>
+<p><b>规模。</b>7000 万参数的模型，在 2021 年是一个概念验证的规模：同一时期最大的自回归语言模型已经到了 1750 亿参数（GPT-3，2020）。论文自己在讨论里也承认，和许多非自回归模型一样，D3PM 在文本上仍不如强的自回归模型。</p>
+<p><b>后来的重新评估。</b>2024 年的 MDLM 在其 LM1B 表里把 D3PM 吸收态的 76.90 和自己的结果并列（MDLM 1.1 亿参数、训练 330 亿 token 时为 ≤ 27.04）。但这两个数字的单位不同：D3PM 用 8192 词表的 SentencePiece、按单词数归一化，MDLM 用 bert-base-uncased 分词、按 token 归一化，不能直接相减。更有说服力的是 MDLM 的消融（其表 8）：在它自己的训练配方下，把模型退回“离散时间 \(T=1000\)、去掉它新增的两项参数化技巧”，也就是数学上等价于 D3PM 吸收态的版本，困惑度上界是 28.51，只比完整的 MDLM 差约 1.5。这说明吸收态 D3PM 的目标本身并不弱，2021 年的差距主要来自模型、训练配方和规模。</p>
+<div class="note-warn"><b>容易误读的地方：</b>“吸收态比均匀好”在这篇论文的设置下是成立的（text8、LM1B 都是），但它是在“按似然评测、70M 模型”的条件下得出的。后来有工作在更大规模上重新审视均匀噪声，认为它在可以反复修改已生成内容等方面有优势，而且不同噪声族的困惑度不宜直接比较（见旧版的 <a href="../legacy/tracks/dllm/05-uniform.html">均匀噪声与连续路线</a>）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · 附录 B.2 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a> · <a href="https://arxiv.org/html/2107.03006#S5.F2" target="_blank" rel="noopener">原文图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 图像实验：CIFAR-10</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把 8 位图像的每个颜色通道看成 256 个类别，D3PM 能不能和连续的 DDPM 比？三种矩阵里哪种最适合图像？混合损失和 logistic 参数化各带来多少提升？这里和 DDPM 的比较是在什么条件下做的？</div>
+<div class="note-pre"><b>先补一点背景：IS、FID 与 bits/dim。</b>
+<p><b>IS（Inception Score）</b>用一个在 ImageNet 上训练好的 Inception 分类网络给生成的图打分：每张图越像某一类、全部图的类别越分散，分数越高。<b>FID（Fréchet Inception Distance）</b>比较生成图和真实图在 Inception 网络特征空间里的分布（均值和协方差）有多接近，越低越好，是最常用的图像质量指标。两者都依赖一个特定数据上训练的网络，论文在讨论里专门提醒了这一点。<b>bits/dim</b> 是负对数似然除以维度数（CIFAR-10 每张图 32×32×3 = 3072 维）再换成以 2 为底，衡量模型给真实图像打的概率，越低越好。</p>
+</div>
+<p><b>设置。</b>CIFAR-10 无条件生成。三种 D3PM：均匀（余弦日程，比线性日程好）、吸收态（吸收态是灰色像素 (128, 128, 128)，日程 \(\beta_t=1/(T-t+1)\)，即被吸收的概率随时间线性增长）、离散高斯（\(\beta_t\) 沿用 DDPM 的线性日程，从 \(10^{-4}\) 到 0.02）。\(T=1000\)，论文验证了所有模型的前向过程在 \(T\) 步内都已收敛到平稳分布，\(L_T\) 最多约 \(10^{-5}\) bits/dim。</p>
+<p>网络完全沿用 DDPM：以 PixelCNN++ 的骨干为基础的 U-Net（Wide ResNet 块，权重归一化换成组归一化），4 种特征图分辨率，每种分辨率 2 个残差块，在 16×16 分辨率加一个自注意力块，时间步用正弦位置编码送进每个残差块。超参数也直接照搬、没有调：dropout 0.1，Adam 学习率 \(2\times10^{-4}\)，批大小 128，评估用衰减率 0.9999 的参数滑动平均，训练时随机水平翻转。作者先用 JAX/Flax 重新实现了 DDPM 并验证能复现原文结果，再在它上面改出 D3PM。参数量：重实现的 DDPM 约 3570 万，和官方 CIFAR-10 检查点一样；直接输出 logits 的 D3PM 约 3660 万；用 logistic 参数化的约 3570 万。所有模型在 TPUv2（4×4 拓扑）上训练 150 万步；IS 和 FID 用 50,000 张样本计算；D3PM 的每个数字是 5 个随机种子的平均和标准差。</p>
+<div class="dia">
+  <div class="dia-title">图：CIFAR-10 上的 FID 与负对数似然（按原文表 3 重画）</div>
+  <svg class="dg" viewBox="0 0 960 324" role="img" aria-label="CIFAR-10 上的 FID 与 NLL" style="--dg-min:760px">
+<text x="400.0" y="22" class="t-c t-b">FID（越低越好）</text>
+<text x="780.0" y="22" class="t-c t-b">NLL，bits/dim（越低越好）</text>
+<line x1="250.0" y1="42" x2="250.0" y2="284" class="grid-ln"/><text x="250.0" y="298" class="t-c t-xs">0</text>
+<line x1="304.5" y1="42" x2="304.5" y2="284" class="grid-ln"/><text x="304.5" y="298" class="t-c t-xs">10</text>
+<line x1="359.1" y1="42" x2="359.1" y2="284" class="grid-ln"/><text x="359.1" y="298" class="t-c t-xs">20</text>
+<line x1="413.6" y1="42" x2="413.6" y2="284" class="grid-ln"/><text x="413.6" y="298" class="t-c t-xs">30</text>
+<line x1="468.2" y1="42" x2="468.2" y2="284" class="grid-ln"/><text x="468.2" y="298" class="t-c t-xs">40</text>
+<line x1="522.7" y1="42" x2="522.7" y2="284" class="grid-ln"/><text x="522.7" y="298" class="t-c t-xs">50</text>
+<line x1="630.0" y1="42" x2="630.0" y2="284" class="grid-ln"/><text x="630.0" y="298" class="t-c t-xs">0</text>
+<line x1="684.5" y1="42" x2="684.5" y2="284" class="grid-ln"/><text x="684.5" y="298" class="t-c t-xs">1</text>
+<line x1="739.1" y1="42" x2="739.1" y2="284" class="grid-ln"/><text x="739.1" y="298" class="t-c t-xs">2</text>
+<line x1="793.6" y1="42" x2="793.6" y2="284" class="grid-ln"/><text x="793.6" y="298" class="t-c t-xs">3</text>
+<line x1="848.2" y1="42" x2="848.2" y2="284" class="grid-ln"/><text x="848.2" y="298" class="t-c t-xs">4</text>
+<line x1="902.7" y1="42" x2="902.7" y2="284" class="grid-ln"/><text x="902.7" y="298" class="t-c t-xs">5</text>
+<text x="240" y="61.0" class="t-r t-sm">D3PM uniform, L_vb</text>
+<rect x="250" y="53" width="279.7" height="16" rx="3" style="fill:var(--c-data);fill-opacity:.8"/>
+<text x="535.7" y="61.0" class="t-xs">51.27</text>
+<rect x="630" y="53" width="277.1" height="16" rx="3" style="fill:var(--c-data);fill-opacity:.8"/>
+<text x="913.1" y="61.0" class="t-xs">≤ 5.08</text>
+<text x="240" y="87.0" class="t-r t-sm">D3PM absorbing, L_vb</text>
+<rect x="250" y="79" width="225.2" height="16" rx="3" style="fill:var(--c-loss);fill-opacity:.8"/>
+<text x="481.2" y="87.0" class="t-xs">41.28</text>
+<rect x="630" y="79" width="263.5" height="16" rx="3" style="fill:var(--c-loss);fill-opacity:.8"/>
+<text x="899.5" y="87.0" class="t-xs">≤ 4.83</text>
+<text x="240" y="113.0" class="t-r t-sm">D3PM absorbing, L_λ</text>
+<rect x="250" y="105" width="168.9" height="16" rx="3" style="fill:var(--c-loss);fill-opacity:.8"/>
+<text x="424.9" y="113.0" class="t-xs">30.97</text>
+<rect x="630" y="105" width="240.0" height="16" rx="3" style="fill:var(--c-loss);fill-opacity:.8"/>
+<text x="876.0" y="113.0" class="t-xs">≤ 4.4</text>
+<text x="240" y="139.0" class="t-r t-sm">D3PM Gauss, L_vb</text>
+<rect x="250" y="131" width="83.5" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="339.5" y="139.0" class="t-xs">15.3</text>
+<rect x="630" y="131" width="216.3" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="852.3" y="139.0" class="t-xs">≤ 3.966</text>
+<text x="240" y="165.0" class="t-r t-sm">D3PM Gauss, L_λ</text>
+<rect x="250" y="157" width="45.5" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="301.5" y="165.0" class="t-xs">8.34</text>
+<rect x="630" y="157" width="216.8" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="852.8" y="165.0" class="t-xs">≤ 3.975</text>
+<text x="240" y="191.0" class="t-r t-sm">D3PM Gauss + logistic, L_λ</text>
+<rect x="250" y="183" width="40.0" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="296.0" y="191.0" class="t-xs">7.34</text>
+<rect x="630" y="183" width="187.4" height="16" rx="3" style="fill:var(--c-act);fill-opacity:.8"/>
+<text x="823.4" y="191.0" class="t-xs">≤ 3.435</text>
+<text x="240" y="217.0" class="t-r t-sm">DDPM, L_vb（连续）</text>
+<rect x="250" y="209" width="73.7" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="329.7" y="217.0" class="t-xs">13.51</text>
+<rect x="630" y="209" width="201.8" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="837.8" y="217.0" class="t-xs">≤ 3.7</text>
+<text x="240" y="243.0" class="t-r t-sm">DDPM, L_simple（连续）</text>
+<rect x="250" y="235" width="17.3" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="273.3" y="243.0" class="t-xs">3.17</text>
+<rect x="630" y="235" width="204.5" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="840.5" y="243.0" class="t-xs">≤ 3.75</text>
+<text x="240" y="269.0" class="t-r t-sm">Improved DDPM, L_vb（连续）</text>
+<rect x="250" y="261" width="62.6" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="318.6" y="269.0" class="t-xs">11.47</text>
+<rect x="630" y="261" width="160.4" height="16" rx="3" style="fill:var(--c-enc);fill-opacity:.8"/>
+<text x="796.4" y="269.0" class="t-xs">≤ 2.94</text>
+<line x1="10" y1="205" x2="950" y2="205" style="stroke:var(--border-strong);stroke-dasharray:4 4"/>
+<text x="950" y="318" class="t-r t-xs">D3PM 行为 5 个随机种子的平均；连续扩散的数字取自原论文报告值</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个模型，左边是 FID，右边是 NLL 上界（bits/dim），两者都是越短越好。虚线以上是六个 D3PM 变体：灰色均匀，红色吸收态，绿色离散高斯；虚线以下是三个连续扩散的参考值（取自各自论文）。从上往下，D3PM 的两个指标基本都在变好；最下面的“Gauss + logistic”在 NLL 上比 DDPM 两行都短，FID 却仍比 DDPM 的 \(L_{\mathrm{simple}}\) 长一倍多。本站按原文表 3 的数字重画，<a href="https://arxiv.org/html/2107.03006#S6.T3" target="_blank" rel="noopener">原文表 3 ↗</a>。</div>
+</div>
+<p><b>结果。</b>按论文表 3（D3PM 为 5 个种子的均值 ± 标准差）：</p>
+<ul>
+  <li>只用 \(L_{\mathrm{vb}}\) 训练时，离散高斯在三个指标上都最好：IS 7.75、FID 15.30、NLL ≤ 3.966。均匀和吸收态的 IS 差不多（5.99 对 6.26），吸收态的 FID（41.28 对 51.27）和 NLL（≤ 4.83 对 ≤ 5.08）略好。这和文本上的排序完全不同：图像的灰度值是有序的，“只往相近的值跳”这个结构正好有用。</li>
+  <li>用 \(L_\lambda\)（\(\lambda=0.001\)）训练，吸收态和离散高斯都明显变好：吸收态 FID 30.97、NLL ≤ 4.40；离散高斯 IS 8.54、FID 8.34（NLL ≤ 3.975，略差于 \(L_{\mathrm{vb}}\) 的 3.966）。第 7 节已经讲过论文对此的解释。</li>
+  <li>最好的是离散高斯 + \(L_\lambda\) + 截断离散 logistic 参数化：IS 8.56、FID 7.34、NLL ≤ 3.435。</li>
+</ul>
+<p>原文图 3 左边是吸收态和“Gauss + logistic”两个模型从 \(t=1000\) 到 0 每隔 100 步的中间结果（挑选过的样本）：吸收态模型从一整片灰色（全是吸收态）开始，像素的各个颜色通道零星地、各自独立地被揭开，所以画面一开始就带着彩色噪点，轮廓随步数逐渐填满；离散高斯模型从满屏均匀的彩色噪点开始，前一半步数几乎看不出变化，图像在后半程才从噪点里浮现，这和连续扩散的观感很像。右边是“Gauss + logistic”的未经挑选的样本。</p>
+
+<h4 id="n-10-1">10.1 结果的份量</h4>
+<p><b>和 DDPM 的比较是对齐得最好的一组。</b>同一套网络结构、几乎相同的参数量（3570 万对 3570–3660 万）、同样的超参数、同样的 \(T=1000\)，而且 DDPM 是作者自己重新实现并验证过的。在这个条件下，“Gauss + logistic”的 NLL 上界 3.435 确实低于 DDPM 的 ≤ 3.70（\(L_{\mathrm{vb}}\) 训练）和 ≤ 3.75（\(L_{\mathrm{simple}}\) 训练），这就是摘要里“似然超过连续 DDPM”的含义。</p>
+<p><b>但只是超过了原始 DDPM。</b>同一张表里，Improved DDPM 用 \(L_{\mathrm{vb}}\) 训练的 NLL 是 ≤ 2.94，Song 等人的 DDPM++（连续时间）是 2.99，自回归的 Sparse Transformer 是 2.80，都比 3.435 低得多。样本质量上，D3PM 最好的 FID 7.34，仍比 DDPM \(L_{\mathrm{simple}}\) 的 3.17 差一倍多，更不及 NCSN++ 的 2.20 和 StyleGAN2 + ADA 的 3.26。论文在讨论里也承认“连续扩散在图像质量上仍然更强”。</p>
+<p><b>其他要注意的条件。</b>图 3 左侧的逐步样本是挑选过的；作者开源的代码不包含 FID 和 IS 的评测部分（代码 README 说明），所以这两个数字目前无法用官方代码直接复现。D3PM 的数字都有 5 个种子的标准差，这一点比许多同期工作更严谨。</p>
+<div class="note-warn"><b>容易误读的一点：</b>图像实验里表现最好的是离散高斯，吸收态在这里排第二（FID 30.97 对 7.34）。所以“吸收态最好”只是文本上的结论；对有序数据，“相近状态之间的局部转移”才是关键。后来的 MD4（2024）用改进的掩码扩散在 CIFAR-10 上做到 2.75 bits/dim（据其摘要），说明吸收态在像素上的差距也主要来自当时的参数化与训练，而不是吸收态本身的上限。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2107.03006#S6.F3" target="_blank" rel="noopener">原文图 3 ↗</a> · 附录 B.1 见 <a href="https://arxiv.org/pdf/2107.03006" target="_blank" rel="noopener">PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">11 相关工作与讨论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>D3PM 在当时的研究版图里处在什么位置？作者自己认为它还差在哪里，下一步可以往哪里走？</div>
+<p><b>相关工作。</b>论文把相关工作分成三块。第一块是连续扩散本身：Sohl-Dickstein 等人最早提出扩散生成模型，DDPM 和 WaveGrad 让它在图像和语音上重新受到关注；之后有对变分界做重要性采样、改进噪声日程（Improved DDPM）、隐式扩散（DDIM）等改进，也有工作揭示了它和得分匹配的联系，并在连续时间极限下得到更好的采样算法（Song 等人的 SDE 框架）。第二块是离散数据上的扩散：Sohl-Dickstein 的二值扩散、Hoogeboom 等人的多项式扩散；有些工作把离散数据嵌入连续空间再用高斯扩散（图生成、符号音乐），但没有用在文本上；Seff 等人也用类似扩散的马尔可夫破坏过程生成离散结构。第三块是文本：去噪自编码器在表示学习（包括 BERT）和生成（Wang 与 Cho）上都有很长的历史，它们在特定日程和矩阵下与吸收态 D3PM 非常接近，而 D3PM 的框架额外给出了似然，并允许换别的转移矩阵；非自回归翻译和语音识别里还有插入/删除（Levenshtein Transformer 等）、掩码（Mask-Predict）、迭代精修的序列对齐（Imputer 等）等做法。</p>
+<p><b>作者承认的局限。</b>第一，和很多非自回归生成模型一样，D3PM 在文本上仍然不如 Transformer-XL 这样强的自回归模型；在图像质量上仍然不如连续扩散。第二，评测指标有局限：IS 和 FID 依赖在特定数据上训练的网络，不能代表所有用途，只看平均质量也可能掩盖模型在不同人群和场景上的差异，作者认为这有造成负面社会影响的风险。</p>
+<p><b>作者展望的方向。</b>借鉴连续扩散的进展：试试类似 \(L_{\mathrm{simple}}\) 的重新加权损失、Improved DDPM 的重采样变分界、更多的时间步和更优化的噪声日程；以及探索更丰富的结构化转移矩阵。同一组作者随后还发表了在 D3PM 之上加入插入和删除操作的工作（Johnson 等，“Beyond In-Place Corruption”，ICML 2021 研讨会），代码也放在同一个仓库里。</p>
+<div class="note-warn"><b>回头看，哪些展望应验了：</b>“借鉴连续扩散的重新加权与更多时间步”基本应验了，而且走到了极端：后来的工作直接取 \(T\to\infty\) 的连续时间，并把吸收态的目标化简成第 8 节那种加权交叉熵。“更丰富的结构化矩阵”则基本没有成为主流：嵌入近邻在本文里就表现平平，后来的大规模文本扩散几乎都用吸收态，少数回到均匀噪声。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2107.03006#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://arxiv.org/html/2107.03006#S8" target="_blank" rel="noopener">§8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>D3PM 本身没有成为一个被广泛使用的模型，但它定下的框架和它的吸收态分支，成了此后几乎所有离散扩散语言模型的起点。下面按时间顺序梳理与本页内容直接相关的几条线（链接到本站的精读页或旧版拆解页）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：从 D3PM 出发的几条线（只列本页提到的工作）</div>
+  <div class="dia-flow"><span class="dia-box enc">D3PM（2021-07）<small>转移矩阵框架；吸收态 = 加权 MLM</small></span><span class="dia-arrow">→</span><span class="dia-box">连续时间<small>Campbell 等（2022）；SEDD（2023）</small></span><span class="dia-arrow">→</span><span class="dia-box act">简化的掩码扩散<small>MDLM、MD4（2024）</small></span><span class="dia-arrow">→</span><span class="dia-box pred">规模化<small>LLaDA 8B（2025）、Dream 7B 等</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">D3PM 的一般矩阵</span><span class="dia-arrow">→</span><span class="dia-box tgt">更一般的概率路径<small>Discrete Flow Matching（2024）</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">D3PM 吸收态 + 均匀的组合</span><span class="dia-arrow">→</span><span class="dia-box reg">图像 token 上的离散扩散<small>VQ-Diffusion（2021-11）的“掩码与替换”</small></span></div>
+  <div class="dia-note">本站示意图，只画本页讨论过的关系，不是完整的谱系。完整谱系见旧版 <a href="../legacy/tracks/dllm/index.html">扩散 LLM 路线页</a>。</div>
+</div>
+<ul>
+  <li><b>连续时间化。</b>D3PM 的附录 A.5 已经指出矩阵指数对应连续时间马尔可夫链。Campbell 等人（2022）给出了第一个完整的离散数据连续时间扩散框架。SEDD（2023）提出“得分熵”损失，同样比较了吸收态和均匀两种矩阵，结论与本文一致：在 GPT-2 small 规模上，吸收态在 WikiText103 上的困惑度上界为 ≤ 40.62，均匀为 ≤ 49.60，GPT-2 为 41.60；在 text8 上，它把非自回归模型的最好成绩从本文吸收态的 1.45 推进到 1.39 bits/char（SEDD 表 1、表 2）。见 <a href="sedd.html">SEDD 精读</a>。</li>
+  <li><b>吸收态的简化。</b>MDLM 和同期的 MD4（2024）证明，吸收态扩散的连续时间变分界就是掩码语言模型损失的加权混合，这正是本页 8.3 节那个 \(1/t\) 加权目标在 \(T\to\infty\) 时的样子。MDLM 明确说“掩码扩散是 D3PM 的严格子集”，它相对 D3PM 的改进是三点：一种专门针对掩码的参数化（SUBS）、由此化简出的更简单的目标、以及更好的训练配方。结果是 LM1B 上 1.1 亿参数、330 亿 token 时 ≤ 27.04，327B token 时 ≤ 23.00，同条件重训的自回归模型为 22.32 和 20.86（MDLM 表 1）。MD4 在 CIFAR-10 上做到 2.75 bits/dim（据其摘要），远好于 D3PM 吸收态的 ≤ 4.40。见 <a href="mdlm.html">MDLM 精读</a>。</li>
+  <li><b>规模化。</b>LLaDA（2025）从头训练了一个 80 亿参数的掩码扩散语言模型，训练损失是“对 \(t\sim U[0,1]\)，在被掩位置上算交叉熵并乘以 \(1/t\)”，和 8.3 节推出的连续时间形式逐项相同；其相关工作部分把 Austin 等人（即本文）列为把离散扩散引入语言建模的开创性工作之一。LLaDA 8B 预训练用了 2.3T token，并与 LLaMA3 8B（15T token）等模型对比（LLaDA 表 1）。见 <a href="llada.html">LLaDA 精读</a>，以及同一路线的 <a href="dream.html">Dream 7B</a>、<a href="llada2.html">LLaDA2.0</a>。</li>
+  <li><b>更一般的离散生成框架。</b>D3PM“矩阵随便设计”的精神，后来以“概率路径”的形式被 Discrete Flow Matching（2024）继承和推广，见 <a href="discrete-flow-matching.html">Discrete Flow Matching 精读</a>。</li>
+  <li><b>图像 token。</b>VQ-Diffusion（2021-11）在 VQ-VAE 的离散图像 token 上做扩散，用了一种“掩码与替换”的加噪策略（据其摘要）。本站的理解是，它和 D3PM 附录 A.2.6 的“吸收态 + 均匀”组合属于同一思路：既会变成 [MASK]，也会被换成随机 token。</li>
+  <li><b>本页提出、后来被反复研究的问题。</b>6.1 节讲的“同一步独立抽样”的误差，以及掩码扩散按随机顺序生成带来的困难子问题，后来成为一个专门的研究方向，见 <a href="token-ordering.html">Train for the Worst, Plan for the Best 精读</a> 和旧版的 <a href="../legacy/tracks/dllm/16-order-limits.html">顺序与并行的极限</a>。</li>
+</ul>
+<p>反过来，D3PM 里有几样东西后来很少再用：嵌入近邻矩阵（本文就证明它几乎没用）、离散高斯之于文本、混合损失里的辅助交叉熵（被更简单的目标取代），以及 1000 步的离散时间（被连续时间取代）。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、论文本身。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Jacob Austin</b>（共同一作）<div class="aff">Google Research, Brain Team（论文署名）</div>也是同组后续工作“Beyond In-Place Corruption: Insertion and Deletion in Denoising Probabilistic Models”的作者之一（见 D3PM 代码 README）。</div>
+  <div class="author-card"><b>Daniel D. Johnson</b>（共同一作）<div class="aff">Google Research, Brain Team（论文署名）</div>据其个人主页：后在多伦多大学读博，研究让模型准确报告不确定性；在 Google DeepMind 期间发布了 JAX 神经网络库 Penzai 和可视化工具 Treescope；现为 Transluce 研究员。上述插入/删除后续工作的第一作者。</div>
+  <div class="author-card senior"><b>Jonathan Ho</b><div class="aff">Google Research, Brain Team（论文署名）</div>据其个人主页：2020 年于 UC Berkeley 获计算机科学博士，导师 Pieter Abbeel；DDPM（NeurIPS 2020）的第一作者，也就是本文所推广的那个连续扩散模型。</div>
+  <div class="author-card senior"><b>Daniel Tarlow</b><div class="aff">Google Research, Brain Team（论文署名）</div>据其个人主页：Google Brain 蒙特利尔研究科学家，2013 年获多伦多大学博士；代表作包括 A* Sampling（NIPS 杰出论文奖）、DeepCoder、Gated Graph Sequence Neural Networks，长期研究机器学习与程序语言的交叉。</div>
+  <div class="author-card senior"><b>Rianne van den Berg</b><div class="aff">Google Research, Brain Team（论文署名）；论文脚注注明发表时已转到 Microsoft Research</div>Integer Discrete Flows（2019）的作者之一，该文第一作者正是多项式扩散的提出者 Emiel Hoogeboom。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：NeurIPS 2021（第 35 届神经信息处理系统大会）。arXiv 首版 2021-07-07，当前为 v3（2023-02-22）。</li>
+  <li><b>代码</b>：官方 JAX/Flax 实现在 <a href="https://github.com/google-research/google-research/tree/master/d3pm" target="_blank" rel="noopener">google-research/google-research 的 d3pm 目录</a>，分 <code>images</code>（第 6 节）和 <code>text</code>（第 5 节）两部分，另有插入/删除后续工作的 <code>insertdelete</code>。README 说明 FID 和 IS 的评测代码没有公开。这个目录属于 Google Research 的大型合集仓库（Apache-2.0 许可，截至 2026-10-19 共 38,954 个 star），仓库的 star 数反映的是整个合集，不能当作 D3PM 本身的采用度。</li>
+  <li><b>后续采用</b>：吸收态加噪与 \(1/t\) 加权的掩码交叉熵，经 MDLM、MD4 的连续时间简化后，成为 LLaDA 等大规模扩散语言模型的训练目标；LLaDA 在相关工作中把本文列为把离散扩散引入语言建模的开创性工作之一。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>旧版结构页：<a href="../legacy/tracks/dllm/01-foundations.html">扩散 LLM 从头讲起</a>（其中 <a href="../legacy/tracks/dllm/01-foundations.html#c-families">三族噪声对照</a> 一节用一句话的例子比较了吸收态、均匀和连续三条路线）；<a href="../legacy/tracks/dllm/index.html">扩散 LLM 路线总览</a>。</li>
+  <li>同一路线的精读页：<a href="diffusion-lm.html">Diffusion-LM</a>（连续路线）、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM / MD4</a>、<a href="discrete-flow-matching.html">Discrete Flow Matching</a>、<a href="llada.html">LLaDA</a>。</li>
+  <li>旧版拆解页：<a href="../legacy/tracks/dllm/02-sedd.html">SEDD</a>、<a href="../legacy/tracks/dllm/03-mdlm.html">MDLM</a>、<a href="../legacy/tracks/dllm/05-uniform.html">均匀噪声与连续路线</a>、<a href="../legacy/tracks/dllm/06-llada.html">LLaDA</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2107.03006" target="_blank" rel="noopener">arXiv:2107.03006</a>。原论文在 arXiv 上以 CC BY-NC-SA 4.0 许可发布，不在本站转载原图的范围内，因此本页没有使用任何原图：所有示意图均为本站绘制，数据图按论文表格中报告的数字重画，\(\alpha(k)\) 图按论文公式重新计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

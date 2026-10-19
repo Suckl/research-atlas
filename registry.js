@@ -488,7 +488,7 @@ window.ATLAS_REGISTRY = {
       "page": "legacy/tracks/dllm/index.html",
       "summary": "扩散语言模型：用迭代去噪代替从左到右生成——噪声与目标（SEDD / MDLM / 离散流匹配 / 均匀噪声）、规模与配方（LLaDA / Dream / LLaDA2.x / DiffusionGemma / Mercury / Seed Diffusion）、块扩散与 AR 混合（BD3-LM / SDAR / WeDLM / TiDAR / DFlash）、缓存与并行解码（Fast-dLLM / dParallel / 并行上限分析）、后训练与代码（d1 / LLaDA 1.5 / TraceRL / DiffuCoder）、多模态（MMaDA / LLaDA-V / LaViDa）。19 页、47 篇论文，时间线 2021 → 2026-10，附测量条件检查清单与简答题。",
       "lineage_band": "quarter",
-      "reading_order": ["dllm-foundations", "sedd", "radd", "mdlm", "md4", "dfm", "edit-flows", "duo", "uniform-scaling", "llada", "smdm", "illada", "dream", "diffullama", "data-constrained", "super-data", "llada2", "llada-moe", "llada21", "diffusiongemma", "mercury", "seed-diffusion", "bd3lm", "eso-lm", "sdar", "fast-dllm-v2", "wedlm", "tidar", "nemotron-diffusion", "dflash", "fast-dllm", "dkv-cache", "d2f", "dparallel", "d3llm", "cdlm", "train-worst", "parallelbench", "flexibility-trap", "d1", "llada-15", "tracerl", "diffucoder", "dream-coder", "stable-diffcoder", "mmada", "llada-v", "lavida"],
+      "reading_order": ["dllm-foundations", "d3pm", "diffusion-lm", "sedd", "radd", "mdlm", "md4", "dfm", "edit-flows", "duo", "uniform-scaling", "llada", "smdm", "illada", "dream", "diffullama", "data-constrained", "super-data", "llada2", "llada-moe", "llada21", "diffusiongemma", "mercury", "seed-diffusion", "bd3lm", "eso-lm", "sdar", "fast-dllm-v2", "wedlm", "tidar", "nemotron-diffusion", "dflash", "fast-dllm", "dkv-cache", "d2f", "dparallel", "d3llm", "cdlm", "train-worst", "parallelbench", "flexibility-trap", "d1", "llada-15", "tracerl", "diffucoder", "dream-coder", "stable-diffcoder", "mmada", "llada-v", "lavida"],
       "lanes": [
         { "id": "objective", "label": "噪声与目标" },
         { "id": "scale", "label": "规模与配方" },
@@ -3477,6 +3477,45 @@ window.ATLAS_REGISTRY = {
       }
     },
     {
+      "id": "d3pm",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "objective",
+      "title": "D3PM",
+      "full_title": "Structured Denoising Diffusion Models in Discrete State-Spaces",
+      "authors": ["Jacob Austin", "Daniel D. Johnson", "Jonathan Ho", "Daniel Tarlow", "Rianne van den Berg"],
+      "org": "Google Research",
+      "date": "2021-07",
+      "venue": "NeurIPS 2021",
+      "arxiv": "2107.03006",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2107.03006" }
+      ],
+      "page": "papers/d3pm.html",
+      "reading": "papers/d3pm.html",
+      "tldr": "D3PM 把扩散模型搬到 token 这类离散数据上：用转移矩阵定义“按概率替换”式的加噪，比较了均匀替换、变成 [MASK]（吸收态）、离散高斯和词向量近邻四种矩阵。吸收态在文本上最好，它的训练目标化简后就是按 1/t 加权的掩码语言模型损失，后来成为 MDLM、LLaDA 等掩码扩散语言模型的起点。"
+    },
+    {
+      "id": "diffusion-lm",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "objective",
+      "title": "Diffusion-LM",
+      "full_title": "Diffusion-LM Improves Controllable Text Generation",
+      "authors": ["Xiang Lisa Li", "John Thickstun", "Ishaan Gulrajani", "Percy Liang", "Tatsunori B. Hashimoto"],
+      "org": "Stanford University",
+      "date": "2022-05",
+      "venue": "NeurIPS 2022",
+      "arxiv": "2205.14217",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2205.14217" },
+        { "label": "Code", "url": "https://github.com/XiangLi1999/Diffusion-LM" }
+      ],
+      "page": "papers/diffusion-lm.html",
+      "reading": "papers/diffusion-lm.html",
+      "tldr": "把每个词变成向量，在整句的词向量上做连续高斯扩散，生成时从噪声逐步去噪、最后取整成词；因为中间状态是连续的，每一步都能用分类器的梯度引导，于是句法树、指定片段、长度、填空这类自回归模型难做的精细控制都做得很好。代价是似然更差、解码比自回归慢得多，后来的扩散语言模型主流转向了离散的掩码扩散。"
+    },
+    {
       "id": "sedd",
       "track": "dllm",
       "kind": "model",
@@ -3484,7 +3523,7 @@ window.ATLAS_REGISTRY = {
       "title": "SEDD",
       "full_title": "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution",
       "authors": ["Aaron Lou", "Chenlin Meng", "Stefano Ermon"],
-      "org": "Stanford University",
+      "org": "Stanford University; Pika Labs",
       "date": "2023-10",
       "venue": "ICML 2024 (Oral, Best Paper)",
       "arxiv": "2310.16834",
@@ -3494,7 +3533,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/louaaron/sedd-medium" }
       ],
       "page": "legacy/tracks/dllm/02-sedd.html",
-      "tldr": "用 score entropy（以 −log 为凸函数的 Bregman 散度）学习离散分布的概率比 p_t(y)/p_t(x)，可去噪式训练并给出似然上界；吸收态版本在 GPT-2 small/medium 规模零样本困惑度与同尺寸 AR 相当，并支持任意位置 prompt。",
+      "reading": "papers/sedd.html",
+      "tldr": "SEDD 把离散扩散的反向过程写成“数据分布的概率比”，并用新损失 score entropy（以 −log 为凸函数的 Bregman 散度）去学这些比值；这个损失可以去噪式地计算，同时就是负对数似然的上界。用 [MASK] 吸收态加噪时，它在 GPT-2 small / medium 规模上让扩散语言模型的零样本困惑度上界第一次与同尺寸 GPT-2 相当，并且不需专门训练就能在任意位置给提示填空。",
       "tags": ["score entropy", "concrete score", "absorbing", "CTMC", "Tweedie τ-leaping"],
       "facts": {
         "noise": "CTMC 吸收态（[M]）与均匀两种转移；吸收态全面更好；几何与 log-linear 调度",
@@ -3554,7 +3594,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/kuleshov-group/mdlm-owt" }
       ],
       "page": "legacy/tracks/dllm/03-mdlm.html",
-      "tldr": "证明掩码扩散的连续时间 ELBO 就是按掩码率加权（线性调度下为 1/t）、只在 [M] 位置计分的 MLM 交叉熵；SUBS 参数化（[M] 概率置零、已揭示位置照抄）加上现代工程配方，使掩码扩散在 LM1B / OWT 上超过 SEDD，并成为 LLaDA 等大模型的训练目标。",
+      "reading": "papers/mdlm.html",
+      "tldr": "MDLM 证明，掩码（吸收态）扩散的连续时间负 ELBO 可以化简为只在被遮位置计算、按 1/t 加权的 BERT 式交叉熵；配上现代训练配方，约 1 亿参数的模型在 LM1B 和 OpenWebText 上的困惑度上界明显好于 SEDD，并逼近训练 token 数相同的自回归模型。同期的 MD4 从另一条推导得到同一个目标，它后来成为 LLaDA 等扩散大模型的训练目标。",
       "tags": ["掩码扩散", "ELBO", "SUBS", "半自回归"],
       "facts": {
         "noise": "掩码（吸收态）；log-linear 调度，即 α_t = 1 − t",
@@ -3612,7 +3653,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Code (flow_matching 库)", "url": "https://github.com/facebookresearch/flow_matching" }
       ],
       "page": "legacy/tracks/dllm/04-discrete-flow.html",
-      "tldr": "把离散生成写成“概率路径 + CTMC 概率速度”：任意源（掩码 / 均匀 / 混合）、任意耦合与调度器，速度公式与连续流匹配同形，并给出可证明正确、能把已揭示 token 重新掩码的 corrector 采样；1.7B 模型首次在 HumanEval / MBPP 上得到非平凡分数。",
+      "reading": "papers/discrete-flow-matching.html",
+      "tldr": "这篇论文把连续流匹配“先规定概率路径、再学让样本沿路径走的速度”的做法搬到离散的 token 上，掩码扩散和均匀噪声扩散都成了它的特例，并给出能把已写 token 重新掩码、又不破坏分布的 corrector 采样。1.7B 模型在 HumanEval 和 MBPP 上的 Pass@1 都是 6.7%，是非自回归模型首次在代码上拿到不平凡的分数，但同规模、同数据的自回归模型分别是 14.3% 和 17.0%。",
       "tags": ["离散流匹配", "CTMC", "corrector", "代码"],
       "facts": {
         "noise": "概率路径：掩码源（主实验）/ 均匀 / 中途混入均匀噪声；文本调度 κ_t = t²",
@@ -3719,7 +3761,7 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "LLaDA",
       "full_title": "Large Language Diffusion Models",
-      "authors": ["Shen Nie", "…", "Chongxuan Li"],
+      "authors": ["Shen Nie", "Fengqi Zhu", "Zebin You", "Xiaolu Zhang", "Jingyang Ou", "Jun Hu", "Jun Zhou", "Yankai Lin", "Ji-Rong Wen", "Chongxuan Li"],
       "org": "Renmin University of China (GSAI); Ant Group",
       "date": "2025-02",
       "venue": "NeurIPS 2025 (Oral)",
@@ -3731,7 +3773,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://ml-gsai.github.io/LLaDA-demo/" }
       ],
       "page": "legacy/tracks/dllm/06-llada.html",
-      "tldr": "8B 掩码扩散从零预训练 2.3T token 再做 SFT；用 MC-ELBO 给选择题打分、低置信度重掩码与半自回归块采样生成，Base 与同协议的 LLaMA3 8B 相当，反转诗补全反向任务超过 GPT-4o。",
+      "reading": "papers/llada.html",
+      "tldr": "LLaDA 把掩码扩散（随机遮住任意比例的 token、让双向 Transformer 猜回，损失是负对数似然的上界）从零训练到 8B 参数、2.3T token，再只做 SFT。预训练版在 15 个基准上整体与用了 15T token 的 LLaMA3 8B 相当、反向古诗补全超过 GPT-4o，但这些分数都是在每步只写 1 个 token、没有 KV 缓存的设置下测得的。",
       "tags": ["from scratch", "masked diffusion", "8B", "semi-AR sampling", "reversal curse"],
       "facts": {
         "noise": "掩码（吸收态）：t~U(0,1]，每个 token 独立以概率 t 换成 [M]；网络不输入 t",
@@ -3809,10 +3852,10 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "Dream 7B",
       "full_title": "Dream 7B: Diffusion Large Language Models",
-      "authors": ["Jiacheng Ye", "…", "Lingpeng Kong"],
+      "authors": ["Jiacheng Ye", "Zhihui Xie", "Lin Zheng", "Jiahui Gao", "Zirui Wu", "Xin Jiang", "Zhenguo Li", "Lingpeng Kong"],
       "org": "The University of Hong Kong; Huawei Noah's Ark Lab",
       "date": "2025-08",
-      "venue": "",
+      "venue": "arXiv 技术报告",
       "arxiv": "2508.15487",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2508.15487" },
@@ -3821,7 +3864,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/Dream-org/Dream-v0-Instruct-7B" }
       ],
       "page": "legacy/tracks/dllm/07-dream.html",
-      "tldr": "以 Qwen2.5-7B 初始化、保留 shift，用 580B token 做掩码扩散继续预训练，并以上下文自适应的 token 级权重（CART）替代 1/t；同协议下规划任务明显强于同规模 AR。",
+      "reading": "papers/dream.html",
+      "tldr": "Dream 7B 用 Qwen2.5-7B 的权重初始化，保留 AR 模型“在位置 i 预测第 i+1 个词”的输出约定，在 580B token 上做掩码扩散继续训练，并按每个被遮 token 周围的已知内容单独给它定损失权重（CART）。在作者的同协议评测里，它全面高于从零训练的 LLaDA 8B，常规任务上略低于自己的出发点 Qwen2.5，数独等规划任务上则大幅领先。",
       "tags": ["AR-to-diffusion", "Qwen2.5 init", "CART", "7B"],
       "facts": {
         "noise": "掩码（吸收态）；CART 按邻近已知 token 的几何衰减为每个被掩 token 重设权重",
@@ -3927,10 +3971,10 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "LLaDA2.0",
       "full_title": "LLaDA2.0: Scaling Up Diffusion Language Models to 100B",
-      "authors": ["Tiwei Bie", "…", "Yihong Zhuang"],
+      "authors": ["Tiwei Bie", "Maosong Cao", "Kun Chen", "Lun Du", "Mingliang Gong", "Zhuochen Gong", "Yanmei Gu", "Jiaqi Hu", "Zenan Huang", "Zhenzhong Lan", "Chengxi Li", "Chongxuan Li", "Jianguo Li", "Zehuan Li", "Huabin Liu", "Lin Liu", "Guoshan Lu", "Xiaocheng Lu", "Yuxin Ma", "Jianfeng Tan", "Lanning Wei", "Ji-Rong Wen", "Yipeng Xing", "Xiaolu Zhang", "Junbo Zhao", "Da Zheng", "Jun Zhou", "Junlin Zhou", "Zhanchao Zhou", "Liwang Zhu", "Yihong Zhuang"],
       "org": "Ant Group; Renmin University of China; Zhejiang University; Westlake University; HKUST",
       "date": "2025-12",
-      "venue": "",
+      "venue": "arXiv 技术报告（预印本）",
       "arxiv": "2512.15745",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2512.15745" },
@@ -3938,7 +3982,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/inclusionAI/LLaDA2.0-flash" }
       ],
       "page": "legacy/tracks/dllm/09-llada2.html",
-      "tldr": "把 AR 模型 Ling-2.0 视为块长 1 的块扩散，用块长 WSD（1→4096→32）转换成 16B / 100B 的 MoE dLLM，再做块扩散 SFT、CAP 置信损失与以 ELBO 代替似然的 DPO；flash 47 项平均 73.18，与 Qwen3-30B-A3B-2507（73.60）相当。",
+      "reading": "papers/llada2.html",
+      "tldr": "这份技术报告没有从零训练扩散模型，而是把已经训练好的自回归 MoE 模型 Ling 2.0 看作块长为 1 的块扩散模型，用先把块长放大到整条序列、再缩回 32 的 WSD 持续预训练，把它改造成 16B 和 100B 的块扩散语言模型。100B 的 LLaDA2.0-flash 在 47 项基准上平均 73.18，与同档的自回归模型相当，在作者自己的推理引擎上也比自回归基线更快，但测速用的硬件和批大小没有公开。",
       "tags": ["MoE", "AR→扩散", "块扩散", "WSD", "100B"],
       "facts": {
         "noise": "吸收态掩码 [M]；块内掩码扩散、块间自回归",
@@ -4045,16 +4090,17 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "Mercury Coder",
       "full_title": "Mercury: Ultra-Fast Language Models Based on Diffusion",
-      "authors": ["Inception Labs", "Samar Khanna", "…", "Volodymyr Kuleshov"],
+      "authors": ["Inception Labs", "Samar Khanna", "Siddhant Kharbanda", "Shufan Li", "Harshit Varma", "Eric Wang", "Sawyer Birnbaum", "Ziyang Luo", "Yanis Miraoui", "Akash Palrecha", "Stefano Ermon", "Aditya Grover", "Volodymyr Kuleshov"],
       "org": "Inception Labs",
       "date": "2025-06",
-      "venue": "",
+      "venue": "arXiv 技术报告",
       "arxiv": "2506.17298",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2506.17298" }
       ],
       "page": "legacy/tracks/dllm/10-industrial.html#mercury",
-      "tldr": "最早公开技术报告的商用 dLLM（代码版 Mini / Small）：Transformer 去噪器、方法称扩展自 SEDD；Artificial Analysis 在 H100 上测得 1109 / 737 tok/s，代码质量与速度优化型前沿模型相当，FIM 表现突出。",
+      "reading": "papers/mercury.html",
+      "tldr": "Inception Labs 商用扩散语言模型 Mercury Coder（Mini / Small）的技术报告，方法只给出加权去噪损失的一般形式，参数量、数据和采样器都没有公开。能独立核实的是 Artificial Analysis 在 2025 年 2 月于 H100 上测得的单请求输出速度（1,109 / 737 token/秒）和 Copilot Arena 的用户投票，其余基准都是厂商自测。",
       "tags": ["商用", "代码", "速度"],
       "facts": {
         "noise": "未披露（只说扩展 SEDD）",
@@ -4102,7 +4148,7 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "BD3-LM",
       "full_title": "Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models",
-      "authors": ["Marianne Arriola", "…", "Volodymyr Kuleshov"],
+      "authors": ["Marianne Arriola", "Aaron Kerem Gokaslan", "Justin T. Chiu", "Zhihan Yang", "Zhixuan Qi", "Jiaqi Han", "Subham Sekhar Sahoo", "Volodymyr Kuleshov"],
       "org": "Cornell Tech; Stanford University; Cohere",
       "date": "2025-03",
       "venue": "ICLR 2025 (Oral)",
@@ -4113,7 +4159,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://m-arriola.com/bd3lms" }
       ],
       "page": "legacy/tracks/dllm/11-block-diffusion.html",
-      "tldr": "块间自回归、块内掩码扩散：块长从 1（AR）到 L（MDLM）是一个旋钮；向量化的 2L 注意力掩码让训练一次前向完成，推理时跨块有精确 KV cache 并可变长生成；裁剪噪声调度降低梯度方差，困惑度刷新离散扩散纪录。",
+      "reading": "papers/block-diffusion.html",
+      "tldr": "BD3-LM 把序列切成块，块与块之间按自回归顺序生成、块内部用掩码扩散，因此能像 AR 一样精确缓存 KV、生成任意长度，块长 1 时就是 AR，块长等于全长时就是 MDLM。作者发现扩散目标的梯度方差是它落后于 AR 的重要原因，用裁剪的掩码率区间降低方差后，110M 模型在 OpenWebText 上把离散扩散的困惑度推进到 ≤ 20.73（同规模 AR 为 17.54）。",
       "tags": ["块扩散", "KV cache", "变长生成", "噪声调度"],
       "facts": {
         "noise": "吸收态掩码，逐块独立噪声水平；裁剪调度 1−α_t ~ U[β, ω]，β, ω 按 NELBO 方差网格搜索",
@@ -4322,7 +4369,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/z-lab/dflash" }
       ],
       "page": "legacy/tracks/dllm/13-hybrid.html#dflash",
-      "tldr": "用 5 层块扩散模型当投机解码草稿器：一次前向起草一整块，目标模型 5 层隐状态经投影注入每层 K/V；验证无损，Qwen3-8B 上平均 4.86×（EAGLE-3 为 1.76×），已接入 SGLang / vLLM。",
+      "reading": "papers/dflash.html",
+      "tldr": "DFlash 用一个只有 5 层的块扩散模型给大模型起草：它一次前向就猜出后面一整块词，并把目标模型多层隐状态注入自己每一层的注意力键值，所以既快又猜得准。在严格的投机验证下输出与目标模型完全一致，Qwen3-8B 上单请求平均快约 4.9 倍（同条件下 EAGLE-3 约 2 倍），放进 SGLang 后并发 32 时仍快 2.8 倍。",
       "tags": ["投机解码", "扩散草稿器", "KV 注入", "SGLang / vLLM"],
       "facts": {
         "noise": "锚点后 k−1 个位置全 [M]（随机锚点构造训练块）",
@@ -4341,7 +4389,7 @@ window.ATLAS_REGISTRY = {
       "lane": "decode",
       "title": "Fast-dLLM",
       "full_title": "Fast-dLLM: Training-free Acceleration of Diffusion LLM by Enabling KV Cache and Parallel Decoding",
-      "authors": ["Chengyue Wu", "…", "Enze Xie"],
+      "authors": ["Chengyue Wu", "Hao Zhang", "Shuchen Xue", "Zhijian Liu", "Shizhe Diao", "Ligeng Zhu", "Ping Luo", "Song Han", "Enze Xie"],
       "org": "The University of Hong Kong; NVIDIA; MIT",
       "date": "2025-05",
       "venue": "ICLR 2026",
@@ -4351,7 +4399,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/NVlabs/Fast-dLLM" }
       ],
       "page": "legacy/tracks/dllm/14-kv-cache.html",
-      "tldr": "免训练加速 LLaDA / Dream：块级近似 KV cache（DualCache 连后缀 [M] 一起缓存，块末刷新）+ 置信度阈值并行解码（定理：高置信时逐位 argmax 等于联合 argmax）；A100、batch 1 下相对原始 LLaDA 最高 27.6×。",
+      "reading": "papers/fast-dllm.html",
+      "tldr": "Fast-dLLM 不改模型权重，让 LLaDA、Dream 这类双向扩散语言模型按块生成、在块内复用近似的 KV 缓存，并且每步只揭开置信度超过阈值的 token。单张 A100、一次一条请求时，它相对每步只写一个 token 的原版最高快 27.6 倍，准确率多数只差 1–2 个点。",
       "tags": ["免训练", "近似 KV cache", "DualCache", "阈值并行解码"],
       "facts": {
         "noise": "不改模型（沿用掩码扩散）",
@@ -4529,7 +4578,8 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2502.06768" }
       ],
       "page": "legacy/tracks/dllm/16-order-limits.html",
-      "tldr": "证明掩码扩散训练时要解指数多个、部分计算上不可解的填空子问题；推理时按 top probability margin 自适应选位置即可绕开难子问题，Sudoku 解题率 6.88%→89.49%，超过训练时给出求解顺序的 ARM。",
+      "reading": "papers/token-ordering.html",
+      "tldr": "掩码扩散模型训练时要同时学会指数多个填空题，作者证明其中一部分在计算上学不会，真实文本上的误差也很不均衡。推理时按模型的把握程度（尤其是前两名候选的概率差）挑选先揭开的位置，就能绕开这些难题：6M 参数的模型在数独上的解题率从 6.88% 升到 89.49%，超过训练时学过求解顺序、贪心解码的 42M 自回归模型（87.18%）。",
       "tags": ["任意顺序", "自适应解码", "理论", "Sudoku"],
       "facts": {
         "noise": "标准掩码扩散；损失 = 所有排列下 π-learner（任意顺序 AR）损失的平均",
@@ -4619,7 +4669,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://dllm-reasoning.github.io" }
       ],
       "page": "legacy/tracks/dllm/17-rl.html",
-      "tldr": "两阶段后训练：先在 s1K 上做掩码 SFT，再用 diffu-GRPO——提示随机掩码、回答全掩码的一次前向估计逐 token 对数概率（均场），是首个面向掩码 dLLM 的策略梯度 RL。",
+      "reading": "papers/d1.html",
+      "tldr": "d1 先在 1000 道推理题（s1K）上对 LLaDA 做掩码 SFT，再用 diffu-GRPO 做强化学习：把回答整段遮住、题目随机遮掉一部分，只做一次前向就估计出 GRPO 需要的逐词对数概率。LLaDA-8B-Instruct 因此在 GSM8K、MATH500 上提高约 4 个点，在 Countdown、Sudoku 两个规划任务上接近翻倍，这是策略梯度 RL 第一次在大规模掩码扩散模型上跑通。",
       "tags": ["RL", "GRPO", "似然估计", "推理"],
       "facts": {
         "noise": "掩码扩散（LLaDA，α_t = 1 − t）",
@@ -4800,10 +4851,11 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT" }
       ],
       "page": "legacy/tracks/dllm/19-multimodal.html",
-      "tldr": "以 LLaDA-8B 为骨干，用 MAGVIT-v2 把图像量化为离散码，与文本共用一个掩码预测目标，同时完成文本推理、图像理解与文生图；后训练依次为 Mixed Long-CoT SFT 和对回答随机部分加噪估计似然的 UniGRPO。",
+      "reading": "papers/mmada.html",
+      "tldr": "MMaDA 以 LLaDA-8B 为底座，把图像用 VQ 量化器变成离散码，和文字共用同一个掩码预测目标，于是一个模型能同时做文本推理、图像理解和文生图；后训练先用三类任务格式统一的长思维链微调，再用只遮住回答一部分来近似对数概率的 UniGRPO 做强化学习。它的不少对比并不对等（文本对手是基座模型，两项生成指标同时是 RL 奖励），经过 RL 的最终权重也尚未公开。",
       "tags": ["多模态", "统一模型", "离散图像码", "UniGRPO"],
       "facts": {
-        "noise": "文本 token 与图像码（码本 8192）统一做掩码扩散，权重 1/t",
+        "noise": "文本 token 与图像码（码本 8192）统一做掩码扩散；官方代码中文本 / 理解分支按 1/t 加权，图像分支用余弦掩码比例、不加 1/t 权重",
         "init": "LLaDA-8B-Instruct + Show-o 的 MAGVIT-v2 量化器；联合词表 134,656；Stage 1 共 60 万步 + Stage 2 5 万步 + UniGRPO 5 万步，64×A100，batch 1280",
         "attn": "全双向，无 KV cache；不使用连续视觉编码器",
         "decode": "文本：半自回归，长度 1024、512 步、块 64（TPF = 2）；图像：1024 码一块、50 步、余弦调度、CFG 3.5",
@@ -5234,6 +5286,8 @@ window.ATLAS_REGISTRY = {
     { "from": "storymem", "to": "slotmem", "label": "对照角色记忆", "kind": "baseline" },
     { "from": "vm-self-forcing", "to": "shotstream", "label": "镜头内外自生成训练" },
     { "from": "shotstream", "to": "causalcine", "label": "双缓存对照内容路由", "kind": "baseline" },
+    { "from": "d3pm", "to": "sedd", "label": "离散状态空间扩散 → 学概率比" },
+    { "from": "d3pm", "to": "mdlm", "label": "吸收态转移即掩码扩散" },
     { "from": "sedd", "to": "radd", "label": "吸收态得分=条件概率" },
     { "from": "sedd", "to": "mdlm", "label": "对照 SEDD 困惑度", "kind": "baseline" },
     { "from": "sedd", "to": "md4", "label": "重训 SEDD 作对照", "kind": "baseline" },

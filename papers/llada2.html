@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLaDA2.0 精读</title>
+<meta name="description" content="LLaDA2.0 技术报告（arXiv 2512.15745）的逐节精读：怎样把自回归 MoE 模型 Ling 2.0 转换成 16B / 100B 的块扩散语言模型（块长 WSD、文档级掩码），后训练（SFT、CAP、DPO），块扩散推理与 KV 缓存，以及评测分数和速度数字各值多少。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="llada2">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · 技术报告（2025）</div>
+  <h1>LLaDA2.0：把扩散语言模型做到 1000 亿参数</h1>
+  <p class="en-title">LLaDA2.0: Scaling Up Diffusion Language Models to 100B</p>
+  <div class="paper-authors">Tiwei Bie<sup>1</sup>, Maosong Cao<sup>1</sup>, Kun Chen<sup>1</sup>, Lun Du<sup>1</sup>, Mingliang Gong<sup>1</sup>, Zhuochen Gong<sup>1</sup>, Yanmei Gu<sup>1</sup>, Jiaqi Hu<sup>1,3</sup>, Zenan Huang<sup>1</sup>, Zhenzhong Lan<sup>1,4,†</sup>, Chengxi Li<sup>1</sup>, Chongxuan Li<sup>2</sup>, Jianguo Li<sup>1,†</sup>, Zehuan Li<sup>1</sup>, Huabin Liu<sup>1</sup>, Lin Liu<sup>1</sup>, Guoshan Lu<sup>1</sup>, Xiaocheng Lu<sup>1,5</sup>, Yuxin Ma<sup>1</sup>, Jianfeng Tan<sup>1</sup>, Lanning Wei<sup>1</sup>, Ji-Rong Wen<sup>2</sup>, Yipeng Xing<sup>1</sup>, Xiaolu Zhang<sup>1</sup>, Junbo Zhao<sup>1,3,†</sup>, Da Zheng<sup>1,†</sup>, Jun Zhou<sup>1</sup>, Junlin Zhou<sup>1</sup>, Zhanchao Zhou<sup>1,4</sup>, Liwang Zhu<sup>1</sup>, Yihong Zhuang<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Ant Group　<sup>2</sup>Renmin University of China　<sup>3</sup>Zhejiang University　<sup>4</sup>Westlake University　<sup>5</sup>HongKong University of Science and Technology　<sup>†</sup>技术负责人（tech-leaders）；作者按姓氏字母排序（按论文署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2512.15745" target="_blank" rel="noopener">arXiv 2512.15745 ↗</a>
+    <a class="pill" href="https://github.com/inclusionAI/LLaDA2.X" target="_blank" rel="noopener">Code: inclusionAI/LLaDA2.X ↗</a>
+    <a class="pill" href="https://huggingface.co/collections/inclusionAI/llada-20" target="_blank" rel="noopener">权重：Hugging Face 合集 ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/09-llada2.html">旧版结构拆解：LLaDA-MoE / 2.0 / 2.1</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>528</b><span>GitHub star（inclusionAI/LLaDA2.X，截至 2026-10-19）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文的许可证不允许转载原图，所以文中的图都是本站重画的示意图，每张都附了原图的链接。标“推算”的数字是本站根据论文数据算出来的，标“读图”的数字是从原图上读出的近似值，都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>今天几乎所有大语言模型都是<b>自回归</b>（autoregressive，AR）模型：从左到右，一次生成一个 token，每生成一个就要把整个模型算一遍。扩散语言模型（diffusion LLM，dLLM）换了一种生成方式：先放一整段“空白”（被遮住的位置），然后反复地“猜一遍、确定其中有把握的一部分”，一次前向可以同时确定好几个 token。这种做法在理论上能并行出字、还能利用左右两边的上下文，但到 2025 年为止，从头训练的扩散语言模型最大只做到 80 亿参数左右，能力也追不上同时期的 AR 模型。</p>
+<p>LLaDA2.0 是蚂蚁集团联合人民大学等单位发布的技术报告。它没有从零开始训练扩散模型，而是拿自家已经训练好的 AR 混合专家（MoE）模型 Ling 2.0 当起点，通过一段精心设计的“持续预训练”，把它改造成扩散模型。改造的关键是一个叫 <b>WSD</b> 的块长课程：先把 AR 模型看成“块长为 1 的块扩散模型”，再把块长逐级放大到整条序列（4096），在这个状态下大规模训练，最后把块长缩回 32。之后再做指令微调（SFT）、一种让模型“更笃定”从而能并行出字的置信度训练（CAP）和偏好对齐（DPO）。最终得到两个开源模型：总参数 16B 的 LLaDA2.0-mini 和 100B 的 LLaDA2.0-flash。</p>
+<p>报告的主要结果是：在 47 个基准的平均分上，LLaDA2.0-flash 得 73.18，与 Qwen3-30B-A3B-Instruct-2507（73.60）和它自己的 AR 起点 Ling-flash-2.0（72.15）相当；在作者的推理引擎上，加了 CAP 训练的版本每秒生成 535 个 token，作者称最多是 AR 基线的 2.1 倍。读这些数字时要记住一个前提：LLaDA2.0 的“底子”是一个已经用 20 万亿（20T）以上 token 训练好的 AR 模型，所以“扩散模型追平了 AR 模型”在这里的准确含义是“改造之后没有丢掉 AR 模型已经学到的能力”。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>自回归、全序列掩码扩散、块扩散三种生成方式有什么区别？为什么块扩散能用 KV 缓存？</li>
+  <li>什么是 MoE，“总参数 100B、激活 6.1B”是什么意思？</li>
+  <li>为什么不能直接把 AR 模型的训练目标换成扩散目标？WSD 的三个阶段各解决什么问题？</li>
+  <li>文档级注意力掩码、互补掩码、CAP、基于 ELBO 的 DPO 各在做什么？</li>
+  <li>推理时一个块是怎么一步步填满的，阈值 0.95 和块长 32 是怎么选出来的？</li>
+  <li>和哪些 AR 模型比、在什么条件下比？速度数字是在什么硬件、什么软件上、和谁比出来的？哪些条件论文没说？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2512.15745" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么不从零训练，而是改造一个自回归模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>自回归模型已经非常成功，为什么还有人想用扩散的方式生成文字？既然扩散语言模型有吸引力，为什么它们一直没有做大？作者的答案是：从零训练一个大扩散模型太贵、积累太少，不如借一个现成的强 AR 模型，把它的知识“搬”过来。这一节交代这个思路，以及整篇报告的两大块内容：持续预训练和后训练。</div>
+
+<div class="note-pre"><b>先补一点背景：自回归模型与掩码扩散模型，生成文字的方式有什么不同。</b>
+<p><b>自回归模型</b>把一句话的概率拆成一连串“已知前文、猜下一个词”的条件概率。它的注意力是<b>因果</b>的：第 \(i\) 个位置只能看第 1 到第 \(i\) 个位置，看不到后面。生成时一次只能确定一个 token，生成 1000 个 token 就要把模型前向计算 1000 次。好处是前面已经生成的 token 不会再变，所以它们在每一层算出的 key、value 可以存起来反复用，这就是 <b>KV 缓存</b>（详见本站 <a href="vllm.html">vLLM 精读</a>）。</p>
+<p><b>掩码扩散语言模型</b>（masked diffusion LM，MDLM，代表作是 <a href="llada.html">LLaDA</a>）的训练方式像做完形填空：拿一段完整的文字，随机把一部分 token 换成一个特殊的“遮罩”符号 [MASK]，让模型根据没被遮住的部分，把被遮住的 token 猜回来。遮住的比例每次随机抽，从几乎不遮到几乎全遮都有。因为要用两边的上下文去猜，它的注意力是<b>双向</b>的：每个位置都能看到所有位置。</p>
+<p>生成时，掩码扩散模型从一整段全是 [MASK] 的“画布”开始。每一步，模型对所有还被遮住的位置各给出一个猜测和一个置信度，系统把其中最有把握的几个定下来，其余的继续遮着，下一步再猜。一次前向能定下几个 token，就省下几次前向，这是“并行出字”的来源。代价有两个：一是双向注意力让每个位置的中间结果都依赖于其他所有位置，画布上任何一处变了，所有位置的 key、value 都会变，所以 KV 缓存不能直接用；二是画布的长度要事先定好。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：三种生成方式各需要几次前向（数字 = 这个 token 在第几次前向中被定下来）</div>
+  <div class="dia-row"><span class="lbl">自回归</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell a">9</span><span class="cell a">10</span><span class="cell a">11</span><span class="cell a">12</span></div></div>
+  <div class="dia-out">严格从左到右，12 个 token 需要 12 次前向；已生成部分的 KV 可以缓存。</div>
+  <div class="dia-row"><span class="lbl">全序列掩码扩散</span><div class="cells"><span class="cell b">2</span><span class="cell b">1</span><span class="cell b">3</span><span class="cell b">1</span><span class="cell b">4</span><span class="cell b">2</span><span class="cell b">1</span><span class="cell b">3</span><span class="cell b">4</span><span class="cell b">2</span><span class="cell b">3</span><span class="cell b">4</span></div></div>
+  <div class="dia-out">整段画布一起去噪，每次定下 3 个，共 4 次前向；顺序任意，但长度固定，KV 不能直接缓存。</div>
+  <div class="dia-row"><span class="lbl">块扩散（块长 4）</span><div class="cells"><span class="cell a">2</span><span class="cell a">1</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell b">3</span><span class="cell b">4</span><span class="cell b">3</span><span class="cell b">4</span><span class="cell c">5</span><span class="cell c">5</span><span class="cell c">6</span><span class="cell c">6</span></div></div>
+  <div class="dia-out">块与块之间从左到右，块内并行去噪，每块 2 次前向，共 6 次；前面的块定稿后不再变，KV 可以缓存。</div>
+  <div class="dia-note">本站示意图，数字是随手举的例子。块扩散里不同颜色代表不同的块。LLaDA2.0 最终采用的是块扩散，推理块长 32。</div>
+</div>
+
+<p>论文开篇先说 AR 范式的两个局限：一是逐个生成造成推理瓶颈，无法并行，规模越大延迟越高；二是严格的从左到右结构，对需要“通盘考虑”的任务可能不是最优。掩码扩散模型天生支持并行生成和双向上下文，因此被看作一个有吸引力的替代方案。但这个方向还很早期，训练配方、采样策略、推理系统、强化学习都还在摸索，现有的扩散模型（包括后面要讲的块扩散模型）大多停留在 80 亿参数以内。作者认为，要让扩散模型在实际部署中和主流 AR 模型竞争，首先得把规模推到几百亿乃至上千亿参数。</p>
+<p>作者的办法是<b>不从零训练</b>，而是把已有的 AR 检查点当作起点，做一次“系统性的转换”，在保留语言知识的同时引入扩散能力。整个工作分两大阶段：</p>
+<ul>
+  <li><b>持续预训练（continual pre-training，CPT）</b>：把 AR 模型变成一个能用的扩散模型。难点在于“从左到右生成”和“双向去噪”之间的训练数据分布差距。作者指出，块扩散（BDLM）的写法虽然能部分缩小这个差距，但它的训练<b>数据利用率低</b>，大规模语料用起来不划算。为此提出 WSD 策略，并配上一个文档级注意力掩码，防止拼在一起训练的不同文档互相“串门”（§4）。</li>
+  <li><b>面向实际部署的后训练</b>：用互补掩码提高 SFT 的数据利用率；把原本为 AR 模型设计的 DPO 改写到扩散模型上；再加一个辅助的置信度损失，让模型的预测更“尖锐”，从而能更激进地并行出字（§5）。</li>
+</ul>
+<p>最终发布两个指令模型：面向资源受限场景的 LLaDA2.0-mini（16B）和面向高性能场景的 LLaDA2.0-flash（100B），两者都是 MoE 结构。</p>
+<div class="note-warn"><b>读的时候容易混淆的一点：</b>这篇报告对训练流程的切分说法不统一。摘要说“三相（3-phase）的块级 WSD”，引言说“两阶段的持续预训练范式”（这里的两阶段其实指 CPT 和后训练），§3 又说“三阶段”（AR→MDLM 的持续预训练、块扩散预训练、后训练）。它们描述的是同一条流水线，只是切法不同。本页统一按 §4 的说法：CPT 内部是 Warmup、Stable、Decay 三个阶段，CPT 之后是后训练。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：从零训练、从 AR 初始化、后训练</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在 LLaDA2.0 之前，人们是怎么做扩散语言模型的？从零训练走到了哪一步，为什么停在 8B 左右？借用 AR 模型的权重来初始化已经有人做过，他们的做法和局限是什么？后训练（微调、强化学习、加速）又做到了什么程度？这一节给 LLaDA2.0 的设计定位。</div>
+
+<div class="note-pre"><b>先补一点背景：块扩散语言模型（BDLM）。</b>
+<p>块扩散（Block Diffusion，代表作 BD3-LM，见本站 <a href="block-diffusion.html">BD3-LM 精读</a>）是自回归和掩码扩散之间的折中。它把序列切成长度为 \(L_B\) 的块：<b>块与块之间</b>按自回归的方式从左到右生成，后面的块以前面已经定稿的块为条件；<b>块内部</b>则用掩码扩散的方式并行去噪，块内各位置之间双向注意。</p>
+<p>这个设计有两个直接的好处。第一，前面的块一旦定稿就不会再变，而且块与块之间的注意力是因果的（后面的块看前面的块，前面的块不看后面的块），所以前面块的 key、value 可以像 AR 模型那样缓存起来。第二，块是一个接一个往后加的，生成多长都可以，不必事先定死画布长度。</p>
+<p>块长是一个连续的“旋钮”：块长为 1 时，每个块只有一个 token，模型就是在“已知前文、猜当前这个被遮住的 token”，这和自回归几乎是一回事；块长等于整条序列时，只有一个块，就退化成全序列掩码扩散。LLaDA2.0 的整套转换方法，就是沿着这个旋钮从一端走到另一端，再走回中间。</p>
+</div>
+
+<h4 id="n-2-1">2.1 从零训练的扩散语言模型</h4>
+<p>AR 模型（如 Ling、Kimi、DeepSeek、Llama 系列）用“预测下一个 token”的似然来训练，它的性能随模型规模、数据量和算力增长的规律（scaling law）已经被反复验证。掩码扩散模型把生成看成一个迭代去噪的过程：每次训练随机遮住一部分 token，让模型根据没遮住的部分把它们恢复出来。</p>
+<p>从零训练这条路上，<a href="llada.html">LLaDA</a> 证明了一个从零训练的 8B 稠密掩码扩散模型能和同规模的 AR 模型打个平手；LLaDA-MoE 第一次把 MoE 结构用到掩码扩散模型上，说明从零训练的 MoE 扩散模型在效率和能力上都能超过稠密模型。另外，由于扩散模型的训练动态和 AR 模型很不一样，AR 领域积累的训练经验和超参数往往不适用，已经有工作开始专门研究扩散模型的规模律和最优训练策略（论文引用了 Ni 等人的两项工作）。</p>
+<p>作者认为，从零训练的扩散模型整体上仍落后于最强的 AR 模型，主要原因是<b>训练数据量</b>和<b>基础设施成熟度</b>的差距，而这两样在 AR 这边已经被优化了好多年。再加上从零预训练成本高、周期长，这些扩散模型基本都不超过 8B 参数，而领先的 AR 模型早已到了几百亿、上千亿。</p>
+
+<h4 id="n-2-2">2.2 用 AR 模型初始化扩散模型</h4>
+<p>既然 AR 模型的知识容量和能力都很强，一个自然的想法是用预训练好的 AR 权重来初始化扩散模型，以降低训练成本、缩小差距。论文列举了三类做法：</p>
+<ul>
+  <li><b>掩码退火</b>：DiffusionLLaMA 和 <a href="dream.html">Dream-7B</a> 在训练中把注意力从因果逐渐过渡到双向，并用一种叫 CART 的方法按 token 重新加权损失。</li>
+  <li><b>直接转换</b>：RND1 在初始化时就把 AR 模型的因果注意力一下子改成双向。它还观察到，为了不丢掉知识密集型的能力，需要限制模型中稠密层的更新幅度，以免“灾难性遗忘”。</li>
+  <li><b>转成块扩散</b>：因为块扩散本身就介于 AR 和扩散之间，用 AR 模型来初始化它很自然。SDAR 用 Qwen3 系列训练块扩散模型，尝试了不同块长和优化策略，性能能追平它的 AR 基座（同类方法见旧版 <a href="../legacy/tracks/dllm/12-ar-to-block.html">AR → 块扩散</a> 拆解页）。</li>
+</ul>
+<p>作者指出这些方法共同的局限是<b>规模</b>：参数量都在 7B 到 30B 之间，更大的模型能否这样转换，还是个开放问题。另外，块扩散训练的效率低，使它难以用在大模型、大语料上。这两点正是 LLaDA2.0 要回答的。</p>
+
+<h4 id="n-2-3">2.3 扩散模型的后训练</h4>
+<p>后训练一般包括三件事：用监督微调（SFT）教会模型听指令，用强化学习（RL）增强复杂推理，以及推理加速。论文分别举了例子：</p>
+<ul>
+  <li><b>SFT</b>：Dream-Coder 把 7B 扩散模型微调成代码模型，表现出“先打草稿再填细节”的生成方式；Dream-7B 通过 SFT 在规划和约束满足类任务上表现突出；Seed-Diffusion 用两阶段课程训练高速代码模型；LiDAR 用“扩散里思考、AR 里生成”的混合结构提升吞吐。</li>
+  <li><b>RL</b>：扩散模型的序列对数似然算不出来，标准的策略梯度没法直接用。SPG 对高奖励样本最大化似然的下界、对低奖励样本最小化上界；TraceRL 让训练目标对齐模型多步生成的实际轨迹，由此得到的 TraDo 系列在推理基准上超过了强 AR 模型（RL 这条线见 <a href="d1.html">d1 精读</a>）。</li>
+  <li><b>加速</b>：扩散模型要多步迭代，推理慢。DPad 把未来的 token 当作“草稿纸”，用滑动窗口和按距离剪枝减少冗余计算；D2F 让后面的块在前面的块还没完全生成时就开始去噪，从而用上 KV 缓存，据称首次超过了同规模 AR 模型的推理速度。</li>
+</ul>
+<p>作者的判断是：这些后训练技术彼此如何配合、能否推到上千亿参数，仍有待系统地探索。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“现有扩散模型都不超过 8B”“AR 初始化的方法只到 30B”是作者对 2025 年下半年文献的概括，用来给自己的 100B 定位。这里的参数量都指<b>总参数</b>。对 MoE 模型而言，总参数和每个 token 实际用到的参数（激活参数）差别很大（下一节解释），比较“规模”时最好两者都看。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 训练全景：从 Ling 2.0 出发的一条流水线</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LLaDA2.0 从什么模型出发，经过哪些训练步骤，最后得到什么？作者说这套流程遵循“继承知识、逐步适应、兼顾效率”三条原则，它们具体落在哪些设计上？起点模型 Ling 2.0 是一种 MoE 模型，在往下读之前，先把 MoE 讲清楚。</div>
+<p>论文图 2 把整条流水线画在一张图里。左边是训练阶段：持续预训练阶段按 WSD 策略调度块长 \(L_B\)，让注意力掩码平滑地完成转换；后训练阶段在同一种块扩散设置下依次做指令 SFT、置信度感知的并行 SFT（CAP）和 DPO。右边画的是训练时用的文档级块扩散注意力掩码（本页 §4.2 会重画）。下面用本站的方式把流程排一遍：</p>
+<div class="dia">
+  <div class="dia-title">示意图：LLaDA2.0 的训练流水线</div>
+  <div class="dia-flow"><span class="dia-box tgt">起点：Ling-mini-2.0 / Ling-flash-2.0<small>AR MoE 模型；官方模型卡称预训练用了 20T 以上的 token</small></span><span class="dia-arrow">→</span><span class="dia-box enc">持续预训练（CPT）<small>WSD：块长 1 → 4096 → 32；文档级掩码；top-k 检查点合并</small></span><span class="dia-arrow">→</span><span class="dia-box enc">SFT<small>块扩散目标；互补掩码；掩码率区间</small></span><span class="dia-arrow">→</span><span class="dia-box enc">DPO<small>1.5M 偏好对；用 ELBO 代替似然</small></span><span class="dia-arrow">→</span><span class="dia-box act">LLaDA2.0-mini（16B）<br>LLaDA2.0-flash（100B）</span></div>
+  <div class="dia-flow"><span class="dia-box pred">CAP 训练<small>SFT 损失 + 置信度损失</small></span><span class="dia-arrow">→</span><span class="dia-box act">LLaDA2.0-mini-CAP / flash-CAP<small>单独发布的提速版本</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.15745#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。论文没有写明 CAP 训练与 DPO 的先后关系，只说三者都在块扩散设置下进行；Hugging Face 上 CAP 版本是和普通版本分开发布的。起点模型的训练量来自 Ling 2.0 的官方模型卡，不是本报告的内容。</div>
+</div>
+<p>作者把这套流程的原则概括为三点。<b>继承知识</b>：不从零开始，而是保住 AR 模型已经学到的东西。<b>逐步适应</b>：块长一级一级地变，而不是一步跳到目标形态。<b>兼顾效率</b>：大部分数据放在计算最省的全序列阶段训练，最后再回到推理最快的小块形态。后面每一节都可以对照这三条来读。</p>
+
+<h4 id="n-3-1">3.1 起点模型 Ling 2.0：一种“参数多、计算少”的 MoE</h4>
+<div class="note-pre"><b>先补一点背景：混合专家模型（MoE）。</b>
+<p>Transformer 的每一层由注意力和前馈网络（FFN）两部分组成，模型的大部分参数都在 FFN 里。普通的<b>稠密</b>模型处理每个 token 时，所有参数都要参与计算，所以参数翻倍，计算量也翻倍。</p>
+<p><b>混合专家模型</b>（Mixture-of-Experts，MoE）把一个大 FFN 换成很多个并列的小 FFN，每个小 FFN 叫一个<b>专家</b>。每个 token 进来时，一个很小的<b>路由器</b>给所有专家打分，只挑出分数最高的几个专家来处理这个 token，其余专家这一次不参与计算。很多 MoE 还设有<b>共享专家</b>，每个 token 都必经。这样，模型的<b>总参数</b>可以很多（知识容量大），而每个 token 实际经过的参数（<b>激活参数</b>）很少（计算量小）。代价是：所有专家的参数都得放在显存里，而且多卡训练和推理时要把 token 发到专家所在的卡上，通信变复杂。MoE 的路由、共享专家和负载均衡，本站在 <a href="deepseek-v3.html#n-2-2">DeepSeek-V3 精读 §2.1.2</a> 有详细讲解。</p>
+</div>
+<p>LLaDA2.0 的两个起点都是蚂蚁集团的 Ling 2.0 系列 MoE 模型。论文本身只给了总参数（16B / 100B），下面这些结构细节是本站从 Hugging Face 上的官方模型卡和配置文件（config.json）查到的：</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>LLaDA2.0-mini（来自 Ling-mini-2.0）</th><th>LLaDA2.0-flash（来自 Ling-flash-2.0）</th></tr>
+  <tr><td>总参数 / 每 token 激活参数</td><td>16B / 1.4B</td><td>100B / 6.1B</td></tr>
+  <tr><td>层数、隐藏维度</td><td>20 层，2048 维</td><td>32 层，4096 维</td></tr>
+  <tr><td>注意力</td><td>16 个查询头、4 个 KV 头（分组查询注意力）</td><td>32 个查询头、4 个 KV 头</td></tr>
+  <tr><td>每层专家</td><td colspan="2">256 个路由专家选 8 个，外加 1 个共享专家；第 1 层是普通稠密 FFN</td></tr>
+  <tr><td>词表、上下文窗口</td><td colspan="2">157,184 个 token；32,768 个位置</td></tr>
+</table></div>
+<p class="w-note">来源：<a href="https://huggingface.co/inclusionAI/LLaDA2.0-flash" target="_blank" rel="noopener">LLaDA2.0-flash</a> 与 <a href="https://huggingface.co/inclusionAI/LLaDA2.0-mini" target="_blank" rel="noopener">LLaDA2.0-mini</a> 模型卡和 config.json；激活参数也见 Ling-flash-2.0 / Ling-mini-2.0 模型卡。</p>
+<div class="dia">
+  <div class="dia-title">示意图：LLaDA2.0-flash 的一个 MoE 层，以及总参数和激活参数的比例</div>
+  <div class="dia-row"><span class="lbl">一个 MoE 层</span><div class="cells"><span class="cell b">共</span><span class="cell">1</span><span class="cell a">2</span><span class="cell">3</span><span class="cell">…</span><span class="cell a">41</span><span class="cell">…</span><span class="cell a">77</span><span class="cell">…</span><span class="cell a">118</span><span class="cell">…</span><span class="cell a">160</span><span class="cell">…</span><span class="cell a">199</span><span class="cell">…</span><span class="cell a">231</span><span class="cell">…</span><span class="cell a">250</span><span class="cell">…</span><span class="cell">256</span></div></div>
+  <div class="dia-out">绿色“共”是共享专家，每个 token 必经；蓝色是路由器为这个 token 挑出的 8 个专家（编号随手举例）；其余 248 个这一次不参与计算。8 ÷ 256 = 1/32，与 Ling 2.0 模型卡说的“1/32 激活比例”一致。</div>
+  <div class="dia-row"><span class="lbl">flash 的参数</span><div class="dia-track"><span class="dia-seg kv" style="flex:6.1">激活</span><span class="dia-seg oth" style="flex:93.9">总参数约 100B，每个 token 只用到约 6.1B</span></div></div>
+  <div class="dia-row"><span class="lbl">mini 的参数</span><div class="dia-track"><span class="dia-seg kv" style="flex:1.4"></span><span class="dia-seg oth" style="flex:14.6">总参数约 16B，每个 token 只用到约 1.4B</span></div></div>
+  <div class="dia-note">本站示意图，配置数字来自官方 config.json 与模型卡。条的长度按比例画。</div>
+</div>
+<p>为什么 MoE 和扩散生成放在一起值得多想一步？AR 模型在批大小为 1 时生成一个 token，每层只需要从显存里读出被选中的 8 个专家。块扩散模型一次前向要处理一整个块（32 个位置），每个位置各自挑 8 个专家，合起来可能用到几十上百个不同的专家，一次前向要读的参数量就比 AR 的一步多得多。所以对 MoE 模型来说，“一次前向定稿 3 个 token”并不意味着速度是 AR 的 3 倍。这一点是本站的分析，论文没有讨论，§5.4 和 §7.3 讲速度时还会用到。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4–4.1 持续预训练：用 WSD 把块长从 1 拉到 4096，再缩回 32</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>手里有一个训练好的 AR 模型，想让它学会掩码扩散。最直接的办法是把训练目标一下子换掉，为什么不行？作者把转换拆成预热、稳定、衰减三步，块长怎么变，每一步解决什么问题？训练时实际优化的是哪个公式？这是整篇报告方法上最核心的一节。</div>
+
+<div class="note-pre"><b>先补一点背景：掩码扩散模型到底在优化什么。</b>
+<p>先定义加噪过程。取一个“时间” \(t\in[0,1]\)，把干净序列 \(x_0\) 里的每个 token 独立地以概率 \(1-\alpha_t\) 换成 [MASK]，得到加噪序列 \(x_t\)。\(\alpha_t\) 是“保留概率”，随 \(t\) 从 1 降到 0：\(t=0\) 时什么都不遮，\(t=1\) 时全部遮住。最常用的线性调度是 \(\alpha_t=1-t\)，也就是在时间 \(t\) 大约有 \(t\) 比例的 token 被遮住。</p>
+<p>训练时，模型看到 \(x_t\)，对每个被遮住的位置输出一个词表上的概率分布，用交叉熵去对比原来的 token。论文的式 (2) 写的就是这个目标（全序列掩码扩散，MDLM）：</p>
+<div class="formula">$$\mathcal{L}_{\text{MDLM}}(\theta)=\mathbb{E}_{t,\,x_0,\,x_t}\Big[\,w(t)\sum_{i=1}^{L}\mathbb{1}\big[x_t^i=\text{[MASK]}\big]\,\big(-\log p_\theta(x_0^i\mid x_t)\big)\Big],\qquad w(t)=-\frac{\alpha_t'}{1-\alpha_t}$$</div>
+<p>这里 \(L\) 是序列长度，指示函数 \(\mathbb{1}[\cdot]\) 保证只在被遮住的位置算损失，\(\alpha_t'\) 是 \(\alpha_t\) 对 \(t\) 的导数（为负），所以权重 \(w(t)\) 是正数。在线性调度下 \(\alpha_t'=-1\)，\(w(t)=1/t\)。这个权重有直观的解释：时间 \(t\) 时大约遮住 \(tL\) 个 token，损失要对这么多位置求和；乘上 \(1/t\)，相当于把“遮得多、加起来损失大”的情况按遮住的比例摊平，让各个噪声水平的贡献大致相当。按这个权重加起来的交叉熵，在理论上是负对数似然的一个<b>上界</b>（等价地说，它的相反数是对数似然的下界，即 ELBO）。所以掩码扩散模型虽然算不出精确的似然，却有一个有理论依据的训练目标。</p>
+</div>
+
+<h4 id="n-4-1">为什么不能直接换目标</h4>
+<p>论文的判断是：AR 模型和扩散模型在结构上的“先入之见”（归纳偏置）和训练目标都对不上。AR 模型只会从左到右、依据前文生成；扩散模型要依据双向上下文、按任意顺序把被破坏的序列恢复出来。如果直接把目标一换，优化往往不稳定，预训练学到的知识也会严重退化。</p>
+<p>这里有一个论文没有展开、但从官方代码能看出来的细节：AR 模型在第 \(i\) 个位置输出的是对第 \(i+1\) 个 token 的预测（“错一位”），而 LLaDA2.0 的推理代码直接用第 \(i\) 个位置的输出来填第 \(i\) 个位置被遮住的 token，没有保留这种错位。相比之下，<a href="dream.html">Dream</a> 在转换时特意保留了错位，以便尽量沿用 AR 模型的输出约定。所以 LLaDA2.0 的转换不只是“把因果注意力换成双向”，模型最后一层的输出含义也要重新适应。这是本站根据 Hugging Face 上 <code>modeling_llada2_moe.py</code> 的 <code>generate()</code> 读出来的，论文正文没有讨论它对转换难度的影响。</p>
+<p>作者的解法是：<b>不要一步跳，而是沿着块长这个旋钮慢慢走</b>。前面讲过，块长为 1 的块扩散几乎就是 AR，块长等于整条序列就是全序列扩散。所以 AR 模型可以被看作块扩散的一个初始配置（块长为 1），转换就变成了“逐渐改变块长”。WSD 这个名字借自学习率调度里常见的“预热—平稳—衰减”（Warmup–Stable–Decay），只是这里被调度的不是学习率，而是块长。</p>
+
+<h4 id="n-4-2">三个阶段：预热、稳定、衰减</h4>
+<div class="dia">
+  <div class="dia-title">示意图：持续预训练期间块长怎么变（WSD）</div>
+  <svg class="dg" viewBox="0 0 960 360" role="img" aria-label="LLaDA2.0 持续预训练中块长随训练进程的变化（WSD）" style="--dg-min:720px">
+<rect x="90" y="40" width="210" height="262" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="195.0" y="24" class="t-c t-b">Warmup 预热</text>
+<text x="195.0" y="318" class="t-c t-xs">块长逐级放大</text>
+<rect x="300" y="40" width="320" height="262" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="460.0" y="24" class="t-c t-b">Stable 稳定</text>
+<text x="460.0" y="318" class="t-c t-xs">块长固定 4096，大规模数据</text>
+<rect x="620" y="40" width="290" height="262" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="765.0" y="24" class="t-c t-b">Decay 衰减</text>
+<text x="765.0" y="318" class="t-c t-xs">块长逐级缩小</text>
+<line x1="80" y1="302" x2="80" y2="50" style="stroke:var(--text-3);stroke-width:1.2"/>
+<text x="72" y="290.0" class="t-r t-xs">1</text>
+<line x1="76" y1="290.0" x2="80" y2="290.0" style="stroke:var(--text-3)"/>
+<text x="72" y="251.7" class="t-r t-xs">4</text>
+<line x1="76" y1="251.7" x2="80" y2="251.7" style="stroke:var(--text-3)"/>
+<text x="72" y="194.2" class="t-r t-xs">32</text>
+<line x1="76" y1="194.2" x2="80" y2="194.2" style="stroke:var(--text-3)"/>
+<text x="72" y="175.0" class="t-r t-xs">64</text>
+<line x1="76" y1="175.0" x2="80" y2="175.0" style="stroke:var(--text-3)"/>
+<text x="72" y="79.2" class="t-r t-xs">2048</text>
+<line x1="76" y1="79.2" x2="80" y2="79.2" style="stroke:var(--text-3)"/>
+<text x="72" y="60.0" class="t-r t-xs">4096</text>
+<line x1="76" y1="60.0" x2="80" y2="60.0" style="stroke:var(--text-3)"/>
+<text x="26" y="170" class="t-c t-sm" transform="rotate(-90 26 170)">块长 L_B（对数刻度）</text>
+<path d="M90,290.0 H130 V251.7 H175 V194.2 H220 V175.0 H265 V60.0 H620 V79.2 H675" style="fill:none;stroke:var(--c-enc);stroke-width:3"/>
+<path d="M675,79.2 C705,79.2 725,194.2 760,194.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:5 5"/>
+<path d="M760,194.2 H905" style="fill:none;stroke:var(--c-enc);stroke-width:3"/>
+<text x="110" y="278.0" class="t-c t-sm t-b">1</text>
+<text x="152" y="239.7" class="t-c t-sm t-b">4</text>
+<text x="197" y="182.2" class="t-c t-sm t-b">32</text>
+<text x="242" y="163.0" class="t-c t-sm t-b">64</text>
+<text x="440" y="48.0" class="t-c t-sm t-b">4096 = 整条序列一个块</text>
+<text x="648" y="67.2" class="t-c t-sm t-b">2048</text>
+<text x="770" y="118" class="t-xs">中间档位</text>
+<text x="770" y="132" class="t-xs">论文未列出</text>
+<text x="832" y="182.2" class="t-c t-sm t-b">32（推理块长）</text>
+<text x="138" y="272" class="t-xs" style="fill:var(--c-act)">块长 1 ≈ AR 模型</text>
+<text x="440" y="175.0" class="t-c t-xs" style="fill:var(--c-act)">等价于全序列掩码扩散（MDLM）</text>
+<text x="440" y="191.0" class="t-c t-xs">不再需要干净副本，输入从 2L 缩到 L</text>
+<text x="832" y="251.7" class="t-c t-xs" style="fill:var(--c-act)">回到块扩散：块间可用</text>
+<text x="832" y="265.7" class="t-c t-xs" style="fill:var(--c-act)">KV 缓存、长度可变</text>
+<text x="195" y="294" class="t-c t-xs">输入 x_t ⊕ x_0（长 2L）</text>
+<text x="460" y="294" class="t-c t-xs">输入只有 x_t（长 L = 4096）</text>
+<text x="765" y="294" class="t-c t-xs">输入 x_t ⊕ x_0（长 2L）</text>
+<text x="500" y="344" class="t-c t-xs">横轴是训练进程，各段长度只是示意：论文没有给出每一段用了多少 token</text>
+</svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.15745#S3.F2" target="_blank" rel="noopener">原文图 2 左侧 ↗</a> 和 §4.1 的文字。怎么看：纵轴是块长（对数刻度），蓝线是块长随训练推进的变化。预热段的台阶是论文明确列出的 1、4、32、64、4096；衰减段论文只说“例如从 4096 降到 2048”“降到一个小块长（例如 32）”，中间的档位没有列出，所以画成虚线。下方标出了每一段的训练输入长度：块扩散阶段要把加噪序列和干净序列拼在一起（下一小节解释），稳定阶段不需要。</div>
+</div>
+<p><b>阶段一：预热（Warmup），逐级放大块长。</b>从块长 \(L_B=1\) 开始，依次放大到 4、32、64，最后到 4096。训练序列长度是 4096，所以块长到 4096 时整条序列就是一个块，块扩散模型就等价于一个标准的全序列掩码扩散模型（MDLM），在全局注意力下对整段被遮住的序列去噪。为了避免出现残缺的块，作者要求序列长度能被当前块长整除。每次换块长后，都用“中等规模”的数据训练一段，让模型平滑适应。放大块长等于放大模型“一起去噪”的范围：块长 4 时模型只需要在 4 个相邻位置之间互相参考，块长 64 时要在 64 个位置之间协调。范围一点点变大，模型内部的表示就有时间跟着调整。</p>
+<p><b>阶段二：稳定（Stable），在全序列扩散下大规模训练。</b>块长固定在 4096，每条输入都是一个单块序列，也就是经典的 MDLM 设置。这一段承担了大规模语料的训练。之所以把大部分数据放在这里，是因为这时训练最省：块扩散训练需要额外维护一份“干净副本”（见下一小节），而单块时这份副本没有用了，注意力的计算量明显下降，同样的算力能处理多得多的数据。这一段的目的是加深模型对扩散动态的理解。</p>
+<p><b>阶段三：衰减（Decay），把块长缩回小块。</b>大规模 MDLM 训练之后，把块长从 4096 逐步降到一个小值（例如 32），把模型变回高效的块扩散模型。作者把这一步描述为把 MDLM 阶段学到的全局上下文知识“蒸馏”进紧凑的分块结构。之所以一步步降（例如先从 4096 降到 2048），而不是一下子降到 32，是为了让模型从“依据全局条件”平滑过渡到“依据局部条件”，在保住语义理解的同时，重新拿回块扩散在实际使用中的好处：可以复用 KV 缓存，可以快速地生成任意长度的文本。</p>
+<p>为什么最后要回到块扩散，而不是停在全序列扩散？因为推理时全序列扩散有两个硬伤：画布长度要事先定死，而且 KV 缓存不能直接用（§1 讲过）。块扩散两样都解决了。为什么中间又非要经过全序列扩散，而不是从块长 1 一路涨到 32 就停？论文给出的理由是效率：全序列阶段训练最省，适合吞下大规模数据。</p>
+
+<h4 id="n-4-3">训练目标：块扩散的式 (1) 与全序列的式 (2)</h4>
+<p>预热和衰减阶段（块长小于整条序列时）用的是块扩散的目标，即论文式 (1)：</p>
+<div class="formula">$$\mathcal{L}_{\text{BDLM}}(\theta)=\mathbb{E}_{t,\,x_0,\,x_t}\Big[\,w(t)\sum_{k=1}^{K}\sum_{i=1}^{L_B}\mathbb{1}\big[x_{t,k}^i=\text{[MASK]}\big]\,\big(-\log p_\theta(x_{0,k}^i\mid x_{0,\lt k},\,x_{t,k})\big)\Big]$$</div>
+<p>其中 \(K=L/L_B\) 是块数，\(x_{t,k}^i\) 是第 \(k\) 个块里的第 \(i\) 个 token。和式 (2) 唯一的区别在条件部分：预测第 \(k\) 个块里被遮住的 token 时，模型能看到的是<b>前面所有块的干净版本</b> \(x_{0,\lt k}\) 加上<b>本块的加噪版本</b> \(x_{t,k}\)，看不到后面的块。这正好对应推理时的情形：前面的块已经生成好了（是干净的），本块正在去噪，后面的块还不存在。当 \(K=1\)（块长等于序列长）时，前面没有块，式 (1) 就退化成式 (2)。</p>
+<p>这里有一个实现上的难题：每个块要看的“前文”都不一样，第 1 块看不到前文，第 2 块看第 1 块的干净版本，第 3 块看前两块……如果逐块算，就要做 \(K\) 次前向。BD3-LM 的做法是把加噪序列和干净序列<b>拼成一条长 \(2L\) 的输入</b> \(x_t\oplus x_0\)，再用一张特制的注意力掩码控制“谁能看谁”，一次前向就把所有块的损失都算出来。代价是输入长度翻倍。块长到 4096 时只有一个块，不再需要干净副本，输入长度减半，这就是稳定阶段更省的原因：粗略地说，前馈层（包括 MoE）的计算量减半，稠密注意力矩阵的大小只剩四分之一（推算，未考虑掩码带来的稀疏性）。论文在引言里说块扩散训练“数据利用率低”，没有具体解释；本站的理解是，同样的算力下块扩散阶段只能吃下大约一半的数据，这和稳定阶段的设计动机是一致的。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li><b>符号。</b>论文式 (1)(2) 在期望前面写了负号，权重又写成 \(\alpha_t'/(1-\alpha_t)\)。因为 \(\alpha_t'\lt 0\)，按字面算出来的损失是负的。正文明确说时间权重是 \(-\alpha_t'/(1-\alpha_t)\)，本页按“正的权重乘以负对数似然”来写，这是论文想表达的意思。</li>
+  <li><b>数据量没有公开。</b>论文没有给出 CPT 一共用了多少 token，也没有给出每个阶段的数据量。官方模型卡写的是“在 Ling2.0 系列上持续训练，约 20 万亿（20T）token”，但这句话分不清 20T 指的是 Ling 2.0 自己的预训练量，还是转换用的量；Ling 2.0 的模型卡说它们本身就是用 20T 以上的 token 预训练的。</li>
+  <li><b>没有消融。</b>“直接换目标会不稳定、会丢知识”“WSD 比一步转换好”是作者的论证，论文没有给出对照实验的数字，所以无法判断 WSD 每个阶段各贡献了多少。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2512.15745#S4.SS1" target="_blank" rel="noopener">§4.1 ↗</a> · 相关：<a href="../legacy/tracks/dllm/09-llada2.html#c-wsd">旧版拆解：块长 WSD</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">4.2 文档级注意力掩码：别让拼在一起的文档互相串门</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练时为了不浪费算力，会把很多篇长短不一的文档首尾相接，拼成固定长度的序列。AR 模型这样做问题不大，为什么扩散模型这样做就会出问题？作者的文档级掩码具体长什么样，和块扩散的掩码怎么叠在一起？</div>
+<div class="note-pre"><b>先补一点背景：序列打包（packing）。</b>
+<p>训练语料里的文档有长有短。GPU 一次处理固定长度（比如 4096）的序列效率最高，如果每篇文档单独成一条、不够长就补空白，补的空白会白白浪费算力。所以常见做法是把多篇文档直接拼接起来，凑满 4096 再切开，叫作打包。这样一条训练序列里可能包含好几篇毫不相干的文档。</p>
+<p>对于因果注意力的 AR 模型，打包的副作用有限：后一篇文档的开头能看到前一篇的结尾，会引入一点干扰，但前一篇看不到后一篇。对于双向注意力的扩散模型，情况更糟：每个位置都能看到序列里所有其他位置，一篇文档里被遮住的词，模型可能去另一篇无关的文档里找线索，学到虚假的跨文档依赖。论文认为这会造成语义混乱，削弱双向建模能力，让训练不稳定。</p>
+</div>
+<p>作者的办法是<b>文档级注意力掩码</b>：注意力只允许在同一篇文档内部进行，跨文档的注意力一律屏蔽。在块扩散阶段，这张掩码要和块扩散本身的掩码叠加。论文式 (3) 给出了块扩散部分的掩码（假设 \(i\)、\(j\) 已经属于同一篇文档）。对长 \(2L\) 的拼接输入 \(x_t\oplus x_0\)，用 \(b(k)=\lfloor k/L_B\rfloor\) 表示第 \(k\) 个位置属于第几个块：</p>
+<div class="formula">$$M_{ij}=\begin{cases}\mathbb{1}\big[b(i)=b(j)\big] &amp; i\in x_t,\ j\in x_t\quad(\text{块对角，}M_{\text{BD}})\\[2pt] \mathbb{1}\big[b(i)>b(j-L)\big] &amp; i\in x_t,\ j\in x_0\quad(\text{错开的块因果，}M_{\text{OBC}})\\[2pt] \mathbb{1}\big[b(i-L)\ge b(j-L)\big] &amp; i\in x_0,\ j\in x_0\quad(\text{块因果，}M_{\text{BC}})\\[2pt] 0 &amp; \text{其他（}i\in x_0,\ j\in x_t\text{）}\end{cases}$$</div>
+<p>逐行读这四种情况（\(i\) 是发出查询的位置，\(j\) 是被看的位置）：</p>
+<ul>
+  <li><b>加噪副本看加噪副本</b>：只能看同一个块。这就是“块内双向去噪”。</li>
+  <li><b>加噪副本看干净副本</b>：只能看<b>严格更早</b>的块的干净版本，对应式 (1) 里的条件 \(x_{0,\lt k}\)。注意不能看本块的干净版本，否则答案就泄露了。</li>
+  <li><b>干净副本看干净副本</b>：块因果，可以看自己所在的块和之前所有块。干净副本的作用相当于训练时现场搭建的“KV 缓存”，它自己按推理时的方式（块间因果）算出表示，供加噪副本查阅。</li>
+  <li><b>干净副本看加噪副本</b>：一律不许。干净副本不能受加噪内容影响。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：块扩散训练的注意力掩码，叠加文档级掩码</div>
+  <svg class="dg" viewBox="0 0 960 372" role="img" aria-label="块扩散训练用的注意力掩码与文档级掩码示意" style="--dg-min:760px">
+<text x="240" y="22" class="t-c t-b">(a) 预热 / 衰减阶段：块扩散掩码 × 文档掩码（L = 8，块长 2）</text>
+<text x="180" y="44" class="t-c t-sm">键：加噪副本 x_t</text>
+<text x="300" y="44" class="t-c t-sm">键：干净副本 x_0</text>
+<text x="150" y="62" class="t-c t-xs">文档 A</text>
+<text x="210" y="62" class="t-c t-xs">文档 B</text>
+<text x="270" y="62" class="t-c t-xs">文档 A</text>
+<text x="330" y="62" class="t-c t-xs">文档 B</text>
+<text x="58" y="134" class="t-c t-sm" transform="rotate(-90 58 134)">查询：x_t</text>
+<text x="58" y="254" class="t-c t-sm" transform="rotate(-90 58 254)">查询：x_0</text>
+<text x="96" y="104" class="t-c t-xs">A</text>
+<text x="96" y="164" class="t-c t-xs">B</text>
+<text x="96" y="224" class="t-c t-xs">A</text>
+<text x="96" y="284" class="t-c t-xs">B</text>
+<rect class="tk enc" x="120" y="74" width="15" height="15"/>
+<rect class="tk enc" x="135" y="74" width="15" height="15"/>
+<rect class="tk off" x="150" y="74" width="15" height="15"/>
+<rect class="tk off" x="165" y="74" width="15" height="15"/>
+<rect class="tk off" x="180" y="74" width="15" height="15"/>
+<rect class="tk off" x="195" y="74" width="15" height="15"/>
+<rect class="tk off" x="210" y="74" width="15" height="15"/>
+<rect class="tk off" x="225" y="74" width="15" height="15"/>
+<rect class="tk off" x="240" y="74" width="15" height="15"/>
+<rect class="tk off" x="255" y="74" width="15" height="15"/>
+<rect class="tk off" x="270" y="74" width="15" height="15"/>
+<rect class="tk off" x="285" y="74" width="15" height="15"/>
+<rect class="tk off" x="300" y="74" width="15" height="15"/>
+<rect class="tk off" x="315" y="74" width="15" height="15"/>
+<rect class="tk off" x="330" y="74" width="15" height="15"/>
+<rect class="tk off" x="345" y="74" width="15" height="15"/>
+<rect class="tk enc" x="120" y="89" width="15" height="15"/>
+<rect class="tk enc" x="135" y="89" width="15" height="15"/>
+<rect class="tk off" x="150" y="89" width="15" height="15"/>
+<rect class="tk off" x="165" y="89" width="15" height="15"/>
+<rect class="tk off" x="180" y="89" width="15" height="15"/>
+<rect class="tk off" x="195" y="89" width="15" height="15"/>
+<rect class="tk off" x="210" y="89" width="15" height="15"/>
+<rect class="tk off" x="225" y="89" width="15" height="15"/>
+<rect class="tk off" x="240" y="89" width="15" height="15"/>
+<rect class="tk off" x="255" y="89" width="15" height="15"/>
+<rect class="tk off" x="270" y="89" width="15" height="15"/>
+<rect class="tk off" x="285" y="89" width="15" height="15"/>
+<rect class="tk off" x="300" y="89" width="15" height="15"/>
+<rect class="tk off" x="315" y="89" width="15" height="15"/>
+<rect class="tk off" x="330" y="89" width="15" height="15"/>
+<rect class="tk off" x="345" y="89" width="15" height="15"/>
+<rect class="tk off" x="120" y="104" width="15" height="15"/>
+<rect class="tk off" x="135" y="104" width="15" height="15"/>
+<rect class="tk enc" x="150" y="104" width="15" height="15"/>
+<rect class="tk enc" x="165" y="104" width="15" height="15"/>
+<rect class="tk off" x="180" y="104" width="15" height="15"/>
+<rect class="tk off" x="195" y="104" width="15" height="15"/>
+<rect class="tk off" x="210" y="104" width="15" height="15"/>
+<rect class="tk off" x="225" y="104" width="15" height="15"/>
+<rect class="tk act" x="240" y="104" width="15" height="15"/>
+<rect class="tk act" x="255" y="104" width="15" height="15"/>
+<rect class="tk off" x="270" y="104" width="15" height="15"/>
+<rect class="tk off" x="285" y="104" width="15" height="15"/>
+<rect class="tk off" x="300" y="104" width="15" height="15"/>
+<rect class="tk off" x="315" y="104" width="15" height="15"/>
+<rect class="tk off" x="330" y="104" width="15" height="15"/>
+<rect class="tk off" x="345" y="104" width="15" height="15"/>
+<rect class="tk off" x="120" y="119" width="15" height="15"/>
+<rect class="tk off" x="135" y="119" width="15" height="15"/>
+<rect class="tk enc" x="150" y="119" width="15" height="15"/>
+<rect class="tk enc" x="165" y="119" width="15" height="15"/>
+<rect class="tk off" x="180" y="119" width="15" height="15"/>
+<rect class="tk off" x="195" y="119" width="15" height="15"/>
+<rect class="tk off" x="210" y="119" width="15" height="15"/>
+<rect class="tk off" x="225" y="119" width="15" height="15"/>
+<rect class="tk act" x="240" y="119" width="15" height="15"/>
+<rect class="tk act" x="255" y="119" width="15" height="15"/>
+<rect class="tk off" x="270" y="119" width="15" height="15"/>
+<rect class="tk off" x="285" y="119" width="15" height="15"/>
+<rect class="tk off" x="300" y="119" width="15" height="15"/>
+<rect class="tk off" x="315" y="119" width="15" height="15"/>
+<rect class="tk off" x="330" y="119" width="15" height="15"/>
+<rect class="tk off" x="345" y="119" width="15" height="15"/>
+<rect class="tk off" x="120" y="134" width="15" height="15"/>
+<rect class="tk off" x="135" y="134" width="15" height="15"/>
+<rect class="tk off" x="150" y="134" width="15" height="15"/>
+<rect class="tk off" x="165" y="134" width="15" height="15"/>
+<rect class="tk enc" x="180" y="134" width="15" height="15"/>
+<rect class="tk enc" x="195" y="134" width="15" height="15"/>
+<rect class="tk off" x="210" y="134" width="15" height="15"/>
+<rect class="tk off" x="225" y="134" width="15" height="15"/>
+<rect class="tk mask" x="240" y="134" width="15" height="15"/>
+<rect class="tk mask" x="255" y="134" width="15" height="15"/>
+<rect class="tk mask" x="270" y="134" width="15" height="15"/>
+<rect class="tk mask" x="285" y="134" width="15" height="15"/>
+<rect class="tk off" x="300" y="134" width="15" height="15"/>
+<rect class="tk off" x="315" y="134" width="15" height="15"/>
+<rect class="tk off" x="330" y="134" width="15" height="15"/>
+<rect class="tk off" x="345" y="134" width="15" height="15"/>
+<rect class="tk off" x="120" y="149" width="15" height="15"/>
+<rect class="tk off" x="135" y="149" width="15" height="15"/>
+<rect class="tk off" x="150" y="149" width="15" height="15"/>
+<rect class="tk off" x="165" y="149" width="15" height="15"/>
+<rect class="tk enc" x="180" y="149" width="15" height="15"/>
+<rect class="tk enc" x="195" y="149" width="15" height="15"/>
+<rect class="tk off" x="210" y="149" width="15" height="15"/>
+<rect class="tk off" x="225" y="149" width="15" height="15"/>
+<rect class="tk mask" x="240" y="149" width="15" height="15"/>
+<rect class="tk mask" x="255" y="149" width="15" height="15"/>
+<rect class="tk mask" x="270" y="149" width="15" height="15"/>
+<rect class="tk mask" x="285" y="149" width="15" height="15"/>
+<rect class="tk off" x="300" y="149" width="15" height="15"/>
+<rect class="tk off" x="315" y="149" width="15" height="15"/>
+<rect class="tk off" x="330" y="149" width="15" height="15"/>
+<rect class="tk off" x="345" y="149" width="15" height="15"/>
+<rect class="tk off" x="120" y="164" width="15" height="15"/>
+<rect class="tk off" x="135" y="164" width="15" height="15"/>
+<rect class="tk off" x="150" y="164" width="15" height="15"/>
+<rect class="tk off" x="165" y="164" width="15" height="15"/>
+<rect class="tk off" x="180" y="164" width="15" height="15"/>
+<rect class="tk off" x="195" y="164" width="15" height="15"/>
+<rect class="tk enc" x="210" y="164" width="15" height="15"/>
+<rect class="tk enc" x="225" y="164" width="15" height="15"/>
+<rect class="tk mask" x="240" y="164" width="15" height="15"/>
+<rect class="tk mask" x="255" y="164" width="15" height="15"/>
+<rect class="tk mask" x="270" y="164" width="15" height="15"/>
+<rect class="tk mask" x="285" y="164" width="15" height="15"/>
+<rect class="tk act" x="300" y="164" width="15" height="15"/>
+<rect class="tk act" x="315" y="164" width="15" height="15"/>
+<rect class="tk off" x="330" y="164" width="15" height="15"/>
+<rect class="tk off" x="345" y="164" width="15" height="15"/>
+<rect class="tk off" x="120" y="179" width="15" height="15"/>
+<rect class="tk off" x="135" y="179" width="15" height="15"/>
+<rect class="tk off" x="150" y="179" width="15" height="15"/>
+<rect class="tk off" x="165" y="179" width="15" height="15"/>
+<rect class="tk off" x="180" y="179" width="15" height="15"/>
+<rect class="tk off" x="195" y="179" width="15" height="15"/>
+<rect class="tk enc" x="210" y="179" width="15" height="15"/>
+<rect class="tk enc" x="225" y="179" width="15" height="15"/>
+<rect class="tk mask" x="240" y="179" width="15" height="15"/>
+<rect class="tk mask" x="255" y="179" width="15" height="15"/>
+<rect class="tk mask" x="270" y="179" width="15" height="15"/>
+<rect class="tk mask" x="285" y="179" width="15" height="15"/>
+<rect class="tk act" x="300" y="179" width="15" height="15"/>
+<rect class="tk act" x="315" y="179" width="15" height="15"/>
+<rect class="tk off" x="330" y="179" width="15" height="15"/>
+<rect class="tk off" x="345" y="179" width="15" height="15"/>
+<rect class="tk off" x="120" y="194" width="15" height="15"/>
+<rect class="tk off" x="135" y="194" width="15" height="15"/>
+<rect class="tk off" x="150" y="194" width="15" height="15"/>
+<rect class="tk off" x="165" y="194" width="15" height="15"/>
+<rect class="tk off" x="180" y="194" width="15" height="15"/>
+<rect class="tk off" x="195" y="194" width="15" height="15"/>
+<rect class="tk off" x="210" y="194" width="15" height="15"/>
+<rect class="tk off" x="225" y="194" width="15" height="15"/>
+<rect class="tk tgt" x="240" y="194" width="15" height="15"/>
+<rect class="tk tgt" x="255" y="194" width="15" height="15"/>
+<rect class="tk off" x="270" y="194" width="15" height="15"/>
+<rect class="tk off" x="285" y="194" width="15" height="15"/>
+<rect class="tk off" x="300" y="194" width="15" height="15"/>
+<rect class="tk off" x="315" y="194" width="15" height="15"/>
+<rect class="tk off" x="330" y="194" width="15" height="15"/>
+<rect class="tk off" x="345" y="194" width="15" height="15"/>
+<rect class="tk off" x="120" y="209" width="15" height="15"/>
+<rect class="tk off" x="135" y="209" width="15" height="15"/>
+<rect class="tk off" x="150" y="209" width="15" height="15"/>
+<rect class="tk off" x="165" y="209" width="15" height="15"/>
+<rect class="tk off" x="180" y="209" width="15" height="15"/>
+<rect class="tk off" x="195" y="209" width="15" height="15"/>
+<rect class="tk off" x="210" y="209" width="15" height="15"/>
+<rect class="tk off" x="225" y="209" width="15" height="15"/>
+<rect class="tk tgt" x="240" y="209" width="15" height="15"/>
+<rect class="tk tgt" x="255" y="209" width="15" height="15"/>
+<rect class="tk off" x="270" y="209" width="15" height="15"/>
+<rect class="tk off" x="285" y="209" width="15" height="15"/>
+<rect class="tk off" x="300" y="209" width="15" height="15"/>
+<rect class="tk off" x="315" y="209" width="15" height="15"/>
+<rect class="tk off" x="330" y="209" width="15" height="15"/>
+<rect class="tk off" x="345" y="209" width="15" height="15"/>
+<rect class="tk off" x="120" y="224" width="15" height="15"/>
+<rect class="tk off" x="135" y="224" width="15" height="15"/>
+<rect class="tk off" x="150" y="224" width="15" height="15"/>
+<rect class="tk off" x="165" y="224" width="15" height="15"/>
+<rect class="tk off" x="180" y="224" width="15" height="15"/>
+<rect class="tk off" x="195" y="224" width="15" height="15"/>
+<rect class="tk off" x="210" y="224" width="15" height="15"/>
+<rect class="tk off" x="225" y="224" width="15" height="15"/>
+<rect class="tk tgt" x="240" y="224" width="15" height="15"/>
+<rect class="tk tgt" x="255" y="224" width="15" height="15"/>
+<rect class="tk tgt" x="270" y="224" width="15" height="15"/>
+<rect class="tk tgt" x="285" y="224" width="15" height="15"/>
+<rect class="tk off" x="300" y="224" width="15" height="15"/>
+<rect class="tk off" x="315" y="224" width="15" height="15"/>
+<rect class="tk off" x="330" y="224" width="15" height="15"/>
+<rect class="tk off" x="345" y="224" width="15" height="15"/>
+<rect class="tk off" x="120" y="239" width="15" height="15"/>
+<rect class="tk off" x="135" y="239" width="15" height="15"/>
+<rect class="tk off" x="150" y="239" width="15" height="15"/>
+<rect class="tk off" x="165" y="239" width="15" height="15"/>
+<rect class="tk off" x="180" y="239" width="15" height="15"/>
+<rect class="tk off" x="195" y="239" width="15" height="15"/>
+<rect class="tk off" x="210" y="239" width="15" height="15"/>
+<rect class="tk off" x="225" y="239" width="15" height="15"/>
+<rect class="tk tgt" x="240" y="239" width="15" height="15"/>
+<rect class="tk tgt" x="255" y="239" width="15" height="15"/>
+<rect class="tk tgt" x="270" y="239" width="15" height="15"/>
+<rect class="tk tgt" x="285" y="239" width="15" height="15"/>
+<rect class="tk off" x="300" y="239" width="15" height="15"/>
+<rect class="tk off" x="315" y="239" width="15" height="15"/>
+<rect class="tk off" x="330" y="239" width="15" height="15"/>
+<rect class="tk off" x="345" y="239" width="15" height="15"/>
+<rect class="tk off" x="120" y="254" width="15" height="15"/>
+<rect class="tk off" x="135" y="254" width="15" height="15"/>
+<rect class="tk off" x="150" y="254" width="15" height="15"/>
+<rect class="tk off" x="165" y="254" width="15" height="15"/>
+<rect class="tk off" x="180" y="254" width="15" height="15"/>
+<rect class="tk off" x="195" y="254" width="15" height="15"/>
+<rect class="tk off" x="210" y="254" width="15" height="15"/>
+<rect class="tk off" x="225" y="254" width="15" height="15"/>
+<rect class="tk mask" x="240" y="254" width="15" height="15"/>
+<rect class="tk mask" x="255" y="254" width="15" height="15"/>
+<rect class="tk mask" x="270" y="254" width="15" height="15"/>
+<rect class="tk mask" x="285" y="254" width="15" height="15"/>
+<rect class="tk tgt" x="300" y="254" width="15" height="15"/>
+<rect class="tk tgt" x="315" y="254" width="15" height="15"/>
+<rect class="tk off" x="330" y="254" width="15" height="15"/>
+<rect class="tk off" x="345" y="254" width="15" height="15"/>
+<rect class="tk off" x="120" y="269" width="15" height="15"/>
+<rect class="tk off" x="135" y="269" width="15" height="15"/>
+<rect class="tk off" x="150" y="269" width="15" height="15"/>
+<rect class="tk off" x="165" y="269" width="15" height="15"/>
+<rect class="tk off" x="180" y="269" width="15" height="15"/>
+<rect class="tk off" x="195" y="269" width="15" height="15"/>
+<rect class="tk off" x="210" y="269" width="15" height="15"/>
+<rect class="tk off" x="225" y="269" width="15" height="15"/>
+<rect class="tk mask" x="240" y="269" width="15" height="15"/>
+<rect class="tk mask" x="255" y="269" width="15" height="15"/>
+<rect class="tk mask" x="270" y="269" width="15" height="15"/>
+<rect class="tk mask" x="285" y="269" width="15" height="15"/>
+<rect class="tk tgt" x="300" y="269" width="15" height="15"/>
+<rect class="tk tgt" x="315" y="269" width="15" height="15"/>
+<rect class="tk off" x="330" y="269" width="15" height="15"/>
+<rect class="tk off" x="345" y="269" width="15" height="15"/>
+<rect class="tk off" x="120" y="284" width="15" height="15"/>
+<rect class="tk off" x="135" y="284" width="15" height="15"/>
+<rect class="tk off" x="150" y="284" width="15" height="15"/>
+<rect class="tk off" x="165" y="284" width="15" height="15"/>
+<rect class="tk off" x="180" y="284" width="15" height="15"/>
+<rect class="tk off" x="195" y="284" width="15" height="15"/>
+<rect class="tk off" x="210" y="284" width="15" height="15"/>
+<rect class="tk off" x="225" y="284" width="15" height="15"/>
+<rect class="tk mask" x="240" y="284" width="15" height="15"/>
+<rect class="tk mask" x="255" y="284" width="15" height="15"/>
+<rect class="tk mask" x="270" y="284" width="15" height="15"/>
+<rect class="tk mask" x="285" y="284" width="15" height="15"/>
+<rect class="tk tgt" x="300" y="284" width="15" height="15"/>
+<rect class="tk tgt" x="315" y="284" width="15" height="15"/>
+<rect class="tk tgt" x="330" y="284" width="15" height="15"/>
+<rect class="tk tgt" x="345" y="284" width="15" height="15"/>
+<rect class="tk off" x="120" y="299" width="15" height="15"/>
+<rect class="tk off" x="135" y="299" width="15" height="15"/>
+<rect class="tk off" x="150" y="299" width="15" height="15"/>
+<rect class="tk off" x="165" y="299" width="15" height="15"/>
+<rect class="tk off" x="180" y="299" width="15" height="15"/>
+<rect class="tk off" x="195" y="299" width="15" height="15"/>
+<rect class="tk off" x="210" y="299" width="15" height="15"/>
+<rect class="tk off" x="225" y="299" width="15" height="15"/>
+<rect class="tk mask" x="240" y="299" width="15" height="15"/>
+<rect class="tk mask" x="255" y="299" width="15" height="15"/>
+<rect class="tk mask" x="270" y="299" width="15" height="15"/>
+<rect class="tk mask" x="285" y="299" width="15" height="15"/>
+<rect class="tk tgt" x="300" y="299" width="15" height="15"/>
+<rect class="tk tgt" x="315" y="299" width="15" height="15"/>
+<rect class="tk tgt" x="330" y="299" width="15" height="15"/>
+<rect class="tk tgt" x="345" y="299" width="15" height="15"/>
+<line x1="240" y1="70" x2="240" y2="318" style="stroke:var(--text);stroke-width:2"/>
+<line x1="116" y1="194" x2="364" y2="194" style="stroke:var(--text);stroke-width:2"/>
+<line x1="180" y1="74" x2="180" y2="314" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<line x1="120" y1="134" x2="360" y2="134" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<line x1="300" y1="74" x2="300" y2="314" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<line x1="120" y1="254" x2="360" y2="254" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<text x="180" y="332" class="t-c t-xs">左上：M_BD 块对角</text>
+<text x="300" y="332" class="t-c t-xs">右上：M_OBC 只看更早的块</text>
+<text x="240" y="348" class="t-c t-xs">右下：M_BC 块因果；左下全 0（干净副本不看加噪副本）</text>
+<text x="648" y="22" class="t-c t-b">(b) 稳定阶段：整段一个块，只剩文档掩码</text>
+<text x="604" y="62" class="t-c t-xs">文档 A</text>
+<text x="544" y="118" class="t-c t-xs">A</text>
+<text x="692" y="62" class="t-c t-xs">文档 B</text>
+<text x="544" y="206" class="t-c t-xs">B</text>
+<rect class="tk enc" x="560" y="74" width="22" height="22"/>
+<rect class="tk enc" x="582" y="74" width="22" height="22"/>
+<rect class="tk enc" x="604" y="74" width="22" height="22"/>
+<rect class="tk enc" x="626" y="74" width="22" height="22"/>
+<rect class="tk mask" x="648" y="74" width="22" height="22"/>
+<rect class="tk mask" x="670" y="74" width="22" height="22"/>
+<rect class="tk mask" x="692" y="74" width="22" height="22"/>
+<rect class="tk mask" x="714" y="74" width="22" height="22"/>
+<rect class="tk enc" x="560" y="96" width="22" height="22"/>
+<rect class="tk enc" x="582" y="96" width="22" height="22"/>
+<rect class="tk enc" x="604" y="96" width="22" height="22"/>
+<rect class="tk enc" x="626" y="96" width="22" height="22"/>
+<rect class="tk mask" x="648" y="96" width="22" height="22"/>
+<rect class="tk mask" x="670" y="96" width="22" height="22"/>
+<rect class="tk mask" x="692" y="96" width="22" height="22"/>
+<rect class="tk mask" x="714" y="96" width="22" height="22"/>
+<rect class="tk enc" x="560" y="118" width="22" height="22"/>
+<rect class="tk enc" x="582" y="118" width="22" height="22"/>
+<rect class="tk enc" x="604" y="118" width="22" height="22"/>
+<rect class="tk enc" x="626" y="118" width="22" height="22"/>
+<rect class="tk mask" x="648" y="118" width="22" height="22"/>
+<rect class="tk mask" x="670" y="118" width="22" height="22"/>
+<rect class="tk mask" x="692" y="118" width="22" height="22"/>
+<rect class="tk mask" x="714" y="118" width="22" height="22"/>
+<rect class="tk enc" x="560" y="140" width="22" height="22"/>
+<rect class="tk enc" x="582" y="140" width="22" height="22"/>
+<rect class="tk enc" x="604" y="140" width="22" height="22"/>
+<rect class="tk enc" x="626" y="140" width="22" height="22"/>
+<rect class="tk mask" x="648" y="140" width="22" height="22"/>
+<rect class="tk mask" x="670" y="140" width="22" height="22"/>
+<rect class="tk mask" x="692" y="140" width="22" height="22"/>
+<rect class="tk mask" x="714" y="140" width="22" height="22"/>
+<rect class="tk mask" x="560" y="162" width="22" height="22"/>
+<rect class="tk mask" x="582" y="162" width="22" height="22"/>
+<rect class="tk mask" x="604" y="162" width="22" height="22"/>
+<rect class="tk mask" x="626" y="162" width="22" height="22"/>
+<rect class="tk enc" x="648" y="162" width="22" height="22"/>
+<rect class="tk enc" x="670" y="162" width="22" height="22"/>
+<rect class="tk enc" x="692" y="162" width="22" height="22"/>
+<rect class="tk enc" x="714" y="162" width="22" height="22"/>
+<rect class="tk mask" x="560" y="184" width="22" height="22"/>
+<rect class="tk mask" x="582" y="184" width="22" height="22"/>
+<rect class="tk mask" x="604" y="184" width="22" height="22"/>
+<rect class="tk mask" x="626" y="184" width="22" height="22"/>
+<rect class="tk enc" x="648" y="184" width="22" height="22"/>
+<rect class="tk enc" x="670" y="184" width="22" height="22"/>
+<rect class="tk enc" x="692" y="184" width="22" height="22"/>
+<rect class="tk enc" x="714" y="184" width="22" height="22"/>
+<rect class="tk mask" x="560" y="206" width="22" height="22"/>
+<rect class="tk mask" x="582" y="206" width="22" height="22"/>
+<rect class="tk mask" x="604" y="206" width="22" height="22"/>
+<rect class="tk mask" x="626" y="206" width="22" height="22"/>
+<rect class="tk enc" x="648" y="206" width="22" height="22"/>
+<rect class="tk enc" x="670" y="206" width="22" height="22"/>
+<rect class="tk enc" x="692" y="206" width="22" height="22"/>
+<rect class="tk enc" x="714" y="206" width="22" height="22"/>
+<rect class="tk mask" x="560" y="228" width="22" height="22"/>
+<rect class="tk mask" x="582" y="228" width="22" height="22"/>
+<rect class="tk mask" x="604" y="228" width="22" height="22"/>
+<rect class="tk mask" x="626" y="228" width="22" height="22"/>
+<rect class="tk enc" x="648" y="228" width="22" height="22"/>
+<rect class="tk enc" x="670" y="228" width="22" height="22"/>
+<rect class="tk enc" x="692" y="228" width="22" height="22"/>
+<rect class="tk enc" x="714" y="228" width="22" height="22"/>
+<line x1="648" y1="74" x2="648" y2="250" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<line x1="560" y1="162" x2="736" y2="162" style="stroke:var(--text-2);stroke-width:1.2;stroke-dasharray:3 3"/>
+<text x="648" y="268" class="t-c t-xs">输入只有 x_t 一份，长 L；文档内全双向</text>
+<rect class="tk enc" x="790" y="77" width="14" height="14"/>
+<text x="810" y="84" class="t-xs">x_t 内同块互看（M_BD）</text>
+<rect class="tk act" x="790" y="103" width="14" height="14"/>
+<text x="810" y="110" class="t-xs">x_t 看更早的干净块（M_OBC）</text>
+<rect class="tk tgt" x="790" y="129" width="14" height="14"/>
+<text x="810" y="136" class="t-xs">x_0 内块因果（M_BC）</text>
+<rect class="tk mask" x="790" y="155" width="14" height="14"/>
+<text x="810" y="162" class="t-xs">按块规则可看，但跨文档，被挡</text>
+<rect class="tk off" x="790" y="181" width="14" height="14"/>
+<text x="810" y="188" class="t-xs">不允许</text>
+<text x="790" y="220" class="t-xs">行 = 查询，列 = 键</text>
+<text x="790" y="236" class="t-xs">虚线 = 文档边界</text>
+</svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.15745#S3.F2" target="_blank" rel="noopener">原文图 2 右侧 ↗</a> 和式 (3)(4)。怎么看：每个小方格表示“这一行的查询能否看到这一列的键”。(a) 是一条长 \(L=8\) 的打包序列，前 4 个 token 属于文档 A、后 4 个属于文档 B，块长 2，拼成 \(x_t\oplus x_0\) 共 16 个位置；粗黑线分开加噪副本和干净副本，虚线是文档边界。三种颜色对应式 (3) 的三块非零区域；斜纹格子是“按块的规则本来可以看、但跨了文档，被文档级掩码挡掉”的位置。比如右上区域里，文档 B 的第一个块（第 5、6 位）按块规则可以看文档 A 的干净块，但文档掩码把它挡掉了，所以文档 B 的第一个块和推理时一篇新文档的开头一样，前面什么都看不到。(b) 是稳定阶段，整段一个块，块的规则失效，只剩文档掩码，变成按文档分的块对角矩阵，对应式 (4)。</div>
+</div>
+<p>稳定阶段（MDLM）时，输入只有一份，掩码简化为论文式 (4)：两个位置属于同一篇文档就为 1，否则为 0。论文说这张文档级掩码贯穿整个训练过程，对所有输入序列都使用。</p>
+<p>作者还试过另外两种技巧：random-length（随机截断训练序列长度）和 Dream 用的 CART（按 token 的上下文重新加权损失）。结论是在持续预训练中文档级掩码“更根本”，并且一直表现更好。论文没有给出这个比较的具体数字。</p>
+<div class="note-warn"><b>容易误解的一点：</b>文档级掩码和块扩散掩码是两件事。块扩散掩码决定“同一篇文档里，谁能看谁”（块内双向、块间因果）；文档级掩码决定“不同文档之间一律不许看”。在预热和衰减阶段两者同时起作用，在稳定阶段只剩后者。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S4.SS2" target="_blank" rel="noopener">英文原文 §4.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">4.3 Top-k 检查点合并：把几个好检查点的参数平均一下</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>预训练结束时，最后一个检查点不一定是最好的。作者把验证指标最好的 k 个检查点的参数直接平均，得到最终的块扩散模型。这和训练中常用的指数滑动平均（EMA）有什么区别，为什么能提升泛化？</div>
+<div class="note-pre"><b>先补一点背景：EMA 与检查点合并。</b>
+<p>训练过程中会定期保存模型参数，叫检查点。<b>指数滑动平均</b>（EMA）是在训练中一直维护一份“平滑版”参数：每走一步，就让平滑版向当前参数靠近一点点。它是在线进行的，最终得到的是最近一段时间参数的加权平均。<b>检查点合并</b>则是离线做的：训练完以后，从保存下来的检查点里挑出若干个，把它们的参数逐项求平均。两者都依赖一个经验事实：同一次训练里相距不远的检查点处在损失曲面上相近的“盆地”里，把它们平均，往往落到盆地更平坦、更中心的位置，泛化更好。</p>
+</div>
+<p>具体做法是：块扩散预训练完成后，按验证集指标（例如困惑度）挑出表现最好的 \(k\) 个检查点，把它们的参数（权重和偏置）做算术平均，合成一个模型。作者说这借用了 WSM 调度方法（Tian 等，2025）的思路：在训练的不同“最优或接近最优”的状态下，模型学到的知识各有侧重，平均起来相当于做了一次集成，能平滑参数、减轻过拟合。它的一个好处是与优化器无关，不需要改训练流程。</p>
+<p>作者特意区分了它和 EMA：EMA 是训练中持续平滑参数，平滑的是最后一段训练；合并是事后有选择地挑出几个高质量状态再平均，是在“整合各自的长处”。论文没有给出 \(k\) 的取值，也没有给出合并带来的分数提升。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S4.SS3" target="_blank" rel="noopener">英文原文 §4.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">5.1 指令微调：在块扩散设置下做 SFT</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>预训练出来的模型只会“续写”或“填空”，还不会听指令。扩散模型怎么做监督微调（SFT）？作者为了让 SFT 更稳定、更省数据做了哪三件事：长度对齐到块、限制掩码率的范围、互补掩码？SFT 的数据是怎么配的？</div>
+<p>SFT 的目标是在给定提示词 \(c\) 的条件下，学会生成期望的回答 \(x_0\)。做法是把式 (1) 的块扩散目标加上对提示词的条件，即论文式 (5)：</p>
+<div class="formula">$$\mathcal{L}_{\text{SFT}}(\theta)=\mathbb{E}_{t,\,(c,x_0),\,x_t}\Big[\,w(t)\sum_{k=1}^{K}\sum_{i=1}^{L_B}\mathbb{1}\big[x_{t,k}^i=\text{[MASK]}\big]\,\big(-\log p_\theta(x_{0,k}^i\mid c,\,x_{0,\lt k},\,x_{t,k})\big)\Big]$$</div>
+<p>只有回答部分被加噪，提示词始终保持干净。预测第 \(k\) 个块里被遮住的 token 时，模型能看到提示词、回答里前面已经干净的块，以及本块的加噪版本。损失只在本块被遮住的位置上计算。</p>
+<p><b>第一件事：把长度补齐到块长的整数倍。</b>为了和分块的注意力掩码对齐，每条序列的原始长度被向上取整到块长的整数倍，作为“有效长度”，保证序列边界正好落在块边界上。</p>
+<p><b>第二件事：限制掩码率的范围（mask ratio bandwidth）。</b>标准做法是在整个 \([0,1]\) 区间里随机抽掩码比例。但 BD3-LM 的作者发现，极端的掩码率会让梯度的方差很大，却提供很少的学习信号：几乎不遮时，填空太简单；几乎全遮时，模型能做的只是学会“每个位置上哪些词最常见”（数据的边缘分布）。所以 LLaDA2.0 把掩码率限制在一个区间 \([\alpha_{\min},\alpha_{\max}]\) 内抽取，让训练集中在梯度信息最多的噪声水平上。论文说这能稳定收敛并改善生成困惑度，但没有给出 \(\alpha_{\min}\)、\(\alpha_{\max}\) 的具体数值。</p>
+<p><b>第三件事：互补掩码。</b>扩散训练的随机掩码有一个天然的浪费：一条样本每次只有被遮住的那部分位置提供监督信号，没被遮住的位置这一次什么也没学到。互补掩码（论文引用 Li 等，2025）的做法是：对同一条样本，先随机生成一个掩码得到 \(x_t\)，再用这个掩码的“反面”（原来遮住的放开、原来放开的遮住）得到 \(x_t'\)，两份一起放进同一个训练批。</p>
+<div class="dia">
+  <div class="dia-title">示意图：互补掩码让每个位置在一对样本里恰好被监督一次</div>
+  <div class="dia-row"><span class="lbl">原样本 \(x_0\)</span><div class="cells"><span class="cell a">今</span><span class="cell a">天</span><span class="cell a">北</span><span class="cell a">京</span><span class="cell a">下</span><span class="cell a">了</span><span class="cell a">一</span><span class="cell a">场</span><span class="cell a">大</span><span class="cell a">雪</span></div></div>
+  <div class="dia-row"><span class="lbl">随机掩码 \(x_t\)</span><div class="cells"><span class="cell c">M</span><span class="cell a">天</span><span class="cell c">M</span><span class="cell a">京</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell a">场</span><span class="cell c">M</span><span class="cell a">雪</span></div></div>
+  <div class="dia-row"><span class="lbl">互补掩码 \(x_t'\)</span><div class="cells"><span class="cell a">今</span><span class="cell c">M</span><span class="cell a">北</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell a">了</span><span class="cell a">一</span><span class="cell c">M</span><span class="cell a">大</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">橙色 M 是被遮住、要算损失的位置。两行合起来，10 个位置每个都恰好被遮一次、也恰好被看见一次。</div>
+  <div class="dia-note">本站示意图。真实训练中掩码比例按 \([\alpha_{\min},\alpha_{\max}]\) 区间抽取，这里只为说明“互补”的含义。</div>
+</div>
+<p>这样做提供了一个确定性的保证：在这一对样本里，序列上的每个位置都恰好以“未被破坏”的形态出现一次（等价地说，也恰好被遮住、被监督一次）。作者认为这使每条样本的有效利用率翻倍，加快收敛，还完全消除了 token 层面的抽样偏差。论文的脚注补充了一个重要事实：他们在持续预训练里也试过互补掩码，发现只在语料少于 1000 亿（100B）token 时有效，数据再多就看不出优势了，所以只在后训练里用。这很好理解：数据少时，“每条样本榨干一点”很值钱；数据多到每个位置迟早都会被遮到时，这个保证就不稀罕了。</p>
+<p><b>数据配比。</b>SFT 数据分三大块：<b>推理</b>（数学和代码生成，锻炼分析与逻辑）、<b>通用</b>（创作和对话类任务，锻炼语言和社交能力）、<b>行业</b>（模拟真实约束下的端到端业务流程，注入领域知识）。作者强调三者均衡，避免能力偏科。论文没有给出数据量和比例。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">5.2 CAP 训练：让模型在答对时更笃定，从而一次多定几个字</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散模型推理时只有置信度超过阈值（LLaDA2.0 用 0.95）的位置才会被定下来，所以模型越“犹豫”，每次前向能定的字就越少，速度越慢。作者加了一个辅助损失，专门让模型在“已经猜对”的位置上把概率分布变得更尖锐。它为什么只作用在猜对的位置上？换来了多少速度，又付出了多少分数？</div>
+<div class="note-pre"><b>先补一点背景：熵、置信度和阈值解码。</b>
+<p>模型对一个被遮住的位置输出的是词表上的概率分布。如果概率高度集中在一个词上（比如 0.98），我们说模型很<b>笃定</b>；如果分散在好几个词上（比如 0.4、0.3、0.2……），模型就很犹豫。衡量“分散程度”的量叫<b>熵</b>：\(H(p)=-\sum_v p(v)\log p(v)\)，分布越集中，熵越小。把熵压小，就是让分布变尖。</p>
+<p>阈值解码的规则是：一个位置的最高概率（置信度）超过阈值才定下来。同样的阈值 0.95，模型的分布越尖，过线的位置越多，每次前向定下的 token 数（TPF，tokens per forward）就越大，生成就越快。</p>
+</div>
+<p>作者观察到，普通 SFT 损失只管“对不对”：一个位置已经猜对之后，继续把它的概率从 0.7 推到 0.99，对交叉熵损失的降低越来越少，模型就缺少动力把正确答案变得更笃定。于是 CAP（Confidence-Aware Parallel）训练加了一个辅助的置信度损失 \(\mathcal{L}_{\text{conf}}\)，思路来自 dParallel（Chen 等，2025）：在每个训练步里，只挑出<b>模型已经预测正确</b>的那些 token，最小化它们输出分布的熵。总目标是论文式 (6)：</p>
+<div class="formula">$$\mathcal{L}(\theta)=\mathcal{L}_{\text{SFT}}(\theta)+\lambda\,\mathcal{L}_{\text{conf}}(\theta)$$</div>
+<p>\(\lambda\) 是平衡两项的超参数，论文没有给出取值。为什么只对猜对的 token 压熵？因为对猜错的 token 压熵，等于让模型“错得更自信”，这些错误的 token 就会更容易越过阈值被定下来，生成质量会变差。只在猜对的地方加码，才能做到“更快但不更错”（这是本站对设计意图的解释，论文只说了“只作用于预测正确的子集”）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：CAP 前后的分数与速度（原文图 3 左两幅与官方模型卡的数字）</div>
+  <div class="dia-row"><span class="lbl">flash 平均分</span><div class="dia-track"><span class="dia-seg kv" style="flex:78.57">78.57</span><span class="dia-seg oth" style="flex:21.43"></span></div></div>
+  <div class="dia-row"><span class="lbl">flash-CAP 平均分</span><div class="dia-track"><span class="dia-seg w" style="flex:76.85">76.85</span><span class="dia-seg oth" style="flex:23.15"></span></div></div>
+  <div class="dia-out">12 个基准的平均分，满分 100。CAP 版本低 1.72 分。</div>
+  <div class="dia-row"><span class="lbl">flash 的 TPF</span><div class="dia-track"><span class="dia-seg kv" style="flex:3.18">3.18</span><span class="dia-seg oth" style="flex:1.82"></span></div></div>
+  <div class="dia-row"><span class="lbl">flash-CAP 的 TPF</span><div class="dia-track"><span class="dia-seg w" style="flex:4.65">4.65</span><span class="dia-seg oth" style="flex:0.35"></span></div></div>
+  <div class="dia-out">条的满格是每次前向 5 个 token。CAP 版本每次前向多定约 46% 的 token（推算：4.65 ÷ 3.18 ≈ 1.46）。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.15745#S5.F3" target="_blank" rel="noopener">原文图 3 ↗</a>。原图正文没有写出这些数字，本站从原图标注读出，并与 <a href="https://huggingface.co/inclusionAI/LLaDA2.0-flash-CAP" target="_blank" rel="noopener">flash-CAP 模型卡</a>核对：模型卡给出 78.57 / 3.19 对 76.85 / 4.65（模型卡的 3.19 与图上的 3.18 差 0.01）。mini 的对应数字只在 <a href="https://huggingface.co/inclusionAI/LLaDA2.0-mini-CAP" target="_blank" rel="noopener">mini-CAP 模型卡</a>里：70.15 / 2.55 对 67.32 / 3.72。</div>
+</div>
+<p>论文图 3 左边两幅比较了 LLaDA2.0-flash 有无 CAP 时的平均分和 TPF，正文的评价是 CAP 在保持有竞争力的表现的同时提高了解码效率。具体数字是：12 个基准上平均分从 78.57 降到 76.85，TPF 从 3.18 升到 4.65。mini 的降幅更大一些，模型卡给出的平均分从 70.15 降到 67.32（降 2.83 分），TPF 从 2.55 升到 3.72。图 3 右边一幅是推理速度，§7.3 再讲。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li>模型卡把 flash 的分数变化写成“1.72% 的性能代价”，其实是 1.72 个<b>分数点</b>；按相对比例算约是 2.2%（推算：1.72 ÷ 78.57）。</li>
+  <li>这 12 个基准是哪 12 个，论文没有列出；它和主表的 47 个基准不是一回事，所以 78.57 不能和主表的平均分 73.18 直接比较。</li>
+  <li>CAP 版本和主表里的 LLaDA2.0-flash 是两个分别发布的模型。主表（47 项）里的分数是不带 CAP 的版本，而 §7.3 里最快的 535 TPS 是带 CAP 的版本。“又快又好”这两个结论并不来自同一个模型。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S5.SS2" target="_blank" rel="noopener">英文原文 §5.2 ↗</a> · 相关：<a href="../legacy/tracks/dllm/15-learned-parallel.html">旧版拆解：学出来的并行（dParallel 等）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">5.3 DPO：用 ELBO 代替算不出来的似然</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DPO 是对齐人类偏好的常用方法，但它的公式里需要模型给一个完整回答打出对数似然，而扩散模型的似然算不出来。作者怎么绕过这个问题？用的数据有多少，超参数怎么设？</div>
+<div class="note-pre"><b>先补一点背景：DPO 在做什么。</b>
+<p>偏好对齐的数据是一组组“偏好对”：同一个提示词 \(c\) 下，一个更好的回答 \(x_w\) 和一个更差的回答 \(x_l\)。直接偏好优化（DPO）不训练单独的奖励模型，而是直接调整策略模型 \(\pi_\theta\)，让它相对于一个冻结的参考模型 \(\pi_{\text{ref}}\)，提高好回答的概率、降低差回答的概率：</p>
+<div class="formula">$$\mathcal{L}_{\text{DPO}}=-\mathbb{E}\Big[\log\sigma\Big(\beta\big[\underbrace{\log\tfrac{\pi_\theta(x_w\mid c)}{\pi_{\text{ref}}(x_w\mid c)}}_{\text{好回答被抬高了多少}}-\underbrace{\log\tfrac{\pi_\theta(x_l\mid c)}{\pi_{\text{ref}}(x_l\mid c)}}_{\text{差回答被抬高了多少}}\big]\Big)\Big]$$</div>
+<p>\(\sigma\) 是 sigmoid 函数，\(\beta\) 控制策略模型可以偏离参考模型多远。对 AR 模型，\(\log\pi(x\mid c)\) 就是把回答里每个 token 的条件对数概率加起来，一次前向就能精确算出。扩散模型没有这种分解，精确的对数似然算不出来。</p>
+</div>
+<p>作者沿用扩散模型做偏好优化的常见做法：<b>用 ELBO 代替对数似然</b>。先定义一个回答 \(x\) 的条件块扩散 ELBO，它就是 SFT 损失式 (5) 里面那一项（取相反数），用对时间步和噪声的<b>一次</b>蒙特卡洛采样来估计，即论文式 (7)：</p>
+<div class="formula">$$B_{\text{BDLM}}(\theta,x\mid c)=\mathbb{E}_{t,\,x_t}\Big[\,w(t)\sum_{k=1}^{K}\sum_{i=1}^{L_B}\mathbb{1}\big[x_{t,k}^i=\text{[MASK]}\big]\,\log p_\theta(x_k^i\mid c,\,x_{\lt k},\,x_{t,k})\Big]$$</div>
+<p>再把 DPO 里的对数似然比换成 ELBO 之差 \(\Delta B(x\mid c)=B_{\text{BDLM}}(\theta,x\mid c)-B_{\text{BDLM}}(\theta_{\text{ref}},x\mid c)\)，得到论文式 (8)：</p>
+<div class="formula">$$\mathcal{L}_{\text{DPO}}(\theta)=-\mathbb{E}_{(c,x_w,x_l)\sim\mathcal{D}}\Big[\log\sigma\Big(\beta\big[\Delta B(x_w\mid c)-\Delta B(x_l\mid c)\big]\Big)\Big]$$</div>
+<p>设置如下：偏好数据共 150 万（1.5M）对，覆盖通用知识、数学和指令遵循等领域；参考模型是 SFT 之后的模型，冻结不动；\(\beta=0.1\)；为了平稳过渡，DPO 阶段的学习率从 SFT 阶段最后的学习率起步。</p>
+<div class="note-warn"><b>读的时候要注意：</b>这里有两层近似。第一，ELBO 只是对数似然的下界，两个模型的 ELBO 之差不等于它们的对数似然之差。第二，每个 ELBO 只用一次随机采样（抽一个 \(t\)、抽一种掩码）来估计，方差很大，同一个回答换一次掩码，算出来的 \(\Delta B\) 可能差很多。论文没有讨论这两点对训练稳定性的影响，也没有单独报告 DPO 前后的分数变化，所以无法判断 DPO 在最终分数里贡献了多少。另外，式 (7) 和式 (1) 一样存在负号写法的问题，按“ELBO = −加权交叉熵”理解即可。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S5.SS3" target="_blank" rel="noopener">英文原文 §5.3 ↗</a> · 相关：<a href="../legacy/tracks/dllm/17-rl.html">旧版拆解：扩散模型的强化学习与似然估计</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">5.4 推理：一块一块地填，块内按置信度并行定稿</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练好的 LLaDA2.0 在生成时到底怎么工作？一个块里的 32 个位置是怎么一步步被填满的？“阈值”和“回退”分别是什么意思？块扩散为什么能像 AR 模型一样用 KV 缓存，这对速度意味着什么？论文 §5.4 只有一段话，本节结合官方推理代码和 §7.3 的推理引擎把它讲完整。</div>
+<div class="note-pre"><b>先补一点背景：块扩散为什么能精确地用 KV 缓存。</b>
+<p>KV 缓存能用的前提是：一个位置的 key、value 一旦算出来，以后就不会变。AR 模型满足这个前提，因为注意力是因果的，已生成的 token 看不到后面新加的 token，它们的中间结果当然不变。</p>
+<p>全序列掩码扩散不满足：注意力是双向的，画布上任何一个位置从 [MASK] 变成了具体的词，其他所有位置在每一层的表示都会跟着变，之前算好的 key、value 就过时了。所以像 <a href="fast-dllm.html">Fast-dLLM</a> 这样给 LLaDA 加缓存的工作，只能用“近似缓存”，赌相邻步之间变化不大。</p>
+<p>块扩散在块与块之间是因果的：一个块只看自己和前面的块，不看后面的块。前面的块定稿以后不再变，它们也看不到当前块，所以它们的 key、value 是精确不变的，可以放心缓存。每一步真正需要重新计算的，只有当前这一个块（32 个位置），它们去读缓存里所有前文的 key、value。这和 AR 模型解码时“只算新 token、读缓存”是同一种模式，只不过一次算 32 个位置而不是 1 个。块扩散的原理见本站 <a href="block-diffusion.html">BD3-LM 精读</a>。</p>
+</div>
+<p>论文的描述是：每次扩散只采样一个块，条件是前面已经采好的块；每个块的生成本身又是多步迭代的过程。每一步，模型为块内所有还没填的位置各给出一个候选 token；然后用一种<b>混合接受策略</b>决定留下哪些：先接受所有采样概率超过预设阈值的 token；如果过线的不够数，就触发<b>低置信度回退</b>，改为不管绝对置信度高低、接受固定个数的最可能的 token。这样保证每一步都有进展，不会卡住。</p>
+<p>从 Hugging Face 上的官方推理代码（<code>generate()</code>）可以看到具体参数：块长 <code>block_length=32</code>，每块最多 <code>steps=32</code> 步，阈值 <code>threshold=0.95</code>，温度 0（每个位置直接取概率最高的词）。每一步的“保底个数”等于块长除以步数，即 32 ÷ 32 = 1。所以只要有一个位置过线，过线的全部接受；一个都不过线时，就只接受最有把握的那一个。由此可以推出：一个 32 位的块，最坏要 32 次前向（每次一个，和 AR 一样慢），最好 1 次前向就全部定完。论文评测用的正是温度 0、块长 32、阈值 0.95 这组设置。</p>
+<div class="dia">
+  <div class="dia-title">示意图：阈值 0.95 下一个块是怎么被填满的（为了画得下，块长画成 8）</div>
+  <div class="dia-flow"><span class="dia-box tgt">提示词 ＋ 已定稿的块 1<small>它们的 K、V 已在缓存里，本块每一步都去读它们</small></span><span class="dia-arrow">→ 当前块 2 从 8 个 [MASK] 开始</span></div>
+  <div class="dia-row"><span class="lbl">第 1 次前向</span><div class="cells"><span class="cell c">.99</span><span class="cell c">.97</span><span class="cell">.62</span><span class="cell">.40</span><span class="cell">.55</span><span class="cell">.31</span><span class="cell">.20</span><span class="cell">.12</span></div></div>
+  <div class="dia-out">2 个位置过线（橙色），全部定稿；其余 6 个继续遮着。</div>
+  <div class="dia-row"><span class="lbl">第 2 次前向</span><div class="cells"><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell c">.96</span><span class="cell">.91</span><span class="cell c">.97</span><span class="cell">.44</span><span class="cell">.30</span><span class="cell">.25</span></div></div>
+  <div class="dia-out">有了新定下的字作上下文，又有 2 个过线。</div>
+  <div class="dia-row"><span class="lbl">第 3 次前向</span><div class="cells"><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell c">.93</span><span class="cell a">✓</span><span class="cell">.81</span><span class="cell">.52</span><span class="cell">.33</span></div></div>
+  <div class="dia-out">一个都没过 0.95，触发回退：只定稿最有把握的一个（.93）。</div>
+  <div class="dia-row"><span class="lbl">第 4 次前向</span><div class="cells"><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell a">✓</span><span class="cell c">.98</span><span class="cell c">.97</span><span class="cell c">.96</span></div></div>
+  <div class="dia-out">剩下 3 个同时过线，块 2 完成：8 个 token 用了 4 次前向，这一块的 TPF = 2。把块 2 的 K、V 写进缓存，开始块 3。</div>
+  <div class="dia-note">本站示意图，格子里的数字是该位置当前最可能的词的概率（置信度），都是编的例子；蓝色 ✓ 是之前已经定稿的位置。规则按论文 §5.4 与官方 <code>generate()</code>：过阈值的全部接受，一个都没有时按保底个数（块长 ÷ 步数 = 1）接受最有把握的。</div>
+</div>
+<p>下面这个交互组件用一个能精确计算的玩具分布演示阈值解码。它的“模型”是已知的条件分布，不是 LLaDA2.0，但能直观看到阈值调低时每次前向能定的字变多、同时出错的概率怎么变化：</p>
+<div data-widget="dllm-decode" data-focus="threshold"></div>
+<p class="w-note">玩具组件：16 个位置的画布，城市名的两个半词彼此强相关，并行定稿时可能拼出“New Diego”这样的无效组合。组件说明见 <a href="../legacy/tracks/dllm/01-foundations.html">旧版“从头讲起”页</a>。</p>
+<p>关于 KV 缓存，官方 Hugging Face 参考代码其实没有用缓存：它每一步都把“提示词＋已生成的块＋当前块”整个重新前向一遍，正确但慢。真正用上缓存的是作者的推理引擎。论文 §7.3 说，他们改造了自家的扩散推理框架 dInfer，让它支持块扩散推理，从而能用上原本为 AR 模型设计的优化，例如复用 KV 缓存来大幅减少预填充（prefill）的计算；又因为块扩散的执行模式和 AR 生成很像，他们也把块扩散推理接进了 SGLang，让它享受同一类系统优化（速度结果见 §7.3）。</p>
+<div class="note-warn"><b>容易误解的一点：TPF 不等于加速倍数。</b>TPF（每次前向定稿的 token 数）只说明“少做了几次前向”，但块扩散的一次前向比 AR 的一步更贵：它要同时处理整个块的 32 个位置；而对 MoE 模型，这 32 个位置各自选专家，一次前向要从显存读出的专家参数也多得多（§3.1）。所以 TPF 是 3，墙钟时间上的加速通常远小于 3 倍。§7.3 的数字可以粗略印证这一点。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S5.SS4" target="_blank" rel="noopener">英文原文 §5.4 ↗</a> · <a href="https://arxiv.org/html/2512.15745#S7.SS3" target="_blank" rel="noopener">§7.3 ↗</a> · 相关：<a href="../legacy/tracks/dllm/14-kv-cache.html">旧版拆解：KV 缓存与阈值解码</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">6.1–6.2 评测：47 个基准，和谁比、比出了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LLaDA2.0 两个模型在多大范围的基准上测了？和哪些 AR 模型比？平均分接近之后，作者声称扩散模型在代码、智能体任务上开始显出优势，这个说法站得住吗？最后用一小节专门回答：这些分数和速度数字各值多少。</div>
+<p><b>评测设置。</b>作者用了 47 个基准，分五类：知识（10 个，如 MMLU、MMLU-Pro、GPQA-Diamond、C-Eval）、推理（12 个，如 BIG-Bench Hard、ZebraLogic、DROP、HellaSwag）、代码（13 个，如 HumanEval、MBPP、LiveCodeBench、Aider、Spider）、数学（8 个，如 GSM8K、MATH、OlympiadBench、AIME 2025）、智能体与对齐（4 个，如 BFCL、IFEval）。对比对象是“强大的开源 AR 模型”。LLaDA2.0 一律用温度 0、块长 32、阈值 0.95 解码。主表里的平均分是 47 个基准分数的简单平均（本站用表中数字重算核对过）。</p>
+<p>先看比较的双方各是什么。下表把论文、官方模型卡和 Qwen3 技术报告里能查到的信息放在一起：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>生成方式</th><th>总参数 / 激活参数</th><th>预训练数据（公开信息）</th><th>后训练</th></tr>
+  <tr class="hl"><td>LLaDA2.0-mini</td><td>块扩散，由 Ling-mini-2.0 转换</td><td>16B / 1.4B</td><td>Ling 2.0 的 AR 预训练（20T+）＋ 数量未公开的 CPT</td><td>SFT ＋ DPO（1.5M 对）</td></tr>
+  <tr><td>Ling-mini-2.0</td><td>AR，MoE</td><td>16B / 1.4B</td><td>20T+ token</td><td>多阶段 SFT 与 RL</td></tr>
+  <tr><td>Qwen3-8B（no_think）</td><td>AR，稠密</td><td>8.2B / 8.2B</td><td>约 36T token</td><td>Qwen3 后训练；评测时关闭思考模式</td></tr>
+  <tr class="hl"><td>LLaDA2.0-flash</td><td>块扩散，由 Ling-flash-2.0 转换</td><td>100B / 6.1B</td><td>Ling 2.0 的 AR 预训练（20T+）＋ 数量未公开的 CPT</td><td>SFT ＋ DPO（1.5M 对）</td></tr>
+  <tr><td>Ling-flash-2.0</td><td>AR，MoE</td><td>100B / 6.1B</td><td>20T+ token</td><td>SFT ＋ 多阶段 RL</td></tr>
+  <tr><td>Qwen3-30B-A3B-Instruct-2507</td><td>AR，MoE</td><td>30.5B / 3.3B</td><td>约 36T token（Qwen3 系列）</td><td>2507 版非思考指令模型</td></tr>
+</table></div>
+<p class="w-note">来源：LLaDA2.0 论文 §4.1、§5.3；Ling-mini-2.0 / Ling-flash-2.0 与 Qwen3 各模型的 Hugging Face 模型卡；<a href="https://arxiv.org/abs/2505.09388" target="_blank" rel="noopener">Qwen3 技术报告</a>（36T token）。</p>
+
+<h4 id="n-11-1">LLaDA2.0-flash 与 100B 档的对比</h4>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">Qwen3-30B-A3B-2507</th><th class="num">Ling-flash-2.0</th><th class="num">flash-preview</th><th class="num">LLaDA2.0-flash</th></tr>
+  <tr class="hl"><td>平均（47 项）</td><td class="num">73.60</td><td class="num">72.15</td><td class="num">65.97</td><td class="num">73.18</td></tr>
+  <tr><td>MMLU-Pro</td><td class="num">74.23</td><td class="num">76.84</td><td class="num">66.16</td><td class="num">73.36</td></tr>
+  <tr><td>GPQA</td><td class="num">57.34</td><td class="num">67.12</td><td class="num">41.92</td><td class="num">61.98</td></tr>
+  <tr><td>BIG-Bench Extra Hard</td><td class="num">37.80</td><td class="num">23.24</td><td class="num">16.70</td><td class="num">27.86</td></tr>
+  <tr><td>ZebraLogic</td><td class="num">90.97</td><td class="num">87.60</td><td class="num">39.90</td><td class="num">82.30</td></tr>
+  <tr><td>HumanEval</td><td class="num">93.29</td><td class="num">85.98</td><td class="num">88.41</td><td class="num">94.51</td></tr>
+  <tr><td>MBPP</td><td class="num">86.65</td><td class="num">85.01</td><td class="num">86.65</td><td class="num">88.29</td></tr>
+  <tr><td>MultiPL-E</td><td class="num">70.67</td><td class="num">65.76</td><td class="num">72.38</td><td class="num">74.87</td></tr>
+  <tr><td>LiveCodeBench</td><td class="num">41.63</td><td class="num">44.11</td><td class="num">29.07</td><td class="num">42.29</td></tr>
+  <tr><td>Aider</td><td class="num">71.43</td><td class="num">71.43</td><td class="num">51.13</td><td class="num">66.92</td></tr>
+  <tr><td>AIME 2025</td><td class="num">61.88</td><td class="num">55.89</td><td class="num">23.33</td><td class="num">60.00</td></tr>
+  <tr><td>OlympiadBench</td><td class="num">77.59</td><td class="num">76.19</td><td class="num">49.33</td><td class="num">74.07</td></tr>
+  <tr><td>BFCL v3</td><td class="num">73.19</td><td class="num">67.57</td><td class="num">74.86</td><td class="num">75.43</td></tr>
+  <tr><td>IFEval（strict prompt）</td><td class="num">84.29</td><td class="num">81.52</td><td class="num">75.60</td><td class="num">81.70</td></tr>
+  <tr><td>知识类平均（10 项，推算）</td><td class="num">68.36</td><td class="num">69.64</td><td class="num">61.21</td><td class="num">68.58</td></tr>
+  <tr><td>推理类平均（12 项，推算）</td><td class="num">80.94</td><td class="num">77.78</td><td class="num">72.86</td><td class="num">79.41</td></tr>
+  <tr><td>代码类平均（13 项，推算）</td><td class="num">74.33</td><td class="num">71.77</td><td class="num">68.89</td><td class="num">74.50</td></tr>
+  <tr><td>数学类平均（8 项，推算）</td><td class="num">72.10</td><td class="num">73.33</td><td class="num">57.98</td><td class="num">70.83</td></tr>
+  <tr><td>智能体与对齐平均（4 项，推算）</td><td class="num">65.35</td><td class="num">60.33</td><td class="num">63.61</td><td class="num">66.40</td></tr>
+</table></div>
+<p class="w-note">单项数字摘自原文表 2（共 47 行，这里选了 13 行）；分类平均是本站按原文分类对表中分数取简单平均，论文没有给出。flash-preview 是论文列出的早期版本，论文没有说明它和正式版在训练上的区别。</p>
+<p>论文对 flash 的解读是：平均分 73.18，与 Qwen3-30B-A3B-Instruct-2507 的 73.60 “持平”；在代码上持续领先 AR 同行（HumanEval 94.51、MBPP 88.29、MultiPL-E 74.87），这种领先还延伸到智能体能力（BFCL v3 75.43）和高等数学（AIME 2025 60.00）。作者由此推测，随着规模增大，扩散模型在结构化生成和工具使用上的固有优势会越来越明显。</p>
+<p>把表格逐行对一遍，可以把这个说法说得更准确：47 项里，flash 有 25 项高于 Qwen3-30B-A3B、21 项低于、1 项持平；相对它自己的 AR 起点 Ling-flash-2.0，25 项更高、22 项更低（推算）。按类别看，代码类平均只比 Qwen3 高 0.17 分，几乎是平手；智能体与对齐类高 1.05 分；推理类和数学类反而分别低 1.53 分和 1.27 分。AIME 2025 上 flash 的 60.00 高于 Ling-flash-2.0（55.89），但低于 Qwen3（61.88）。差距最大的几项都是 flash 落后：BIG-Bench Extra Hard 比 Qwen3 低 9.94 分，ZebraLogic 低 8.67 分，Aider 低 4.51 分（推算）。</p>
+
+<h4 id="n-11-2">LLaDA2.0-mini 与 16B 档的对比</h4>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">Qwen3-8B（no_think）</th><th class="num">Ling-mini-2.0</th><th class="num">mini-preview</th><th class="num">LLaDA2.0-mini</th></tr>
+  <tr class="hl"><td>平均（47 项）</td><td class="num">63.42</td><td class="num">65.77</td><td class="num">54.67</td><td class="num">64.34</td></tr>
+  <tr><td>MMLU</td><td class="num">80.94</td><td class="num">82.15</td><td class="num">72.49</td><td class="num">80.53</td></tr>
+  <tr><td>GPQA</td><td class="num">46.59</td><td class="num">56.80</td><td class="num">23.74</td><td class="num">47.98</td></tr>
+  <tr><td>ZebraLogic</td><td class="num">37.48</td><td class="num">79.85</td><td class="num">14.80</td><td class="num">64.20</td></tr>
+  <tr><td>SQuAD 2.0</td><td class="num">85.21</td><td class="num">75.56</td><td class="num">85.61</td><td class="num">86.50</td></tr>
+  <tr><td>HumanEval</td><td class="num">84.76</td><td class="num">85.98</td><td class="num">80.49</td><td class="num">86.59</td></tr>
+  <tr><td>LiveCodeBench</td><td class="num">26.38</td><td class="num">34.97</td><td class="num">19.82</td><td class="num">31.50</td></tr>
+  <tr><td>Aider</td><td class="num">55.64</td><td class="num">49.62</td><td class="num">28.57</td><td class="num">39.85</td></tr>
+  <tr><td>MATH</td><td class="num">86.28</td><td class="num">94.66</td><td class="num">73.50</td><td class="num">93.22</td></tr>
+  <tr><td>AIME 2025</td><td class="num">22.08</td><td class="num">47.66</td><td class="num">10.00</td><td class="num">36.67</td></tr>
+  <tr><td>IFEval（strict prompt）</td><td class="num">86.90</td><td class="num">76.16</td><td class="num">62.50</td><td class="num">80.78</td></tr>
+  <tr><td>BFCL v3</td><td class="num">70.08</td><td class="num">53.98</td><td class="num">74.11</td><td class="num">70.90</td></tr>
+  <tr><td>知识类平均（推算）</td><td class="num">59.70</td><td class="num">62.14</td><td class="num">50.28</td><td class="num">59.70</td></tr>
+  <tr><td>推理类平均（推算）</td><td class="num">69.34</td><td class="num">70.47</td><td class="num">59.21</td><td class="num">70.08</td></tr>
+  <tr><td>代码类平均（推算）</td><td class="num">63.65</td><td class="num">66.25</td><td class="num">56.67</td><td class="num">64.23</td></tr>
+  <tr><td>数学类平均（推算）</td><td class="num">59.95</td><td class="num">69.03</td><td class="num">50.12</td><td class="num">64.50</td></tr>
+  <tr><td>智能体与对齐平均（推算）</td><td class="num">61.17</td><td class="num">52.63</td><td class="num">54.57</td><td class="num">58.72</td></tr>
+</table></div>
+<p class="w-note">单项数字摘自原文表 1（选了 11 行）；分类平均为本站推算。</p>
+<p>论文对 mini 的解读是：平均分 64.34，接近它的 AR 同行 Ling-mini-2.0（65.77），说明扩散路线基本可行；在推理、代码、数学三个领域超过可比的 AR 模型 Qwen3-8B，比如 SQuAD 2.0（86.50）和 IFEval（80.78），代码上 HumanEval 86.59 显示出结构化生成的潜力。</p>
+<p>对照表格看：按本站算的分类平均，mini 在推理（70.08 对 69.34）、代码（64.23 对 63.65）、数学（64.50 对 59.95）上确实高于 Qwen3-8B，知识类打平，智能体与对齐类更低（58.72 对 61.17）。不过 IFEval 上 mini 的 80.78 其实低于 Qwen3-8B 的 86.90，只是高于 Ling-mini-2.0 的 76.16，论文正文说的“更稳健的指令遵循”是相对 Ling 而言。更值得注意的是和它自己的 AR 起点比：47 项里 mini 只有 16 项高于 Ling-mini-2.0、31 项更低，五个能力类别里有四个低于 Ling，只有智能体与对齐类更高（推算）。数学和推理里难题的落差尤其大：AIME 2025 从 47.66 降到 36.67，ZebraLogic 从 79.85 降到 64.20。</p>
+<div class="note-warn"><b>原文图 1 的一处不一致：</b>论文首页的图 1 用柱状图展示 flash 的八项主要结果，其中 “LLaDA2.0-flash-preview” 一栏有几个数字与表 2 对不上（例如 MMLU-Pro 画的是 49.2，表 2 是 66.16；HumanEval 画的是 80.5，表 2 是 88.41），而这些数字恰好等于表 1 里 mini-preview 的分数（49.22、80.49）。官方 flash 模型卡的 preview 一栏也有同样的情况。本页以表 2 为准；这只影响 preview 的数字，不影响正式版 flash。</div>
+
+<h4 id="n-11-3">结果的份量：这些分数和速度各值多少</h4>
+<p><b>第一，这是一个“改造”结果，不是“从零训练的扩散模型追平 AR”。</b>LLaDA2.0 的起点 Ling 2.0 已经用 20T 以上的 token 做过 AR 预训练，CPT 又用了论文没有公开的数据量。所以平均分接近 AR 模型，说明的是“把一个 AR 模型改造成块扩散模型以后，它的能力大体保住了”，并不说明扩散训练和 AR 训练一样省数据。对这个问题最有信息量的对比，是 LLaDA2.0 和它自己的起点：mini 比 Ling-mini-2.0 低 1.43 分，flash 比 Ling-flash-2.0 高 1.03 分。</p>
+<p><b>第二，即使和自己的起点比，两边也不完全对等。</b>Ling 2.0 的指令模型有自己的 SFT 和多阶段强化学习；LLaDA2.0 用的是新的 SFT 数据加 150 万对 DPO。论文写的是从“AR 基座模型 Ling-mini-2.0 和 Ling-flash-2.0”开始，但这两个名字正是 Ling 已发布的指令模型的名字（Ling 另外发布了 base 版本），论文没有说清转换是从预训练基座还是从指令模型开始的。因此 flash 比 Ling-flash-2.0 高出的 1.03 分，不能归功于“扩散生成方式本身更好”，也可能来自后训练数据的差别。</p>
+<p><b>第三，和 Qwen3 的比较在规模和数据上都不对等。</b>flash 的总参数是 Qwen3-30B-A3B 的约 3.3 倍、激活参数约 1.8 倍（推算：100 ÷ 30.5、6.1 ÷ 3.3）；mini 是 16B 总参数、1.4B 激活的 MoE，对手 Qwen3-8B 是 8.2B 的稠密模型。数据上，Qwen3 报告的预训练量约 36T token，Ling 2.0 是 20T 以上。这些比较只能说明“处在同一档次”，不能说明哪种生成方式在同等条件下更强。</p>
+<p><b>第四，评测协议交代得很少。</b>论文没有说明每个基准的提示格式、少样本设置、答案抽取方式、LLaDA2.0 的最大生成长度，也没有说明 AR 基线的分数是作者用同一套流程重新跑的，还是引用的公开数字；只知道 Qwen3-8B 用的是关闭思考的模式。平均分对基准集合很敏感：同一个 LLaDA2.0-flash，在后续 LLaDA2.1 论文的 33 项基准上重测，平均分是 72.43，Qwen3-30B-A3B 是 73.09，Ling-flash-2.0 是 71.52；官方模型卡在另一组子集上给出的平均分则是 79.32。不同论文、不同表格里的平均分不能互相比较。</p>
+<p><b>第五，“代码和智能体有优势”的差距大多很小，而且只测了一次。</b>评测用温度 0 的贪心解码，每个基准只报一个数，没有置信区间。HumanEval 共 164 题，flash 的 94.51 对 Qwen3 的 93.29，相当于 155 题对 153 题，只差 2 题（推算）；AIME 2025 共 30 题，一题就是 3.33 分，flash 的 60.00 对 Qwen3 的 61.88，相差不到一题。另外，这 47 个基准都是标准的从左到右生成任务，没有数独、倒序、填空这类明显偏向非自回归生成的任务，所以它们检验的是“通用能力有没有保住”，而不是“扩散生成方式有什么独特优势”。</p>
+<p><b>第六，速度数字的条件缺得多。</b>论文图 3 右边报告：在 HumanEval、MBPP、GSM8K、CRUXEval 四个代码和数学基准上平均，flash-CAP 每秒生成 535 个 token，flash 是 383，AR 基线 Ling-flash-2.0 是 256、Qwen3-30B-A3B-Instruct-2507 是 237（§7.3 详述）。已知条件是：TPS 定义为解码出的 token 数除以总时间；扩散模型用阈值 0.95、跑在作者自己的 dInfer 上；AR 基线跑在 SGLang 上。论文没有给出的条件是：GPU 型号和卡数、批大小或并发数、输入和输出长度、AR 基线是否开启了投机解码。这些缺失之所以要紧，是因为扩散模型的优势强烈依赖批大小：批大小为 1 时，AR 解码受显存带宽限制、算力大量闲置（见 <a href="vllm.html#n-1">vLLM 精读 §1</a>），扩散模型一次多算几个位置几乎是“白拿”的；并发一高，AR 模型的批也能把算力填满，这份白拿的余量就没了。另外，最快的 535 TPS 来自 CAP 版本，它在 12 项基准上的平均分比普通版低 1.72 分；测速的四个基准又都是输出结构化、模型置信度高的代码和数学题，正是并行解码最占便宜的场景（后续的 LLaDA2.1 论文明确报告速度在代码上最高、在指令遵循上最低）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · 相关：<a href="../legacy/tracks/dllm/09-llada2.html#vs-ar">旧版拆解：与自回归模型对照</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">6.3 分析：阈值、块长与上下文长度</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>主评测里的阈值 0.95 和块长 32 是怎么定的？把阈值调低、把块调大，速度和分数各怎么变？模型在多长的上下文里还能保持水平？</div>
+<p>作者在 LLaDA2.0-mini 上、用一个“有代表性的基准子集”做了简短的超参数分析，同时看质量（平均分）和速度（TPF，越高越快）。</p>
+<p><b>阈值。</b>块长固定为 32，改变阈值：阈值 0.95 时分数最高（70.15），但速度最低（TPF 2.55）；阈值降到 0.85 时速度最高（TPF 3.31），分数却降到 67.90，作者认为这个降幅不可接受。道理很直接：阈值越低，越多“没那么有把握”的位置被一起定下来，并行定稿的 token 之间可能互相矛盾（比如两个位置各自猜得都挺像，拼起来却不通），错误也就越多。</p>
+<p><b>块长。</b>阈值固定为 0.95，改变块长：块长 16 分数最高（70.26），但最慢（TPF 2.44）；块长 32 速度提高到 2.55，分数只降到 70.15；块长 64 分数和速度都比 32 差。所以作者选 32，用几乎可以忽略的分数代价换来速度。块长影响速度的一种直观解释是（本站的理解，论文没有展开）：块越大，每次前向可供挑选的候选位置越多，过线的可能更多，所以从 16 到 32 速度上升；但块太大时，离已知上下文较远的位置普遍没有把握，多出来的位置大多过不了线，反而让块内的错误和犹豫变多，于是块长 64 两头都吃亏。</p>
+<div class="dia">
+  <div class="dia-title">示意图：阈值与块长对 LLaDA2.0-mini 分数和速度的影响</div>
+  <svg class="dg" viewBox="0 0 680 310" role="img" aria-label="LLaDA2.0-mini 解码阈值与块长对分数和每次前向产出 token 数的影响" style="max-width:680px">
+<line x1="90" y1="250" x2="610" y2="250" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="90" y1="250" x2="90" y2="30" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="114.3" y1="250" x2="114.3" y2="254" style="stroke:var(--text-3)"/><text x="114.3" y="266" class="t-c t-xs">2.4</text>
+<line x1="211.4" y1="250" x2="211.4" y2="254" style="stroke:var(--text-3)"/><text x="211.4" y="266" class="t-c t-xs">2.6</text>
+<line x1="308.6" y1="250" x2="308.6" y2="254" style="stroke:var(--text-3)"/><text x="308.6" y="266" class="t-c t-xs">2.8</text>
+<line x1="405.7" y1="250" x2="405.7" y2="254" style="stroke:var(--text-3)"/><text x="405.7" y="266" class="t-c t-xs">3.0</text>
+<line x1="502.9" y1="250" x2="502.9" y2="254" style="stroke:var(--text-3)"/><text x="502.9" y="266" class="t-c t-xs">3.2</text>
+<line x1="600.0" y1="250" x2="600.0" y2="254" style="stroke:var(--text-3)"/><text x="600.0" y="266" class="t-c t-xs">3.4</text>
+<line x1="86" y1="221.0" x2="600" y2="221.0" style="stroke:var(--border);stroke-dasharray:2 4"/><text x="82" y="221.0" class="t-r t-xs">68</text>
+<line x1="86" y1="148.6" x2="600" y2="148.6" style="stroke:var(--border);stroke-dasharray:2 4"/><text x="82" y="148.6" class="t-r t-xs">69</text>
+<line x1="86" y1="76.2" x2="600" y2="76.2" style="stroke:var(--border);stroke-dasharray:2 4"/><text x="82" y="76.2" class="t-r t-xs">70</text>
+<text x="345.0" y="286" class="t-c t-sm">每次前向定稿的 token 数（TPF）→ 越大越快</text>
+<text x="28" y="145.0" class="t-c t-sm" transform="rotate(-90 28 145.0)">平均分 → 越高越好</text>
+<path d="M187.1,65.3 L381.4,96.5 L556.3,228.3" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<path d="M133.7,57.4 L187.1,65.3 L148.3,100.8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<circle cx="187.1" cy="65.3" r="5.5" style="fill:var(--c-pred)"/>
+<circle cx="381.4" cy="96.5" r="5.5" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="556.3" cy="228.3" r="5.5" style="fill:var(--c-pred)"/>
+<circle cx="133.7" cy="57.4" r="5.5" style="fill:var(--c-enc)"/>
+<circle cx="187.1" cy="65.3" r="5.5" style="fill:var(--c-enc)"/>
+<circle cx="148.3" cy="100.8" r="5.5" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<text x="542.3" y="228.3" class="t-r t-xs">阈值 0.85：67.90 / 3.31</text>
+<text x="391.4" y="84.5" class="t-xs">阈值 0.90：约 69.7 / 约 2.95（读图）</text>
+<text x="199.1" y="55.3" class="t-xs">默认：阈值 0.95、块长 32 → 70.15 / 2.55</text>
+<text x="125.69999999999999" y="39.4" class="t-c t-xs">块长 16：70.26 / 2.44</text>
+<text x="158.3" y="114.8" class="t-xs">块长 64：约 69.7 / 约 2.47（读图）</text>
+<line x1="110" y1="160" x2="134" y2="160" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="140" y="160" class="t-xs">改阈值（块长固定 32）</text>
+<line x1="110" y1="178" x2="134" y2="178" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="140" y="178" class="t-xs">改块长（阈值固定 0.95）</text>
+<circle cx="122" cy="196" r="4.5" style="fill:var(--surface);stroke:var(--text-2);stroke-width:2"/><text x="140" y="196" class="t-xs">空心 = 正文没给数字，从原图读出的近似值</text>
+</svg>
+  <div class="dia-note">本站根据 <a href="https://arxiv.org/html/2512.15745#S6.SS3" target="_blank" rel="noopener">原文图 4 ↗</a> 的数值重画。怎么看：横轴是 TPF（越往右越快），纵轴是平均分（越往上越好），越靠右上越好。橙线是固定块长 32、改变阈值；蓝线是固定阈值 0.95、改变块长；两条线在默认配置（阈值 0.95、块长 32）处相交。实心点的数字来自论文正文；阈值 0.90 和块长 64 两个点正文没有给数字，空心点是本站从原图读出的近似值。可以看到，降阈值是用分数换速度的主要旋钮，而改块长对两者的影响都很小。</div>
+</div>
+<p>这里有两个细节。一是论文正文在这一段两次引用“图 5”，但内容对应的是图 4（图 5 是下面的长上下文结果）。二是这个“有代表性的子集”没有列出是哪几个基准；mini-CAP 的官方模型卡里，LLaDA2.0-mini 在“12 个基准”上的数字正好是 70.15 和 2.55，所以这个子集很可能就是 CAP 实验用的那 12 个基准（本站推测）。</p>
+
+<div class="note-pre"><b>先补一点背景：RULER 与 YaRN。</b>
+<p><b>RULER</b> 是一个测长上下文能力的合成基准，包含在长文本里找“针”、跟踪多跳的变量指向、统计高频词、长文档问答等任务，可以把上下文长度从 4K 一直调到很长，看模型的分数怎么随长度下降。</p>
+<p><b>YaRN</b> 是一种扩展上下文窗口的方法。模型用旋转位置编码（RoPE，见 <a href="roformer.html">RoFormer 精读</a>）记录位置，训练时只见过一定长度以内的位置；YaRN 按一个缩放因子重新调整 RoPE 的频率，让模型在推理时能处理比训练时更长的输入，通常会付出一些精度。</p>
+</div>
+<p><b>上下文长度。</b>两个模型的原生上下文窗口是 32K。在 RULER 上，flash 从 4K 到 32K 的每个长度都保持在 93 分以上，非常稳；mini 在 4K 时是 93.29，到 32K 降到 83.94。作者又用 YaRN（缩放因子 2.0）把长度推到 64K，两个模型的分数都明显下降，说明延长上下文和任务准确率之间存在取舍。论文没有给出 64K 的具体分数，原文图 5 的热力图上两者在 64K 处都明显变差。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S6.SS3" target="_blank" rel="noopener">英文原文 §6.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-13">7 训练与推理基础设施</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练一个 100B 的 MoE 扩散模型，在工程上和训练同样大小的 AR 模型有哪些不同？随机掩码怎么在多卡之间保持一致？块扩散那张复杂的注意力掩码怎么算得快？从 AR 转过来时为什么会梯度爆炸？推理速度是在什么系统上测的，测出了什么？</div>
+
+<h4 id="n-13-1">7.1 预训练：Megatron-LM 上的五种并行</h4>
+<div class="note-pre"><b>先补一点背景：大模型训练的几种并行方式。</b>
+<p>一个 100B 的模型放不进一张卡，也算不完一张卡该算的数据，只能把工作拆到很多张卡上。常见的拆法有五种：<b>数据并行</b>（DP，每张卡拿不同的数据、算同一个模型，再把梯度汇总，见 <a href="zero.html">ZeRO 精读</a>）；<b>张量并行</b>（TP，把一层里的大矩阵切成几块分给几张卡，见 <a href="megatron-lm.html">Megatron-LM 精读</a>）；<b>流水线并行</b>（PP，把不同的层放到不同的卡上，像流水线一样传递）；<b>上下文并行</b>（CP，把一条长序列切成几段分给几张卡）；<b>专家并行</b>（EP，把 MoE 的不同专家放在不同的卡上，token 被发到它要去的专家所在的卡，见 <a href="deepseek-v3.html#n-4">DeepSeek-V3 精读 §3.1–3.2</a>）。TP 和 PP 合起来叫模型并行（MP）。</p>
+</div>
+<p>作者用 Megatron-LM 作为预训练后端，同时用上 DP、PP、TP、CP、EP 五种并行，来训练长序列的 100B 模型（原文图 6 是一张并行方式总览图）。扩散训练比 AR 训练多出一个随机环节：每条样本都要随机抽时间 \(t\)、随机决定遮哪些位置。同一条样本在 TP 和 PP 里是被几张卡分着算的，如果每张卡各抽各的随机掩码，不同的卡看到的输入就不一致，算出来的东西对不上。所以作者在模型并行组里只让一张卡生成掩码，再广播给组内其他卡。</p>
+<p><b>高效的块扩散注意力。</b>块扩散的注意力掩码（§4.2 那张图）形状不规则，而很多高度优化的融合注意力内核只针对因果、全量这类规则的掩码。作者用 cuDNN 作为注意力后端，以灵活支持任意的块扩散掩码。训练 LLaDA2.0-mini 时，与 TransformerEngine 里未融合的注意力实现相比，端到端加速超过 1.3 倍，注意力层的显存节省超过 90%。上下文并行时，他们还对块扩散掩码采用 zig-zag 切分来平衡负载。原因是在块因果的掩码下，序列越靠后的位置要看的前文越多、计算量越大；如果把序列按顺序切成几段分给几张卡，拿到最后一段的卡最忙。zig-zag 切分的常见做法是把序列切成两倍于卡数的小段，让每张卡同时拿一个靠前的段和一个靠后的段，各卡的工作量就差不多了。</p>
+<p><b>数值稳定性：[MASK] 的嵌入几乎为零。</b>从 AR 转到扩散时，训练可能出现梯度爆炸，尤其是一篇文档里被遮住的比例很高的时候。作者找到的原因是：AR 训练从来不会见到 [MASK] 这个 token，它在嵌入表里对应的那一行权重得不到任何有效训练，逐渐衰减到接近零。一个直接的修法是加载 AR 模型后把 [MASK] 的嵌入随机重新初始化，但作者担心这会扰动其他训练好的参数，引发灾难性遗忘。他们的做法是在训练初期的若干步里，给每个被遮住 token 的嵌入层输出加上独立的高斯噪声，让它的 L2 范数保持在一个不小的水平，从而避免梯度爆炸。为什么嵌入接近零会导致梯度爆炸，论文没有展开；一种可能的机制是（本站推测）：第一层开头的 RMSNorm 要把输入向量除以它自己的均方根，[MASK] 位置的输入几乎为零时，这个除数极小，反向传播经过这里的梯度就会被放得很大；掩码率越高，这样的位置越多。</p>
+
+<h4 id="n-13-2">7.2 后训练框架</h4>
+<p>后训练用的是作者开源的 dFactory，它构建在 VeOmni 分布式训练框架之上，提供扩散模型的高效训练配方。微调 LLaDA2.0 时组合使用数据并行和专家并行；为了提高吞吐和硬件利用率，也像持续预训练那样把多条短序列打包成一条长序列（官方模型卡另外提到用的是 FSDP2，即 PyTorch 的第二代全分片数据并行）。</p>
+
+<h4 id="n-13-3">7.3 推理引擎与速度</h4>
+<p>推理侧，作者改造了自家的扩散推理框架 dInfer，让它支持块扩散，能用 KV 缓存复用来大幅减少预填充计算（§5.4）；还把块扩散推理接进了 SGLang（对应 SGLang 仓库的一个功能提案 <a href="https://github.com/sgl-project/sglang/issues/12766" target="_blank" rel="noopener">#12766 ↗</a>），并说 dInfer 里更成熟的功能正在迁移到 SGLang。</p>
+<div class="dia">
+  <div class="dia-title">示意图：原文图 3 右侧的推理速度（4 个代码与数学基准上的平均 TPS）</div>
+  <div class="dia-row"><span class="lbl">LLaDA2.0-flash-CAP</span><div class="dia-track"><span class="dia-seg w" style="flex:535">535</span><span class="dia-seg oth" style="flex:65"></span></div></div>
+  <div class="dia-row"><span class="lbl">LLaDA2.0-flash</span><div class="dia-track"><span class="dia-seg kv" style="flex:383">383</span><span class="dia-seg oth" style="flex:217"></span></div></div>
+  <div class="dia-out">扩散模型：dInfer，阈值 0.95。</div>
+  <div class="dia-row"><span class="lbl">Ling-flash-2.0（AR）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:256">256</span><span class="dia-seg oth" style="flex:344"></span></div></div>
+  <div class="dia-row"><span class="lbl">Qwen3-30B-A3B-2507（AR）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:237">237</span><span class="dia-seg oth" style="flex:363"></span></div></div>
+  <div class="dia-out">AR 基线：SGLang。满格为每秒 600 个 token。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.15745#S5.F3" target="_blank" rel="noopener">原文图 3 右 ↗</a>，数字来自 §7.3 正文。基准为 HumanEval、MBPP、GSM8K、CRUXEval；TPS = 解码出的 token 数 ÷ 总时间。论文没有写 GPU 型号、卡数、批大小或并发数、输入输出长度。</div>
+</div>
+<p>论文的结论是：flash-CAP 达到 535 TPS，高于普通 flash 的 383，比 AR 基线（256 和 237）“最多快 2.1 倍”。按这些数字算（推算）：535 ÷ 256 ≈ 2.09，这就是“2.1 倍”的来源，它是相对 Ling-flash-2.0 而言的；相对 Qwen3-30B-A3B 是 535 ÷ 237 ≈ 2.26 倍；不带 CAP 的 flash 相对两者分别是约 1.50 倍和 1.62 倍。CAP 把 TPS 提高了约 1.40 倍（535 ÷ 383），和它把 TPF 提高的约 1.46 倍很接近，说明加了 CAP 之后每次前向的耗时基本没变，快出来的部分几乎全部来自“每次前向多定几个字”。</p>
+<p>再粗略验证一下 §5.4 说的“TPF 不等于加速倍数”（推算，只看数量级）：普通 flash 的 TPF 约 3.18，TPS 是 383，相当于每秒约 120 次前向；AR 的 Ling-flash-2.0 每次前向产出 1 个 token，256 TPS 就是每秒约 256 次前向。也就是说，同样一个 100B 的 MoE，块扩散的一次前向大约要花 AR 一步两倍的时间。这个估算并不严格：TPF 是在 12 个基准上测的，TPS 是在 4 个基准上测的，两者的基准集合不同。</p>
+<div class="note-warn"><b>读速度数字时要注意：</b>论文说“所有模型都在一致的生成设置下评测，以保证在真实推理环境中的公平比较”，但扩散模型和 AR 模型跑在两套不同的推理框架上（dInfer 对 SGLang），硬件、批大小、生成长度都没有交代。在批大小为 1 这种最有利于扩散模型的条件下，加速最明显；高并发服务时差距会缩小多少，论文没有测。“2.1 倍”这个最好看的数字，来自分数低 1.72 分的 CAP 版本，测在最适合并行解码的代码和数学题上。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · dInfer 论文：<a href="https://arxiv.org/abs/2510.08666" target="_blank" rel="noopener">arXiv 2510.08666 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-14">8 结论：作者认为证明了什么，接下来做什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后怎样概括这份报告的贡献，又给出了哪些未来方向？结合前面对实验条件的分析，哪些结论证据扎实，哪些还需要打个问号？</div>
+<p>作者的总结是：LLaDA2.0 通过从 AR 模型系统性转换，把离散扩散语言模型做到了 100B 总参数，同时给出了一套把传统 AR 模型平滑、有效地转成掩码扩散模型的完整配方。大量评测验证了这套训练范式可行：mini 和 flash 的表现与 AR 同行相当；作者自己也说“有点意外”的是，flash 似乎在代码生成、数学推理、智能体工具调用这类复杂的结构化领域显出优势。他们认为这可能为智能体时代的工作打开新的方向，也说明扩散模型在测试时扩展（test-time scaling）上有可衡量的潜力。未来工作包括：继续扩大参数规模，引入强化学习和“思考”范式，以及把解码速度推到极限。</p>
+<p>读完前面的分析，这几个结论可以这样定位：“转换配方可行”有两个开源模型和完整的评测作证据，是这份报告最扎实的贡献；“与 AR 同行相当”成立，但要记住它是改造结果，且对比双方在参数和数据上并不对等；“结构化领域有优势”的证据比较弱，代码类平均只高 0.17 分，单项差距多在一两道题以内，推理和数学类平均反而更低。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.15745#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p><b>先说前作。</b>LLaDA2.0 之前，作者大量重合的蚂蚁集团与人民大学团队在 2025 年 9 月发布了 <a href="https://arxiv.org/abs/2509.24389" target="_blank" rel="noopener">LLaDA-MoE ↗</a>：一个<b>从零训练</b>的 MoE 掩码扩散模型，用了约 20T token，总参数 7B、激活 1.4B，指令版的能力与 Qwen2.5-3B-Instruct 相当。LLaDA2.0 没有沿着从零训练的路继续放大，而是改走“从 AR 转换”，一下子把规模推到 100B。两条路线的对比见 <a href="../legacy/tracks/dllm/09-llada2.html#llada-moe">旧版拆解页的 LLaDA-MoE 一节</a>。</p>
+<p><b>LLaDA2.1（2026 年 2 月）。</b>同一团队的 <a href="https://arxiv.org/abs/2602.08676" target="_blank" rel="noopener">LLaDA2.1 ↗</a> 针对 LLaDA2.0 的速度—质量取舍继续改进。LLaDA2.0 的解码中，一个位置一旦从 [MASK] 定成某个词就再也不能改，所以阈值不敢放低（§6.3）。LLaDA2.1 在“[MASK] → 词”之外加了“词 → 词”的编辑（Token-to-Token，T2T），已经写下的词如果模型后来有了更有把握的答案，可以改掉。于是可以把定稿阈值放得很低、先粗糙地起草，再靠编辑修正，形成两种模式：激进的 Speedy 模式（S）和保守的 Quality 模式（Q）。它还做了作者称为第一个面向扩散模型的大规模强化学习框架（EBPO，用块级 ELBO 估计策略比率）。在 33 个基准上，LLaDA2.1-flash 的 S 模式平均分 72.34、TPF 5.93，Q 模式 73.54、TPF 3.64，而重测的 LLaDA2.0-flash 是 72.43、TPF 3.08。论文摘要里的“HumanEval+ 上 892 TPS”是 S 模式、按块 FP8 量化、MoE 融合内核、定制版 SGLang 下的峰值；不做量化时是 746.66 TPS，量化使该基准的分数降了 3.04 分。LLaDA2.1 同样没有写测速硬件，并承认 S 模式在一般对话中可能产生不理想的输出，建议这时改用 Q 模式。细节见 <a href="../legacy/tracks/dllm/09-llada2.html#llada21">旧版拆解页的 LLaDA2.1 一节</a>。</p>
+<p><b>第三方测速。</b>2026 年 7 月的 <a href="https://arxiv.org/abs/2608.00146" target="_blank" rel="noopener">DiffusionGemma 技术报告 ↗</a> 把 LLaDA 2.1 Flash 作为对照之一，在 8 张 B200、BF16、批大小 1 的条件下测得它在 S 模式下平均 375 TPS、TPF 4.63（7 个基准的平均，TPS 不含预填充时间）。这是本站查到的由其他团队测的数字，条件写得比 LLaDA2.0 / 2.1 原文清楚，量级也比作者报告的峰值低不少（基准集合、精度、硬件都不同，不能直接相减）。工业界扩散模型怎样报告速度，见旧版 <a href="../legacy/tracks/dllm/10-industrial.html">工业 dLLM 拆解页</a>。</p>
+<p><b>推理生态。</b>LLaDA2.0 引用的 SGLang 功能提案 #12766（“在 SGLang 中支持块扩散大模型”）已经关闭；LLaDA2.1 的推理已经基于定制版 SGLang，并支持基数树缓存（radix cache）和批处理。</p>
+<p>本站相关页面：块扩散的原理见 <a href="block-diffusion.html">BD3-LM 精读</a>；从零训练的 8B 扩散模型见 <a href="llada.html">LLaDA 精读</a>；另一条“从 AR 初始化”的路线见 <a href="dream.html">Dream 7B 精读</a>；全序列扩散模型的近似缓存与阈值解码见 <a href="fast-dllm.html">Fast-dLLM 精读</a>；同类的 AR → 块扩散方法（SDAR、Fast-dLLM v2、WeDLM）见旧版 <a href="../legacy/tracks/dllm/12-ar-to-block.html">AR → 块扩散拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（作者按姓氏字母排序，† 为论文标注的技术负责人）。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及 arXiv 上的论文署名。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Zenan Huang</b><div class="aff">Ant Group</div>本报告在 arXiv 上的提交人；也是 LLaDA-MoE 与 dInfer 的作者之一。</div>
+  <div class="author-card"><b>Yuxin Ma</b>、<b>Lun Du</b><div class="aff">Ant Group</div>dInfer（本报告用来做块扩散推理的框架）的第一、第二作者。</div>
+  <div class="author-card senior"><b>Zhenzhong Lan</b> †<div class="aff">Ant Group；Westlake University</div>LLaDA-MoE、dInfer 的作者之一。</div>
+  <div class="author-card senior"><b>Junbo Zhao</b> †<div class="aff">Ant Group；Zhejiang University</div>LLaDA-MoE、dInfer 的作者之一。</div>
+  <div class="author-card senior"><b>Jianguo Li</b> †<div class="aff">Ant Group</div>dInfer 的作者之一。</div>
+  <div class="author-card senior"><b>Da Zheng</b> †<div class="aff">Ant Group</div>LLaDA-MoE、dInfer 的作者之一。</div>
+  <div class="author-card senior"><b>Chongxuan Li</b><div class="aff">Renmin University of China，高瓴人工智能学院准聘副教授</div>清华大学博士；课题组研究深度生成模型，包括扩散语言模型（据其个人主页）。<a href="llada.html">LLaDA</a> 与 LLaDA-MoE 的作者之一。</div>
+  <div class="author-card senior"><b>Ji-Rong Wen</b><div class="aff">Renmin University of China</div><a href="llada.html">LLaDA</a> 的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：mini、flash 及其 CAP 版本和 preview 版本的权重都以 Apache-2.0 许可发布在 Hugging Face（<a href="https://huggingface.co/collections/inclusionAI/llada-20" target="_blank" rel="noopener">合集 ↗</a>）。截至 2026-10-19，LLaDA2.0-mini 在 Hugging Face 上近一个月的下载量约 16.5 万次，flash 约 550 次；代码仓库 <a href="https://github.com/inclusionAI/LLaDA2.X" target="_blank" rel="noopener">inclusionAI/LLaDA2.X</a> 有 528 个 star，推理框架 <a href="https://github.com/inclusionAI/dInfer" target="_blank" rel="noopener">inclusionAI/dInfer</a> 有 488 个 star。</li>
+  <li><b>后续</b>：同一团队的 LLaDA2.1（arXiv 2602.08676）在此基础上加入 token 编辑与强化学习；DiffusionGemma 技术报告把 LLaDA 2.1 Flash 作为开源扩散模型的对照之一。</li>
+  <li><b>发表</b>：arXiv 技术报告（v1 2025-12-10，v2 2025-12-24，19 页），arXiv 页面未标注会议或期刊。本页读的是 v2。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/09-llada2.html">旧版结构拆解：LLaDA-MoE、LLaDA2.0 与 LLaDA2.1</a>（架构图、超参表、伪代码与简答题）</li>
+  <li><a href="block-diffusion.html">BD3-LM / 块扩散精读</a> · <a href="../legacy/tracks/dllm/11-block-diffusion.html">旧版块扩散拆解</a></li>
+  <li><a href="llada.html">LLaDA 精读</a> · <a href="dream.html">Dream 7B 精读</a> · <a href="fast-dllm.html">Fast-dLLM 精读</a> · <a href="mercury.html">Mercury 精读</a></li>
+  <li><a href="../legacy/tracks/dllm/12-ar-to-block.html">旧版：AR → 块扩散（SDAR / Fast-dLLM v2 / WeDLM）</a> · <a href="../legacy/tracks/dllm/14-kv-cache.html">旧版：KV 缓存与阈值解码</a> · <a href="../legacy/tracks/dllm/15-learned-parallel.html">旧版：学出来的并行</a> · <a href="../legacy/tracks/dllm/17-rl.html">旧版：扩散模型的强化学习</a></li>
+  <li>背景：<a href="deepseek-v3.html">DeepSeek-V3 精读</a>（MoE）· <a href="vllm.html">vLLM 精读</a>（KV 缓存与批处理）· <a href="megatron-lm.html">Megatron-LM 精读</a>（张量并行）</li>
+  <li><a href="../legacy/tracks/dllm/index.html">扩散 LLM 路线总览</a> · <a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。论文以 arXiv 非独占许可发布，本页没有转载原图，所有图都是本站重画的示意图，并附有原图链接。数字与结论以原文为准：<a href="https://arxiv.org/abs/2512.15745" target="_blank" rel="noopener">arXiv:2512.15745</a>。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

@@ -93,17 +93,19 @@
     function render() {
       persist();
       const list = filtered();
-      // sidebar counts are computed on the other filters so the numbers stay meaningful
-      const shelfCount = (k) => all.filter((p) => (k === "all" ? true : k === "fav" ? p.st.fav : statusOf(p.st) === k)).length;
+      // sidebar counts ignore the shelf/category being counted but respect "只看有精读页的", so the numbers match what a click shows
+      const base = ui.full ? all.filter((p) => p.n.reading) : all;
+      const shelfCount = (k) => base.filter((p) => (k === "all" ? true : k === "fav" ? p.st.fav : statusOf(p.st) === k)).length;
       $('[data-list="shelf"]').innerHTML = [["all", "全部"], ["unread", "未读"], ["reading", "在读"], ["done", "已读"], ["fav", "收藏"]]
         .map(([k, l]) => `<button type="button" class="lib-item${ui.shelf === k ? " on" : ""}" data-shelf="${k}">${l}<span>${shelfCount(k)}</span></button>`).join("");
-      $('[data-list="cat"]').innerHTML = [["all", "全部", all.length]].concat((R.tracks || []).map((t) => [t.id, t.short, all.filter((p) => p.n.track === t.id).length]))
+      $('[data-list="cat"]').innerHTML = [["all", "全部", base.length]].concat((R.tracks || []).map((t) => [t.id, t.short, base.filter((p) => p.n.track === t.id).length]))
+        .filter(([k, , c]) => !ui.full || k === "all" || c > 0 || ui.cat === k)
         .map(([k, l, c]) => `<button type="button" class="lib-item${ui.cat === k ? " on" : ""}" data-cat="${k}">${esc(l)}<span>${c}</span></button>`).join("");
       const years = {};
       list.forEach((p) => (years[p.year] = (years[p.year] || 0) + 1));
       $('[data-list="year"]').innerHTML = Object.keys(years).sort().reverse()
         .map((y) => `<button type="button" class="lib-year" data-year="${y}">${y} <span>${years[y]}</span></button>`).join("");
-      $(".lib-count").textContent = `共 ${all.length} 篇 · 显示 ${list.length} 篇`;
+      $(".lib-count").textContent = `共 ${base.length} 篇${ui.full ? "精读" : ""} · 显示 ${list.length} 篇`;
       // continue reading
       const cont = all.filter((p) => statusOf(p.st) === "reading").sort((a, b) => (b.st.at || 0) - (a.st.at || 0)).slice(0, 3);
       const cbox = $(".lib-continue");

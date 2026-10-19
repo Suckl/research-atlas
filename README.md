@@ -29,6 +29,27 @@
   - [HybridFlow / verl](papers/hybridflow.html)
   - [DeepSeek-V3](papers/deepseek-v3.html)
 - 统一多模态：[视觉生成能扩展 UMM 的知识吗](papers/visual-generation-knowledge.html)
+- 扩散 LLM。每页的“结果的份量”写明和自回归模型比时对齐了什么（参数、训练 token、步数、批大小、对照系统）。
+  - 噪声与目标：
+    - [D3PM](papers/d3pm.html)
+    - [Diffusion-LM](papers/diffusion-lm.html)
+    - [SEDD](papers/sedd.html)
+    - [MDLM（含 MD4）](papers/mdlm.html)
+    - [Discrete Flow Matching](papers/discrete-flow-matching.html)
+  - 规模：
+    - [LLaDA](papers/llada.html)
+    - [Dream 7B](papers/dream.html)
+    - [LLaDA2.0](papers/llada2.html)
+  - 块扩散与加速：
+    - [Block Diffusion](papers/block-diffusion.html)
+    - [Fast-dLLM](papers/fast-dllm.html)
+    - [DFlash](papers/dflash.html)
+  - 后训练与局限：
+    - [d1](papers/d1.html)
+    - [Train for the Worst, Plan for the Best](papers/token-ordering.html)
+  - 多模态与工业：
+    - [MMaDA](papers/mmada.html)
+    - [Mercury](papers/mercury.html)
 - 循环 Transformer（looped / recurrent-depth）。每页都有“结果的份量”一节，写明每个比较到底对齐了什么（参数、训练算力、推理算力、KV 缓存还是数据）。
   - 奠基与理论：
     - [Universal Transformer](papers/universal-transformers.html)
