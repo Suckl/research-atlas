@@ -170,15 +170,17 @@
       if (st.pos > 400 && statusOf(st) === "reading") { resume.hidden = false; resume.addEventListener("click", () => window.scrollTo({ top: st.pos, behavior: "smooth" })); }
       else resume.hidden = true;
     }
-    // progress = furthest point reached inside #fulltext
+    // progress = furthest point reached between the start of the reading content (#overview, else the full text)
+    // and the end of the full text — so reading only the overview + section notes still counts
     const full = document.getElementById("fulltext-body");
+    const start = document.getElementById("overview") || full;
     let tm = 0;
     window.addEventListener("scroll", () => {
       clearTimeout(tm);
       tm = setTimeout(() => {
-        if (!full) return;
-        const r = full.getBoundingClientRect(), h = r.height || 1;
-        const f = Math.max(0, Math.min(1, (window.innerHeight * 0.6 - r.top) / h));
+        if (!full || !start) return;
+        const top = start.getBoundingClientRect().top, h = (full.getBoundingClientRect().bottom - top) || 1;
+        const f = Math.max(0, Math.min(1, (window.innerHeight * 0.6 - top) / h));
         if (f > (st.progress || 0)) st.progress = f;
         if (f > 0.02) st.pos = window.scrollY;
         if (f > 0.02 && (!st.status || st.status === "unread")) st.status = "reading";
