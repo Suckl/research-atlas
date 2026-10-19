@@ -247,7 +247,9 @@ Widgets must be deterministic for a given seed and must not fetch anything.
   otherwise to its legacy page. Shelves (未读 / 在读 / 已读 / 收藏) and progress are per viewer in localStorage
   (`atlas-paper:<node id>`); categories are the registry tracks (including `papers-only` ones).
 - `papers/metrics.js` is a Semantic Scholar snapshot (citations, highly influential citations) keyed by arXiv id;
-  `scripts/fetch_metrics.py` refreshes it (rate-limited without a key; it backs off).
+  `scripts/fetch_metrics.py` refreshes it (rate-limited without a key; it backs off). When a full refresh keeps
+  getting rate-limited, `python scripts/fetch_metrics.py --missing` fetches only the papers absent from the snapshot
+  and merges them in. Papers older than ~6 months that come back with 0 citations are re-matched by exact title.
 - Reading-page markup: `.note`, `.note-ask`, `.note-pre`, `.note-warn`, `.paper-fig` (+ `.imgs`, `figcaption`), `.dia*`,
   `.gantt`, `.author-cards`, `.license-note`; progress runs from `#notes` to the end of `#notes-body`
   (or `#fulltext-body` on the vLLM page, which also has a bilingual full translation in `.bi` blocks).

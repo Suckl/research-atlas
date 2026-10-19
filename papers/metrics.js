@@ -732,6 +732,16 @@ window.ATLAS_METRICS = {
    "citations": 0,
    "influential": 0,
    "s2": "276381286fcdc5f14a5b20b3eaa893f95db9fcf5"
+  },
+  "2107.03006": {
+   "citations": 2332,
+   "influential": 312,
+   "s2": "91b32fc0a23f0af53229fceaae9cce43a0406d2e"
+  },
+  "2205.14217": {
+   "citations": 1576,
+   "influential": 128,
+   "s2": "1386b8a11929cf02da291c56aca353e33bbc22ed"
   }
  }
 };
