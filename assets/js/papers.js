@@ -6,7 +6,7 @@
  *           Citations come from papers/metrics.js (window.ATLAS_METRICS, a dated Semantic Scholar snapshot).
  *           A node with `reading: "papers/<x>.html"` has a full reading page (粗读 + 全文翻译); cards link there,
  *           otherwise to the node's structure page.
- * Reading   <body data-page-kind="reading" data-node="<id>">
+ * Reading   <body data-page-kind="reading" data-node="<id>">  ([data-stats] is filled from metrics + registry)
  *           [data-status] / [data-fav] controls, .read-progress bar, scroll progress through #fulltext (stored),
  *           bilingual blocks (.bi with .zh / .en; .bi-toggle per block; [data-mode="zh|bi"] global; [data-expand]).
  * Per-viewer state lives in localStorage under "atlas-paper:<node id>" = { status, fav, progress, pos, at }.
@@ -47,7 +47,7 @@
         <div class="lib-sec"><div class="lib-h">书架</div><div data-list="shelf"></div></div>
         <div class="lib-sec"><div class="lib-h">分类（研究路线）</div><div data-list="cat"></div></div>
         <div class="lib-sec"><div class="lib-h">跳到年份</div><div class="lib-years" data-list="year"></div></div>
-        <div class="lib-sec"><div class="lib-h">内容</div><label class="lib-check"><input type="checkbox" data-k="full"> 只看有全文翻译的</label></div>
+        <div class="lib-sec"><div class="lib-h">内容</div><label class="lib-check"><input type="checkbox" data-k="full"> 只看有精读页的</label></div>
         <p class="lib-note">被引次数来自 Semantic Scholar${fetched ? `，截至 ${esc(fetched)}` : ""}；阅读进度与收藏只保存在你的浏览器里。</p>
       </aside>
       <div class="lib-main">
@@ -83,7 +83,7 @@
         <h3>${esc(p.n.title)}</h3>
         ${p.n.full_title ? `<div class="pc-en">${esc(p.n.full_title)}</div>` : ""}
         <p class="pc-blurb">${esc(p.n.tldr && p.n.tldr !== "（占位）" ? p.n.tldr : "")}</p>
-        <div class="pc-meta">${p.n.reading ? '<span class="pc-badge">全文翻译</span>' : '<span class="pc-badge alt">结构拆解</span>'}
+        <div class="pc-meta">${p.n.reading ? '<span class="pc-badge">精读</span>' : '<span class="pc-badge alt">旧版拆解</span>'}
           ${p.track ? `<span class="pc-track">${esc(p.track.short)}</span>` : ""}${p.n.org ? `<span class="pc-org">${esc(String(p.n.org).split(/[;；/、]/)[0])}</span>` : ""}
           ${p.cites != null ? `<span class="pc-cites" title="Semantic Scholar 被引次数（高影响力引用 ${fmtN(p.infl)}）">被引 ${fmtN(p.cites)}</span>` : ""}${tags}</div>
         <div class="pc-foot">${s !== "unread" ? `<span class="pc-status ${s}">${STATUS[s]}${s === "reading" ? " " + prog + "%" : ""}</span>` : ""}</div>
@@ -149,8 +149,23 @@
   }
 
   /* ------------------------------------------------------------------ reading page */
+  function renderStats(id) {
+    // <div class="paper-stats" data-stats></div>: citations from papers/metrics.js + first-version month from the
+    // registry; any static children (e.g. GitHub stars) are kept after the computed ones
+    const host = document.querySelector("[data-stats]"), n = (R.nodes || []).find((x) => x.id === id);
+    if (!host || !n) return;
+    const m = (n.arxiv && M[n.arxiv]) || {}, fetched = window.ATLAS_METRICS && window.ATLAS_METRICS.fetched;
+    const items = [];
+    if (m.citations != null) items.push([fmtN(m.citations), `被引次数（Semantic Scholar，${esc(fetched || "")}）`]);
+    if (m.influential != null) items.push([fmtN(m.influential), "高影响力引用"]);
+    if (n.date) items.push([esc(n.date), n.arxiv ? `arXiv 首版（${esc(n.arxiv)}）` : "发表时间"]);
+    if (n.venue) items.push([esc(String(n.venue).split(/[（(；;]/)[0]), "发表"]);
+    host.insertAdjacentHTML("afterbegin", items.map(([b, s]) => `<div><b>${b}</b><span>${s}</span></div>`).join(""));
+  }
+
   function initReading() {
     const id = document.body.dataset.node;
+    renderStats(id);
     const st = load(id);
     const bar = document.querySelector(".read-progress i"), pct = document.querySelector(".read-pct");
     const ctl = document.querySelectorAll("[data-status]"), fav = document.querySelector("[data-fav]");
@@ -172,7 +187,8 @@
     }
     // progress = furthest point reached between the start of the reading content (#overview, else the full text)
     // and the end of the full text — so reading only the overview + section notes still counts
-    const full = document.getElementById("fulltext-body");
+    // progress runs to the end of the full text if there is one, otherwise to the end of the notes (#notes-body)
+    const full = document.getElementById("fulltext-body") || document.getElementById("notes-body");
     const start = document.getElementById("notes") || document.getElementById("overview") || full;
     let tm = 0;
     window.addEventListener("scroll", () => {

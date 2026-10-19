@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Megatron-LM 精读</title>
+<meta name="description" content="Megatron-LM（Shoeybi 等，2019）的逐节精读：从数据并行和 all-reduce 讲起，手算矩阵按列切与按行切，解释 f/g 共轭算子、注意力按头切、按词表切的嵌入与交叉熵、扩展效率与 BERT 的 LayerNorm 位置，以及后来的 3D 并行、序列并行与 ZeRO。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/collectives.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="megatron">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · arXiv 2019</div>
+  <h1>Megatron-LM：用模型并行训练数十亿参数的语言模型</h1>
+  <p class="en-title">Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism</p>
+  <div class="paper-authors">Mohammad Shoeybi<sup>1,2</sup>, Mostofa Patwary<sup>1,2</sup>, Raul Puri<sup>1,2</sup>, Patrick LeGresley<sup>2</sup>, Jared Casper<sup>2</sup>, Bryan Catanzaro<sup>2</sup></div>
+  <div class="paper-affil"><sup>1</sup>共同贡献（论文原注 Equal contribution）　<sup>2</sup>NVIDIA</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">arXiv 1909.08053 ↗</a>
+    <a class="pill" href="https://github.com/NVIDIA/Megatron-LM" target="_blank" rel="noopener">Code: NVIDIA/Megatron-LM ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/07-megatron.html">结构拆解：分步图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>18.2k</b><span>GitHub star（NVIDIA/Megatron-LM，截至 2026-10-19）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文的许可证不允许转载原图，所以页面里的图都是本站重新画的示意图或按原文数字重画的图表，并附上原图链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>2018–2019 年，自然语言处理领域出现了一个清晰的趋势：同样的 Transformer 结构，参数越多、训练数据越多，下游任务的效果就越好。BERT-Large 约有 3.4 亿参数（论文记为 336M），GPT-2 有 15 亿参数，研究者自然想知道再大十倍会怎样。但训练这样的模型，第一个撞上的墙不是算力，而是<b>单张 GPU 的显存</b>。训练时显存里不只要放参数，还要放每个参数的梯度、优化器（比如 Adam）为每个参数记录的统计量，以及前向计算留下来给反向用的中间结果。按混合精度加 Adam 的常见做法，光是前三样，每个参数就要约 16 字节。论文用的 V100 每张只有 32 GB，论文里放在单卡上训练的配置是 12 亿参数（1.2B）。</p>
+<p>当时最常用的扩展方法是数据并行：每张 GPU 放一份完整的模型，各自处理不同的数据。它能让训练更快，却不能让模型更大，因为每张卡都得装下整个模型。已有的“模型并行”方案（把模型本身拆到多张卡上）又各有麻烦：GPipe 一类的流水并行会让 GPU 互相等待，Mesh-TensorFlow 需要用专门的语言重写模型，并依赖还在开发中的编译器。</p>
+<p>这篇论文的思路很朴素：不发明新框架，而是仔细看 Transformer 一层里的几次矩阵乘法，找出一种切法，让一层的计算均匀地分到多张 GPU 上，同时把 GPU 之间的通信压到最少。最后的切法是：MLP 的第一个矩阵按列切、第二个按行切；注意力按“头”切，输出投影按行切。这样一层 Transformer 前向只需要 2 次 all-reduce 通信，反向也只要 2 次，在原生 PyTorch 里加几行代码就能实现。这种在一层内部切分的方式，后来被称为<b>张量并行</b>。</p>
+<p>靠它，作者在 512 张 V100 上训练了 83 亿参数（8.3B）的 GPT-2 式模型，整个训练程序最高保持 15.1 PFLOPs（每秒 1.51 亿亿次浮点运算），相对单卡基线的扩展效率是 76%。8.3B 模型在 WikiText103 和 LAMBADA 上刷新了当时的最好成绩。作者还发现，BERT 变大时会训练不稳定，原因在于 LayerNorm 与残差连接的排列顺序；调整之后，39 亿参数的 BERT 在 RACE 阅读理解上取得了最好成绩。这套代码开源为 Megatron-LM 框架，“先列切、后行切”的张量并行此后成了大模型训练和推理系统的标准组件。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>数据并行为什么解决不了“模型太大放不下”？all-reduce 是一种什么样的通信？</li>
+  <li>一个矩阵乘法按列切和按行切，结果有什么不同？为什么 MLP 的第一个矩阵按列切、第二个按行切，就只需要通信一次？</li>
+  <li>论文里的 \(f\) 和 \(g\) 两个算子分别做什么？为什么说它们“共轭”？</li>
+  <li>注意力层、词嵌入层和输出层又是怎么切的？交叉熵为什么要和输出层“融合”？</li>
+  <li>76% 的扩展效率是和谁比、怎么算出来的？为什么张量并行只适合放在一台服务器内部？</li>
+  <li>BERT 变大以后，为什么调整 LayerNorm 的位置就能训练稳定？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：模型放不进一张卡时怎么办</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>既然更大的语言模型效果更好，为什么不直接把模型做大？论文的回答是：模型变大以后，单张 GPU 的显存首先就装不下了。这一节交代显存到底被什么占满、当时已有的解决办法为什么不令人满意，以及论文打算用什么思路、最后做到了什么程度。</div>
+<div class="note-pre"><b>先补一点背景：训练时显存里装了什么。</b>
+<p>推理时，显存里主要是模型参数。训练时则多出好几样东西：</p>
+<ul>
+  <li><b>梯度</b>：反向传播为每个参数算出一个梯度，数量和参数一样多。</li>
+  <li><b>优化器状态</b>：Adam 为每个参数维护两个滑动平均（一阶矩和二阶矩，论文里说的 momentum 等状态）。混合精度训练时，还要额外保留一份 32 位的参数“主副本”，用来做精确的更新。</li>
+  <li><b>激活</b>：前向计算时每一层的中间结果。反向传播计算梯度时要用到它们，所以前向时得先存着。</li>
+</ul>
+<p>ZeRO 论文（与本文同期的另一篇大模型训练工作）给过一笔常用的账：混合精度加 Adam 时，16 位参数 2 字节、16 位梯度 2 字节，32 位的参数副本、一阶矩、二阶矩各 4 字节，合计<b>每个参数 16 字节</b>，还不算激活。照这个算法，12 亿参数的模型光这几样就要约 19.2 GB，83 亿参数的模型要约 133 GB（推算），而一张 V100 只有 32 GB。</p>
+<p>激活的大小则和批大小、序列长度成正比。论文用<b>激活检查点</b>（activation checkpointing）来压缩它：前向时只保存每个 Transformer 层的输入，其余中间结果用完就丢；反向传播到这一层时，先用保存的输入把这一层的前向重算一遍，再算梯度。这是用多算一次前向来换显存。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：模型状态（参数 + 梯度 + Adam 状态）要多少显存（按每参数 16 字节推算，所有条形同一比例）</div>
+  <div class="dia-row"><span class="lbl">一张 V100</span><div class="dia-track"><span class="dia-seg w" style="flex:32">32 GB</span><span class="dia-seg" style="flex:101"></span></div></div>
+  <div class="dia-row"><span class="lbl">1.2B 模型</span><div class="dia-track"><span class="dia-seg kv" style="flex:19.2">19.2 GB</span><span class="dia-seg" style="flex:113.8"></span></div></div>
+  <div class="dia-out">放得进一张卡，剩下的空间留给激活。论文里 1.2B 正是放在单卡上训练的配置。</div>
+  <div class="dia-row"><span class="lbl">8.3B 模型</span><div class="dia-track"><span class="dia-seg frag" style="flex:133">≈133 GB，是一张卡的 4 倍多</span></div></div>
+  <div class="dia-row"><span class="lbl">8.3B 切 8 份后的每张卡</span><div class="dia-track"><span class="dia-seg kv" style="flex:16.6">≈16.6 GB</span><span class="dia-seg" style="flex:116.4"></span></div></div>
+  <div class="dia-out">每张卡只存 1/8，又放得下了。这正是本文的层内模型并行要做到的事。</div>
+  <div class="dia-note">推算：每参数 16 字节的算法来自 ZeRO 论文 §3.1，不是本文给出的数字；实际还要加上激活和临时缓冲区。</div>
+</div>
+<p>模型放不下时，有两类常见的补救办法。一类是省显存的技巧，比如上面说的激活检查点。另一类是<b>模型并行</b>：把模型拆开，让参数和对应的优化器状态分散到多个处理器上，不必全部挤在同一张卡里。论文举了两个当时的代表：GPipe（按层把模型切成几段，像流水线一样传递）和 Mesh-TensorFlow（用一种专门的语言描述每个张量怎么切，再由编译器生成并行程序）。它们的共同问题是：都要重写模型，并且依赖仍在开发中的定制编译器和框架。</p>
+<p>本文选择了一条更“土”的路：只在已有的 PyTorch Transformer 实现上做少量有针对性的修改。作者利用 Transformer 层本身的结构，把每一层内部的计算切开，分给多张 GPU（<b>层内模型并行</b>），不需要写任何 C++ 代码，也不需要编译器。作者还强调，这种切法和按层切分的流水并行是“正交”的：两者切的是不同的维度，可以叠加使用。</p>
+<p>为了说明这种方法扩展得好，论文先立了一个基线：在一张 V100 上训练 12 亿参数的模型，整个训练过程平均每秒完成 39 万亿次浮点运算（39 TFLOPs），这是 DGX-2H 服务器里单张 GPU 理论峰值的 30%（反推峰值约 130 TFLOPS，推算）。对一个完整的训练程序来说，30% 已经是很高的利用率，所以作者称它是一个“强基线”。基线强很重要：如果单卡基线本身跑得很慢，多卡时“相对基线的效率”就会被虚高。然后，作者把模型扩到 83 亿参数，用 8 路模型并行、共 512 张 GPU 训练，整个程序最高达到每秒 15.1 千万亿次浮点运算（15.1 PFLOPs）。</p>
+<p>“76% 的扩展效率”是这样算的：如果 512 张卡每张都跑得和单卡基线一样快，总共应该是 512 × 39 TFLOPs ≈ 19.97 PFLOPs；实际达到 15.1 PFLOPs，15.1 ÷ 19.97 ≈ 76%（推算，与论文数字一致）。</p>
+<p>原文图 1 用对数坐标画了每秒浮点运算数随 GPU 数的变化：蓝线是只用模型并行（1 到 8 张卡，每张卡大约放 10 亿参数，所以 2 张卡训练的就是 20 亿参数左右的模型），绿线是模型并行再叠加 64 路数据并行（64 到 512 张卡），灰色虚线是理想的线性扩展。两条实线都紧贴虚线，只是略微落在它下方。第 5 节会把同一组实验换算成扩展效率逐个讲。</p>
+<p>除了系统部分，论文还研究了模型规模对精度的影响：训练了从左到右生成的 GPT-2 式模型和双向的 BERT 式模型。作者发现原始的 BERT 结构在规模变大时效果反而变差，把层归一化（LayerNorm）和残差连接的顺序重新排列之后，下游任务的开发集成绩随规模单调上升。论文列出的贡献依次是：一种只需少量修改的模型并行实现；512 张 GPU 上最高 76% 扩展效率的实证分析；BERT 中 LayerNorm 位置的发现；GPT-2（到 8.3B）和 BERT（到 3.9B）规模越大效果越好的实验；WikiText103（困惑度 10.8）、LAMBADA（准确率 66.5%）、RACE（准确率 90.9%）三个测试集上的最好成绩；以及开源全部代码和训练、评测流程。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>论文通篇说的“模型并行”（model parallelism），专指在<b>一层内部</b>切矩阵。后来 NVIDIA 的续作把它叫做 tensor (intra-layer) model parallelism，中文一般叫<b>张量并行</b>，以区别于按层切分的流水并行。本页后面两种叫法混用，指的是同一件事。</li>
+  <li>76% 不是“同一个模型从 1 张卡加到 512 张卡”的加速比。基线是 1.2B 模型跑在 1 张卡上，512 张卡跑的是 8.3B 模型，模型随着卡数一起变大，这叫弱扩展（第 5 节细讲）。它衡量的是“每张卡的算力利用率掉了多少”，不是“训练同一个模型快了多少倍”。</li>
+</ul></div>
+<p class="note-links">原文图：<a href="https://arxiv.org/html/1909.08053#S1.F1" target="_blank" rel="noopener">图 1 ↗</a> · <a href="https://arxiv.org/html/1909.08053#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景与挑战：数据并行为什么不够，模型并行有哪几种</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>预训练语言模型为什么越做越大？论文研究的 GPT-2 和 BERT 一层里有什么？把训练扩展到很多张 GPU 上，有数据并行和模型并行两大思路，它们各自怎么工作、各自卡在哪里？模型并行内部又分流水并行和张量切分两种，本文为什么选后者？这一节把后面所有设计的前提交代清楚。</div>
+
+<h4 id="n-2-1">2.1 预训练语言模型：从一张词向量表到整个模型</h4>
+<p>论文先简短回顾了预训练的发展。最早的做法是只预训练一张“词向量表”（如 word2vec、GloVe），下游任务拿它当初始化，比从零学要好。后来的工作开始预训练能理解上下文的整个神经网络，取它的中间表示给下游任务用。再后来（ULMFiT、GPT、BERT、XLNet、RoBERTa、ALBERT 等），干脆把整个预训练好的语言模型拿到下游任务上端到端地微调。迁移的东西从一张表变成了一个数十亿参数的模型，这就对硬件、系统技术和训练框架提出了越来越高的要求。本文把自己定位为顺着这个趋势再往前走一步所需要的工具。</p>
+
+<h4 id="n-2-2">2.2 Transformer 语言模型：GPT-2 与 BERT 的一层里有什么</h4>
+<p>原始的 Transformer 是为机器翻译设计的，由编码器和解码器两部分组成。后来的语言模型只取其中一半：GPT-2 只用解码器，从左到右逐词预测，每个位置只能看见它前面的词；BERT 只用编码器，每个位置能看见整句话，训练时把一些词遮住让模型去猜。两者的“一层”结构几乎相同，本文对两者都做了实验。</p>
+<div class="note-pre"><b>先补一点背景：Transformer 的一层由两个子块组成。</b>
+<p>一层的输入是一个形状为 \((b\cdot s)\times h\) 的矩阵：\(b\) 个序列、每个序列 \(s\) 个 token，每个 token 用一个 \(h\) 维的向量表示（\(h\) 叫隐藏维度）。一层里依次有两个子块：</p>
+<ul>
+  <li><b>自注意力子块</b>：每个 token 的向量分别乘三个 \(h\times h\) 的矩阵，得到 query、key、value；用 query 和其他 token 的 key 算相似度，经过 softmax 变成权重，再对 value 加权平均。实际计算时会把 \(h\) 维拆成 \(a\) 个“头”，每个头在 \(h/a\) 维的小空间里独立做一遍上面的计算，最后把各头的结果拼回 \(h\) 维，再乘一个 \(h\times h\) 的输出投影矩阵。</li>
+  <li><b>MLP 子块</b>（也叫前馈网络）：先乘一个 \(h\times 4h\) 的矩阵，把每个 token 的向量放大到 \(4h\) 维，经过逐元素的非线性函数 GeLU，再乘一个 \(4h\times h\) 的矩阵缩回 \(h\) 维。</li>
+</ul>
+<p>两个子块外面都包着同样的“配件”：子块之前做一次层归一化（LayerNorm，把每个 token 的向量减均值、除标准差，再做一次可学习的缩放和平移），子块之后做一次 dropout，然后通过残差连接把子块的输出加回到子块的输入上。</p>
+<p>算一下参数量：注意力有 4 个 \(h\times h\) 矩阵，MLP 有两个 \(h\times 4h\) 的矩阵，合计约 \(12h^{2}\) 个参数。以 8.3B 模型为例（\(h=3072\)，72 层），每层约 1.13 亿参数，72 层约 81.5 亿，再加上 51,200 × 3072 ≈ 1.57 亿的词嵌入表，正好约 83 亿（推算）。也就是说，<b>模型的参数和计算量几乎全部集中在这几个大矩阵乘法上</b>，切模型，就是切这几个矩阵。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：本文使用的 Transformer 层（LayerNorm 放在子块之前）</div>
+  <div class="dia-flow"><span class="dia-box">输入 X<small>(b·s)×h</small></span><span class="dia-arrow">→</span><span class="dia-box">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box enc">自注意力<small>QKV 投影 h→3h，各头独立计算，输出投影 h→h</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout</span><span class="dia-arrow">→</span><span class="dia-box reg">⊕ 加回 X</span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box act">MLP<small>h→4h，GeLU，4h→h</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout</span><span class="dia-arrow">→</span><span class="dia-box reg">⊕ 加回</span><span class="dia-arrow">→</span><span class="dia-box">输出<small>(b·s)×h，进入下一层</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。这样的层重复 \(L\) 次；最下面是词嵌入和位置嵌入，最上面是输出层和损失。原图里紫色的全连接层，就是这里的 QKV 投影、输出投影和 MLP 的两个矩阵。</div>
+</div>
+<p>论文特别指出一个细节：GPT-2 和 BERT 都用 GeLU 作非线性函数，并且把 LayerNorm 放在注意力和 MLP 的<b>输入</b>端；而原始 Transformer 用 ReLU，并把 LayerNorm 放在输出端。LayerNorm 到底放在哪里，会在第 7 节变成一个关键问题。</p>
+
+<h4 id="n-2-3">2.3 数据并行与模型并行</h4>
+<p>把训练扩展到很多个加速器上，有两种基本思路：<b>数据并行</b>把一个训练批次切开分给多个 worker；<b>模型并行</b>把模型本身的显存占用和计算分给多个 worker。</p>
+<div class="note-pre"><b>先补一点背景：数据并行是怎么工作的。</b>
+<p>假设有 4 张 GPU。数据并行的做法是：每张 GPU 都放一份<b>完整的</b>模型；一个批次的 512 个样本切成 4 份，每张卡各拿 128 个，各自做前向和反向，算出各自的梯度。因为每张卡看到的数据不同，算出来的梯度也不同。如果各卡直接用自己的梯度更新参数，4 份模型很快就会变得不一样。所以更新之前，4 张卡要先把梯度<b>求平均</b>，让每张卡都拿到同一个平均梯度，再用它更新自己那份参数。这样 4 份模型始终保持一致，效果等价于一张卡一次处理 512 个样本。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：4 卡数据并行的一步训练</div>
+  <div class="dia-flow"><span class="dia-box">数据第 1 份</span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 0：完整模型<small>前向 + 反向</small></span><span class="dia-arrow">→</span><span class="dia-box">梯度 g₀</span></div>
+  <div class="dia-flow"><span class="dia-box">数据第 2 份</span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 1：完整模型<small>前向 + 反向</small></span><span class="dia-arrow">→</span><span class="dia-box">梯度 g₁</span></div>
+  <div class="dia-flow"><span class="dia-box">数据第 3 份</span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 2：完整模型<small>前向 + 反向</small></span><span class="dia-arrow">→</span><span class="dia-box">梯度 g₂</span></div>
+  <div class="dia-flow"><span class="dia-box">数据第 4 份</span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 3：完整模型<small>前向 + 反向</small></span><span class="dia-arrow">→</span><span class="dia-box">梯度 g₃</span></div>
+  <div class="dia-flow"><span class="dia-box pred">all-reduce<small>每张卡都得到 g₀+g₁+g₂+g₃（再除以 4）</small></span><span class="dia-arrow">→</span><span class="dia-box act">每张卡用同一个梯度更新<small>4 份模型保持一致</small></span></div>
+  <div class="dia-note">本站示意图。注意每张卡都存着完整的模型、梯度和优化器状态：数据并行能让训练更快，却不能让单卡需要装下的东西变少。</div>
+</div>
+<div class="note-pre"><b>再补一点背景：all-reduce 是什么。</b>
+<p>上面“每张卡都拿到所有卡梯度之和”的这一步通信，叫 <b>all-reduce</b>：开始时 \(N\) 张卡各有一个同样长度的向量，结束时每张卡都拿到这 \(N\) 个向量逐元素相加的结果。它也是本文模型并行唯一用到的通信操作，后面讲的每一次“同步”都是它。</p>
+<p>最直接的实现是让每张卡把整个向量发给其他所有卡，但这样每张卡要发 \(N-1\) 份完整的数据，卡越多越慢。NCCL 等通信库常用<b>环形算法</b>：把 \(N\) 张卡连成一个环，每个向量切成 \(N\) 块。第一阶段叫 reduce-scatter：每一步每张卡把一块发给右边的邻居，邻居把收到的块加到自己对应的块上；走 \(N-1\) 步之后，每张卡恰好拥有某一块的完整总和。第二阶段叫 all-gather：再走 \(N-1\) 步，把这些完整的块沿着环传一圈，每张卡就都拿到了全部块的总和。算下来，每张卡总共发送 \(2(N-1)/N\) 倍向量大小的数据，卡数再多也不超过向量大小的 2 倍。</p>
+<p>下面的小演示可以一步步看，默认是 4 张卡的 All-Reduce。浅橙色格子是已经加了一部分的“部分和”，浅绿色格子是完整的总和。按“下一步”，先看 3 步 reduce-scatter 让每张卡各凑齐一块，再看 3 步 all-gather 把完整的块传遍全环。也可以切到 Reduce-Scatter、All-Gather 单独看，最后一节讲序列并行时会用到它们。</p>
+</div>
+<div data-widget="collectives" data-ranks="4"></div>
+<p>数据并行的扩展方式通常是：卡数翻倍，总批大小也翻倍，每张卡的工作量不变。这叫<b>弱扩展</b>（weak scaling），训练吞吐量几乎能随卡数线性增长。但论文指出它有两个问题。第一，批太大会给优化带来麻烦：同样的样本数下更新次数变少，可能导致精度下降或需要更长时间才收敛，抵消掉吞吐量的收益；有一系列工作（如针对大批量的学习率调整方法）在缓解这个问题，也有工作把数据并行和激活检查点结合起来，进一步省显存。第二，也是更根本的：<b>模型必须能完整地放进一个 worker</b>。BERT、GPT-2 这样的模型已经接近当时硬件的显存上限，数据并行对此无能为力。ALBERT 用参数共享来压缩显存，但这也限制了模型的总容量。</p>
+<p>本文的选择是模型并行：把模型拆到多个加速器上。这样做不仅缓解了显存压力，还带来一个额外的好处：并行度不再受批大小牵制。数据并行要用更多的卡，就得把批变大；模型并行可以在每个微批大小不变的情况下用更多的卡。</p>
+<p>模型并行内部又有两种做法。</p>
+<div class="note-pre"><b>先补一点背景：流水并行和它的“气泡”。</b>
+<p><b>流水并行</b>按层切：比如 48 层的模型放在 4 张卡上，每张卡负责连续的 12 层。一批数据先在第 1 张卡上算完前 12 层，把结果传给第 2 张卡，依此类推。如果整批数据作为一个整体传递，同一时刻只有一张卡在干活，其余三张都在等。所以通常把批次再切成若干个<b>微批</b>（micro-batch），让它们像流水线上的零件一样依次流过各张卡。即便如此，流水线在“灌满”和“排空”的时候仍有卡闲着，这段空闲叫<b>流水线气泡</b>。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：4 张卡、4 个微批的同步流水线（先做完所有前向，再做所有反向）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td class="lbl">GPU 1（第 1–12 层）</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td></tr>
+    <tr><td class="lbl">GPU 2（第 13–24 层）</td><td></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td></td></tr>
+    <tr><td class="lbl">GPU 3（第 25–36 层）</td><td></td><td></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU 4（第 37–48 层）</td><td></td><td></td><td></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图。每格是一个时间单位；蓝色 = 某个微批的前向，粉色 = 反向，灰色空格 = 闲着（气泡）。为了画图简单，假设前向和反向一样长。每张卡在 14 格里只忙 8 格、闲 6 格，气泡与有效工作时间之比是 6 : 8 = 3/4，正好等于 \((p-1)/m\)（\(p=4\) 是流水级数，\(m=4\) 是微批数；这个公式出自后来的 PTD-P 论文，这里是用图验证）。要让气泡变小，就得让 \(m\) 远大于 \(p\)，而那又意味着要同时存下更多微批的激活。</div>
+</div>
+<p>论文提到，有些流水并行方案（如 PipeDream）配合参数服务器做异步更新，不同微批看到的参数版本不一致，存在一致性问题。GPipe 用同步的梯度下降解决了一致性问题，但需要额外的逻辑来安排计算和通信的流水，并且要么承受上面这种降低效率的气泡，要么修改优化器本身，影响精度。</p>
+<p>另一种做法论文称为<b>分布式张量计算</b>：不按层切，而是把单个张量运算（比如一次矩阵乘）本身切开，分给多个设备同时算，用来加速计算或容纳更大的模型。FlexFlow 会自动搜索最好的切分策略；Mesh-TensorFlow 提供一种语言，让用户声明每个张量沿哪一维切开，再编译成带有正确集合通信的计算图。本文借用了 Mesh-TensorFlow 的思路，特别是“多头注意力的各个头可以并行算”这一点，但不去实现新的框架和编译器，只在现有的 PyTorch 代码里插入几个简单的通信原语。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>“正交”在这里的意思是可以叠加。流水并行切的是“层与层之间”，本文切的是“一层之内”，数据并行切的是“样本”。三者切的维度互不冲突：一个模型可以先按层分成几段，每一段内部再按本文的方法切到几张卡上，最后把整套配置复制多份做数据并行。论文本身只组合了“层内模型并行 + 数据并行”，三者全部叠加是两年后的续作（见最后一节）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1909.08053#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 模型并行的 Transformer：一层怎么切到多张卡上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个 Transformer 层里有好几个矩阵乘法，每一个都能切到多张 GPU 上算。但每切一次，GPU 之间可能就要通信一次，而通信比计算慢得多。怎样切，才能让每张卡都分到差不多的计算和参数，同时通信次数最少？论文把一层拆成 MLP 和自注意力两个子块分别处理，再处理词嵌入和输出层，最后说明其余的小操作怎么办。这是全文的核心，所以本页先用一个手算的小例子把“按列切”和“按行切”讲透。</div>
+
+<h4 id="n-3-1">3.1 先弄清楚：矩阵乘法按列切和按行切有什么不同</h4>
+<div class="note-pre"><b>先补一点背景：把一次矩阵乘法拆给两张卡的两种方式。</b>
+<p>考虑 \(Y=XA\)，其中 \(X\) 是 \((b\cdot s)\times h\) 的输入，\(A\) 是 \(h\times k\) 的权重。有两种自然的切法：</p>
+<ul>
+  <li><b>按列切</b> \(A\)：\(A=[A_{1},A_{2}]\)，\(A_{1}\) 是前一半列，\(A_{2}\) 是后一半列。因为输出的第 \(j\) 列只取决于 \(A\) 的第 \(j\) 列，所以 \(XA=[XA_{1},XA_{2}]\)。GPU 0 拿完整的 \(X\) 乘 \(A_{1}\)，GPU 1 拿完整的 \(X\) 乘 \(A_{2}\)，各自得到输出的一半列，而且<b>这一半列的数值已经是最终结果</b>。</li>
+  <li><b>按行切</b> \(A\)：\(A=\begin{bmatrix}A_{1}\\A_{2}\end{bmatrix}\)，同时把 \(X\) 的列也对应切开，\(X=[X_{1},X_{2}]\)。按分块矩阵乘法，\(XA=X_{1}A_{1}+X_{2}A_{2}\)。GPU 0 算 \(X_{1}A_{1}\)，GPU 1 算 \(X_{2}A_{2}\)，各自得到一个和完整输出<b>一样大</b>的矩阵，但它只是<b>部分和</b>，必须两份加起来才是正确结果。</li>
+</ul>
+<p>两种切法都把计算量平分了，区别在于输出的状态：按列切得到的是“数值完整、但只有一部分列”，按行切得到的是“形状完整、但数值只是一部分”。前者要拼接才完整，后者要求和才完整。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：同一个矩阵乘法 \(XA\) 的两种切法（蓝色归 GPU 0，绿色归 GPU 1）</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-out" style="margin-left:0"><b>按列切：A = [A₁, A₂]</b></div>
+      <svg class="dg" viewBox="0 0 460 250" role="img" aria-label="按列切分矩阵乘法：每张卡得到输出的一部分列">
+        <rect class="box data" x="10" y="30" width="60" height="110" rx="4"/>
+        <text x="40" y="85" class="t-c t-b">X</text>
+        <text x="40" y="156" class="t-c t-xs">(b·s)×h</text>
+        <text x="88" y="85" class="t-c t-lg">×</text>
+        <rect class="box enc" x="106" y="45" width="56" height="80" rx="4"/>
+        <text x="134" y="76" class="t-c t-b">A₁</text>
+        <text x="134" y="98" class="t-c t-xs">GPU 0</text>
+        <rect class="box act" x="162" y="45" width="56" height="80" rx="4"/>
+        <text x="190" y="76" class="t-c t-b">A₂</text>
+        <text x="190" y="98" class="t-c t-xs">GPU 1</text>
+        <text x="162" y="141" class="t-c t-xs">h×4h，按列分两半</text>
+        <text x="238" y="85" class="t-c t-lg">=</text>
+        <rect class="box enc" x="256" y="30" width="90" height="110" rx="4"/>
+        <text x="301" y="78" class="t-c t-b">XA₁</text>
+        <text x="301" y="100" class="t-c t-xs">GPU 0 算</text>
+        <rect class="box act" x="346" y="30" width="90" height="110" rx="4"/>
+        <text x="391" y="78" class="t-c t-b">XA₂</text>
+        <text x="391" y="100" class="t-c t-xs">GPU 1 算</text>
+        <text x="346" y="156" class="t-c t-xs">左右拼起来就是 XA</text>
+        <text x="230" y="192" class="t-c t-sm">每张卡：完整的 X × 自己那几列 A</text>
+        <text x="230" y="214" class="t-c t-sm">得到输出里属于自己的几列，数值已是最终结果</text>
+        <text x="230" y="236" class="t-c t-sm t-b" style="fill:var(--c-act)">后面可以直接接 GeLU，不需要通信</text>
+      </svg>
+    </div>
+    <div>
+      <div class="dia-out" style="margin-left:0"><b>按行切：A = [A₁; A₂]，X = [X₁, X₂]</b></div>
+      <svg class="dg" viewBox="0 0 460 250" role="img" aria-label="按行切分矩阵乘法：每张卡得到一个部分和">
+        <rect class="box enc" x="10" y="30" width="30" height="110" rx="4"/>
+        <rect class="box act" x="40" y="30" width="30" height="110" rx="4"/>
+        <text x="25" y="85" class="t-c t-b">X₁</text>
+        <text x="55" y="85" class="t-c t-b">X₂</text>
+        <text x="40" y="156" class="t-c t-xs">X 也按列切开</text>
+        <text x="88" y="85" class="t-c t-lg">×</text>
+        <rect class="box enc" x="106" y="45" width="112" height="40" rx="4"/>
+        <text x="162" y="65" class="t-c t-b">A₁（GPU 0）</text>
+        <rect class="box act" x="106" y="85" width="112" height="40" rx="4"/>
+        <text x="162" y="105" class="t-c t-b">A₂（GPU 1）</text>
+        <text x="162" y="141" class="t-c t-xs">h×4h，按行分两半</text>
+        <text x="238" y="85" class="t-c t-lg">=</text>
+        <rect class="box enc" x="256" y="30" width="80" height="110" rx="4"/>
+        <text x="296" y="78" class="t-c t-b">X₁A₁</text>
+        <text x="296" y="100" class="t-c t-xs">GPU 0 算</text>
+        <text x="348" y="85" class="t-c t-lg">+</text>
+        <rect class="box act" x="360" y="30" width="80" height="110" rx="4"/>
+        <text x="400" y="78" class="t-c t-b">X₂A₂</text>
+        <text x="400" y="100" class="t-c t-xs">GPU 1 算</text>
+        <text x="348" y="156" class="t-c t-xs">两份都和 XA 一样大</text>
+        <text x="230" y="192" class="t-c t-sm">每张卡得到的只是部分和，相加才是 XA</text>
+        <text x="230" y="214" class="t-c t-sm">而 GeLU(a+b) ≠ GeLU(a) + GeLU(b)</text>
+        <text x="230" y="236" class="t-c t-sm t-b" style="fill:var(--c-loss)">GeLU 之前必须先做一次 all-reduce</text>
+      </svg>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图。矩阵形状按 MLP 的第一个矩阵（\(h\times 4h\)）画。</div>
+</div>
+<p><b>用一个小例子把两种切法各算一遍。</b>取一个 token（\(b\cdot s=1\)），隐藏维度 \(h=2\)，MLP 的中间维度 \(4h\) 在这里取 4。为了手算方便，非线性函数用 ReLU 代替 GeLU（负数变 0，正数不变）；两者都是逐元素作用的非线性函数，下面的结论完全一样。</p>
+<div class="formula">$$X=\begin{bmatrix}1 &amp; 2\end{bmatrix},\qquad A=\begin{bmatrix}1 &amp; 0 &amp; -1 &amp; 2\\ 1 &amp; -1 &amp; 1 &amp; 0\end{bmatrix},\qquad B=\begin{bmatrix}1 &amp; 0\\ 0 &amp; 1\\ 1 &amp; 1\\ 0 &amp; 2\end{bmatrix}$$</div>
+<p><b>不切的时候</b>：\(XA=[3,\,-2,\,1,\,2]\)，过 ReLU 得 \(Y=[3,\,0,\,1,\,2]\)，再乘 \(B\) 得 \(Z=YB=[4,\,5]\)。这是正确答案。</p>
+<p><b>错误的切法：先把 \(A\) 按行切。</b>把 \(X_{1}=[1]\)、\(A_{1}=[1,0,-1,2]\)（\(A\) 的第一行）给 GPU 0，把 \(X_{2}=[2]\)、\(A_{2}=[1,-1,1,0]\)（第二行）给 GPU 1。两张卡分别得到 \(X_{1}A_{1}=[1,0,-1,2]\) 和 \(X_{2}A_{2}=[2,-2,2,0]\)，相加确实是 \([3,-2,1,2]\)。但如果两张卡想省掉通信，各自先过 ReLU 再相加，得到的是 \([1,0,0,2]+[2,0,2,0]=[3,0,2,2]\)，第三个数是 2 而不是 1。原因是 \(\mathrm{ReLU}(-1+2)=1\)，而 \(\mathrm{ReLU}(-1)+\mathrm{ReLU}(2)=2\)：非线性函数不能拆到加法的两边去。所以这种切法<b>必须在 ReLU（GeLU）之前做一次 all-reduce</b>，先把部分和加起来。</p>
+<p><b>正确的切法：\(A\) 按列切，\(B\) 按行切。</b>GPU 0 拿 \(A\) 的前两列 \(A_{1}=\begin{bmatrix}1 &amp; 0\\ 1 &amp; -1\end{bmatrix}\) 和 \(B\) 的前两行 \(B_{1}=\begin{bmatrix}1 &amp; 0\\ 0 &amp; 1\end{bmatrix}\)；GPU 1 拿 \(A\) 的后两列 \(A_{2}=\begin{bmatrix}-1 &amp; 2\\ 1 &amp; 0\end{bmatrix}\) 和 \(B\) 的后两行 \(B_{2}=\begin{bmatrix}1 &amp; 1\\ 0 &amp; 2\end{bmatrix}\)。</p>
+<div class="table-wrap"><table>
+  <tr><th>步骤</th><th>GPU 0</th><th>GPU 1</th><th>通信</th></tr>
+  <tr><td>输入</td><td>完整的 X = [1, 2]</td><td>完整的 X = [1, 2]</td><td>无（两张卡本来就有同一个 X）</td></tr>
+  <tr><td>乘 A 的一半列</td><td>XA₁ = [3, −2]</td><td>XA₂ = [1, 2]</td><td>无</td></tr>
+  <tr><td>ReLU</td><td>Y₁ = [3, 0]</td><td>Y₂ = [1, 2]</td><td>无（逐元素，各算各的）</td></tr>
+  <tr><td>乘 B 的一半行</td><td>Z₁ = Y₁B₁ = [3, 0]</td><td>Z₂ = Y₂B₂ = [1, 5]</td><td>无</td></tr>
+  <tr><td>求和</td><td colspan="2">Z = Z₁ + Z₂ = [4, 5]，和不切时完全一样</td><td>1 次 all-reduce</td></tr>
+</table></div>
+<p>关键在中间那一步：按列切 \(A\) 之后，每张卡手里的 \(Y_{i}\) 恰好是 \(Y\) 的一部分<b>列</b>；而按行切的 \(B\) 需要的输入，正好就是“按列切开的 \(Y\)”（相当于上面按行切时的 \(X_{1}\)、\(X_{2}\)）。前一个矩阵输出的格式，正好是后一个矩阵需要的输入格式，所以两次矩阵乘之间不需要任何通信，只在最后求一次和。</p>
+
+<h4 id="n-3-2">3.2 MLP：先列切、后行切，一个子块只通信一次</h4>
+<p>MLP 子块的两步是 \(Y=\mathrm{GeLU}(XA)\) 和 \(Z=\mathrm{Dropout}(YB)\)，其中 \(A\) 是 \(h\times 4h\)，\(B\) 是 \(4h\times h\)。论文比较了切第一个矩阵 \(A\) 的两种方式：</p>
+<ul>
+  <li>按行切 \(A\)（同时按列切 \(X\)）：得到 \(Y=\mathrm{GeLU}(X_{1}A_{1}+X_{2}A_{2})\)。因为 GeLU 是非线性的，\(\mathrm{GeLU}(X_{1}A_{1}+X_{2}A_{2})\neq\mathrm{GeLU}(X_{1}A_{1})+\mathrm{GeLU}(X_{2}A_{2})\)，GeLU 之前必须有一个同步点。</li>
+  <li>按列切 \(A\)：\([Y_{1},Y_{2}]=[\mathrm{GeLU}(XA_{1}),\mathrm{GeLU}(XA_{2})]\)，GeLU 可以在每张卡上独立地作用于自己那一份，省掉了一个同步点。</li>
+</ul>
+<p>所以论文把第一个矩阵按列切（后来代码里叫 column parallel），第二个矩阵按行切（row parallel），让第二个矩阵直接吃第一个矩阵的输出。第二个矩阵算完，各卡手里是部分和，把它们 all-reduce 加起来，再交给 dropout。整个 MLP 子块，前向只需要一次 all-reduce。</p>
+<div class="dia">
+  <div class="dia-title">示意图：MLP 子块在 2 张卡上的切法</div>
+  <div class="dia-flow"><span class="dia-box">输入 X<small>两张卡各有一份相同的副本</small></span><span class="dia-arrow">→</span><span class="dia-box reg">f<small>前向：原样交给两张卡</small></span></div>
+  <div class="dia-flow"><b style="width:52px">GPU 0</b><span class="dia-box enc">X · A₁<small>A 的前 2h 列</small></span><span class="dia-arrow">→</span><span class="dia-box enc">GeLU</span><span class="dia-arrow">→</span><span class="dia-box enc">Y₁<small>(b·s)×2h</small></span><span class="dia-arrow">→</span><span class="dia-box enc">Y₁ · B₁<small>B 的前 2h 行</small></span><span class="dia-arrow">→</span><span class="dia-box enc">Z₁<small>部分和，(b·s)×h</small></span></div>
+  <div class="dia-flow"><b style="width:52px">GPU 1</b><span class="dia-box act">X · A₂<small>A 的后 2h 列</small></span><span class="dia-arrow">→</span><span class="dia-box act">GeLU</span><span class="dia-arrow">→</span><span class="dia-box act">Y₂<small>(b·s)×2h</small></span><span class="dia-arrow">→</span><span class="dia-box act">Y₂ · B₂<small>B 的后 2h 行</small></span><span class="dia-arrow">→</span><span class="dia-box act">Z₂<small>部分和，(b·s)×h</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">g<small>前向：all-reduce，Z = Z₁ + Z₂</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout</span><span class="dia-arrow">→</span><span class="dia-box">加残差，进入下一个子块</span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#S3.F3" target="_blank" rel="noopener">原文图 3a ↗</a>。蓝色框只在 GPU 0 上算，绿色框只在 GPU 1 上算，两行之间没有任何数据往来；唯一的前向通信发生在 \(g\)。</div>
+</div>
+<p>这种安排还有一个容易被忽略的好处：<b>通信发生在“窄”的一端</b>。MLP 中间的激活 \(Y\) 是 \(4h\) 宽的，而进出 MLP 的 \(X\) 和 \(Z\) 只有 \(h\) 宽。先列后行的切法让宽的中间结果始终留在各自的卡上，只在出口交换 \(h\) 宽的数据。反过来，如果第二个矩阵也按列切，每张卡就需要完整的 \(Y\)，得先用 all-gather 把 \(4h\) 宽的 \(Y\) 拼起来；而输出又被按列切开，进入 dropout 和残差之前还得再拼一次。按环形算法的每卡发送量算，两次 all-gather 合计约 \(5\frac{t-1}{t}bsh\) 个数，是先列后行那一次 all-reduce（\(2\frac{t-1}{t}bsh\)）的 2.5 倍（推算）。</p>
+<p>参数也被均匀分开了：\(A\) 和 \(B\) 合计 \(8h^{2}\) 个参数，\(t\) 路模型并行时每张卡只存 \(8h^{2}/t\) 个，对应的梯度和优化器状态也只存这么多。</p>
+
+<h4 id="n-3-3">3.3 f 和 g：一对“共轭”的通信算子</h4>
+<p>前向讲清楚了，反向传播呢？论文把通信封装成两个算子，插在模型并行区域的两端：入口处是 \(f\)，出口处是 \(g\)。</p>
+<ul>
+  <li>\(f\)：前向是<b>恒等</b>（什么也不做，输入原样往下传）；反向是 <b>all-reduce</b>。</li>
+  <li>\(g\)：前向是 <b>all-reduce</b>；反向是<b>恒等</b>。</li>
+</ul>
+<p>两者的前向和反向恰好互换，论文称它们互为“共轭”。为什么反向是这样？</p>
+<div class="note-pre"><b>先补一点背景：反向传播里，“复制”和“求和”互为镜像。</b>
+<p>链式法则有两条简单的推论。其一，如果一个变量被<b>复制</b>后用在好几个地方，那么它的梯度等于各个用处传回来的梯度<b>之和</b>。其二，如果一个结果是几个量的<b>和</b>，那么每个加数收到的梯度就<b>等于</b>这个结果的梯度，原样复制一份即可。也就是说，前向的“复制”对应反向的“求和”，前向的“求和”对应反向的“复制”。</p>
+</div>
+<p>套到 MLP 上：前向时，\(X\) 被两张卡各用了一次（GPU 0 拿它乘 \(A_{1}\)，GPU 1 拿它乘 \(A_{2}\)），相当于被复制了两份。反向时，GPU 0 只能算出“\(X\) 经由 \(A_{1}\) 这条路对损失的影响”，GPU 1 只能算出“经由 \(A_{2}\) 这条路的影响”，两份加起来才是 \(X\) 的完整梯度。这就是 \(f\) 在反向要做 all-reduce 的原因。而 \(Z=Z_{1}+Z_{2}\) 是一个求和，它的梯度原样复制给 \(Z_{1}\) 和 \(Z_{2}\) 就行；由于 \(g\) 之后的所有计算在每张卡上都一模一样，每张卡上已经有一份相同的 \(Z\) 的梯度，所以 \(g\) 在反向什么也不用做。</p>
+<p><b>用上面的数字例子走一遍反向。</b>假设损失对 \(Z\) 的梯度是 \(\partial L/\partial Z=[1,1]\)（两张卡上一样）。</p>
+<ol>
+  <li>经过 \(g\) 的反向（恒等）：两张卡都拿到 \([1,1]\)。</li>
+  <li>乘 \(B_{i}\) 的转置：GPU 0 得到 \([1,1]B_{1}^{\top}=[1,1]\)；GPU 1 得到 \([1,1]B_{2}^{\top}=[2,2]\)。</li>
+  <li>乘 ReLU 的导数（前向输入为正的位置导数为 1，否则为 0）：GPU 0 的前向输入是 \([3,-2]\)，梯度变成 \([1,0]\)；GPU 1 的前向输入是 \([1,2]\)，梯度保持 \([2,2]\)。</li>
+  <li>乘 \(A_{i}\) 的转置，得到各卡对 \(X\) 梯度的贡献：GPU 0 是 \([1,0]A_{1}^{\top}=[1,1]\)，GPU 1 是 \([2,2]A_{2}^{\top}=[2,2]\)。</li>
+  <li>经过 \(f\) 的反向（all-reduce）：两张卡都得到 \([1,1]+[2,2]=[3,3]\)。</li>
+</ol>
+<p>不切分直接算：完整的 ReLU 后梯度是 \([1,0,2,2]\)，乘 \(A^{\top}\) 得到 \([3,3]\)，与上面一致。如果漏掉了 \(f\) 的 all-reduce，GPU 0 会以为 \(X\) 的梯度是 \([1,1]\)，GPU 1 以为是 \([2,2]\)，再往前传，两张卡上 LayerNorm 和更早各层的梯度就都错了，而且彼此不一致。</p>
+<p>论文给出了 \(f\) 的 PyTorch 实现，只有几行：一个自定义的 autograd 函数，forward 直接返回输入，backward 对梯度做 all-reduce；\(g\) 反过来写即可。下面用本站的写法把 \(f\)、\(g\) 和并行 MLP 放在一起：</p>
+<pre><code class="lang-py">class f(torch.autograd.Function):           # 模型并行区域的入口
+    @staticmethod
+    def forward(ctx, x):
+        return x                             # 前向：恒等
+    @staticmethod
+    def backward(ctx, grad):
+        dist.all_reduce(grad)                # 反向：把各卡对 x 的梯度贡献加起来
+        return grad
+
+class g(torch.autograd.Function):           # 模型并行区域的出口
+    @staticmethod
+    def forward(ctx, x):
+        dist.all_reduce(x)                   # 前向：把各卡的部分和加起来
+        return x
+    @staticmethod
+    def backward(ctx, grad):
+        return grad                          # 反向：恒等
+
+def parallel_mlp(x, A_i, B_i):               # 本卡持有 A 的一组列、B 的对应一组行
+    x = f.apply(x)
+    y_i = gelu(x @ A_i)                      # 列并行：不需要通信
+    z_i = y_i @ B_i                          # 行并行：得到部分和
+    return g.apply(z_i)                      # 前向唯一的一次通信</code></pre>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>在现在的 Megatron-LM 里，\(f\) 叫 <code>copy_to_tensor_model_parallel_region</code>（内部类 <code>_CopyToModelParallelRegion</code>），\(g\) 叫 <code>reduce_from_tensor_model_parallel_region</code>（<code>_ReduceFromModelParallelRegion</code>），都在 <code>megatron/core/tensor_parallel/mappings.py</code>；按列切和按行切的线性层是同目录 <code>layers.py</code> 里的 <code>ColumnParallelLinear</code> 和 <code>RowParallelLinear</code>。论文没有提到偏置，代码里行并行层的偏置不切分，并且是在 all-reduce <b>之后</b>才加上：如果每张卡在部分和上都加一遍完整偏置，求和后偏置就被加了 \(t\) 次。</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>\(f\) 在前向“什么也不做”，很容易被当成可有可无。其实它是反向梯度同步的地方：去掉它，前向结果完全正确，梯度却是错的，而且这种错误不会报错，只会让训练悄悄变差。另外，“只需要一次 all-reduce”指的是每个 MLP 子块前向一次（在 \(g\)）、反向一次（在 \(f\)），不是整个模型只通信一次。</div>
+
+<h4 id="n-3-4">3.4 自注意力：按“头”切，天然不需要通信</h4>
+<div class="note-pre"><b>先补一点背景：多头注意力的各个头是互相独立的。</b>
+<p>把 \(h\) 维拆成 \(a\) 个头，每个头的维度是 \(d=h/a\)。第 \(i\) 个头只用 query、key、value 投影矩阵里属于它的那 \(d\) 列：\(Q_{i}=XW^{Q}_{i}\)、\(K_{i}=XW^{K}_{i}\)、\(V_{i}=XW^{V}_{i}\)，然后在自己的 \(d\) 维空间里算注意力 \(\mathrm{softmax}(Q_{i}K_{i}^{\top}/\sqrt{d})\,V_{i}\)。在把各头的输出拼起来、乘输出投影矩阵 \(W^{O}\) 之前，<b>不同头之间没有任何数据往来</b>。注意力里的 softmax 是对“序列中的所有位置”归一化，不是对“所有头”归一化，所以每个头的 softmax 也能独立算完。</p>
+</div>
+<p>这正好对上 3.1 节的“按列切”：把 \(W^{Q}\)、\(W^{K}\)、\(W^{V}\) 按列切，并且让切分的边界和头的边界对齐，就等于把一部分头整体分给一张卡。每张卡算自己那几个头的完整注意力，中间完全不需要通信。接下来的输出投影 \(W^{O}\)（\(h\times h\)）按行切：各卡拿自己那几个头的输出（正好是拼接结果中属于自己的那几列）乘 \(W^{O}\) 中对应的几行，得到部分和，再由 \(g\) 做一次 all-reduce。结构和 MLP 一模一样：列并行接行并行，中间无通信，出口一次 all-reduce。</p>
+<div class="dia">
+  <div class="dia-title">示意图：自注意力子块在 2 张卡上的切法（以 32 个头为例）</div>
+  <div class="dia-flow"><span class="dia-box">输入 X<small>两张卡各一份</small></span><span class="dia-arrow">→</span><span class="dia-box reg">f<small>前向恒等，反向 all-reduce</small></span></div>
+  <div class="dia-flow"><b style="width:52px">GPU 0</b><span class="dia-box enc">头 1–16 的 Q、K、V 投影<small>\(W^{Q}\)、\(W^{K}\)、\(W^{V}\) 的前一半列</small></span><span class="dia-arrow">→</span><span class="dia-box enc">16 个头各自算注意力<small>softmax、dropout、乘 V</small></span><span class="dia-arrow">→</span><span class="dia-box enc">乘 \(W^{O}\) 的前一半行<small>得到部分和</small></span></div>
+  <div class="dia-flow"><b style="width:52px">GPU 1</b><span class="dia-box act">头 17–32 的 Q、K、V 投影<small>后一半列</small></span><span class="dia-arrow">→</span><span class="dia-box act">16 个头各自算注意力<small>softmax、dropout、乘 V</small></span><span class="dia-arrow">→</span><span class="dia-box act">乘 \(W^{O}\) 的后一半行<small>得到部分和</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">g<small>all-reduce 求和</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout</span><span class="dia-arrow">→</span><span class="dia-box">加残差</span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#S3.F3" target="_blank" rel="noopener">原文图 3b ↗</a>（原图用 2 个头示意）。论文扩展性实验里 8.3B 配置有 32 个头，8 路切分时每张卡 4 个头（推算）。</div>
+</div>
+<p>这样切还有几个直接的推论：</p>
+<ul>
+  <li>头数 \(a\) 必须能被模型并行路数 \(t\) 整除，否则头分不均匀。</li>
+  <li>注意力里的 dropout（作用在 softmax 之后的注意力权重上）发生在模型并行区域<b>内部</b>，各卡处理的是不同的头，这对随机数的使用提出了要求，见 3.8 节。</li>
+  <li>每张卡只持有 \(4h^{2}/t\) 个注意力参数。推理时，每张卡也只需要保存自己那几个头的 KV 缓存，这正是后来 vLLM 等推理系统在多卡上存放 KV 缓存的方式（见 <a href="vllm.html#n-4-6">vLLM 精读 §4.6</a>）。</li>
+</ul>
+<p>论文总结说，MLP 和自注意力的做法都是把两次矩阵乘“融合”成一组：中间去掉一个同步点，扩展性因此更好。一个简单的 Transformer 层里所有的矩阵乘，只用前向 2 次、反向 2 次 all-reduce 就能完成。</p>
+
+<h4 id="n-3-5">3.5 一层一共通信几次，为什么只能放在一台服务器里</h4>
+<div class="dia">
+  <div class="dia-title">示意图：一个模型并行的 Transformer 层里，通信发生在哪里</div>
+  <div class="dia-flow"><span class="dia-box">X</span><span class="dia-arrow">→</span><span class="dia-box">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box reg">f<small>反向 all-reduce ①</small></span><span class="dia-arrow">→</span><span class="dia-box enc">自注意力 + 输出投影<small>模型并行区</small></span><span class="dia-arrow">→</span><span class="dia-box pred">g<small>前向 all-reduce ①</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout、⊕ 残差</span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box reg">f<small>反向 all-reduce ②</small></span><span class="dia-arrow">→</span><span class="dia-box act">MLP 的两次矩阵乘<small>模型并行区</small></span><span class="dia-arrow">→</span><span class="dia-box pred">g<small>前向 all-reduce ②</small></span><span class="dia-arrow">→</span><span class="dia-box">Dropout、⊕ 残差</span><span class="dia-arrow">→</span><span class="dia-box">Y</span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。每层前向 2 次、反向 2 次，共 4 次 all-reduce；每次传的张量都是 \((b\cdot s)\times h\) 大小。LayerNorm、Dropout 和残差相加不在模型并行区内，每张卡都完整地各算一遍。</div>
+</div>
+<p>每次 all-reduce 的数据量是 \(b\cdot s\cdot h\) 个数，和模型参数量无关，而和“这一步处理了多少个 token”成正比。这一点和数据并行正好相反：数据并行每一步 all-reduce 的是全部梯度，数据量等于参数量，和批大小无关。</p>
+<p>还要注意，论文训练时对每一层都用了激活检查点。反向传播到某一层时，要先把这一层的前向重算一遍，重算的前向里同样有 2 次 all-reduce。所以实际训练中，每层每步是 6 次 all-reduce（ZeRO 论文 §8 对 Megatron-LM 做过同样的统计）。</p>
+<p><b>通信要花多少时间？</b>下面用论文的配置粗算一下量级（推算，按理想带宽，不考虑延迟和计算通信重叠）。8.3B 模型 \(h=3072\)，序列长 \(s=1024\)；模型并行加数据并行时，全局批 512 分给 64 个数据并行组，每个模型并行组每步处理 \(b=8\) 个序列。</p>
+<ul>
+  <li>一次 all-reduce 的张量是 \(8\times1024\times3072\approx 2{,}517\) 万个数，16 位浮点约 50 MB。8 卡环形 all-reduce，每张卡要发送 \(2\times\frac{7}{8}\times 50\approx 88\) MB。</li>
+  <li>一层前向的计算量，按常用的矩阵乘计数约为 \(24bsh^{2}+4bs^{2}h\approx 1.96\times10^{12}\) 次浮点运算，分给 8 张卡，每卡约 \(2.45\times10^{11}\) 次；按单卡基线 39 TFLOPs 算，约 6.3 毫秒。</li>
+  <li>服务器内部：论文的 DGX-2H 用 NVSwitch 互联，GPU 之间 300 GB/s。88 MB 约需 0.29 毫秒，一层前向两次约 0.6 毫秒，大约是计算时间的十分之一。</li>
+  <li>跨服务器：每台服务器 8 块 InfiniBand 网卡合计 100 GB/s，由 16 张 GPU 分享，平均每张卡约 6.25 GB/s。同样的 88 MB 约需 14 毫秒，一层前向两次约 28 毫秒，是计算时间的 4 倍多。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：8 路模型并行时，一层前向的计算与通信时间（推算，只看量级）</div>
+  <div class="dia-row"><span class="lbl">8 卡在同一台服务器（NVSwitch）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:6.3">计算 ≈6.3 ms</span><span class="dia-seg frag" style="flex:0.6"></span><span class="dia-seg" style="flex:27.4"></span></div></div>
+  <div class="dia-out">通信（粉色窄条）≈0.6 ms，约为计算的十分之一。</div>
+  <div class="dia-row"><span class="lbl">8 卡跨服务器（InfiniBand）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:6.3">计算</span><span class="dia-seg frag" style="flex:28">通信 ≈28 ms</span></div></div>
+  <div class="dia-out">通信是计算的 4 倍多，GPU 大部分时间在等数据。</div>
+  <div class="dia-note">推算条件：\(b=8\)、\(s=1024\)、\(h=3072\)、16 位浮点、8 卡环形 all-reduce；带宽直接使用论文 §5 给出的 300 GB/s 与 100 GB/s（后者按每台服务器 16 张卡均分），没有区分单向与双向，也没有计入延迟和计算通信重叠，所以只用来比较量级。</div>
+</div>
+<p>这个量级差距解释了论文的配置：8 路模型并行的 8 张卡总是放在同一台 DGX-2H 里（一台有 16 张卡，正好容纳两个模型并行组），跨服务器只做数据并行。数据并行的梯度 all-reduce 每步只做一次，一般还可以和反向计算重叠；而 \(g\) 的 all-reduce 处在关键路径上，后面的 dropout、残差和 LayerNorm 都要等它的结果才能开始，没法藏起来。</p>
+<p>ZeRO 论文给出了一个实测的旁证：他们把一个 400 亿参数的模型用 Megatron-LM 的模型并行跨两台 DGX-2 服务器训练，每张 V100 只跑出约 5 TFLOPs，不到硬件峰值的 5%。这也是本文结论里说的：超过 160 亿参数、一台服务器的 16 张卡装不下时，需要把层内并行和层间（流水）并行结合起来。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>张量并行省下的是参数、梯度和优化器状态（每卡 \(1/t\)），以及模型并行区<b>内部</b>的激活（比如 MLP 中间 \(4h\) 宽的 \(Y\)、各头的注意力分数）。但区域<b>之外</b>的激活，比如 LayerNorm 的输入输出、dropout 的掩码、残差流，在每张卡上都是完整的一份，并没有被切开。这部分冗余后来由“序列并行”解决（见最后一节）。</div>
+
+<h4 id="n-3-6">3.6 词嵌入与输出层：按词表切，并把交叉熵融合进来</h4>
+<div class="note-pre"><b>先补一点背景：输入嵌入、输出层和权重共享。</b>
+<p>语言模型的第一步是查表：词表里有 \(v\) 个 token，每个 token 对应一个 \(h\) 维向量，这张表论文记作 \(E_{H\times v}\)（\(H\) 就是隐藏维度），查表得到每个输入 token 的向量。最后一步反过来：把最后一层输出的 \(h\) 维向量和表里每一个 token 的向量做内积，得到 \(v\) 个分数（logits），经过 softmax 变成“下一个 token 是谁”的概率，再和正确答案算交叉熵损失。GPT-2 类模型让输入嵌入和输出层<b>共用同一张表</b> \(E\)，所以两头要一起改。</p>
+<p>这张表很大：GPT-2 的词表有 50,257 个 token，8.3B 模型的这张表约 1.57 亿参数（推算）。更大的是输出的 logits：每个位置都有 \(v\) 个分数，整批是 \(b\times s\times v\) 个数。</p>
+</div>
+<p><b>输入嵌入</b>：把 \(E\) 沿词表方向切开，\(E=[E_{1},E_{2}]\)，每张卡只存一部分 token 的向量。比如词表有 8 个 token、2 张卡，GPU 0 存编号 0–3，GPU 1 存编号 4–7。查编号 5 时，GPU 0 发现它不归自己管，输出全零向量；GPU 1 查到真正的向量。两张卡的结果相加，就得到完整的嵌入。所以输入嵌入之后要接一个 \(g\)（all-reduce）。</p>
+<p><b>输出层</b>：\([Y_{1},Y_{2}]=[XE_{1},XE_{2}]\) 是一次列并行的矩阵乘，每张卡得到自己那部分 token 的 logits。最直接的做法是用 all-gather 把各卡的 logits 拼成完整的 \(b\times s\times v\)，再送进交叉熵。但这要传 \(b\times s\times v\) 个数，词表很大，这个量非常大。以扩展性实验的配置为例，\(8\times1024\times51{,}200\approx 4.2\) 亿个数，16 位浮点约 840 MB（推算），是一层里一次 all-reduce 张量（约 50 MB）的 17 倍左右。</p>
+<div class="note-pre"><b>先补一点背景：交叉熵可以拆成几个“每个位置一个数”的量。</b>
+<p>对一个位置，设 logits 是 \(z_{1},\dots,z_{v}\)，正确答案是第 \(y\) 个 token。交叉熵损失是</p>
+<div class="formula">$$\ell=-\log\frac{e^{z_{y}}}{\sum_{j=1}^{v}e^{z_{j}}}=\log\sum_{j=1}^{v}e^{z_{j}}-z_{y}$$</div>
+<p>要算它，只需要两样东西：所有 logits 的指数和，以及正确答案那个 token 的 logit。指数和可以拆成“每张卡算自己那部分 token 的指数和，再加起来”；正确答案的 logit 只在一张卡上，其他卡贡献 0，同样可以用加法汇总。为了数值稳定，实际计算时先减去所有 logits 的最大值再取指数，这个最大值也可以先各卡求局部最大、再取全局最大。三样东西都是每个位置一个数，整批只有 \(b\times s\) 个。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：输出层与交叉熵融合后，每张卡做什么（2 卡为例）</div>
+  <div class="dia-flow"><span class="dia-box enc">GPU 0：X · E₁<small>前一半 token 的 logits</small></span><span class="dia-box act">GPU 1：X · E₂<small>后一半 token 的 logits</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box">各卡求本地 logits 的最大值</span><span class="dia-arrow">→</span><span class="dia-box pred">all-reduce（取最大）<small>b·s 个数</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box">各卡求本地的指数和；正确 token 归谁管，谁给出它的 logit，其他卡给 0</span><span class="dia-arrow">→</span><span class="dia-box pred">all-reduce（求和）<small>两次，各 b·s 个数</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box act">每张卡都算出损失 ℓ = log Σ − z_y<small>完整的 logits 从未在任何一张卡上拼起来</small></span></div>
+  <div class="dia-note">本站示意图。对比：不融合时要 all-gather \(b\times s\times v\) 个数（上例约 4.2 亿个）；融合后每次只传 \(b\times s\) 个数（上例 8,192 个）。</div>
+</div>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>论文的说法是“把并行矩阵乘的输出和交叉熵融合，传标量损失而不是 logits，把通信量降到 \(b\times s\)”。官方代码（<code>megatron/core/tensor_parallel/cross_entropy.py</code> 的 <code>vocab_parallel_cross_entropy</code>）实际做了三次 all-reduce：一次取 logits 的最大值，一次对正确 token 的 logit 求和，一次对指数和求和，每次都是 \(b\times s\) 个数。量级与论文一致，只是次数是三次。反向时，每张卡用保存下来的这些汇总量，就能在本地算出自己那部分 logits 的梯度，不需要额外通信。输入嵌入对应 <code>layers.py</code> 里的 <code>VocabParallelEmbedding</code>：不归本卡管的 token 先置零，查表后再 all-reduce。</div>
+<p>为了让矩阵乘高效，论文还把词表补齐了。原始词表是 50,257，作者希望每张卡分到的词表大小是 128 的倍数；实验最多 8 路切分，所以把词表补到能被 \(128\times8=1024\) 整除的 51,200（§5.1）。8 路切分时每张卡 6,400 个 token，正好是 128 的 50 倍（推算）。</p>
+
+<h4 id="n-3-7">3.7 其余的小操作：宁可重复算，也不通信</h4>
+<p>论文把整套方法概括为：一切为了减少通信，让 GPU 一直有计算可做（保持 compute bound）。LayerNorm、dropout 和残差相加这些操作计算量很小，如果让一张卡算完再广播给其他卡，通信的代价远大于计算本身。所以作者选择让每张卡都<b>重复</b>做一遍：每张卡都存一份 LayerNorm 的参数，拿模型并行区出口的完整结果，各自做 dropout 和残差相加，再送进下一个模型并行区。</p>
+<p>参数更新也因此变得简单：每张卡只优化自己持有的那些参数（矩阵的切片，加上重复保存的 LayerNorm 参数）。被切开的参数只存在一张卡上，自然不用同步；被重复保存的参数，在各卡上的输入相同，反向经过 \(f\) 的 all-reduce 之后传来的梯度也相同，所以各卡收到的梯度完全一样，独立更新后仍然一致（这一句是本站的解释）。整个过程不需要再传输更新后的参数。</p>
+<p>这里有一个隐含的前提：重复计算的那些 dropout 必须在各卡上产生<b>相同</b>的随机掩码，否则各卡上本该一样的激活就会分叉。这就引出了附录 B 讨论的随机数问题。</p>
+
+<h4 id="n-3-8">3.8 附录 B：模型并行和数据并行怎么组合，随机数怎么管</h4>
+<p>模型并行和数据并行可以同时使用。论文附录 B 给出了分组方式：同一台服务器里的若干张卡（比如 GPU 1–8）组成一个<b>模型并行组</b>，共同持有一份完整的模型；其余的卡（通常在别的服务器上）组成更多的模型并行组，每组又是一份完整模型。各模型并行组里<b>位置相同</b>的卡（比如每组的第 1 张：GPU 1、9、…、505）组成一个<b>数据并行组</b>，它们持有完全相同的那一片参数。总卡数等于两者的乘积。</p>
+<div class="dia">
+  <div class="dia-title">示意图：512 张卡 = 64 个模型并行组 × 每组 8 路模型并行</div>
+  <div class="dia-row"><span class="lbl">模型并行组 1</span><div class="cells"><span class="cell a">1</span><span class="cell">2</span><span class="cell">3</span><span class="cell">4</span><span class="cell">5</span><span class="cell">6</span><span class="cell">7</span><span class="cell c">8</span></div></div>
+  <div class="dia-row"><span class="lbl">模型并行组 2</span><div class="cells"><span class="cell a">9</span><span class="cell">10</span><span class="cell">11</span><span class="cell">12</span><span class="cell">13</span><span class="cell">14</span><span class="cell">15</span><span class="cell c">16</span></div></div>
+  <div class="dia-row"><span class="lbl">……</span><div class="cells"><span class="cell">…</span><span class="cell">…</span><span class="cell">…</span></div></div>
+  <div class="dia-row"><span class="lbl">模型并行组 64</span><div class="cells"><span class="cell a">505</span><span class="cell">506</span><span class="cell">507</span><span class="cell">508</span><span class="cell">509</span><span class="cell">510</span><span class="cell">511</span><span class="cell c">512</span></div></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#A2.F8" target="_blank" rel="noopener">原文图 8 ↗</a>。每一行是一个模型并行组（一份完整模型，组内做 \(f\)/\(g\) 的 all-reduce）；每一列是一个数据并行组（64 张卡持有同一片参数，反向后在列内对梯度做 all-reduce）。蓝色是数据并行组 1（GPU 1、9、…、505），橙色是数据并行组 8（GPU 8、16、…、512）。</div>
+</div>
+<p>8.3B 模型用的就是 8 路模型并行 × 64 路数据并行 = 512 张卡。反向传播时，8 个数据并行组各自对自己那一片参数的梯度做 all-reduce，这 8 个 all-reduce 同时进行，每个只涉及全部参数的约 1/8。所有通信都通过 PyTorch 调用 NCCL 实现。</p>
+<p><b>随机数</b>：Transformer 里的 dropout 有两类。一类在模型并行区<b>之外</b>，比如残差相加前的 dropout，它作用在每张卡上都完整存在的同一个张量上，必须在各卡上产生同样的掩码；论文的做法是训练开始时，用同一个种子初始化各个模型并行 worker 的随机数生成器。另一类在模型并行区<b>之内</b>，比如注意力权重上的 dropout，每张卡处理的是不同的头，如果各卡的掩码相同，不同头上的随机性就被“绑”在了一起，整个操作就不再是独立随机的。所以论文为模型并行区内的 dropout 另外维护一个随机数生成器，每个 worker 用不同的种子。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>官方代码在 <code>megatron/core/tensor_parallel/random.py</code> 的 <code>model_parallel_cuda_manual_seed</code> 中实现了这一点：默认生成器在模型并行组内用同一个种子 <code>seed</code>；模型并行区内用的生成器，种子是 <code>seed + 2718 + tp_rank</code>（代码注释说 2718 只是随手取的正数），每张卡不同；前向时用一个“随机数状态追踪器”在两者之间切换。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1909.08053#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/1909.08053#A2" target="_blank" rel="noopener">附录 B ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 实验设置：数据从哪来，怎么训练</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>为了证明大模型确实更好，作者训练了 GPT-2 和 BERT 两类模型。它们用什么数据训练？作者怎样避免测试集的内容漏进训练集？优化器、初始化、学习率这些训练细节是怎么设定的，其中哪些是专门为了让大模型训练稳定？</div>
+
+<h4 id="n-4-1">4.1 训练数据：174 GB 去重后的文本</h4>
+<p>作者想要一个大而多样、包含长距离依赖的训练集，于是合并了几个当时最大的语言建模数据集：Wikipedia、CC-Stories、RealNews 和 OpenWebText。为了防止训练集泄漏到下游评测，他们从 Wikipedia 中删掉了出现在 WikiText103 测试集里的文章，还去掉了 CC-Stories 预处理时留下的多余换行。BERT 模型额外加入了 BooksCorpus；GPT-2 则不用它，因为它和 LAMBADA 评测任务有重叠。</p>
+<p>合并之后，作者删掉了内容少于 128 个 token 的文档；又因为同样的内容可能在不同数据集里重复出现，用局部敏感哈希（LSH）去掉了 Jaccard 相似度大于 0.7 的重复内容。最终得到 174 GB 去重后的文本。</p>
+<div class="note-pre"><b>先补一点背景：Jaccard 相似度与局部敏感哈希。</b>
+<p>判断两篇文档是否“几乎一样”，常见做法是把每篇文档切成一组短片段（比如连续的几个词），用两组片段的交集大小除以并集大小，这就是 Jaccard 相似度：完全相同是 1，毫无重叠是 0。几千万篇文档两两比较太慢，局部敏感哈希用一组特殊的哈希函数，让相似的文档大概率落进同一个桶，只需要在桶内比较，就能高效地找出近似重复。</p>
+</div>
+
+<h4 id="n-4-2">4.2 训练方法与超参数</h4>
+<div class="note-pre"><b>先补一点背景：混合精度与动态损失缩放。</b>
+<p>V100 的 Tensor Core 做 16 位浮点矩阵乘比 32 位快得多，所以训练时大部分计算用 16 位进行。但 16 位浮点能表示的范围很窄，很小的梯度会直接变成 0（下溢）。<b>损失缩放</b>的做法是：反向传播前先把损失乘一个大数，梯度也随之放大，避开下溢；更新参数前再除回来。<b>动态</b>损失缩放会自动调整这个倍数：一旦发现梯度溢出成无穷大，就跳过这一步并把倍数调小，一段时间没有溢出再慢慢调大。</p>
+</div>
+<ul>
+  <li><b>初始化</b>：权重从均值为 0 的正态分布初始化，论文写作 \(\mathcal{N}(0,0.02)\)；官方代码的 <code>init_method_std</code> 默认 0.02，即标准差。紧接在残差相加之前的那些权重（注意力的输出投影、MLP 的第二个矩阵）再乘 \(1/\sqrt{2N}\)，\(N\) 是 Transformer 层数；官方代码里对应的标准差是 <code>init_method_std / sqrt(2 * num_layers)</code>，与论文一致。为什么是 \(2N\)：每层有注意力和 MLP 两个子块，各往残差流上加一次，\(N\) 层共加 \(2N\) 次；如果每次加上去的量方差相同，残差流的方差会随层数线性增长。把每次加的量按 \(1/\sqrt{2N}\) 缩小，总方差就不再随深度膨胀（这一句是本站的解释，论文没有展开）。</li>
+  <li><b>优化器</b>：Adam，加权重衰减 \(\lambda=0.01\)。</li>
+  <li><b>稳定性</b>：对全局梯度范数做裁剪，阈值 1.0；所有 dropout 概率都是 0.1。</li>
+  <li><b>省显存</b>：每个 Transformer 层之后做一次激活检查点（见第 1 节）。</li>
+</ul>
+<p><b>GPT-2</b>：序列长 1024 个子词，批大小 512，训练 30 万步。学习率 1.5e-4，前 3,000 步预热，之后在剩下的 29.7 万步里按单周期余弦衰减，最低到 1e-5 为止。整个训练看过的 token 数约为 512 × 1024 × 300,000 ≈ 1,573 亿（推算）。</p>
+<p><b>BERT</b>：基本沿用 ALBERT 的训练流程。用原始 BERT 的词表（30,522 个 token）；把“下一句预测”（NSP）换成 ALBERT 提出的“句子顺序预测”（SOP）；遮盖方式采用整词 n-gram 遮盖。批大小 1024，学习率 1.0e-4，预热 10,000 步，之后在 200 万步内线性衰减。其他训练参数与原始 BERT 相同。</p>
+<div class="note-pre"><b>先补一点背景：NSP、SOP 与整词 n-gram 遮盖。</b>
+<p>原始 BERT 除了“猜被遮住的词”，还有一个辅助任务 NSP：给两段文本，判断第二段是不是原文中紧跟着第一段的那段。ALBERT 认为这个任务太容易（随机抽来的段落往往主题都不同，靠主题就能判断），改成 SOP：两段文本总是原文中相邻的，只判断它们的先后顺序有没有被颠倒，迫使模型关注篇章的连贯性。整词 n-gram 遮盖则是一次遮住连续几个完整的词，而不是零散的子词片段，让猜词任务更难、更依赖上下文。</p>
+</div>
+<p class="note-links"><a href="https://arxiv.org/html/1909.08053#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 扩展性分析：加卡之后，每张卡的效率掉了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>3.5 节说张量并行要通信，那么卡数加上去以后，实际的效率损失有多大？论文用一组随卡数一起变大的 GPT-2 模型做弱扩展实验，回答“8 路模型并行能保持单卡多少的效率”“再叠上数据并行、扩到 512 张卡又是多少”。附录 D 还补充了注意力头数的影响，以及模型大小固定时加卡能快多少。</div>
+<p><b>硬件</b>：最多 32 台 DGX-2H 服务器，共 512 张 32 GB 的 Tesla V100 SXM3。服务器内部的 GPU 通过 NVSwitch 互联，带宽 300 GB/s；服务器之间每台用 8 块 InfiniBand 网卡，合计 100 GB/s。</p>
+<div class="note-pre"><b>先补一点背景：弱扩展、强扩展和扩展效率。</b>
+<p><b>强扩展</b>是问题规模不变、只加卡：同一个模型、同样的批大小，2 张卡能不能快 2 倍。<b>弱扩展</b>是每张卡的工作量不变、问题规模随卡数一起变大。数据并行的弱扩展通常是加大批大小；本文的弱扩展是<b>加大模型</b>：大约每张卡放 10 亿参数，2 张卡训练 25 亿参数的模型，8 张卡训练 83 亿参数的模型。作者特意说明，这样做正是为了训练原本放不进单卡的模型，同时避免大批量带来的收敛问题。</p>
+<p><b>扩展效率</b>：\(n\) 张卡上实际达到的每秒浮点运算数，除以“\(n\) 倍的单卡基线”。100% 表示加卡没有任何损失；77% 表示每张卡平均只发挥出单卡基线 77% 的效率，其余 23% 损失在通信、等待和更小矩阵乘的低效上。本节所有扩展效率的基线都是 1.2B 模型在单卡上的 39 TFLOPs。</p>
+</div>
+<p>为了让自注意力层里矩阵乘的大小保持一致，四个配置的每头维度固定为 96，只改变头数和层数：</p>
+<div class="table-wrap"><table>
+  <tr><th>隐藏维度</th><th>头数</th><th>层数</th><th>参数量</th><th>模型并行卡数</th><th>模型 + 数据并行卡数</th></tr>
+  <tr><td class="num">1536</td><td class="num">16</td><td class="num">40</td><td class="num">1.2B</td><td class="num">1</td><td class="num">64</td></tr>
+  <tr><td class="num">1920</td><td class="num">20</td><td class="num">54</td><td class="num">2.5B</td><td class="num">2</td><td class="num">128</td></tr>
+  <tr><td class="num">2304</td><td class="num">24</td><td class="num">64</td><td class="num">4.2B</td><td class="num">4</td><td class="num">256</td></tr>
+  <tr><td class="num">3072</td><td class="num">32</td><td class="num">72</td><td class="num">8.3B</td><td class="num">8</td><td class="num">512</td></tr>
+</table></div>
+<p class="w-note">数据来自原文表 1。用每层 \(12h^{2}\) 个参数乘层数、再加词嵌入表粗算，四个配置分别约为 1.21B、2.49B、4.19B、8.31B（推算），与表中数字吻合。</p>
+<p>只用模型并行的实验，所有配置的批大小都固定为 8。叠加数据并行的实验，全局批大小固定为 512，对应 64 路数据并行（每个模型并行组每步处理 8 个序列）。</p>
+<div class="dia">
+  <div class="dia-title">图：弱扩展效率（数值来自原文图 5，本站重画）</div>
+  <svg class="dg" viewBox="0 0 640 300" role="img" aria-label="弱扩展效率柱状图：模型并行 1、2、4、8 卡为 100%、95%、82%、77%；模型加数据并行 64、128、256、512 卡为 96%、83%、79%、74%" style="max-width:640px">
+    <rect x="62" y="8" width="12" height="12" class="tk enc"/>
+    <text x="80" y="14" class="t-sm">只用模型并行（批大小 8）</text>
+    <rect x="300" y="8" width="12" height="12" class="tk act"/>
+    <text x="318" y="14" class="t-sm">模型并行 + 64 路数据并行（全局批 512）</text>
+    <line x1="60" y1="50" x2="620" y2="50" style="stroke:var(--border);stroke-dasharray:3 3"/>
+    <line x1="60" y1="100" x2="620" y2="100" style="stroke:var(--border);stroke-dasharray:3 3"/>
+    <line x1="60" y1="150" x2="620" y2="150" style="stroke:var(--border);stroke-dasharray:3 3"/>
+    <line x1="60" y1="200" x2="620" y2="200" style="stroke:var(--border);stroke-dasharray:3 3"/>
+    <line x1="60" y1="250" x2="620" y2="250" class="axis"/>
+    <text x="54" y="50" class="t-r t-xs">100%</text>
+    <text x="54" y="100" class="t-r t-xs">75%</text>
+    <text x="54" y="150" class="t-r t-xs">50%</text>
+    <text x="54" y="200" class="t-r t-xs">25%</text>
+    <text x="54" y="250" class="t-r t-xs">0%</text>
+    <line x1="340" y1="40" x2="340" y2="290" style="stroke:var(--border-strong);stroke-dasharray:4 4"/>
+    <rect class="tk enc" x="88" y="50" width="44" height="200"/>
+    <rect class="tk enc" x="148" y="60" width="44" height="190"/>
+    <rect class="tk enc" x="208" y="86" width="44" height="164"/>
+    <rect class="tk enc" x="268" y="96" width="44" height="154"/>
+    <rect class="tk act" x="368" y="58" width="44" height="192"/>
+    <rect class="tk act" x="428" y="84" width="44" height="166"/>
+    <rect class="tk act" x="488" y="92" width="44" height="158"/>
+    <rect class="tk act" x="548" y="102" width="44" height="148"/>
+    <text x="110" y="41" class="t-c t-sm t-b">100%</text>
+    <text x="170" y="51" class="t-c t-sm t-b">95%</text>
+    <text x="230" y="77" class="t-c t-sm t-b">82%</text>
+    <text x="290" y="87" class="t-c t-sm t-b">77%</text>
+    <text x="390" y="49" class="t-c t-sm t-b">96%</text>
+    <text x="450" y="75" class="t-c t-sm t-b">83%</text>
+    <text x="510" y="83" class="t-c t-sm t-b">79%</text>
+    <text x="570" y="93" class="t-c t-sm t-b">74%</text>
+    <text x="110" y="266" class="t-c t-sm">1 卡</text>
+    <text x="170" y="266" class="t-c t-sm">2 卡</text>
+    <text x="230" y="266" class="t-c t-sm">4 卡</text>
+    <text x="290" y="266" class="t-c t-sm">8 卡</text>
+    <text x="390" y="266" class="t-c t-sm">64 卡</text>
+    <text x="450" y="266" class="t-c t-sm">128 卡</text>
+    <text x="510" y="266" class="t-c t-sm">256 卡</text>
+    <text x="570" y="266" class="t-c t-sm">512 卡</text>
+    <text x="110" y="284" class="t-c t-xs">1.2B</text>
+    <text x="170" y="284" class="t-c t-xs">2.5B</text>
+    <text x="230" y="284" class="t-c t-xs">4.2B</text>
+    <text x="290" y="284" class="t-c t-xs">8.3B</text>
+    <text x="390" y="284" class="t-c t-xs">1.2B</text>
+    <text x="450" y="284" class="t-c t-xs">2.5B</text>
+    <text x="510" y="284" class="t-c t-xs">4.2B</text>
+    <text x="570" y="284" class="t-c t-xs">8.3B</text>
+  </svg>
+  <div class="dia-note">本站根据 <a href="https://arxiv.org/html/1909.08053#S5.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 标注的数值重画。纵轴是扩展效率；横轴第一行是 GPU 数，第二行是该配置的模型大小。</div>
+</div>
+<p>怎么读这张图：左边四根柱子只用模型并行，从 1 张卡（1.2B，100%）到 2 张卡（2.5B，95%）、4 张卡（4.2B，82%）、8 张卡（8.3B，77%）。右边四根是在此基础上再叠加 64 路数据并行：64 张卡 96%、128 张卡 83%、256 张卡 79%、512 张卡 74%。趋势很清楚：模型并行的路数越多，效率越低，因为每张卡分到的矩阵越小、通信占的比例越大。叠加数据并行后，同一个模型配置的效率又低了 3–12 个百分点（2.5B 那组下降最多），这是因为多了跨服务器的梯度 all-reduce。论文的结论是两种设置下扩展性都很好：8 路模型并行达到线性扩展的 77%，512 张卡的最大配置也达到 74%。</p>
+<div class="note-warn"><b>论文内部的一处数字不一致：</b>摘要和引言说 512 张卡上的扩展效率是 76%，而 §5.1.1 正文和图 5 给出的是 74%。按摘要的数字反推：15.1 PFLOPs ÷（512 × 39 TFLOPs）≈ 75.6%，四舍五入就是 76%；而 74% 对应约 14.8 PFLOPs（推算）。摘要的措辞是“最高达到”（up to）15.1 PFLOPs，可能是训练过程中的峰值，而图 5 是另一种统计口径，论文没有说明两者的区别。引用时最好说明用的是哪一个数。</div>
+<div class="note-warn"><b>另一个要注意的地方：</b>论文没有给出“每秒浮点运算数”的计数方法，比如激活检查点带来的那次重算前向算不算在内。如果算在内，硬件实际做的运算会比“模型本身需要的运算”多出一截。所以这里的 39 TFLOPs 和 30%，不宜直接拿来和后来论文里按固定公式算的“模型 FLOPs 利用率”（MFU）比较。</div>
+
+<h4 id="n-5-1">5.1 附录 D：头数越多，扩展效率越低</h4>
+<p>附录 D.1 固定 8.3B 参数、8 路模型并行，只改变注意力头数（隐藏维度不变，所以头越多，每个头越窄）：</p>
+<div class="table-wrap"><table>
+  <tr><th>注意力头数</th><th>每头维度</th><th>扩展效率</th></tr>
+  <tr><td class="num">16</td><td class="num">192</td><td class="num">82%</td></tr>
+  <tr><td class="num">24</td><td class="num">128</td><td class="num">80%</td></tr>
+  <tr><td class="num">32</td><td class="num">96</td><td class="num">77%</td></tr>
+</table></div>
+<p class="w-note">数据来自原文表 7。</p>
+<p>论文的解释是：头数增加后，自注意力里的一部分矩阵乘（每个头的 \(QK^{\top}\) 和乘 \(V\)）变小了，GPU 跑小矩阵乘的效率低；同时 softmax 要处理的元素数随头数成正比增加（每个头都有一张 \(s\times s\) 的注意力分数表）。作者提醒后续研究在设计大模型时留意这个超参数，在速度和精度之间取得平衡。顺带一提，第 6 节真正用来训练的 8.3B GPT-2 用的是 24 个头，而不是扩展性实验里的 32 个头；论文没有解释原因，从这张表看，24 个头的扩展效率更高一些（本站的观察）。</p>
+
+<h4 id="n-5-2">5.2 附录 D：模型大小不变时，加卡能快多少</h4>
+<p>张量并行主要是为了训练单卡放不下的模型，但它也能在不增大批大小的前提下加速小模型的训练。附录 D.2 用 1.2B 模型、固定每步 8 个样本，测了强扩展：</p>
+<div class="dia">
+  <div class="dia-title">图：1.2B 模型的强扩展加速比（数值来自原文表 8，整条轨道代表 8 倍）</div>
+  <div class="dia-row"><span class="lbl">1 张卡</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">1.0×</span><span class="dia-seg" style="flex:7"></span></div></div>
+  <div class="dia-row"><span class="lbl">2 张卡</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1.64">1.64×</span><span class="dia-seg res" style="flex:0.36"></span><span class="dia-seg" style="flex:6"></span></div></div>
+  <div class="dia-row"><span class="lbl">4 张卡</span><div class="dia-track"><span class="dia-seg cmp" style="flex:2.34">2.34×</span><span class="dia-seg res" style="flex:1.66"></span><span class="dia-seg" style="flex:4"></span></div></div>
+  <div class="dia-row"><span class="lbl">8 张卡</span><div class="dia-track"><span class="dia-seg cmp" style="flex:2.98">2.98×</span><span class="dia-seg res" style="flex:5.02">离理想的 8× 还差这么多</span></div></div>
+  <div class="dia-note">绿色是实测加速比，斜纹是离理想线性加速还差的部分。对应的强扩展效率分别是 82%、58.5%、37%（推算）。</div>
+</div>
+<p>2 张卡快了 64%，再往上收益递减。论文的解释是：每张卡分到的计算越来越少，而显存带宽和通信的开销开始占主导。换句话说，矩阵切得太碎以后，GPU 花在搬数据和等通信上的时间比例越来越高。这也说明张量并行的路数不是越多越好，够用就行。</p>
+<p class="note-links"><a href="https://arxiv.org/html/1909.08053#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1 ↗</a> · <a href="https://arxiv.org/html/1909.08053#A4" target="_blank" rel="noopener">附录 D ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 GPT-2 实验：模型越大，困惑度越低</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>能训练更大的模型之后，更大的模型是不是真的更好？作者训练了 3.55 亿、25 亿、83 亿参数三个 GPT-2 式模型，用验证集困惑度和两个零样本评测（WikiText103 困惑度、LAMBADA 完形填空准确率）来回答。读这一节之前，需要先弄清楚这两个评测是怎么算的，以及作者怎样确认测试集没有混进训练集。</div>
+<div class="table-wrap"><table>
+  <tr><th>参数量</th><th>层数</th><th>隐藏维度</th><th>头数</th><th>每头维度</th><th>GPU 数</th><th>每轮耗时</th></tr>
+  <tr><td>355M</td><td class="num">24</td><td class="num">1024</td><td class="num">16</td><td class="num">64</td><td class="num">64</td><td class="num">0.86 天</td></tr>
+  <tr><td>2.5B</td><td class="num">54</td><td class="num">1920</td><td class="num">20</td><td class="num">96</td><td class="num">128</td><td class="num">2.27 天</td></tr>
+  <tr><td>8.3B</td><td class="num">72</td><td class="num">3072</td><td class="num">24</td><td class="num">128</td><td class="num">512</td><td class="num">2.10 天</td></tr>
+</table></div>
+<p class="w-note">数据来自原文表 2。“每轮”指过一遍训练数据（epoch）。</p>
+<p>355M 和 BERT-Large 的大小、结构相同；2.5B 比此前最大的 GPT-2 还大；8.3B 据作者所知，是当时训练过的最大的从左到右 Transformer 语言模型。一轮相当于 68,507 步。8.3B 在 512 张卡上每轮约两天；按 30 万步算，约 4.4 轮、9 天左右（推算）。355M 虽然小，也用了 64 张卡，所以每轮耗时短得多。与表 1 相比，2.5B 的配置相同，8.3B 用 24 个头而不是 32 个。</p>
+<div class="note-pre"><b>先补一点背景：困惑度、零样本与 LAMBADA。</b>
+<p><b>困惑度</b>（perplexity）是语言模型最常用的指标：对一段文本，模型给每个位置的正确词一个概率，取这些概率的负对数的平均（也就是平均交叉熵），再取指数。直观上，困惑度 10 表示模型平均下来“像在 10 个等可能的候选词里挑一个”那么不确定。越低越好。</p>
+<p><b>零样本</b>评测是指模型训练完之后，不在评测数据上做任何微调，直接拿去测。</p>
+<p><b>LAMBADA</b> 是一个完形填空任务：每个样本是 4–5 句话，要求预测最后一个词。这个数据集专门用来考察模型利用长距离上下文的能力。指标是准确率，越高越好。</p>
+</div>
+<p>原文图 6 画了三个模型的验证集困惑度随训练步数的变化：横轴是迭代步数（千步，到 30 万步），纵轴是困惑度。三条曲线从上到下依次是 355M、2.5B、8.3B：大模型不仅最后的困惑度更低，而且收敛得明显更快，在任何相同的步数下都领先。8.3B 最终的验证集困惑度是 9.27。</p>
+<div class="dia">
+  <div class="dia-title">图：零样本结果（数值来自原文表 3）</div>
+  <div class="dia-out" style="margin-left:0"><b>WikiText103 困惑度（越低越好；整条轨道代表 20）</b></div>
+  <div class="dia-row"><span class="lbl">355M</span><div class="dia-track"><span class="dia-seg kv" style="flex:19.31">19.31</span><span class="dia-seg" style="flex:0.69"></span></div></div>
+  <div class="dia-row"><span class="lbl">2.5B</span><div class="dia-track"><span class="dia-seg kv" style="flex:12.76">12.76</span><span class="dia-seg" style="flex:7.24"></span></div></div>
+  <div class="dia-row"><span class="lbl">8.3B</span><div class="dia-track"><span class="dia-seg kv" style="flex:10.81">10.81</span><span class="dia-seg" style="flex:9.19"></span></div></div>
+  <div class="dia-row"><span class="lbl">此前最好</span><div class="dia-track"><span class="dia-seg oth" style="flex:15.79">15.79</span><span class="dia-seg" style="flex:4.21"></span></div></div>
+  <div class="dia-out" style="margin-left:0"><b>LAMBADA 准确率（越高越好；整条轨道代表 100%）</b></div>
+  <div class="dia-row"><span class="lbl">355M</span><div class="dia-track"><span class="dia-seg cmp" style="flex:45.18">45.18%</span><span class="dia-seg" style="flex:54.82"></span></div></div>
+  <div class="dia-row"><span class="lbl">2.5B</span><div class="dia-track"><span class="dia-seg cmp" style="flex:61.73">61.73%</span><span class="dia-seg" style="flex:38.27"></span></div></div>
+  <div class="dia-row"><span class="lbl">8.3B</span><div class="dia-track"><span class="dia-seg cmp" style="flex:66.51">66.51%</span><span class="dia-seg" style="flex:33.49"></span></div></div>
+  <div class="dia-row"><span class="lbl">此前最好</span><div class="dia-track"><span class="dia-seg oth" style="flex:63.24">63.24%</span><span class="dia-seg" style="flex:36.76"></span></div></div>
+  <div class="dia-note">“此前最好”：WikiText103 取自 Khandelwal 等（2019），LAMBADA 取自 GPT-2 论文（Radford 等，2019），均按原文表 3。</div>
+</div>
+<p>规模越大，WikiText103 困惑度越低、LAMBADA 准确率越高。8.3B 在 WikiText103 测试集上的困惑度是 10.81（按下面说的方法校正后），在 LAMBADA 上的准确率是 66.51%，都超过了此前的最好成绩。论文 v4 版还补充了一句：微软与 NVIDIA 合作，用 Megatron 训练了 170 亿参数的 GPT-2 式模型 Turing-NLG，精度随规模继续提高。</p>
+
+<h4 id="n-6-1">6.1 附录 E：两个评测的细节，以及测试集有没有泄漏</h4>
+<p><b>WikiText103 的困惑度要换算到“词”上。</b>WikiText103 的测试集本来是按词切好的（245,566 个词），而本文的模型用子词，同一段文本被切成 270,329 个子词。困惑度是“平均每个单位的不确定度”，分母用哪种单位，数值就不同。为了和以前按词计算的模型公平比较，作者把所有子词的交叉熵加起来之后，除以原始的<b>词数</b> \(T_{o}\)，而不是子词数 \(T\)：</p>
+<div class="formula">$$\mathrm{PPL}=\exp\Big(-\frac{1}{T_{o}}\sum_{t=1}^{T}\log P(t\mid 0{:}t-1)\Big)$$</div>
+<p>这会让数字变得“更难看”：以 8.3B 的 10.81 为例，如果按子词数平均，困惑度约为 \(10.81^{245566/270329}\approx 8.7\)（推算）。论文报告的是更严格、能和旧模型比较的那个数。此外，测试集按词切分时带有一些标点和空格方面的人工痕迹，训练数据里没有，作者先用可逆的“反切分”处理去掉这些痕迹；\(T_{o}\) 在处理之前计算。</p>
+<p><b>滑动窗口。</b>Transformer 一次只能看 1024 个 token 的窗口，没法像 RNN 那样以前面的全部文本为条件。对每个 token 都用它前面完整的 1024 个 token 做条件最准确，但要做约 \(T\) 次前向，太慢。作者折中采用“重叠评估”：窗口每次向前滑动 32 个 token，只计算窗口里最后 32 个 token 的损失，这样每个被计分的 token 都至少有 992 个 token 的上下文（推算）。</p>
+<p><b>LAMBADA 要求整个词都对。</b>目标词可能被切成几个子词。作者使用未经预处理的原始 LAMBADA 数据，要求模型把组成目标词的所有子词都预测对；预测时用“教师强制”，即预测第二个子词时，输入的是正确的第一个子词，而不是模型自己预测的。只有所有子词都对才算正确，这与原任务“预测一个词”等价。</p>
+<p><b>测试集有没有混进训练集？</b>作者参照 GPT-2 论文的做法，统计测试集里的 8-gram（连续 8 个词）有多少也出现在训练集中。WikiText103 测试集最多 10.8% 重叠，LAMBADA 最多 1.4%。作为参照，WikiText103 测试集和它自己的训练集本来就有 9.09% 的重叠。这些数字与以前的工作一致，所以作者认为测试集的文档没有被无意中包含进训练数据。</p>
+<div class="note-warn"><b>读结果时要注意的几点：</b>
+<ul>
+  <li>表 3 的“此前最好”是对比对象在各自条件下得到的成绩。本文的数字是零样本，但训练数据（174 GB）和模型规模都与对比对象不同，所以这里的“超越”同时包含了更多数据和更大模型两方面的贡献，论文没有把两者分开。</li>
+  <li>WikiText103 的困惑度按原始词数归一化（见上），不能和按子词归一化的困惑度直接比较；图 6 里的验证集困惑度 9.27 是在作者自己的验证集上算的，和 WikiText103 的 10.81 也不是一回事。</li>
+</ul></div>
+<p class="note-links">原文图：<a href="https://arxiv.org/html/1909.08053#S5.F6" target="_blank" rel="noopener">图 6 ↗</a> · <a href="https://arxiv.org/html/1909.08053#S5.SS2" target="_blank" rel="noopener">英文原文 §5.2 ↗</a> · <a href="https://arxiv.org/html/1909.08053#A5" target="_blank" rel="noopener">附录 E ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 BERT 实验：LayerNorm 放在哪里，决定了模型能不能变大</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>ALBERT 的作者发现，把 BERT 做得比 BERT-Large（3.36 亿参数）更大，效果反而会意外地变差，于是他们改用参数共享来控制模型大小。本文追问：BERT 变大以后变差，到底是什么原因？作者的发现是，问题出在 LayerNorm 和残差连接的排列顺序上；换一种排列之后，BERT 可以一路放大到 39 亿参数，效果单调变好。</div>
+<div class="note-pre"><b>先补一点背景：残差连接与 LayerNorm 的两种排法。</b>
+<p><b>残差连接</b>让每个子块（注意力或 MLP）只负责学一个“增量”：输出 = 输入 + 子块(输入)。这样即使子块学得不好，信息和梯度也能沿着“把输入直接加过去”的那条路通畅地流动，几十层的网络因此能训练。<b>LayerNorm</b> 对每个 token 的向量减去均值、除以标准差，再乘上可学习的缩放、加上可学习的平移，用来稳定数值范围。</p>
+<p>两者的组合有两种常见排法。记子块为 \(F\)，第 \(l\) 个子块的输入为 \(x_{l}\)。原始 BERT 的排法（后置）是</p>
+<div class="formula">$$x_{l+1}=\mathrm{LN}\big(x_{l}+F(x_{l})\big)$$</div>
+<p>本文（以及 GPT-2）的排法（前置）是</p>
+<div class="formula">$$x_{l+1}=x_{l}+F\big(\mathrm{LN}(x_{l})\big)$$</div>
+<p>区别在于残差那条“直通路”上有没有 LayerNorm。后置排法里，每加一次残差就要过一次 LayerNorm，从最后一层回到第一层的直通路要穿过所有的 LayerNorm；前置排法里，LayerNorm 只放在子块的入口，直通路上只有一连串加法，梯度可以不经任何变换地从输出直达任意一层。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：两种排法下的一个子块</div>
+  <div class="dia-flow"><b style="width:110px">(a) 原始 BERT</b><span class="dia-box">x</span><span class="dia-arrow">→</span><span class="dia-box enc">子块 F</span><span class="dia-arrow">→</span><span class="dia-box reg">⊕ 加回 x</span><span class="dia-arrow">→</span><span class="dia-box pred">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box">下一个子块</span></div>
+  <div class="dia-out" style="margin-left:0">残差直通路上的每一站都要过一次 LayerNorm。</div>
+  <div class="dia-flow"><b style="width:110px">(b) 调整后</b><span class="dia-box">x</span><span class="dia-arrow">→</span><span class="dia-box pred">LayerNorm</span><span class="dia-arrow">→</span><span class="dia-box enc">子块 F</span><span class="dia-arrow">→</span><span class="dia-box reg">⊕ 加回原始的 x</span><span class="dia-arrow">→</span><span class="dia-box">下一个子块</span></div>
+  <div class="dia-out" style="margin-left:0">LayerNorm 只在子块入口；直通路上只有加法。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/1909.08053#S5.F7" target="_blank" rel="noopener">原文图 7 ↗</a> 左侧的 (a)(b) 两种结构。原图里 (a) 的残差分支从 LayerNorm 之后引出，(b) 的残差分支从 LayerNorm 之前引出，这就是两者唯一的区别。</div>
+</div>
+<p>原文图 7 右侧是训练损失曲线（纵轴是语言模型损失，横轴是千步迭代）。黄线是 3.36 亿参数的模型用原始排法 (a)，训练正常。红线是 7.52 亿参数的模型用排法 (a)：损失起初和其他曲线一样下降，大约在 20 多万步时突然跳到很高的值，训练崩溃了（从图上读出）。蓝线是同样 7.52 亿参数、改用排法 (b)：全程稳定，而且损失比 3.36 亿的模型更低。作者说排法 (b) 消除了原始结构里观察到的不稳定，训练损失也更低，并称据他们所知，这是第一次报告这一改动能让更大的 BERT 训练起来。</p>
+<div class="note-warn"><b>论文没有解释的地方：</b>论文只给出了实验现象，没有解释为什么后置排法在大模型上不稳定。一个后来被广泛引用的分析是 Xiong 等（2020）的 <i>On Layer Normalization in the Transformer Architecture</i>：他们证明在初始化时，后置排法里靠近输出层的参数梯度很大，用大学习率容易不稳定，所以需要学习率预热；而前置排法的梯度在初始化时就表现良好。这是另一篇论文的结论，晚于本文，本文没有引用它。另外，论文 §2.2 说 GPT-2 和 BERT 都把 LayerNorm 放在子块的“输入”端，而 §5.3 又说原始 BERT 是排法 (a)。两处说法并不矛盾：在 (a) 里 LayerNorm 也紧挨着下一个子块的输入，关键差别在于残差分支是从 LayerNorm 之前还是之后引出的。</div>
+<p>采用排法 (b) 后，作者训练了三个 BERT 模型，每头维度都固定为 64：</p>
+<div class="table-wrap"><table>
+  <tr><th>参数量</th><th>层数</th><th>隐藏维度</th><th>头数</th><th>GPU 数</th></tr>
+  <tr><td>336M</td><td class="num">24</td><td class="num">1024</td><td class="num">16</td><td class="num">128</td></tr>
+  <tr><td>1.3B</td><td class="num">24</td><td class="num">2048</td><td class="num">32</td><td class="num">256</td></tr>
+  <tr><td>3.9B</td><td class="num">48</td><td class="num">2560</td><td class="num">40</td><td class="num">512</td></tr>
+</table></div>
+<p class="w-note">数据来自原文表 4。</p>
+<p>336M 与 BERT-Large 一样大；1.3B 与 ALBERT 论文里的 BERT-xlarge 配置相同，而那篇论文发现这个配置比 336M 的效果还差；3.9B 同时加宽、加深。336M 和 1.3B 训练了 200 万步，3.9B 训练了 150 万步（论文写作时还在继续训练）。在留出的 3% 数据上，三者的验证集困惑度（猜被遮住的词）分别是 1.58、1.30、1.16，随规模单调下降。</p>
+<div class="note-pre"><b>先补一点背景：几个下游任务。</b>
+<ul>
+  <li><b>MNLI</b>：给一个前提句和一个假设句，判断两者是蕴含、矛盾还是中立（三分类）；“m/mm”分别是与训练数据同领域和不同领域的开发集。</li>
+  <li><b>QQP</b>：判断 Quora 上的两个问题是不是同一个意思。</li>
+  <li><b>SQuAD 1.1 / 2.0</b>：给一段文章和一个问题，从文章里划出答案；2.0 版还包含文章里根本没有答案的问题，模型要学会“不答”。指标是 F1（与标准答案的词重叠程度）和 EM（完全匹配）。</li>
+  <li><b>RACE</b>：英语考试里的阅读理解选择题，“m/h”分别是初中（middle）和高中（high）部分。</li>
+</ul></div>
+<p>微调沿用 RoBERTa 的流程：先调批大小和学习率，选定最优值后，用 5 个不同的随机种子各跑一次，报告开发集结果的<b>中位数</b>。RACE 的测试集结果，是先在开发集上找到成绩为中位数的那个检查点，再报告它在测试集上的成绩。SQuAD 开发集和 RACE 测试集还额外报告了 5 个模型集成的结果。各任务的微调超参数列在附录 A。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>训练 token 比例</th><th>MNLI m/mm</th><th>QQP</th><th>SQuAD 1.1 F1/EM</th><th>SQuAD 2.0 F1/EM</th><th>RACE m/h（测试集）</th></tr>
+  <tr><td>RoBERTa</td><td class="num">2</td><td>90.2 / 90.2</td><td>92.2</td><td>94.6 / 88.9</td><td>89.4 / 86.5</td><td>83.2（86.5 / 81.8）</td></tr>
+  <tr><td>ALBERT</td><td class="num">3</td><td>90.8</td><td>92.2</td><td>94.8 / 89.3</td><td>90.2 / 87.4</td><td>86.5（89.0 / 85.5）</td></tr>
+  <tr><td>XLNet</td><td class="num">2</td><td>90.8 / 90.8</td><td>92.3</td><td>95.1 / 89.7</td><td>90.6 / 87.9</td><td>85.4（88.6 / 84.0）</td></tr>
+  <tr><td>Megatron-336M</td><td class="num">1</td><td>89.7 / 90.0</td><td>92.3</td><td>94.2 / 88.0</td><td>88.1 / 84.8</td><td>83.0（86.9 / 81.5）</td></tr>
+  <tr><td>Megatron-1.3B</td><td class="num">1</td><td>90.9 / 91.0</td><td>92.6</td><td>94.9 / 89.1</td><td>90.2 / 87.1</td><td>87.3（90.4 / 86.1）</td></tr>
+  <tr class="hl"><td>Megatron-3.9B</td><td class="num">1</td><td>91.4 / 91.4</td><td>92.7</td><td>95.5 / 90.0</td><td>91.2 / 88.5</td><td>89.5（91.8 / 88.6）</td></tr>
+  <tr><td>ALBERT 集成</td><td></td><td></td><td></td><td>95.5 / 90.1</td><td>91.4 / 88.9</td><td>89.4（91.2 / 88.6）</td></tr>
+  <tr class="hl"><td>Megatron-3.9B 集成</td><td></td><td></td><td></td><td>95.8 / 90.5</td><td>91.7 / 89.0</td><td>90.9（93.1 / 90.0）</td></tr>
+</table></div>
+<p class="w-note">数据来自原文表 5。除 RACE 是测试集外，其余都是开发集。“训练 token 比例”是预训练消耗的 token 数，以 Megatron-336M 为 1 归一化。</p>
+<p>从表里可以读出三点，与论文的结论一致。第一，Megatron 的三个模型随规模变大，在所有任务上都变好，这正是 ALBERT 论文里的 BERT-xlarge 没能做到的。第二，3.9B 在开发集上超过了当时其他基于 BERT 的模型。第三，3.9B 在 RACE 测试集上，单模型（89.5）和集成（90.9）都是最好成绩，集成比 ALBERT 集成的 89.4 高 1.5 个点。还值得注意的是“训练 token 比例”一列：RoBERTa 和 XLNet 预训练消耗的 token 是 Megatron 的 2 倍，ALBERT 是 3 倍，Megatron-3.9B 用更少的训练量取得了更好的成绩。</p>
+<div class="note-warn"><b>读的时候要注意：</b>规模最小的 Megatron-336M 在多数任务上略低于 RoBERTa（比如 MNLI 89.7 对 90.2），所以优势主要来自规模，而不是同等规模下的训练方法更好。另外，附录 A 的超参数表把最大的模型写成 3.8B，正文其他地方都是 3.9B，应是同一个模型。</div>
+<p class="note-links">原文图：<a href="https://arxiv.org/html/1909.08053#S5.F7" target="_blank" rel="noopener">图 7 ↗</a> · <a href="https://arxiv.org/html/1909.08053#S5.SS3" target="_blank" rel="noopener">英文原文 §5.3 ↗</a> · <a href="https://arxiv.org/html/1909.08053#A1" target="_blank" rel="noopener">附录 A ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 结论与未来工作</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>论文最后怎样总结自己的贡献？作者认为接下来还缺什么？这些“未来工作”后来大多变成了具体的论文，所以值得对照着读。</div>
+<p>论文的结论可以概括为三句话。第一，只需在现有的 PyTorch Transformer 实现上做少量修改，就能突破“一个模型只能放在一张 GPU 上”的限制：8 路模型并行加数据并行，在 512 张 V100 上训练到 83 亿参数，整个程序最高达到 15.1 PFLOPs。第二，对 BERT 类模型，LayerNorm 的位置对规模变大后能否继续提升精度至关重要。第三，模型规模越大，下游任务的效果越好，并在 WikiText103、LAMBADA 和 RACE 上取得了最好成绩。代码已经开源，供后续工作使用模型并行的 Transformer。</p>
+<p>作者列出的未来方向：</p>
+<ul>
+  <li><b>继续扩大预训练规模</b>。这会进一步考验硬件和软件，并且需要更高效、更省显存的优化器（后来的 ZeRO 一类工作正是在这个方向上）。</li>
+  <li><b>超过 160 亿参数</b>的模型，一台 DGX-2H 的 16 张卡已经装不下，需要把层内模型并行、层间（流水）模型并行和跨服务器的模型并行结合起来（对应两年后的 PTD-P）。粗算一下：弱扩展实验大约每张卡放 10 亿参数（图 1 的图注），16 张卡也就约 160 亿参数（推算），与论文的说法吻合。</li>
+  <li>预训练其他模型家族（XLNet、T5）；在更难、更多样的任务上评估大模型（生成式问答、摘要、对话）；用知识蒸馏从大模型训练小的学生模型。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/1909.08053#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">9 后来怎么样了</h3>
+<p>Megatron-LM 的代码仓库一直在更新，成了 NVIDIA 训练大模型的主力框架：截至 2026-10-19，<a href="https://github.com/NVIDIA/Megatron-LM" target="_blank" rel="noopener">NVIDIA/Megatron-LM</a> 有约 1.8 万个 star。论文里“先列切、后行切，入口 \(f\)、出口 \(g\)”的结构，成了张量并行的标准写法。下面只列本站核对过原文的直接后续。</p>
+
+<h4 id="n-impact-1">9.1 三种并行叠起来：PTD-P（SC 2021）</h4>
+<p>Narayanan 等人 2021 年的 <i>Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM</i>（<a href="https://arxiv.org/abs/2104.04473" target="_blank" rel="noopener">arXiv 2104.04473 ↗</a>）把张量并行（T）、流水并行（P）和数据并行（D）组合起来，称为 PTD-P。它的分工原则正是本文 3.5 节的推论：张量并行通信量大，放在一台服务器内部；流水并行只在段与段之间传激活，通信量小，用来跨服务器；最外层再复制整套配置做数据并行。他们指出，单用张量并行在 DGX A100（8 张 80 GB 的 A100）上能撑到约 200 亿参数，更大就必须跨服务器；而张量并行和流水并行组合不当，吞吐量可能低到最优配置的一半。</p>
+<div class="dia">
+  <div class="dia-title">示意图：3D 并行的分工（GPU 总数 = t × p × d）</div>
+  <div class="dia-flow"><span class="dia-box enc">张量并行 t<small>一层之内切矩阵；每层多次 all-reduce；放在一台服务器内（NVLink）</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">外面套</span><span class="dia-box act">流水并行 p<small>按层切成 p 段；段之间点对点传激活；可以跨服务器</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">外面再套</span><span class="dia-box pred">数据并行 d<small>复制整套 t × p 的配置；每步对梯度 all-reduce（或用 ZeRO 分片）</small></span></div>
+  <div class="dia-note">本站示意图，按 PTD-P 论文的描述整理。从内到外，通信越来越少、越来越能容忍慢的网络。</div>
+</div>
+<p>流水并行的气泡（见 2.3 节的示意图）占理想时间的比例是 \((p-1)/m\)。PTD-P 采用“一前一反”交替（1F1B）的调度，把同时在流水线里、还没做反向的微批数限制在流水级数以内，从而节省激活显存；又提出了<b>交错调度</b>：每张卡不再负责一段连续的层，而是负责 \(v\) 个不连续的小块（比如第 1、2 层和第 9、10 层），气泡缩小到 \(\frac{1}{v}\cdot\frac{p-1}{m}\)，代价是流水线内的通信量增加到 \(v\) 倍，吞吐量提升 10% 以上。最终，1 万亿参数的模型在 3072 张 A100 上达到 502 PFLOP/s，每卡 163 TFLOP/s，是理论峰值的 52%。</p>
+
+<h4 id="n-impact-2">9.2 序列并行：把冗余的激活也切开（MLSys 2023）</h4>
+<p>3.5 节的提醒说过：张量并行区之外的 LayerNorm、dropout 的激活在每张卡上都完整地存了一份。Korthikanti 等人的 <i>Reducing Activation Recomputation in Large Transformer Models</i>（<a href="https://arxiv.org/abs/2205.05198" target="_blank" rel="noopener">arXiv 2205.05198 ↗</a>）注意到这些操作在序列方向上各位置独立，于是把它们的输入沿序列方向切成 \(t\) 段，每张卡只算、只存自己那一段，称为<b>序列并行</b>。通信也随之改写：本文 \(g\) 处的前向 all-reduce 换成 reduce-scatter（每张卡只拿到自己那段序列的完整和），算完 LayerNorm 和 dropout，进入下一个张量并行区之前再用 all-gather 拼回完整序列。他们把这一对新算子记作 \(g\) 和 \(\bar{g}\)：\(g\) 前向 all-gather、反向 reduce-scatter，\(\bar{g}\) 正好相反，两者同样互为共轭。因为环形 all-reduce 本来就等于 reduce-scatter 加 all-gather（可以在 2.3 节的演示里对照），通信带宽和原来一样，省下的是激活显存。</p>
+<p>再配合“选择性激活重算”（只重算注意力里那些占显存多、计算便宜的部分，而不是整层重算），激活显存减少约 5 倍，重算带来的额外开销减少 90% 以上。在 2240 张 A100 上训练 5300 亿参数的模型时，模型 FLOPs 利用率从全量重算时的 42.1% 提高到 54.2%。</p>
+
+<h4 id="n-impact-3">9.3 ZeRO：从数据并行这一侧省显存</h4>
+<p>2019 年 10 月，微软的 Rajbhandari 等人发表了 ZeRO（Zero Redundancy Optimizer，<a href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">arXiv 1910.02054 ↗</a>）。它从另一个方向解决同一个问题：数据并行的每张卡都存着完整的参数、梯度和优化器状态，这些都是冗余的。ZeRO 分三个阶段把它们切开、分给数据并行的各张卡：只切优化器状态（\(P_{os}\)，显存降为 1/4，通信量与普通数据并行相同）；再切梯度（\(P_{os+g}\)，降为 1/8，通信量仍相同）；再切参数（\(P_{os+g+p}\)，显存随数据并行路数线性下降，通信量增加 50%）。ZeRO 论文认为，仅就“装得下”而言，模型并行变得不那么必要了；但两者可以结合：ZeRO 加上 Megatron 的模型并行，在 400 张 GPU 上高效训练了 1700 亿参数的模型。3.5 节引用的“跨两台服务器做模型并行，每卡只剩约 5 TFLOPs”的实测，也来自 ZeRO 论文。</p>
+<p>微软 170 亿参数的 Turing-NLG 同时用到了两者：本文 v4 版说它是用 Megatron 训练的，ZeRO 论文说它用到了 ZeRO。2022 年，微软和 NVIDIA 又联合发表了 5300 亿参数的 Megatron-Turing NLG（<a href="https://arxiv.org/abs/2201.11990" target="_blank" rel="noopener">arXiv 2201.11990 ↗</a>），用 DeepSpeed 和 Megatron 实现了该文所称的“3D 并行”。本站的 <a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP 拆解页</a> 详细讲了 ZeRO 的三个阶段和 PyTorch FSDP。</p>
+
+<h4 id="n-impact-4">9.4 推理里的张量并行</h4>
+<p>同样的切法也被推理系统沿用：多张 GPU 一起服务一个大模型时，注意力按头切、MLP 先列后行，每层两次 all-reduce。vLLM 论文就是在这种张量并行下，让每张卡只存自己那几个头的 KV 缓存，见 <a href="vllm.html#n-4-6">vLLM 精读 §4.6</a>。</p>
+<p>想看可点击的张量并行分步图、流水调度对比表和配套简答题，见本站的 <a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron-LM 结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（论文只写了 NVIDIA）。背景只列可公开查证的信息，主要来自 NVIDIA 开发者博客的作者介绍页（内容可能已更新，与论文发表时不完全相同）。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Mohammad Shoeybi</b>（共同一作，通讯作者）<div class="aff">NVIDIA，Applied Deep Learning Research（ADLR）</div>NVIDIA 开发者博客介绍：高级研究科学家，领导 ADLR 的 NLP 团队；2010 年获斯坦福大学博士；此前在 DeepMind 和百度美国工作。也是序列并行论文的作者之一。</div>
+  <div class="author-card"><b>Mostofa Patwary</b>（共同一作）<div class="aff">NVIDIA，ADLR</div>NVIDIA 开发者博客介绍：高级深度学习研究科学家；此前在百度硅谷人工智能实验室研究大语言模型的扩展，以及深度学习效果随规模变化的可预测性。Megatron-Turing NLG 530B 论文的共同一作。</div>
+  <div class="author-card"><b>Raul Puri</b>（共同一作）<div class="aff">NVIDIA（论文发表时）</div>加州大学伯克利分校电子工程与计算机科学学士。NVIDIA 开发者博客的作者页显示他后来在 OpenAI 任研究科学家。</div>
+  <div class="author-card"><b>Patrick LeGresley</b><div class="aff">NVIDIA，ADLR 的 NLP 组</div>NVIDIA 开发者博客介绍：研究大语言模型训练的系统问题；斯坦福大学航空航天博士；此前在百度硅谷人工智能实验室做系统研究和语音识别。</div>
+  <div class="author-card"><b>Jared Casper</b><div class="aff">NVIDIA，ADLR</div>NVIDIA 开发者博客介绍：高级深度学习科学家，2017 年加入 NVIDIA；此前在百度硅谷人工智能实验室做深度学习系统，在 Oracle Labs 做领域专用硬件加速器；2015 年获斯坦福大学博士（计算机体系结构）。也是序列并行论文的作者之一。</div>
+  <div class="author-card senior"><b>Bryan Catanzaro</b><div class="aff">NVIDIA，Applied Deep Learning Research 副总裁</div>NVIDIA 开发者博客介绍：他在 NVIDIA 的研究促成了 cuDNN，后来参与领导了发明 DLSS 2.0 的团队；此前在百度研究端到端的深度学习语音识别系统；加州大学伯克利分校电子工程与计算机科学博士。也是序列并行论文的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/NVIDIA/Megatron-LM" target="_blank" rel="noopener">NVIDIA/Megatron-LM</a> 有 18,191 个 star、4,637 个 fork（截至 2026-10-19）；仓库创建于 2019-03-21，早于论文首版；GitHub 上显示的许可证类型为自定义（Other）。</li>
+  <li><b>采用</b>：本文 v4 版提到微软的 Turing-NLG（170 亿参数）用 Megatron 训练；Megatron-Turing NLG 530B 用 DeepSpeed 与 Megatron 训练；后续的 PTD-P、序列并行都实现在 Megatron-LM 中，序列并行论文也说明其实现会进入 NeMo-Megatron。</li>
+  <li><b>发表</b>：arXiv 预印本。v1 于 2019-09-17 提交，最新为 2020-03-13 的 v4（本页依据 v4）。直接续作 PTD-P 发表于 SC 2021，序列并行发表于 MLSys 2023。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="zero.html">ZeRO</a>、<a href="deepseek-v3.html">DeepSeek-V3</a>、<a href="hybridflow.html">HybridFlow / verl</a></li>
+  <li><a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron-LM 结构拆解</a>：张量并行分步图、流水调度对比、序列并行与集合通信、简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP</a>：从数据并行一侧切分参数、梯度和优化器状态。</li>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：推理中的张量并行与分页的 KV 缓存。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, Bryan Catanzaro. <em>Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism.</em> <a href="https://arxiv.org/abs/1909.08053" target="_blank" rel="noopener">arXiv:1909.08053</a>（v4，2020）。原文以 arXiv 非独占分发许可（arXiv.org perpetual, non-exclusive license）发布，本站没有转载原图：页面中的示意图和图表都是本站根据原文的描述与数值重新绘制的，并附有原图链接。本页是中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

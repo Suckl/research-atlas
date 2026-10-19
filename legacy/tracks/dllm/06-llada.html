@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLaDA、SMDM 与 iLLaDA：从零训练的掩码扩散 LLM</title>
+<meta name="description" content="SMDM 的掩码扩散扩展律与 16× 计算口径，LLaDA 8B 从零训练（2.3T token）、MC-ELBO 似然评测、低置信度重掩码与半自回归块采样、反转诅咒，以及 iLLaDA 12T 重训改了什么。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="llada">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：LLM 的能力一定来自左到右吗</h2>
+<p>到 2024 年，掩码扩散在 GPT-2 规模上已经能和 AR 比困惑度（<a href="02-sedd.html">SEDD</a>、<a href="03-mdlm.html">MDLM / MD4</a>、<a href="02-sedd.html#radd">RADD</a>），但没人知道它能否像 LLM 一样随规模变强、做上下文学习、听指令。这一页的三篇来自同一个团队，回答的是同一个问题的三个阶段：<b>SMDM</b>（2024-10）先在 1.1B 以内拟合掩码扩散的扩展律，给出“约 16× 计算才追平 AR”的数字；<b>LLaDA</b>（2025-02）据此把 8B 模型从零训练到 2.3T token，再做 SFT；<b>iLLaDA</b>（2026-06）用同一目标把预训练扩到 12T token，并改了架构、SFT 与评测口径。<span class="src">SMDM 摘要；LLaDA §1；iLLaDA 摘要</span></p>
+<p>LLaDA 的论点是：LLM 的可扩展性、上下文学习等性质来自“最大似然的生成建模原则”，而不是 AR 这一特定分解；而左到右分解本身带来反转推理之类的缺陷。<span class="src">LLaDA §1</span>这是论文的立场，不是被证明的命题——后面的 <a href="#vs-ar">对照表</a> 与 <a href="#results">结果</a> 会给出它能支持到哪里。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  把 LLaMA 式 Transformer 的因果掩码拿掉、加一个 \([\mathrm{M}]\) token，用“随机比例 \(t\) 掩码 + 被掩位置交叉熵 ÷ \(t\)”从零预训练；生成时从全 \([\mathrm{M}]\) 的画布出发，每步定稿置信度最高的若干位置，必要时按块从左到右推进。训练配方几乎照搬 AR，难点集中在<b>似然只能估计</b>、<b>生成长度要预设</b>和<b>没有现成 KV cache</b>。
+</div>
+<p>本页记号：干净序列 \(x_0\)（长 \(L\)），腐蚀态 \(x_t\)，\(t\in[0,1]\)、\(t=1\) 为全掩码；去噪网络 \(p_{\theta}(x_0^{i}\mid x_t)\)；prompt \(c\)；块长 \(B\)；步数（NFE）\(N\)；每次前向定稿 token 数 TPF。LLaDA 论文把 prompt 写成 \(p_0\)、回答写成 \(r_0\)，SMDM 用 \(\alpha_t=1-t\) 表示“未被掩”的概率，与本页一致。<span class="src">LLaDA §2；SMDM §2</span></p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：LLaDA 的一步半自回归解码</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw act"></i>条件（prompt、已定稿块）</span><span><i class="sw reg"></i>缓存与状态</span><span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M] token</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 466" role="img" aria-label="LLaDA 半自回归低置信度重掩码：画布送入双向 mask predictor，取 argmax 与置信度，屏蔽当前块之外的位置，定稿 top-k 并写回画布；下方为训练视角与代价说明">
+    <g class="data" data-part="canvas" data-step="1">
+      <rect class="box" x="20" y="24" width="540" height="112" rx="10"/>
+      <text class="t-c t-b" x="290" y="46">画布 x_t：prompt c + 生成区（块长 B = 4）</text>
+      <rect class="tk act" x="44" y="58" width="22" height="22"/><rect class="tk act" x="70" y="58" width="22" height="22"/><rect class="tk act" x="96" y="58" width="22" height="22"/><rect class="tk act" x="122" y="58" width="22" height="22"/>
+      <rect class="tk enc" x="162" y="58" width="22" height="22"/><rect class="tk enc" x="188" y="58" width="22" height="22"/><rect class="tk enc" x="214" y="58" width="22" height="22"/><rect class="tk enc" x="240" y="58" width="22" height="22"/>
+      <rect class="tk enc" x="280" y="58" width="22" height="22"/><rect class="tk mask" x="306" y="58" width="22" height="22"/><rect class="tk enc" x="332" y="58" width="22" height="22"/><rect class="tk mask" x="358" y="58" width="22" height="22"/>
+      <rect class="tk mask" x="398" y="58" width="22" height="22"/><rect class="tk mask" x="424" y="58" width="22" height="22"/><rect class="tk mask" x="450" y="58" width="22" height="22"/><rect class="tk mask" x="476" y="58" width="22" height="22"/>
+      <text class="t-c t-xs" x="94" y="98">prompt c</text><text class="t-c t-xs" x="212" y="98">块 1 已定稿</text>
+      <text class="t-c t-xs" x="330" y="98">块 2 当前</text><text class="t-c t-xs" x="448" y="98">块 3 全 [M]</text>
+      <text class="t-c t-xs" x="290" y="124">L = 12 个生成位，共 N 步，每块分到 N/(L/B) 步</text>
+    </g>
+    <path class="edge" d="M560,80 H616" data-step="2"/>
+    <g class="enc" data-part="predictor" data-step="2">
+      <rect class="box" x="620" y="24" width="320" height="112" rx="10"/>
+      <text class="t-c t-b" x="780" y="50">mask predictor p_θ</text>
+      <text class="t-c t-sm" x="780" y="74">Transformer · 全双向 · 不输入 t</text>
+      <text class="t-c t-sm" x="780" y="96">输出每个位置的词表分布</text>
+      <text class="t-c t-xs" x="780" y="118">8B：32 层，MHA（32 个 KV 头）</text>
+    </g>
+    <path class="edge enc" d="M840,136 V172" data-step="3"/>
+    <g data-part="conf" data-step="3">
+      <rect class="box" x="700" y="176" width="240" height="80" rx="10"/>
+      <text class="t-c t-b" x="820" y="202">argmax + 置信度</text>
+      <text class="t-c t-sm" x="820" y="226">c_i = p_θ(x̂_i | x_t)</text>
+      <text class="t-c t-xs" x="820" y="246">温度 0 时为贪心；只看 [M] 位</text>
+    </g>
+    <path class="edge" d="M700,216 H664" data-step="3"/>
+    <g class="act" data-part="blockmask" data-step="3">
+      <rect class="box" x="460" y="176" width="200" height="80" rx="10"/>
+      <text class="t-c t-b" x="560" y="202">块外置信度 = −∞</text>
+      <text class="t-c t-sm" x="560" y="226">半自回归：只在当前块选</text>
+      <text class="t-c t-xs" x="560" y="246">B = L 时即纯扩散采样</text>
+    </g>
+    <path class="edge" d="M460,216 H424" data-step="4"/>
+    <g class="enc" data-part="topk" data-step="4">
+      <rect class="box" x="220" y="176" width="200" height="80" rx="10"/>
+      <text class="t-c t-b" x="320" y="202">定稿 top-k 个</text>
+      <text class="t-c t-sm" x="320" y="226">k = 块内 [M] 数 / 步数</text>
+      <text class="t-c t-xs" x="320" y="246">其余留作 [M]（重掩码）</text>
+    </g>
+    <path class="edge enc" d="M220,216 H120 V140" data-step="4"/>
+    <text class="t-xs" x="28" y="196" data-step="4">x_s 写回画布</text>
+    <g data-part="train" data-step="6">
+      <rect class="panel" x="20" y="284" width="600" height="170" rx="12"/>
+      <text class="t-sm" x="36" y="306" style="fill:var(--text);font-weight:650">训练视角（同一网络）：随机掩码比例 t</text>
+      <g class="data"><rect class="box" x="40" y="322" width="170" height="56" rx="8"/></g>
+      <text class="t-c t-b" x="125" y="344">x_0 ~ 数据</text>
+      <text class="t-c t-xs" x="125" y="366">预训练 4096 token 定长</text>
+      <path class="edge" d="M210,350 H236"/>
+      <g class="data"><rect class="box" x="240" y="322" width="170" height="56" rx="8"/></g>
+      <text class="t-c t-b" x="325" y="344">t ~ U(0,1]</text>
+      <text class="t-c t-xs" x="325" y="366">每个 token 以概率 t 变 [M]</text>
+      <path class="edge" d="M410,350 H436"/>
+      <g class="loss"><rect class="box" x="440" y="322" width="160" height="56" rx="8"/></g>
+      <text class="t-c t-b" x="520" y="344">CE ÷ t</text>
+      <text class="t-c t-xs" x="520" y="366">只算被掩位置</text>
+      <text class="t-xs" x="36" y="404">SFT：prompt 不加噪，只掩 response（含补齐的 |EOS|）</text>
+      <text class="t-xs" x="36" y="424">该损失是负对数似然的上界；网络无需时间嵌入</text>
+      <text class="t-xs" x="36" y="444">生成侧的 top-k 规则不是训练目标推出来的，而是启发式</text>
+    </g>
+    <g class="reg" data-part="cost" data-step="2">
+      <rect class="box" x="650" y="284" width="290" height="70" rx="10"/>
+      <text class="t-c t-b" x="795" y="308">没有现成 KV cache</text>
+      <text class="t-c t-sm" x="795" y="330">每步对整张画布重算注意力</text>
+      <text class="t-c t-xs" x="795" y="346">代价 ∝ N ×（|c| + L）²</text>
+    </g>
+    <g data-part="eos" data-step="5">
+      <rect class="box" x="650" y="372" width="290" height="82" rx="10"/>
+      <text class="t-c t-b" x="795" y="396">|EOS| 与生成长度</text>
+      <text class="t-c t-sm" x="795" y="420">SFT 用 |EOS| 补齐 → 早停风险</text>
+      <text class="t-c t-xs" x="795" y="442">部分任务把 EOS 置信度设为 0</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="canvas"><h4>定长画布</h4><p>生成前先决定生成长度 \(L\)：prompt 后面接 \(L\) 个 \([\mathrm{M}]\)（LLaDA 的 mask id 为 126336）。半自回归时再把生成区切成 \(L/B\) 块，总步数 \(N\) 平均分给各块，代码要求 \(L\) 能被 \(B\) 整除、\(N\) 能被块数整除。<span class="src">官方 <code>generate.py</code></span>Base 主表评测用 \(L=N=1024\)，即每步只定稿 1 个 token。<span class="src">LLaDA App. B.6</span></p></div>
+    <div data-note="predictor"><h4>mask predictor</h4><p>结构与 LLaMA 3 8B 基本一致（RMSNorm、SwiGLU、RoPE），区别只有三处：不用因果掩码；用普通多头注意力而非 GQA（论文的理由是 LLaDA 与 KV cache 不兼容，GQA 省不了什么），于是 KV 头从 8 变 32，为保持参数量把 FFN 从 14,336 降到 12,288；词表换成在自家数据上适配的 126,464。<span class="src">LLaDA §2.2、Tab. 5</span>网络不输入 \(t\)：由 RADD 的结论，被掩位置的干净条件分布与时间无关。<span class="src">LLaDA App. A.1 Eq. 11</span></p></div>
+    <div data-note="conf"><h4>argmax 与置信度</h4><p>官方实现对 logits 加 Gumbel 噪声后取 argmax（温度 0 时就是贪心），置信度取 softmax 中被选 token 的概率。Gumbel 采样在 float64 下做，注释引用 2409.02908：低精度 Gumbel-max 会让困惑度好看、生成质量变差。<span class="src">官方 <code>generate.py</code> <code>add_gumbel_noise</code></span></p></div>
+    <div data-note="blockmask"><h4>半自回归：块外不选</h4><p>把当前块右侧所有位置的置信度设为 \(-\infty\)，于是每步只能在当前块里定稿；块左侧早已定稿，不再改动。右侧的 \([\mathrm{M}]\) 仍留在画布上参与注意力——这就是论文所说的“block diffusion LLaDA / semi-autoregressive remasking”，与画布随块增长的原版 block diffusion 不同。<span class="src">LLaDA App. B.4、Fig. 4</span></p></div>
+    <div data-note="topk"><h4>低置信度重掩码</h4><p>理论上的反向过程是：每个 \([\mathrm{M}]\) 以概率 \(1-s/t\) 变成预测 token，与置信度无关（随机重掩码，Alg. 4）。LLaDA 改为保留置信度最高的 k 个、其余重新掩上（Alg. 5，同 MaskGIT）。代码直接按“每步转移 k 个”实现，k 由块内掩码数在步数上平均分配。<span class="src">LLaDA §2.4、App. A.3；官方 <code>get_num_transfer_tokens</code></span></p></div>
+    <div data-note="cost"><h4>代价：没有可复用的缓存</h4><p>画布上任何位置都可能在下一步变化，注意力是双向的，所以 AR 的“前缀 K/V 不变”不成立；朴素实现每步对 \(|c|+L\) 个位置做完整前向。LLaDA 论文明确没有用任何 KV cache 之类的系统优化。<span class="src">LLaDA §5 Limitations</span>近似缓存见 <a href="14-kv-cache.html">第 14 页</a>。</p></div>
+    <div data-note="eos"><h4>|EOS| 的副作用</h4><p>SFT 把短回答用 |EOS| 补齐并当作普通 token 训练，模型因此学会“自己控制长度”；代价是纯扩散采样时 |EOS| 置信度很高、很早被定稿，回答过短。论文对 Instruct 的 HumanEval、MBPP、GSM8K、MATH、GPQA 把 |EOS| 置信度设为 0；半自回归采样也能缓解。<span class="src">LLaDA App. B.1、B.4</span></p></div>
+    <div data-note="train"><h4>训练与生成用同一个网络</h4><p>预训练：\(t\sim U(0,1]\)，每个 token 独立以概率 \(t\) 换成 \([\mathrm{M}]\)，被掩位置交叉熵除以 \(t\)，再除以 \(L\) 平均（官方代码取 \(t\in[10^{-3},1)\)）；1% 样本截成 \(U[1,4096]\) 的随机长度。SFT 只掩 response。<span class="src">LLaDA Alg. 1–2；官方 <code>GUIDELINES.md</code></span>注意：训练目标对应随机顺序的反向过程，而默认生成用的是置信度排序——两者之间没有理论保证。</p></div>
+    <div data-step-note="1"><h4>① 初始化画布</h4><p>prompt + \(L\) 个 \([\mathrm{M}]\)，按块长 \(B\) 切块。</p></div>
+    <div data-step-note="2"><h4>② 整张画布前向</h4><p>双向 Transformer 对全部位置给出分布；无缓存，每步全量重算。</p></div>
+    <div data-step-note="3"><h4>③ 置信度与块约束</h4><p>贪心取 token 与其概率；当前块以外设为 \(-\infty\)。</p></div>
+    <div data-step-note="4"><h4>④ 定稿并写回</h4><p>选 top-k 写入画布，其余保持 \([\mathrm{M}]\)；进入下一步，块内步数用完后换下一块。</p></div>
+    <div data-step-note="5"><h4>⑤ 收尾</h4><p>截掉 |EOS| 之后的内容；Instruct 在部分任务上屏蔽 |EOS| 置信度。</p></div>
+    <div data-step-note="6"><h4>⑥ 训练视角</h4><p>同一网络在训练中只见过“随机比例、随机位置”的掩码画布。</p></div>
+  </div>
+  <figcaption>图 1　LLaDA 生成中的一步（半自回归 + 低置信度重掩码）与对应的训练目标。<span class="src">依据 LLaDA §2、App. A.3、B.4 与官方 <code>generate.py</code>、<code>GUIDELINES.md</code>。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-recipe">3.1 从零训练 8B：数据、token 与架构差异</h3>
+<p>LLaDA 8B 在 2.3T token 上预训练，耗 0.13M H800 GPU 小时，论文称与同规模、同数据量的 AR 相当；序列长度固定 4096。语料约 11% 中文、61% 英文、28% 代码，用人工规则与 LLM 过滤低质量内容，配比由缩小版 AR 模型决定；SFT 用 450 万对数据（100 万人工标注 + 350 万合成）。8B 只训练了一次，没有调超参。<span class="src">LLaDA §2.2–2.3、App. B.1</span></p>
+<p>与 LLaMA 3 8B 的结构对照：层数 32、宽度 4096、注意力头 32 相同；KV 头 32 vs 8；FFN 12,288 vs 14,336；词表 126,464 vs 128,000；总参数 8.02B vs 8.03B，非嵌入参数同为 6.98B。<span class="src">LLaDA Tab. 5</span>按 \(6ND\) 估算预训练计算约 \(6\times 6.98\times10^{9}\times 2.3\times10^{12}\approx 9.6\times10^{22}\) FLOPs（推算），与论文“扩展到 \(10^{23}\) FLOPs”的表述一致。<span class="src">LLaDA §1、App. B.2 的 6ND 口径</span></p>
+<h3 id="c-likelihood">3.2 MC-ELBO 似然：选择题怎么打分</h3>
+<p>AR 给选项打分用精确的条件对数似然；LLaDA 只有上界，于是用蒙特卡洛估计。论文发现训练目标的等价形式更稳：不是按概率 \(t\) 独立掩码，而是均匀抽 \(l\in\{1,\dots,L\}\)、恰好掩 \(l\) 个、权重 \(L/l\)（Eq. 6）。前者需要 1000 次以上估计才稳定，后者 128 次即可；MMLU、CMMLU、C-Eval 只需一个 token 的似然，1 次就够。<span class="src">LLaDA §2.4、App. A.2、B.6</span>每个候选 128 次前向，这是 dLLM 选择题评测比 AR 贵得多的直接原因。</p>
+<h3 id="c-remask">3.3 低置信度重掩码与随机重掩码</h3>
+<p>在 Base、生成长度与步数均为 256 的设置下，随机重掩码 → 低置信度重掩码：BBH 32.1 → 45.0，GSM8K 21.3 → 70.0，MATH 9.2 → 30.3，HumanEval 11.6 → 32.9，MBPP 21.0 → 40.2。<span class="src">LLaDA Tab. 9</span>论文把它类比为 AR 的退火采样：以多样性换准确率。它也意味着“生成顺序”由模型置信度决定，常常接近左到右，但并不保证（顺序的利弊见 <a href="16-order-limits.html">第 16 页</a>）。</p>
+<h3 id="c-semiar">3.4 半自回归块采样：为什么 Instruct 需要它</h3>
+<p>论文比较三种采样：逐 token 的 AR 采样、画布随块增长的 block diffusion、画布定长的“block diffusion LLaDA”（即半自回归），以及纯扩散。Base 上纯扩散整体最好，块越长越好；Instruct 上半自回归在数学题明显更强：GSM8K 77.5 vs 纯扩散 69.4、MATH 42.2 vs 31.9（块长 32），块长 8 时 GSM8K 再到 78.6。原因是 SFT 数据大量 |EOS| 补齐，纯扩散采样容易早早定稿 |EOS|。AR 采样对 Instruct 几乎完全失败（GSM8K 0），因为 SFT 让模型倾向在给定长度内说完一整句。<span class="src">LLaDA §3.2、App. B.4、Tab. 7–8</span></p>
+<div class="callout warn"><span class="callout-title">报告口径</span>LLaDA 正文 Tab. 2 用纯扩散（GSM8K 69.4），附录 Tab. 8 的半自回归（77.5 / 78.6）更高；后续论文引用“LLaDA Instruct”时常取后者。iLLaDA Tab. 3 中的 LLaDA 列是逐基准取两者中更好的一个（GSM8K / MATH 取半自回归，HumanEval / MBPP / MMLU-Pro 取纯扩散）。<span class="src">LLaDA Tab. 2、Tab. 8；iLLaDA Tab. 3</span>比较时要看清是哪一种采样。</div>
+<h3 id="c-reversal">3.5 反转诅咒：双向目标带来什么</h3>
+<p>496 对中文名诗上下句：给一句，补下一句（正向）或上一句（反向），零样本。GPT-4o（2024-08-06）正向 / 反向 82.7 / 34.3，Qwen2.5-7B Instruct 75.9 / 38.0，LLaDA 8B Instruct 51.8 / 45.6。<span class="src">LLaDA Tab. 4、§3.3</span>LLaDA 两个方向接近、反向最好，但正向明显弱于两个 AR——“平衡”有一部分来自正向较弱，不能读成全面更强。论文的解释是：训练目标等价于对所有顺序求平均的任意顺序自回归（AO-ARM，见 <a href="#objective">§5</a>），模型对各方向没有偏置。<span class="src">LLaDA App. A.2 Eq. 15</span></p>
+<h3 id="smdm">3.6 SMDM：第一条掩码扩散扩展律与“16×”</h3>
+<p>SMDM 用 RADD 的无时间参数化，AR 用 Transformer decoder、MDM 用对应的 encoder，差别只有“多一个掩码 embedding、去掉因果掩码”，其余（深度、宽度、头数）一致；数据 SlimPajama（627B），两者都用 Llama-2 tokenizer，上下文 2048。IsoFLOP 预算 \(6\times10^{18}\)–\(10^{20}\) FLOPs，\(C=6ND\)，对每个预算拟合损失–\(\log N\) 的二次曲线取最优，再拟合 \(\mathcal{L}=e^{\beta^{*}}C^{\alpha^{*}}\)。<span class="src">SMDM §2–3、App. B.2</span></p>
+<p>结论：MDM 的最优验证损失随计算按幂律下降，速率与 AR 相近，但要达到相同验证损失约需 <b>16 倍</b>计算；最优模型大小约为 AR 的一半。作为对照，连续扩散被报告为 64 倍。<span class="src">SMDM §3、Fig. 2</span>这里 MDM 的“验证损失”是 ELBO 的 MC 估计（128 次），AR 是精确 NLL；训练数据只过一遍。这三个口径后来都被挑战，见 <a href="#q12">Q12</a> 与 <a href="08-data-constrained.html">第 08 页</a>。</p>
+<p>SMDM 还提出<b>无监督 CFG</b>：把条件 \(c\) 换成等长 \([\mathrm{M}]\) 序列就得到“无条件”分布，因此不需要成对数据训练无条件模型（公式见 §5）。在 MT-Bench 上，用 16 倍预训练时间的 1.1B MDM 与带 KV cache 的同尺寸 ARM 对比：128 步得 1.56 分、396 s，ARM 1.57 分、555 s（快约 1.4 倍）；256 步 1.60 分、780 s（慢约 1.4 倍）。<span class="src">SMDM §4、§6、Tab. 4；单卡 A100-40GB</span></p>
+<h3 id="illada">3.7 iLLaDA：12T 重训改了什么</h3>
+<p>目标与 LLaDA 完全相同，改动都在“配方”上：<span class="src">iLLaDA §2</span></p>
+<ul>
+  <li><b>架构</b>：改回 GQA（8 个 KV 头），理由是 dKV-Cache 等近似缓存已经可用，GQA 能降低缓存显存；输入嵌入与 LM head 共享；词表 155,136；最大长度 8192。总参数 7.62B，非嵌入参数仍为 6.98B。<span class="src">iLLaDA §2.1、Tab. 1</span></li>
+  <li><b>预训练</b>：12T token；以 30% 概率把 8192 长的序列切成两段，用变长 FlashAttention 打包；学习率升到 \(2\times10^{-4}\) 后恒定，loss 停滞时切到余弦衰减至 \(5\times10^{-6}\)。<span class="src">iLLaDA §2.1</span></li>
+  <li><b>SFT</b>：不再“prompt 可见、response 补 |EOS|”，而是把指令样本拼成连续语料、按 8192 切段、对整段（含 prompt）随机掩码，与预训练同一处理；约 25B token、12 个 epoch，epoch 越多越好。<span class="src">iLLaDA §2.2、§3.2、Fig. 1</span></li>
+  <li><b>推理</b>：变长生成——每次只追加一个块的 \([\mathrm{M}]\)，块解完若出现停止符就结束，否则再追加；Base 评测最大长度 1024、块长 32（HumanEval 用 512，因为半自回归会伤害该基准）。<span class="src">iLLaDA §2.3、App. A；官方 <code>var_generate</code></span></li>
+  <li><b>选择题</b>：用确定性的置信度打分代替 ELBO（§5），PIQA / ARC-C / HellaSwag 分别 +1.3 / +0.6 / +2.3。<span class="src">iLLaDA §3.2、Tab. 4</span></li>
+</ul>
+<p>iLLaDA-Instruct 在难题上会陷入“Wait, let me check again”式循环，作者把它归因于 SFT 中推理模型生成的思维链，推理时随生成变长逐步提高 <code>&lt;/think&gt;</code> 的 logit。<span class="src">iLLaDA App. A；官方 <code>apply_end_think_logit_boost</code></span>论文没有报告采样步数或 TPF。<span class="unverified">iLLaDA 的生成速度与步数设置未核实</span></p>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>SMDM（≤ 1.1B）</th><th>LLaDA 8B</th><th>iLLaDA 8B</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>掩码扩散上界，\(\alpha_t=1-t\)，权重 \(1/t\)，无时间输入 <span class="src">SMDM Eq. 4</span></td><td>同一目标；SFT 只掩 response <span class="src">LLaDA Eq. 3、5</span></td><td>同一目标；SFT 对整段（含 prompt）掩码 <span class="src">iLLaDA §2.2</span></td><td>逐 token 交叉熵 = 精确 NLL</td></tr>
+    <tr><td>注意力与 KV cache</td><td>encoder 全双向；无 cache <span class="src">SMDM §3</span></td><td>全双向 MHA；论文称与 KV cache 不兼容 <span class="src">LLaDA §2.2</span></td><td>全双向 GQA（8 KV 头），为近似缓存留余地 <span class="src">iLLaDA §2.1</span></td><td>因果 + 精确 KV cache；LLaMA 3 8B 为 8 KV 头 <span class="src">LLaDA Tab. 5</span></td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>MT-Bench 用 64 / 128 / 256 步（NFE），对照 ARM 平均 325.94 NFE；每步 token 数未单独报告 <span class="src">SMDM §6、Tab. 4</span></td><td>主表 TPF = 1（步数 = 长度）；效率测试 256 长度用 32–256 步，TPF 8–1 <span class="src">LLaDA App. B.6、Fig. 5</span></td><td>未报告 <span class="src">iLLaDA App. A</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>反转诅咒：DescriptionToName 反向 92% vs GPT-3 0% <span class="src">SMDM Tab. 5</span></td><td>反转诗补全反向 45.6 vs GPT-4o 34.3；原生填空 <span class="src">LLaDA Tab. 4</span></td><td>同一模型可变长按块生成；多 epoch SFT 持续受益 <span class="src">iLLaDA §2.3、Fig. 1</span></td><td>精确似然、流式输出、成熟服务栈</td></tr>
+    <tr><td>代价与失效情形</td><td>同验证损失约 16× 计算（单 epoch、ELBO 口径）<span class="src">SMDM §3</span></td><td>生成长度须预设；|EOS| 早停；每步全量重算；似然需 128 次 MC <span class="src">LLaDA App. B.4、B.6</span></td><td>Instruct 平均 67.1 仍低于 Qwen2.5-7B Instruct 77.1；推理循环 <span class="src">iLLaDA Tab. 3、App. A</span></td><td>一步一 token，小 batch 下访存受限</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、块与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>画布</td><td>\([1,\,|c|+L]\)</td><td>prompt 不变，生成区初值全为 126336（\([\mathrm{M}]\)）<span class="src">官方 <code>generate.py</code></span></td></tr>
+    <tr><td>每步 logits</td><td>\([1,\,|c|+L,\,126464]\)</td><td>整张画布都要算，只用当前块内 \([\mathrm{M}]\) 位置</td></tr>
+    <tr><td>块与步</td><td>\(L/B\) 块，每块 \(N/(L/B)\) 步</td><td>块内每步定稿 \(\approx B\cdot L/(B N)=L/N\) 个，即 TPF \(=L/N\)</td></tr>
+    <tr><td>前向次数</td><td>\(N\)</td><td>每次注意力为 \((|c|+L)^2\) 量级；AR 用 KV cache 只算新 token</td></tr>
+    <tr><td>选择题打分</td><td>每候选 128 次前向（batch 16 × 8）</td><td>MMLU 类单 token 任务 1 次 <span class="src">LLaDA App. B.6；官方 <code>get_log_likelihood.py</code></span></td></tr>
+    <tr><td>预训练 batch</td><td>\(1280\times4096\) token / 步</td><td>每卡 4 条 <span class="src">LLaDA §2.2</span></td></tr>
+    <tr><td>显存（推理）</td><td>输入 / 输出 1024 / 1024：17.53 GB vs LLaMA3 带 cache 16.41 GB</td><td>LLaDA 显存与步数无关 <span class="src">LLaDA Tab. 11</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>前向过程逐 token 独立：\(q(x_t^{i}\mid x_0^{i})\) 以概率 \(1-t\) 保持原样、以概率 \(t\) 变成 \([\mathrm{M}]\)。训练目标与它的上界关系：<span class="src">LLaDA Eq. 3–4、Eq. 7–8</span></p>
+<div class="formula">$$\mathcal{L}(\theta)=-\mathbb{E}_{t,\,x_0,\,x_t}\Big[\frac{1}{t}\sum_{i=1}^{L}\mathbf{1}\big[x_t^{i}=[\mathrm{M}]\big]\log p_{\theta}(x_0^{i}\mid x_t)\Big]\;\ge\;-\mathbb{E}_{x_0}\log p_{\theta}(x_0).$$</div>
+<p>与 BERT 的区别是掩码比例随机且有 \(1/t\) 权重；与 MaskGIT 的区别也是这个 \(1/t\)——没有它就与最大似然失去联系。<span class="src">LLaDA §2.1</span>条件似然的低方差等价形式（选择题打分用）：<span class="src">LLaDA Eq. 6</span></p>
+<div class="formula">$$-\log p_{\theta}(r_0\mid c)\;\le\;-\mathbb{E}_{l\sim U\{1,\dots,L\},\,r_l}\Big[\frac{L}{l}\sum_{i=1}^{L}\mathbf{1}\big[r_l^{i}=[\mathrm{M}]\big]\log p_{\theta}(r_0^{i}\mid c,r_l)\Big].$$</div>
+<p>同一目标也等价于“对所有 \(L!\) 种顺序平均”的任意顺序自回归，这是双向推理能力的解释：<span class="src">LLaDA Eq. 15</span></p>
+<div class="formula">$$-\mathbb{E}_{x_0,\;\pi\sim U_{\pi}}\sum_{i=1}^{L}\log p_{\theta}\big(x_0^{\pi(i)}\mid x_0^{\pi(&lt;i)};\pi\big).$$</div>
+<p>SMDM 的无监督 CFG（\(w\) 为强度，把 \(c\) 换成同长度的 \([\mathrm{M}]\) 串）与 iLLaDA 的置信度打分（\(\tilde y_{k-1}\) 为已揭示真值 token、其余为 \([\mathrm{M}]\)）：<span class="src">SMDM Eq. 7；iLLaDA Eq. 2</span></p>
+<div class="formula">$$\tilde p_{\theta}(x_0\mid c,x_t)\propto\frac{p_{\theta}(x_0\mid c,x_t)^{1+w}}{p_{\theta}(x_0\mid [\mathrm{M}]^{|c|},x_t)^{w}},\qquad S_{\mathrm{conf}}(y\mid c)=\sum_{k=1}^{|y|}\log p_{\theta}\big(y^{i_k}\mid c,\tilde y_{k-1}\big),\;\; i_k=\arg\max_{i\in\mathcal{M}_{k-1}}p_{\theta}(y^{i}\mid c,\tilde y_{k-1}).$$</div>
+<p>\(S_{\mathrm{conf}}\) 是“按模型自己最有把握的顺序逐个揭示真值”时的对数概率之和，论文明确说它不是似然估计，只用于在有限候选间比较。<span class="src">iLLaDA §2.3</span>它与 2026-10 复核 16× 时用的“按解码顺序的精确似然”（DUEL）形似而不同：DUEL 只依据已揭示的 token 决定下一个位置（如模型自身的 top-1 置信度），因而是归一化的分布；iLLaDA 选的是“真值 token 概率最高”的位置，顺序偷看了答案，所以只能作打分用（此对比为本页分析）。<span class="src">2610.17590 §2；iLLaDA Eq. 2</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码</span>
+  <b>① 定稿数量。</b>LLaDA Alg. 5 第 12 行令 \(n_{un}=\lfloor L(1-s)\rfloor\)（注释为“未掩 token 数”），第 14 行却把“最低的 \(n_{un}\) 个”重新掩上，两处自相矛盾；官方代码按“每步转移 k 个最高置信度位置”实现，k 由块内掩码数在步数上均分。<span class="src">LLaDA App. A.3；官方 <code>generate.py</code></span>
+  <b>② MC 似然。</b>Eq. 6 写的是独立均匀抽 \(l\)；官方 <code>get_log_likelihood.py</code> 在一个 batch 内让 \(l\) 等间隔分层（随机起点 + 等距），方差更低。
+  <b>③ 训练 \(t\) 的下界。</b>Alg. 1 写 \(t\sim U(0,1]\)；官方示例取 \(t\in[10^{-3},1)\) 以避免 \(1/t\) 发散。<span class="src">官方 <code>GUIDELINES.md</code></span>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">llada_generate_and_score.py（按官方 generate.py / get_log_likelihood.py 简化，batch = 1）</div>
+<pre><code class="lang-py">MASK = 126336
+
+def generate(p_theta, c, L=256, N=256, B=32):
+    x = cat([c, full(L, MASK)])                 # 画布：prompt + L 个 [M]
+    n_blocks, steps = L // B, N // (L // B)     # 每块分到的步数
+    for b in range(n_blocks):
+        lo, hi = len(c) + b * B, len(c) + (b + 1) * B
+        ks = split_evenly(count(x[lo:hi] == MASK), steps)  # 每步定稿几个
+        for k in ks:
+            logits = p_theta(x)                 # 全双向、整张画布、无 KV cache
+            x_hat = argmax(logits + gumbel(temp))   # temp = 0 时即贪心
+            conf = softmax(logits)[x_hat]
+            conf[hi:] = -inf                    # 半自回归：块外不选（B = L 即纯扩散）
+            conf[x != MASK] = -inf              # 已定稿的位置不再改
+            pick = topk(conf, k)                # 其余位置保持 [M] = 低置信度重掩码
+            x[pick] = x_hat[pick]
+    return cut_after_eos(x[len(c):])
+
+def log_likelihood(p_theta, c, r, n_mc=128, bs=16):
+    L, est = len(r), []
+    for _ in range(n_mc // bs):
+        l = stratified(1, L, bs)                # 官方实现：batch 内等距分层
+        r_l = mask_exactly(r, l)                # 第 j 行恰好掩 l[j] 个
+        logp = log_softmax(p_theta(cat([c, r_l])))
+        nll = -sum_masked(logp, r) * L / l      # Eq. 6 的权重 L / l
+        est.append(mean(nll))
+    return -mean(est)                           # 选择题：取估计值最大的选项
+
+def train_step(p_theta, x0, prompt_len=0):
+    t = uniform(1e-3, 1.0)                      # 每条序列一个 t
+    m = (rand_like(x0) &lt; t); m[:prompt_len] = False   # SFT：prompt 不加噪
+    xt = where(m, MASK, x0)
+    ce = cross_entropy(p_theta(xt)[m], x0[m])
+    return ce.sum() / t / len(x0)               # 被掩位置 CE ÷ t，再按长度平均</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>SMDM</th><th>LLaDA 8B</th><th>iLLaDA 8B</th></tr></thead>
+  <tbody>
+    <tr><td>数据</td><td>SlimPajama 627B，Llama-2 tokenizer <span class="src">§3</span></td><td>2.3T 自建语料 <span class="src">§2.2</span></td><td>12T <span class="src">§2.1</span></td></tr>
+    <tr><td>序列长度</td><td>2048；1% 随机长度 <span class="src">§3、§5</span></td><td>4096；1% 截为 \(U[1,4096]\) <span class="src">§2.2</span></td><td>8192；30% 拆成两段 <span class="src">§2.1</span></td></tr>
+    <tr><td>学习率</td><td>余弦 4e-4 → 4e-5，1% warmup <span class="src">App. B.2</span></td><td>WSD：2000 iter 升到 4e-4；1.2T 后降到 1e-4 再训 0.8T；最后 0.3T 线性降到 1e-5 <span class="src">§2.2</span></td><td>升到 2e-4 恒定，停滞后余弦到 5e-6 <span class="src">§2.1</span></td></tr>
+    <tr><td>优化器 / batch</td><td>AdamW (0.9, 0.95)，wd 0.1，batch 256 <span class="src">App. B.2</span></td><td>AdamW，wd 0.1，batch 1280 <span class="src">§2.2</span></td><td>AdamW，wd 0.1；batch 未公开</td></tr>
+    <tr><td>算力</td><td>IsoFLOP \(6\times10^{18}\)–\(10^{20}\)；下游 1.1B 用 \(3.3\times10^{21}\) <span class="src">§3、App. B.2</span></td><td>0.13M H800 GPU 小时 <span class="src">§2.2</span></td><td><span class="unverified">未公开</span></td></tr>
+    <tr><td>SFT</td><td>ShareGPT，3 epoch，2e-4 余弦 <span class="src">App. B.4</span></td><td>4.5M 对，3 epoch，2.5e-5，batch 256 <span class="src">§2.3</span></td><td>约 25B token × 12 epoch，5e-6 <span class="src">§2.2</span></td></tr>
+    <tr><td>采样（评测）</td><td>MaskGIT 式贪心 <span class="src">App. A</span></td><td>Base：长度 = 步数 = 1024；Instruct：长度 3–512、步数 = 长度 <span class="src">App. B.6</span></td><td>块长 32（HumanEval 512），长度 1024–4096 <span class="src">App. A</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>LLaDA Base 与 AR 同协议评测</b>（* 为作者用同一实现重测；括号内为 shot 数）：<span class="src">LLaDA Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>基准</th><th class="num">LLaDA 8B</th><th class="num">LLaMA3 8B</th><th class="num">LLaMA2 7B</th></tr></thead>
+  <tbody>
+    <tr><td>预训练 token</td><td class="num">2.3T</td><td class="num">15T</td><td class="num">2T</td></tr>
+    <tr class="hl"><td>MMLU (5)</td><td class="num">65.9</td><td class="num">65.4</td><td class="num">45.9</td></tr>
+    <tr><td>BBH (3)</td><td class="num">49.7</td><td class="num">62.1</td><td class="num">39.4</td></tr>
+    <tr><td>ARC-C (0)</td><td class="num">45.9</td><td class="num">53.1</td><td class="num">46.3</td></tr>
+    <tr class="hl"><td>GSM8K (4)</td><td class="num">70.3</td><td class="num">48.7</td><td class="num">13.1</td></tr>
+    <tr><td>MATH (4)</td><td class="num">31.4</td><td class="num">16.0</td><td class="num">4.3</td></tr>
+    <tr><td>HumanEval (0)</td><td class="num">35.4</td><td class="num">34.8</td><td class="num">12.8</td></tr>
+    <tr><td>CMMLU (5)</td><td class="num">69.9</td><td class="num">50.7</td><td class="num">32.5</td></tr>
+  </tbody>
+</table></div>
+<p>数学与中文的优势作者自己也归因于数据分布差异，而非扩散本身；GSM8K 的泄漏风险用一个合成的 iGSM 集检验：4 / 5 / 6 步题 LLaDA 64 / 41 / 44 vs LLaMA3 38 / 35 / 34（每档 100 题）。<span class="src">LLaDA §3.2、Tab. 12</span>在 1B 规模同架构同数据的对照中，LLaDA 与自建 AR 在六个任务上随计算的趋势相当。<span class="src">LLaDA §3.1、Fig. 3</span></p>
+<p><b>iLLaDA 与其他 Base 模型</b>（LLaDA 列取自 LLaDA 论文，Dream 与 Qwen2.5 列取自 Dream 论文；iLLaDA 选择题用置信度打分——四列的协议并不统一）：<span class="src">iLLaDA Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>基准</th><th class="num">iLLaDA 8B（12T）</th><th class="num">LLaDA 8B（2.3T）</th><th class="num">Dream 7B（18T+0.6T）</th><th class="num">Qwen2.5 7B（18T）</th></tr></thead>
+  <tbody>
+    <tr><td>MMLU</td><td class="num">74.8</td><td class="num">65.9</td><td class="num">69.5</td><td class="num">71.9</td></tr>
+    <tr class="hl"><td>BBH</td><td class="num">71.3</td><td class="num">49.7</td><td class="num">57.9</td><td class="num">63.9</td></tr>
+    <tr><td>ARC-C</td><td class="num">60.8</td><td class="num">45.9</td><td class="num">59.8</td><td class="num">51.5</td></tr>
+    <tr><td>GSM8K</td><td class="num">81.9</td><td class="num">70.3</td><td class="num">77.2</td><td class="num">78.9</td></tr>
+    <tr><td>HumanEval</td><td class="num">50.0</td><td class="num">35.4</td><td class="num">57.9</td><td class="num">56.7</td></tr>
+    <tr class="hl"><td>8 项平均</td><td class="num">63.9</td><td class="num">51.1</td><td class="num">61.4</td><td class="num">63.3</td></tr>
+  </tbody>
+</table></div>
+<p>用 ELBO 式似然打分时 iLLaDA 的 ARC-C 是 60.2、HellaSwag 74.3（置信度打分 60.8 / 76.6），所以 ARC-C 对 LLaDA 的大幅领先主要不是打分规则造成的。<span class="src">iLLaDA Tab. 4</span>Instruct 平均：iLLaDA 67.1，LLaDA 54.5，Dream 60.2，Qwen2.5 7B Instruct 77.1；作者把剩余差距归于 Qwen2.5 额外做了 RL。<span class="src">iLLaDA Tab. 3、§3.1</span></p>
+<p><b>速度</b>：单卡 A100-80GB、batch 1、bf16、输出 256 token，LLaDA 不做任何推理优化而 LLaMA3 用 KV cache；在 GSM8K、MATH 上调到与 LLaMA3 相当的质量时，吞吐分别为其 1.5 倍和 1.8 倍；HumanEval 上吞吐相同时质量相当，MBPP 落后。<span class="src">LLaDA App. B.7、Fig. 5</span>这里 AR 一侧是 HF 风格的 batch 1 推理，不是 vLLM 级的服务引擎；高并发下结论未测。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul>
+    <li>把 <a href="03-mdlm.html">MDLM</a> / <a href="02-sedd.html#radd">RADD</a> 的加权 MLM 目标原样放大到 8B、2.3T token，并证明能做上下文学习与对话。</li>
+    <li>给出可复用的推理与评测套路：低置信度重掩码、半自回归块、MC-ELBO 选择题打分；开放权重成为后续 <a href="14-kv-cache.html">Fast-dLLM / dKV-Cache / D2F</a>、<a href="17-rl.html">d1 / LLaDA 1.5</a>、<a href="19-multimodal.html">LLaDA-V / MMaDA / LaViDa</a> 的底座。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>从零训练太贵：<a href="07-dream.html">Dream / DiffuLLaMA</a> 改走 AR 转换；<a href="09-llada2.html">LLaDA2.0</a> 用 AR 转换做到 100B。</li>
+    <li>16× 是否成立：<a href="08-data-constrained.html">数据受限研究</a>与 2026-10 的 <a href="https://arxiv.org/abs/2610.17590">16× 复核</a>（精确似然下 12.8×，块扩散 + 编码器-解码器在块长 4 时 3.0×）。<span class="src">2610.17590 摘要</span></li>
+    <li>定长画布与无缓存：<a href="11-block-diffusion.html">块扩散</a>与 <a href="12-ar-to-block.html">AR→块扩散</a>把半自回归采样变成训练时的结构。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q11"><span class="qid">Q11</span>LLaDA 为什么默认用“低置信度重掩码”而非按反向过程随机去掩码？又为什么 Instruct 模型还需要半自回归块？块长取 1、32 或整段时会发生什么？</h3>
+  <div class="ans"><p class="short">随机重掩码对应训练目标的反向过程，但贪心时每步会把一些低把握的位置也提前定稿，且同一步内各位置独立决定，错误无法回头改；保留最高置信度的 k 个相当于给采样“降温”，GSM8K 从 21.3 升到 70.0。半自回归针对的是 SFT 的 |EOS| 补齐：纯扩散时 |EOS| 置信度高、会在画布末尾被过早定稿，限制只在当前块里选就绕开了它（GSM8K 69.4 → 77.5，块长 8 时 78.6）。</p>
+    <ul><li>块长 = 整段即纯扩散，对 Base 整体最好；块越短越接近左到右，Base 上 block diffusion 的分数随块长缩短而下降。</li>
+    <li>块长 1 的极端论文没有在定长画布上测；它测的“AR 采样”（不带后续 \([\mathrm{M}]\)）对 Instruct 几乎完全失败（GSM8K 0），因为模型被训练成要在给定长度内说完。</li>
+    <li>低置信度规则不是训练目标推出的采样器，选择顺序依赖模型自身的置信度；因子分解误差与并行上限见 <a href="16-order-limits.html">第 16 页</a>。</li></ul>
+    <p class="cite">依据：LLaDA §2.4、App. B.4、Tab. 7–9；官方 generate.py。</p>
+  </div>
+  <h3 id="q12"><span class="qid">Q12</span>SMDM 的“掩码扩散约需 16× 计算”是在什么口径下得到的？哪些因素会改变这个倍数，LLaDA 为什么认为它不妨碍放大？</h3>
+  <div class="ans"><p class="short">它是单 epoch（数据不重复）、全序列 decoder-only MDM、以 ELBO 的 MC 估计对比 AR 的精确 NLL、\(C=6ND\) 计 FLOPs、在 \(6\times10^{18}\)–\(10^{20}\) FLOPs 内拟合幂律后读出的“相同验证损失所需计算之比”。每一项口径都可能改变倍数：评测改用按解码顺序的精确似然、训练改为块扩散或编码器-解码器、或者数据不足需要多 epoch。</p>
+    <ul><li>2026-10 的复核在同一数据与超参下用 ELBO 读出 17.8×，同一批模型换精确似然降到 12.8×，块扩散 + 编码器-解码器在块长 32 / 8 / 4 时为 7.8× / 4.6× / 3.0×（结论很新，尚无复现）。</li>
+    <li>数据受限时情况反过来：多 epoch 下扩散可以反超 AR（<a href="08-data-constrained.html">第 08 页</a>），但两篇数据受限论文本身也有方法学争议。</li>
+    <li>LLaDA 的理由是似然只是下游能力的间接指标，且扩散优化的是上界、不可直接比；它把对照范围从 \(10^{18}\)–\(10^{20}\) 扩到 \(10^{20}\)–\(10^{23}\)，看下游任务而非损失。SMDM 自己的 MT-Bench 实验也是“多花 16 倍预训练，换来同质量下 1.4 倍采样速度”。</li></ul>
+    <p class="cite">依据：SMDM §3、§6、App. B.2；LLaDA §3.1；2610.17590 摘要、§4。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Nie, Zhu, You, Zhang, Ou, Hu, Zhou, Lin, Wen, Li. <i>Large Language Diffusion Models.</i> NeurIPS 2025；本页读 arXiv v3。<a href="https://arxiv.org/abs/2502.09992">论文</a> · <a href="https://github.com/ML-GSAI/LLaDA">代码</a> · <a href="https://huggingface.co/GSAI-ML/LLaDA-8B-Base">Base 权重</a> · <a href="https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct">Instruct 权重</a> · <a href="https://ml-gsai.github.io/LLaDA-demo/">项目页</a>。</li>
+  <li>Nie, Zhu, Du, Pang, Liu, Zeng, Lin, Li. <i>Scaling up Masked Diffusion Models on Text.</i> ICLR 2025；arXiv v3。<a href="https://arxiv.org/abs/2410.18514">论文</a> · <a href="https://github.com/ML-GSAI/SMDM">代码</a>。</li>
+  <li>Nie, Min, Xu, Huang, Song, Shan, Lin, Zhao, Li, Wen. <i>Improved Large Language Diffusion Models.</i> 2026，arXiv v1。<a href="https://arxiv.org/abs/2606.25331">论文</a> · <a href="https://huggingface.co/GSAI-ML/iLLaDA-8B-Base">Base 权重</a> · <a href="https://huggingface.co/GSAI-ML/iLLaDA-8B-Instruct">Instruct 权重</a>（代码同 LLaDA 仓库，<code>mask_id=5</code>）。</li>
+  <li>Wang et al. <i>Revisiting the 16x Pretraining Compute Gap between Diffusion and Autoregressive Language Models.</i> 2026-10，arXiv v1。<a href="https://arxiv.org/abs/2610.17590">论文</a>。</li>
+  <li>Ou et al. RADD（时间无关参数化）：见 <a href="02-sedd.html#radd">第 02 页</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

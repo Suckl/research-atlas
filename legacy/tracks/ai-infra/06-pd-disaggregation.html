@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PD 分离拆解</title>
+<meta name="description" content="DistServe / Splitwise / Mooncake：为什么要把 prefill 与 decode 拆到不同 GPU，goodput 的定义，KV cache 传输的代价与异构部署的挑战。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="pd-disaggregation">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：两种阶段挤在一张卡上互相拖累</h2>
+<p>连续批处理把 prefill 和 decode 混在同一批里。DistServe 测得：往一个 decode 批里加入一个 prefill 任务，<b>两边都明显变慢</b>——prefill 是算力受限的大矩阵乘，会独占 SM 几十到几百毫秒，同批的 decode 请求这一步的 TPOT 直接被拉长；反过来 decode 的小矩阵乘又把 prefill 的批次搅碎。更根本的是，两种阶段想要的<b>并行策略和批策略不同</b>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>Prefill</th><th>Decode</th></tr></thead>
+  <tbody>
+    <tr><td>瓶颈</td><td>算力</td><td>带宽（权重 + KV 读取）</td></tr>
+    <tr><td>SLO</td><td>TTFT（首 token）</td><td>TPOT / TBT（逐 token）</td></tr>
+    <tr><td>想要的并行</td><td>TTFT 紧时用算子内并行（TP）切短单次计算</td><td>TPOT 紧时也要 TP；吞吐优先时流水并行 / 多副本</td></tr>
+    <tr><td>想要的 batch</td><td>小（几个长 prompt 就打满算力）</td><td>大（摊薄权重读取）</td></tr>
+    <tr><td>功耗（Splitwise）</td><td>随 batch 升高，对功率上限敏感</td><td>平坦；350 W 上限几乎不影响延迟</td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  把 prefill 和 decode 拆到不同的 GPU 池，各自按自己的 SLO 选并行度和 batch；代价是每条请求要把 KV cache 从 prefill 卡传到 decode 卡。优化目标不是“更快”，而是 <b>goodput</b>——每张卡在满足 TTFT 与 TPOT 两个 SLO 的前提下能服务的请求率。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构（DistServe）</h2>
+<div class="legend">
+  <span><i class="sw data"></i>请求</span><span><i class="sw pred"></i>Prefill 实例</span><span><i class="sw enc"></i>Decode 实例</span><span><i class="sw tgt"></i>KV cache</span><span><i class="sw act"></i>调度 / 放置</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="PD 分离架构">
+    <g data-part="requests" data-step="1"><rect class="box data" x="20" y="40" width="130" height="56" rx="10"/><text class="t-c t-b" x="85" y="62">请求流</text><text class="t-c t-xs" x="85" y="82">prompt 长短不一</text></g>
+    <g class="act" data-part="router" data-step="1"><rect class="box" x="20" y="130" width="130" height="70" rx="10"/><text class="t-c t-b" x="85" y="154">全局调度</text><text class="t-c t-xs" x="85" y="172">选 prefill 实例 /</text><text class="t-c t-xs" x="85" y="188">decode 实例</text></g>
+    <path class="edge" d="M85,96 V126" data-step="1"/>
+    <!-- prefill pool -->
+    <rect class="panel" x="190" y="20" width="300" height="250" rx="12"/>
+    <text class="t-lg" x="204" y="46">Prefill 池</text>
+    <text class="t-xs" x="204" y="64">算力受限 · 为 TTFT 调并行</text>
+    <g class="pred" data-part="prefill" data-step="2"><rect class="box" x="204" y="80" width="270" height="70" rx="10"/><text class="t-c t-b" x="339" y="104">Prefill 实例（如 TP=4）</text><text class="t-c t-sm" x="339" y="124">一次 prefill 整段 prompt，产出首 token</text><text class="t-c t-xs" x="339" y="140">小 batch，长 prompt 可切 chunk</text></g>
+    <g class="tgt" data-part="kv-src" data-step="3"><rect class="box" x="204" y="170" width="270" height="56" rx="10"/><text class="t-c t-b" x="339" y="192">KV cache（prefill 卡显存）</text><text class="t-c t-xs" x="339" y="212">逐层算完逐层发，与计算重叠（Splitwise / Mooncake）</text></g>
+    <path class="edge" d="M150,165 C170,165 170,115 200,115" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="2"/>
+    <path class="edge" d="M339,150 V166" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="3"/>
+    <text class="t-xs" x="204" y="252">首 token 直接返回用户（TTFT 到此为止）</text>
+    <!-- transfer -->
+    <g data-part="transfer" data-step="4">
+      <path class="edge" d="M474,198 C540,198 540,198 606,198" style="stroke:var(--c-tgt);stroke-width:3;marker-end:url(#ah-tgt)"/>
+      <rect class="note-bg" x="486" y="150" width="110" height="40" rx="6"/>
+      <text class="t-c t-xs" x="541" y="164">NVLink / RDMA</text>
+      <text class="t-c t-xs" x="541" y="180">S × KV/token 字节</text>
+    </g>
+    <!-- decode pool -->
+    <rect class="panel" x="610" y="20" width="340" height="250" rx="12"/>
+    <text class="t-lg" x="624" y="46">Decode 池</text>
+    <text class="t-xs" x="624" y="64">带宽受限 · 为 TPOT 调并行 · 大 batch</text>
+    <g class="tgt" data-part="kv-dst" data-step="4"><rect class="box" x="624" y="170" width="310" height="56" rx="10"/><text class="t-c t-b" x="779" y="192">KV cache（decode 卡显存）</text><text class="t-c t-xs" x="779" y="212">按需从 prefill 卡拉取；缓冲等待 decode 调度</text></g>
+    <g class="enc" data-part="decode" data-step="5"><rect class="box" x="624" y="80" width="310" height="70" rx="10"/><text class="t-c t-b" x="779" y="104">Decode 实例（如 TP=2 或 PP）</text><text class="t-c t-sm" x="779" y="124">连续批处理，几十上百条请求一起逐 token 生成</text><text class="t-c t-xs" x="779" y="140">没有 prefill 插队 → TPOT 稳定</text></g>
+    <path class="edge" d="M779,170 V154" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="5"/>
+    <text class="t-xs" x="624" y="252">后续 token 流式返回（TPOT）</text>
+    <!-- placement -->
+    <g class="act" data-part="placement" data-step="6">
+      <rect class="box" x="190" y="300" width="760" height="110" rx="10"/>
+      <text class="t-c t-b" x="570" y="324">放置算法：给定 SLO 与带宽，为两种实例分别搜索并行配置与副本数，最大化每 GPU goodput</text>
+      <text class="t-c t-sm" x="570" y="348">高带宽集群（算法 1）：prefill / decode 独立优化；低带宽集群（算法 2）：配对的 prefill 与 decode 阶段放同一节点，KV 走 NVLink</text>
+      <text class="t-c t-xs" x="570" y="370">TTFT 紧 → prefill 用算子内并行；TPOT 紧 → decode 用算子内并行；吞吐优先 → 算子间（流水）并行</text>
+      <text class="t-c t-xs" x="570" y="392">Splitwise 加“混合池”：高负载时机器临时跨角色；Mooncake 加全局 KVCache 池（CPU DRAM / SSD）与早期拒绝</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="requests"><h4>请求流</h4><p>长短不一的 prompt、不同的输出长度。混部时一条长 prompt 的 prefill 会让同批几十条 decode 请求这一步集体变慢。</p></div>
+    <div data-note="router"><h4>全局调度</h4><p>决定每条请求去哪个 prefill 实例、之后去哪个 decode 实例。Mooncake 的 Conductor 还会预测 TTFT / TBT，预计无法满足 SLO 的请求提前拒绝，避免浪费算力。</p></div>
+    <div data-note="prefill"><h4>Prefill 实例</h4><p>只做 prefill，batch 小（几条长 prompt 即可打满算力），并行度为 TTFT 服务：TTFT 紧时用算子内并行（张量并行）把单次 prefill 切短。Mooncake 对超长 prompt 用 chunked pipeline parallelism，把一条请求的 chunk 分到多个节点流水处理。</p></div>
+    <div data-note="kv-src"><h4>KV 在 prefill 卡上</h4><p>prefill 完成后 KV 留在 prefill 卡显存作为缓冲，由 decode 实例按需拉取。Splitwise 的关键优化是<b>逐层传输</b>：第 l 层算完就异步发第 l 层的 KV，与后面层的计算重叠，非重叠部分只剩约 5–8 ms。</p></div>
+    <div data-note="transfer"><h4>传输</h4><p>每条请求要搬 S × (KV / token) 字节。DistServe 给的例子：OPT-66B、512 token 的请求约 1.13 GB；10 req/s 就是 11.3 GB/s（约 90 Gbps）。NVLink（600 GB/s）轻松，InfiniBand 800 Gbps 也够；他们的 25 Gbps 测试床上 OPT-175B 的传输仍只占总延迟 &lt;0.1%，95% 的请求传输延迟 &lt;30 ms。跨节点用 NCCL，节点内用异步 cudaMemcpy；Mooncake 用 GPUDirect RDMA 的 Messenger 组件。</p></div>
+    <div data-note="kv-dst"><h4>KV 到 decode 卡</h4><p>到达后进入 decode 实例的 KV 池，等待被调度进连续批。Mooncake 把 KV 池做成跨节点的分布式缓存（含 CPU DRAM 与 SSD），前缀命中可直接复用，不必重新 prefill。</p></div>
+    <div data-note="decode"><h4>Decode 实例</h4><p>只做 decode，大 batch 摊薄权重读取；没有 prefill 插队，TPOT 稳定。并行度为 TPOT 服务：TPOT 紧时也用张量并行减少单步时间，吞吐优先时用流水并行或多副本。</p></div>
+    <div data-note="placement"><h4>放置算法</h4><p>DistServe 用模拟器枚举两种实例的并行配置（算子内 × 算子间）与副本数，在带宽约束下最大化每 GPU goodput。低带宽集群把“prefill 的第 k 段”和“decode 的第 k 段”放在同一节点，使 KV 不出 NVLink。</p></div>
+    <div data-step-note="1"><h4>① 请求到达，调度器分配 prefill 实例</h4><p>按负载 / 队列长度选择（Splitwise 用 JSQ）。</p></div>
+    <div data-step-note="2"><h4>② Prefill</h4><p>一次性算完 prompt，首 token 返回用户。</p></div>
+    <div data-step-note="3"><h4>③ KV 落在 prefill 卡</h4><p>逐层写出，边算边发。</p></div>
+    <div data-step-note="4"><h4>④ 传输到 decode 卡</h4><p>NVLink / RDMA；字节数 = S × 每 token KV。</p></div>
+    <div data-step-note="5"><h4>⑤ Decode</h4><p>加入 decode 实例的连续批，逐 token 生成。</p></div>
+    <div data-step-note="6"><h4>⑥ 离线放置 + 在线调度</h4><p>两种实例的并行度与数量按 SLO 预先搜索；运行时全局调度维持负载均衡。</p></div>
+  </div>
+  <figcaption>图 1　PD 分离的数据流。依据 DistServe §3–4、Splitwise §4、Mooncake §3–5。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 三篇论文各自强调什么</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>DistServe（OSDI 2024）</th><th>Splitwise（ISCA 2024）</th><th>Mooncake（FAST 2025，Kimi 生产系统）</th></tr></thead>
+  <tbody>
+    <tr><td>核心贡献</td><td>goodput 指标；按 SLO 分别为两种阶段搜索并行配置；放置算法</td><td>阶段的功耗 / 算力特征刻画；<b>异构硬件</b>（H100 做 prompt、A100 做 token）；逐层 KV 传输；混合池</td><td>KVCache 中心化：prefill / decode 池 + 跨节点 KVCache 池（CPU DRAM + SSD）；chunked pipeline prefill；预测式早期拒绝</td></tr>
+    <tr><td>KV 传输</td><td>NCCL / cudaMemcpy；25 Gbps 下 &lt;0.1% 延迟</td><td>InfiniBand，逐层异步；开销 &lt;7% 的 prompt 时间</td><td>GPUDirect RDMA，节点间 800 Gbps；512 token 为哈希块</td></tr>
+    <tr><td>结果</td><td>vs vLLM：请求率 2.0–4.6×（聊天）、4.3×（摘要），SLO 紧 12.6×；vs DeepSpeed-MII 7.4×</td><td>同功耗同成本吞吐 2.35×；或吞吐 1.4× 且成本低 20%；异构方案同功耗下吞吐 1.18×、成本低 10%</td><td>模拟场景吞吐最高 +525%；真实负载多承接 75% 请求；缓存命中最高约 55%</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="c-kvsize">3.1 传多少：KV 的量</h3>
+<p>一条请求的 KV = S × 2 × L × n_kv × d_h × bytes（MLA 为 S × L × 576 × bytes）。用下面的计算器选模型和链路看传输时间——它直接决定 PD 分离能否“把传输藏进计算”：</p>
+<div data-widget="roofline" data-panel="kv"></div>
+
+<h3 id="c-when">3.2 什么时候不该分离</h3>
+<p>DistServe 自己指出：吞吐优先的离线批处理场景下，分离的收益会被削弱，chunked prefill（把 prefill 切块混进 decode 步）可能更合适。分离本质上是用<b>更多 GPU 与一次传输</b>换<b>SLO 下的稳定性</b>；若没有延迟 SLO，让一张卡同时做两件事的总利用率可能更高。</p>
+
+<!-- ================================================================== -->
+<h2 id="questions">4. 简答题</h2>
+<div class="qa">
+  <h3 id="q13"><span class="qid">Q13</span>PD 分离的整体数据流是怎样的？</h3>
+  <div class="ans">
+    <p class="short">把一条请求的 prefill 和 decode 两个阶段放到不同的 GPU（池）上执行，中间通过 KV cache 传输衔接。</p>
+    <ol>
+      <li><b>Prefill 池</b>：算力受限，小 batch、按 TTFT 选并行度（常用更高的 TP）；算完首 token 返回，KV 留在显存。</li>
+      <li><b>传输</b>：decode 实例按需拉取 KV（NVLink / RDMA），逐层异步与 prefill 计算重叠。</li>
+      <li><b>Decode 池</b>：带宽受限，大 batch 连续批处理，按 TPOT 选并行度；没有 prefill 插队。</li>
+      <li><b>调度 / 放置</b>：离线为两种实例搜索并行配置与数量（DistServe），在线做负载均衡与（Mooncake）SLO 预测、早期拒绝；Splitwise 加混合池应对突发负载。</li>
+    </ol>
+    <p class="cite">依据：DistServe §3–4；Splitwise §4；Mooncake §3。</p>
+  </div>
+  <h3 id="q14"><span class="qid">Q14</span>PD 分离优化的指标是什么？为什么它不等于“更快”？</h3>
+  <div class="ans">
+    <p class="short">不是“更快”，而是<b>消除两种阶段的互相干扰 + 让每种阶段按自己的 SLO 独立选并行与批策略</b>，从而提高 goodput（满足 TTFT 和 TPOT 的请求率）。单条请求甚至可能因为多了一次传输而略慢。</p>
+    <ul>
+      <li>混部时 prefill 把同批 decode 的 TPOT 拉长、decode 的小算子又拖慢 prefill——DistServe 实测两边都显著变慢。分离后 decode 的 TPOT 曲线平稳，prefill 不再排队等 decode 步。</li>
+      <li>并行策略解耦：prefill 想要高 TP 压 TTFT，decode 想要大 batch 和适度 TP 压 TPOT；混部只能取一个折中配置。</li>
+      <li>资源配比解耦：prefill 与 decode 的算力需求比例随负载（prompt / 输出长度）变化，分离后可以独立扩缩两类实例；异构时还能把 decode 放到更便宜、带宽充足的卡上（Splitwise 的 Perf/W、Perf/$）。</li>
+      <li>结果以 goodput 衡量：DistServe 在同样的 SLO 下承接 2–4.6× 的请求率，或在同样请求率下 SLO 收紧 12.6×。</li>
+    </ul>
+    <p class="cite">依据：DistServe §2.3（干扰）、§3（goodput 与并行分析）、§6；Splitwise §3（Insight I–V）。</p>
+  </div>
+  <h3 id="q15"><span class="qid">Q15</span>若 prefill 与 decode 运行在不同厂商的 GPU 上，最大的困难是什么？</h3>
+  <div class="ans">
+    <p class="short">最大的挑战是 <b>KV cache 的“契约”在两套软硬件栈之间没有共同语言</b>——布局、数据类型 / 量化格式、数值结果都要一致，而且两边没有共享的高速互连与通信库。</p>
+    <ul>
+      <li><b>传输通路</b>：没有 NVLink 这种跨厂商的链路，只能走 RDMA 网络；NCCL 与 RCCL 不能互通，需要厂商无关的传输层（如 NIXL / Mooncake Transfer Engine 这类基于 UCX / RDMA 的实现），且两边的 GPUDirect RDMA 支持都要打通。</li>
+      <li><b>KV 布局与格式</b>：两边注意力内核（FlashAttention vs CK / aiter）期望的 KV 张量布局（[block, head, token, dim] 的顺序、块大小、对齐）、FP8 的具体格式与缩放因子粒度可能不同，需要在传输时转换或约定统一格式。</li>
+      <li><b>数值一致性</b>：prefill 和 decode 用不同内核、不同精度（甚至不同的 FP8 累加策略）会让同一位置的 KV 有微小差异，长序列 decode 下误差累积可能影响输出；这与 <a href="13-batch-invariance.html">训推不一致</a>是同一类问题。</li>
+      <li><b>调度与容量匹配</b>：两种卡的吞吐、显存、KV 容量不同，放置算法要按各自的性能模型重新搜索；故障域、驱动版本、两套运维栈也是现实成本。</li>
+    </ul>
+    <p class="cite">依据：Splitwise §4（异构 Splitwise-HA 的设计前提是同厂商不同代；跨厂商的挑战为依据上述论文机制的推论）；DistServe §4.2（KV 传输）。</p>
+  </div>
+  <h3 id="q16"><span class="qid">Q16</span>决定 PD 之间 KV 传输量的核心因素是什么？</h3>
+  <div class="ans">
+    <p class="short">通信量 = 每条请求的 KV 字节数 × 请求率，而每条请求的 KV 字节数由<b>模型的注意力架构</b>（每 token 缓存多少数）、<b>上下文长度</b>和<b>KV 精度</b>决定：</p>
+    <div class="formula">$$\text{bytes/request} = S \times 2 \times L \times n_{kv}\times d_h \times \text{bytes}\qquad(\text{MLA}: S\times L\times(d_c+d_r)\times\text{bytes})$$</div>
+    <ul>
+      <li>最大的杠杆是<b>每 token 的 KV 大小</b>：MHA → GQA 降 4–8×，MLA 再降数倍（DeepSeek-V3 每 token 约 70 KB vs Llama-3-70B 320 KB vs OPT-13B 800 KB）；FP8 KV 再减半。架构一定，S 就是唯一变量。</li>
+      <li>其次是<b>能否与计算重叠</b>：逐层发送（Splitwise）把非重叠部分压到几毫秒；异构时若格式需要转换，转换本身也要流水化。</li>
+      <li>异构特有的加项：若两边 KV 格式不同，可能要以较高精度传输再转换（字节数上升），或多一次打包 / 解包。</li>
+      <li>DistServe 的量级：OPT-66B、512 token ≈ 1.13 GB/请求；10 req/s ≈ 90 Gbps——正好是一张 100 Gbps 网卡的量，所以“压 KV 大小”比“加网卡”更根本。</li>
+    </ul>
+    <p class="cite">依据：DistServe §4.2 的带宽估算；<a href="00-inference-basics.html#kv-size">KV 大小公式</a>；DeepSeek-V2/V3 的 MLA 维度。</p>
+  </div>
+</div>
+
+<div class="callout info next-read">
+  <span class="callout-title">后续节点</span>
+  同一机器内的折中方案见 <a href="15-orca-sarathi.html#c-sarathi">Sarathi-Serve 的 chunked prefill</a>；Mooncake 之后的 KV 存储层见 <a href="21-kv-cache-tiering.html">KV cache 分层存储</a>（LMCache、Strata）。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zhong et al. <i>DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving.</i> OSDI 2024. <a href="https://arxiv.org/abs/2401.09670">arXiv:2401.09670</a></li>
+  <li>Patel et al. <i>Splitwise: Efficient Generative LLM Inference Using Phase Splitting.</i> ISCA 2024. <a href="https://arxiv.org/abs/2311.18677">arXiv:2311.18677</a></li>
+  <li>Qin et al. <i>Mooncake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot.</i> FAST 2025. <a href="https://arxiv.org/abs/2407.00079">arXiv:2407.00079</a></li>
+  <li>Agrawal et al. <i>Sarathi-Serve.</i> OSDI 2024.（chunked prefill 路线）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

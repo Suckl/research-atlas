@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>块扩散：BD3-LM 与 Eso-LM</title>
+<meta name="description" content="块间自回归、块内掩码扩散：块长是从 AR 到全序列扩散的旋钮；向量化训练与 2L 注意力掩码、跨块精确 KV cache、变长生成、降低梯度方差的裁剪噪声调度；Eso-LM 用置换后的因果注意力同时拿到全序列并行、精确 KV cache 与精确似然。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="bd3lm">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：全序列扩散的三个短板</h2>
+<p>BD3-LM 的论文开头列出了离散扩散的三个限制：① 只能生成固定长度，聊天这类场景需要任意长度；② 双向注意力使已算过的东西无法用 KV cache 复用；③ 困惑度仍落后于 AR<span class="src">BD3-LM §1</span>。<a href="03-mdlm.html">MDLM</a> 已经把掩码扩散的目标化简为加权 MLM，但这三点都没有改变。</p>
+<p>BD3-LM 的办法是把序列切成块：块与块之间按 AR 分解，块内用离散扩散建模。于是块间有精确 KV cache、可以一直往后生成；块内仍可并行采样。块长从 1 到整条序列，正好在 AR 与 MDLM 之间插值<span class="src">BD3-LM §3</span>。Eso-LM（同一研究组，2025-06）走另一条路：不切块，而是让掩码扩散的去噪器本身使用<b>因果注意力</b>，从而在全序列并行的同时获得精确 KV cache 与精确似然<span class="src">Eso-LM 摘要</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  BD3-LM：\(\log p(x)=\sum_b\log p(x^b\mid x^{\lt b})\)，每个条件项都是一个小型掩码扩散；块长是旋钮，1 对应 AR，\(L\) 对应 MDLM。它额外发现，即使块长为 1、目标期望上等于 AR，扩散目标仍因<b>梯度方差</b>大而训练得更差，于是用“裁剪”的掩码率分布来降低方差。
+</div>
+<p>记号：本页统一用 \(B\) 表示块长、\(L/B\) 表示块数。BD3-LM 论文把块长记作 \(L'\)、块数记作 \(B\)，正好与本轨道相反；它与 Eso-LM 都用 \(\alpha_t\) 表示保留概率（掩码率为 \(1-\alpha_t\)），Eso-LM 把带掩码的序列记作 \(z_t\)、干净序列记作 \(x\)<span class="src">BD3-LM §3.1；Eso-LM §2</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：BD3-LM 的一次训练步</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw reg"></i>块级 KV cache</span><span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M]</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 490" role="img" aria-label="BD3-LM 训练：干净序列分块、逐块采样掩码率并加噪，噪声半边与干净半边拼接后用专门的注意力掩码一次前向，只在被掩码位置计算损失；右下为逐块采样与 KV cache">
+    <g class="data" data-part="clean" data-step="1">
+      <rect class="box" x="20" y="40" width="260" height="96" rx="10"/>
+      <text class="t-c t-b" x="150" y="62">干净序列 x，按块长 B 切分</text>
+      <rect class="tk data" x="62" y="78" width="26" height="26"/><rect class="tk data" x="90" y="78" width="26" height="26"/>
+      <rect class="tk data" x="124" y="78" width="26" height="26"/><rect class="tk data" x="152" y="78" width="26" height="26"/>
+      <rect class="tk data" x="186" y="78" width="26" height="26"/><rect class="tk data" x="214" y="78" width="26" height="26"/>
+      <text class="t-c t-xs" x="150" y="120">示意 L = 6、B = 2：共 3 块</text>
+    </g>
+    <path class="edge" d="M280,88 H306" data-step="2"/>
+    <g data-part="schedule" data-step="2 5">
+      <rect class="box" x="310" y="40" width="260" height="96" rx="10"/>
+      <text class="t-c t-b" x="440" y="62">每块独立采样掩码率</text>
+      <text class="t-c t-sm" x="440" y="88">1 − α_t ~ U[β, ω]（裁剪调度）</text>
+      <text class="t-c t-xs" x="440" y="114">β, ω 每约 5K 步网格搜索一次</text>
+    </g>
+    <path class="edge" d="M570,88 H596" data-step="2"/>
+    <g class="data" data-part="noisy" data-step="2">
+      <rect class="box" x="600" y="40" width="340" height="96" rx="10"/>
+      <text class="t-c t-b" x="770" y="62">噪声副本 x_t（逐块掩码）</text>
+      <rect class="tk mask" x="682" y="78" width="26" height="26"/><rect class="tk data" x="710" y="78" width="26" height="26"/>
+      <rect class="tk mask" x="744" y="78" width="26" height="26"/><rect class="tk mask" x="772" y="78" width="26" height="26"/>
+      <rect class="tk data" x="806" y="78" width="26" height="26"/><rect class="tk mask" x="834" y="78" width="26" height="26"/>
+      <text class="t-c t-xs" x="770" y="120">各块的噪声水平 t_b 互不相同</text>
+    </g>
+    <path class="edge" d="M150,136 V166" data-step="3"/>
+    <path class="edge" d="M770,136 V166" data-step="3"/>
+    <g class="data" data-part="concat" data-step="3">
+      <rect class="box" x="20" y="170" width="920" height="66" rx="10"/>
+      <text class="t-b" x="36" y="198">拼接输入 x_t ⊕ x</text>
+      <text class="t-sm" x="36" y="220">长 2L，两半共享位置编码</text>
+      <rect class="tk mask" x="420" y="186" width="24" height="24"/><rect class="tk data" x="446" y="186" width="24" height="24"/>
+      <rect class="tk mask" x="478" y="186" width="24" height="24"/><rect class="tk mask" x="504" y="186" width="24" height="24"/>
+      <rect class="tk data" x="536" y="186" width="24" height="24"/><rect class="tk mask" x="562" y="186" width="24" height="24"/>
+      <rect class="tk data" x="640" y="186" width="24" height="24"/><rect class="tk data" x="666" y="186" width="24" height="24"/>
+      <rect class="tk data" x="698" y="186" width="24" height="24"/><rect class="tk data" x="724" y="186" width="24" height="24"/>
+      <rect class="tk data" x="756" y="186" width="24" height="24"/><rect class="tk data" x="782" y="186" width="24" height="24"/>
+      <text class="t-c t-xs" x="503" y="224">x_t（噪声半边）</text>
+      <text class="t-c t-xs" x="711" y="224">x（干净半边）</text>
+    </g>
+    <g data-part="mask" data-step="3">
+      <rect class="panel" x="20" y="256" width="300" height="214" rx="10"/>
+      <text class="t-c t-b" x="170" y="276">注意力掩码 M_full（L = 6，B = 2）</text>
+      <text class="t-r t-xs" x="82" y="328">x_t</text>
+      <text class="t-r t-xs" x="82" y="400">x</text>
+      <rect class="tk enc" x="88" y="292" width="12" height="12"/><rect class="tk enc" x="100" y="292" width="12" height="12"/><rect class="tk off" x="112" y="292" width="12" height="12"/><rect class="tk off" x="124" y="292" width="12" height="12"/><rect class="tk off" x="136" y="292" width="12" height="12"/><rect class="tk off" x="148" y="292" width="12" height="12"/><rect class="tk off" x="160" y="292" width="12" height="12"/><rect class="tk off" x="172" y="292" width="12" height="12"/><rect class="tk off" x="184" y="292" width="12" height="12"/><rect class="tk off" x="196" y="292" width="12" height="12"/><rect class="tk off" x="208" y="292" width="12" height="12"/><rect class="tk off" x="220" y="292" width="12" height="12"/>
+      <rect class="tk enc" x="88" y="304" width="12" height="12"/><rect class="tk enc" x="100" y="304" width="12" height="12"/><rect class="tk off" x="112" y="304" width="12" height="12"/><rect class="tk off" x="124" y="304" width="12" height="12"/><rect class="tk off" x="136" y="304" width="12" height="12"/><rect class="tk off" x="148" y="304" width="12" height="12"/><rect class="tk off" x="160" y="304" width="12" height="12"/><rect class="tk off" x="172" y="304" width="12" height="12"/><rect class="tk off" x="184" y="304" width="12" height="12"/><rect class="tk off" x="196" y="304" width="12" height="12"/><rect class="tk off" x="208" y="304" width="12" height="12"/><rect class="tk off" x="220" y="304" width="12" height="12"/>
+      <rect class="tk off" x="88" y="316" width="12" height="12"/><rect class="tk off" x="100" y="316" width="12" height="12"/><rect class="tk enc" x="112" y="316" width="12" height="12"/><rect class="tk enc" x="124" y="316" width="12" height="12"/><rect class="tk off" x="136" y="316" width="12" height="12"/><rect class="tk off" x="148" y="316" width="12" height="12"/><rect class="tk enc" x="160" y="316" width="12" height="12"/><rect class="tk enc" x="172" y="316" width="12" height="12"/><rect class="tk off" x="184" y="316" width="12" height="12"/><rect class="tk off" x="196" y="316" width="12" height="12"/><rect class="tk off" x="208" y="316" width="12" height="12"/><rect class="tk off" x="220" y="316" width="12" height="12"/>
+      <rect class="tk off" x="88" y="328" width="12" height="12"/><rect class="tk off" x="100" y="328" width="12" height="12"/><rect class="tk enc" x="112" y="328" width="12" height="12"/><rect class="tk enc" x="124" y="328" width="12" height="12"/><rect class="tk off" x="136" y="328" width="12" height="12"/><rect class="tk off" x="148" y="328" width="12" height="12"/><rect class="tk enc" x="160" y="328" width="12" height="12"/><rect class="tk enc" x="172" y="328" width="12" height="12"/><rect class="tk off" x="184" y="328" width="12" height="12"/><rect class="tk off" x="196" y="328" width="12" height="12"/><rect class="tk off" x="208" y="328" width="12" height="12"/><rect class="tk off" x="220" y="328" width="12" height="12"/>
+      <rect class="tk off" x="88" y="340" width="12" height="12"/><rect class="tk off" x="100" y="340" width="12" height="12"/><rect class="tk off" x="112" y="340" width="12" height="12"/><rect class="tk off" x="124" y="340" width="12" height="12"/><rect class="tk enc" x="136" y="340" width="12" height="12"/><rect class="tk enc" x="148" y="340" width="12" height="12"/><rect class="tk enc" x="160" y="340" width="12" height="12"/><rect class="tk enc" x="172" y="340" width="12" height="12"/><rect class="tk enc" x="184" y="340" width="12" height="12"/><rect class="tk enc" x="196" y="340" width="12" height="12"/><rect class="tk off" x="208" y="340" width="12" height="12"/><rect class="tk off" x="220" y="340" width="12" height="12"/>
+      <rect class="tk off" x="88" y="352" width="12" height="12"/><rect class="tk off" x="100" y="352" width="12" height="12"/><rect class="tk off" x="112" y="352" width="12" height="12"/><rect class="tk off" x="124" y="352" width="12" height="12"/><rect class="tk enc" x="136" y="352" width="12" height="12"/><rect class="tk enc" x="148" y="352" width="12" height="12"/><rect class="tk enc" x="160" y="352" width="12" height="12"/><rect class="tk enc" x="172" y="352" width="12" height="12"/><rect class="tk enc" x="184" y="352" width="12" height="12"/><rect class="tk enc" x="196" y="352" width="12" height="12"/><rect class="tk off" x="208" y="352" width="12" height="12"/><rect class="tk off" x="220" y="352" width="12" height="12"/>
+      <rect class="tk off" x="88" y="364" width="12" height="12"/><rect class="tk off" x="100" y="364" width="12" height="12"/><rect class="tk off" x="112" y="364" width="12" height="12"/><rect class="tk off" x="124" y="364" width="12" height="12"/><rect class="tk off" x="136" y="364" width="12" height="12"/><rect class="tk off" x="148" y="364" width="12" height="12"/><rect class="tk enc" x="160" y="364" width="12" height="12"/><rect class="tk enc" x="172" y="364" width="12" height="12"/><rect class="tk off" x="184" y="364" width="12" height="12"/><rect class="tk off" x="196" y="364" width="12" height="12"/><rect class="tk off" x="208" y="364" width="12" height="12"/><rect class="tk off" x="220" y="364" width="12" height="12"/>
+      <rect class="tk off" x="88" y="376" width="12" height="12"/><rect class="tk off" x="100" y="376" width="12" height="12"/><rect class="tk off" x="112" y="376" width="12" height="12"/><rect class="tk off" x="124" y="376" width="12" height="12"/><rect class="tk off" x="136" y="376" width="12" height="12"/><rect class="tk off" x="148" y="376" width="12" height="12"/><rect class="tk enc" x="160" y="376" width="12" height="12"/><rect class="tk enc" x="172" y="376" width="12" height="12"/><rect class="tk off" x="184" y="376" width="12" height="12"/><rect class="tk off" x="196" y="376" width="12" height="12"/><rect class="tk off" x="208" y="376" width="12" height="12"/><rect class="tk off" x="220" y="376" width="12" height="12"/>
+      <rect class="tk off" x="88" y="388" width="12" height="12"/><rect class="tk off" x="100" y="388" width="12" height="12"/><rect class="tk off" x="112" y="388" width="12" height="12"/><rect class="tk off" x="124" y="388" width="12" height="12"/><rect class="tk off" x="136" y="388" width="12" height="12"/><rect class="tk off" x="148" y="388" width="12" height="12"/><rect class="tk enc" x="160" y="388" width="12" height="12"/><rect class="tk enc" x="172" y="388" width="12" height="12"/><rect class="tk enc" x="184" y="388" width="12" height="12"/><rect class="tk enc" x="196" y="388" width="12" height="12"/><rect class="tk off" x="208" y="388" width="12" height="12"/><rect class="tk off" x="220" y="388" width="12" height="12"/>
+      <rect class="tk off" x="88" y="400" width="12" height="12"/><rect class="tk off" x="100" y="400" width="12" height="12"/><rect class="tk off" x="112" y="400" width="12" height="12"/><rect class="tk off" x="124" y="400" width="12" height="12"/><rect class="tk off" x="136" y="400" width="12" height="12"/><rect class="tk off" x="148" y="400" width="12" height="12"/><rect class="tk enc" x="160" y="400" width="12" height="12"/><rect class="tk enc" x="172" y="400" width="12" height="12"/><rect class="tk enc" x="184" y="400" width="12" height="12"/><rect class="tk enc" x="196" y="400" width="12" height="12"/><rect class="tk off" x="208" y="400" width="12" height="12"/><rect class="tk off" x="220" y="400" width="12" height="12"/>
+      <rect class="tk off" x="88" y="412" width="12" height="12"/><rect class="tk off" x="100" y="412" width="12" height="12"/><rect class="tk off" x="112" y="412" width="12" height="12"/><rect class="tk off" x="124" y="412" width="12" height="12"/><rect class="tk off" x="136" y="412" width="12" height="12"/><rect class="tk off" x="148" y="412" width="12" height="12"/><rect class="tk enc" x="160" y="412" width="12" height="12"/><rect class="tk enc" x="172" y="412" width="12" height="12"/><rect class="tk enc" x="184" y="412" width="12" height="12"/><rect class="tk enc" x="196" y="412" width="12" height="12"/><rect class="tk enc" x="208" y="412" width="12" height="12"/><rect class="tk enc" x="220" y="412" width="12" height="12"/>
+      <rect class="tk off" x="88" y="424" width="12" height="12"/><rect class="tk off" x="100" y="424" width="12" height="12"/><rect class="tk off" x="112" y="424" width="12" height="12"/><rect class="tk off" x="124" y="424" width="12" height="12"/><rect class="tk off" x="136" y="424" width="12" height="12"/><rect class="tk off" x="148" y="424" width="12" height="12"/><rect class="tk enc" x="160" y="424" width="12" height="12"/><rect class="tk enc" x="172" y="424" width="12" height="12"/><rect class="tk enc" x="184" y="424" width="12" height="12"/><rect class="tk enc" x="196" y="424" width="12" height="12"/><rect class="tk enc" x="208" y="424" width="12" height="12"/><rect class="tk enc" x="220" y="424" width="12" height="12"/>
+      <text class="t-c t-xs" x="170" y="452">左上 M_BD　右上 M_OBC　右下 M_BC</text>
+    </g>
+    <path class="edge idx" d="M320,307 H356" data-step="3"/>
+    <path class="edge" d="M510,236 V258" data-step="3"/>
+    <g class="enc" data-part="denoiser" data-step="3">
+      <rect class="box" x="360" y="262" width="300" height="90" rx="10"/>
+      <text class="t-c t-b" x="510" y="286">去噪网络 x_θ（110M）</text>
+      <text class="t-c t-sm" x="510" y="312">一次前向算出所有块的条件分布</text>
+      <text class="t-c t-xs" x="510" y="336">FlexAttention 利用掩码稀疏性</text>
+    </g>
+    <path class="edge enc" d="M510,352 V388" data-step="4"/>
+    <g class="loss" data-part="loss" data-step="4 5">
+      <rect class="box" x="360" y="392" width="300" height="78" rx="10"/>
+      <text class="t-c t-b" x="510" y="414">块扩散 NELBO</text>
+      <text class="t-c t-sm" x="510" y="438">只在噪声半边的 [M] 位置算 CE</text>
+      <text class="t-c t-xs" x="510" y="458">权重 −α′_t/(1−α_t)；干净半边的输出丢弃</text>
+    </g>
+    <g class="reg" data-part="sampling" data-step="6">
+      <rect class="box" x="700" y="256" width="240" height="214" rx="10"/>
+      <text class="t-c t-b" x="820" y="278">推理：逐块采样</text>
+      <rect class="tk enc" x="716" y="294" width="24" height="24"/><rect class="tk enc" x="744" y="294" width="24" height="24"/><rect class="tk enc" x="772" y="294" width="24" height="24"/><rect class="tk enc" x="800" y="294" width="24" height="24"/>
+      <rect class="tk mask" x="836" y="294" width="24" height="24"/><rect class="tk mask" x="864" y="294" width="24" height="24"/>
+      <text class="t-c t-xs" x="770" y="332">KV 已缓存</text>
+      <text class="t-c t-xs" x="862" y="332">当前块</text>
+      <text class="t-c t-sm" x="820" y="358">当前块从全 [M] 去噪 T′ 步</text>
+      <text class="t-c t-sm" x="820" y="382">定稿后前向一次，追加 K/V</text>
+      <text class="t-c t-xs" x="820" y="406">遇 [EOS] 或末 256 token 均熵 &lt; 4 即停</text>
+      <text class="t-c t-xs" x="820" y="428">→ 可生成长于训练上下文的序列</text>
+      <text class="t-c t-xs" x="820" y="450">块内 NFE ≤ B（已解码的不再掩码）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="clean"><h4>块分解</h4><p>\(\log p_\theta(x)=\sum_b\log p_\theta(x^b\mid x^{\lt b})\)，每个条件项是对 \(B\) 个 token 的掩码扩散。OWT 实验用 GPT-2 分词、上下文 1024，不注入 BOS / EOS，好让模型学会跨越训练长度继续生成。<span class="src">BD3-LM 式 (4)、App. C.1</span></p></div>
+    <div data-note="schedule"><h4>裁剪噪声调度</h4><p>掩码率不在 [0, 1] 上均匀采样，而是限制在 [β, ω]：掩码太少则任务过于简单，全部掩码则只能学到边缘分布，两种极端都只贡献高方差的梯度。训练中每个验证周期（约 5K 步）做一次网格搜索，选使 NELBO 方差最小的 β, ω。<span class="src">BD3-LM §5.1–5.3、§6</span></p></div>
+    <div data-note="noisy"><h4>每块一个噪声水平</h4><p>块 b 用自己的 \(t_b\) 加噪，所以一个 batch 同时训练各种“前文干净、本块半掩码”的条件。官方代码另外会在某块实际掩码比例落在 [β, ω] 之外时重采样该块。<span class="src">BD3-LM Alg. 1；官方代码 _resample_q_xt</span></p></div>
+    <div data-note="concat"><h4>为什么要拼接</h4><p>预测块 b 需要它的噪声版本，而后续各块需要它的干净版本作为条件，所以每个 token 至少要过网络两次。把两半拼成长 2L 的输入、一次前向完成，比两次前向快 20–25%。<span class="src">BD3-LM §3.2、§6.3</span></p></div>
+    <div data-note="mask"><h4>三块掩码</h4><p>M_BD：噪声块只看同块的噪声 token；M_OBC：噪声块看前面各块的干净 token；M_BC：干净半边做块因果；干净 → 噪声全部屏蔽。实心 = 允许注意。该矩阵很稀疏，FlexAttention 比 PyTorch SDPA 最多快约 5 倍（A5000，L = 1024，batch 16）。<span class="src">BD3-LM App. B.6–B.7</span></p></div>
+    <div data-note="denoiser"><h4>主干</h4><p>12 层、hidden 768、12 头，约 110M 参数，沿用 MDLM 的 DiT 结构但不输入时间步。先以 B = L 预训练 850K 步，再按不同 B 微调 150K 步。<span class="src">BD3-LM App. C.2–C.3</span></p></div>
+    <div data-note="loss"><h4>只算被掩码的位置</h4><p>\(\mathcal L_{\text{BD}}=\sum_b\mathbb E_t\,\mathbb E_q\,\frac{\alpha_t'}{1-\alpha_t}\log p_\theta(x^b\mid x_t^b,x^{\lt b})\)，是负对数似然的上界；B = 1 时是紧的，B 越大越松。<span class="src">BD3-LM 式 (8)、App. B.5</span></p></div>
+    <div data-note="sampling"><h4>逐块采样与变长</h4><p>块 b 在缓存条件下用任意扩散采样器生成，完成后前向一次写入 K/V。生成在出现 [EOS] 或最后 256 个 token 的平均熵低于 4 时停止。OWT 上中位长度 798、最长 9982 token，而 SEDD 最长只有 1024。<span class="src">BD3-LM Alg. 2、Tab. 6、App. C.5</span></p></div>
+    <div data-step-note="1"><h4>① 分块</h4><p>长 L 的干净序列切成 L/B 块。</p></div>
+    <div data-step-note="2"><h4>② 逐块加噪</h4><p>每块从裁剪区间采样掩码率并独立掩码。</p></div>
+    <div data-step-note="3"><h4>③ 一次前向</h4><p>拼接噪声与干净两半，用 M_full 一次算出全部条件分布。</p></div>
+    <div data-step-note="4"><h4>④ 损失</h4><p>噪声半边的 [M] 位置做加权交叉熵，得到块扩散 NELBO。</p></div>
+    <div data-step-note="5"><h4>⑤ 调整调度</h4><p>周期性地按 NELBO 方差重新选 β, ω。</p></div>
+    <div data-step-note="6"><h4>⑥ 推理</h4><p>逐块去噪、定稿后写 KV，直到 EOS，因此长度可变。</p></div>
+  </div>
+  <figcaption>图 1　BD3-LM 的向量化训练步与推理方式。依据 BD3-LM §3.2、Alg. 1–2、App. B.6 与官方代码 <code>kuleshov-group/bd3lms</code>。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-knob">3.1 块长：从 AR 到全序列扩散的旋钮</h3>
+<p>B = 1 时，每块只有一个 token，扩散目标在期望上等于 AR 的 NLL；B = L 时就是 MDLM。论文证明 NELBO 随块长单调变松：\(-\log p(x)\le\mathcal L_{B}\le\mathcal L_{B+1}\)<span class="src">BD3-LM App. B.4–B.5</span>。在 LM1B 与 OWT 上，块越小困惑度越好，越接近 AR；但块越小，每步能并行的 token 越少，生成越接近逐 token 串行<span class="src">BD3-LM Tab. 3–4、§7 Limitations</span>。所以 B 同时决定三件事：似然界的松紧、每步最多定稿多少 token、多大比例的上下文能用精确 KV cache。</p>
+
+<h3 id="c-variance">3.2 B = 1 仍比 AR 差：梯度方差</h3>
+<p>在 LM1B 上训练 16B tokens，AR 的困惑度为 22.88，B = 1 的 BD3-LM 为 ≤ 25.56，尽管二者目标在期望上相同<span class="src">BD3-LM Tab. 1</span>。原因在于：线性调度下每个 token 平均只有一半时间被掩码，扩散目标相当于用一半的 token 估计梯度，表现与“随机 batch 大小”的 AR（24.37）相近。把 B = 1 的调度改为“总是全掩码”，目标就与 AR 完全一致，困惑度回到 22.88；训练 328M tokens 后测得损失方差从 1.52 降到 0.11<span class="src">BD3-LM §4.2、Fig. 2</span>。对 B &gt; 1，作者提出裁剪调度 \(1-\alpha_t\sim\mathrm U[\beta,\omega]\)，并发现每个块长都有自己最优的区间：B = 4 偏好重掩码，B = 16 偏好轻掩码<span class="src">BD3-LM §5、Tab. 2、Tab. 8</span>。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>论文写作把 \(t\) 线性映射到掩码率 \(\beta+(\omega-\beta)t\)，权重为 \(-\alpha_t'/(1-\alpha_t)\)。官方代码中，log-linear 调度的损失权重为 −1 / 掩码率（乘在 \(\log p\) 上），并且 ① 若某块实际掩码比例落在 [β, ω] 之外就重采样该块；② 当 \(\beta&gt;0.5\) 时把权重直接设为常数 −1。复现时以代码为准。<span class="src">BD3-LM App. C.4；diffusion.py 中 _sample_t、_resample_q_xt、_forward_pass_diffusion</span></div>
+
+<h3 id="c-kv">3.3 KV cache 与可变长度</h3>
+<p>推理时一次采样一块：当前块在已缓存的 K/V 条件下去噪 \(T'\) 步，定稿后再前向一次写入 K/V<span class="src">BD3-LM Alg. 2</span>。这里的缓存是<b>精确</b>的：前面各块不会再变，且训练时它们本就以干净形式、块因果地被编码，与推理一致。但块内的扩散步骤没有缓存，每步都要重算整块。块的数量不受训练上下文限制，OWT 上能生成到 9982 token<span class="src">BD3-LM Tab. 6</span>。论文的采样沿用 MDLM 的缓存技巧：已解码的 token 不会被重新掩码，因此 NFE 不超过生成长度；生成困惑度用 \(T=5\mathrm K\) 步、nucleus \(p=0.9\)、64 位 Gumbel 与 first-hitting 采样器<span class="src">BD3-LM App. C.5</span>。</p>
+
+<h3 id="eso-lm">3.4 Eso-LM：让掩码扩散使用因果注意力</h3>
+<p>Eso-LM 把生成拆成两段：MDM 阶段并行生成一个部分掩码的序列 \(z_0\)，期望比例为 \(\alpha_0\)；AR 阶段再从左到右填完剩下的 [M]。\(\alpha_0=1\) 是纯 MDM，\(\alpha_0=0\) 是纯 AR，插值的旋钮是“由扩散生成的 token 比例”，而不是块长<span class="src">Eso-LM §3.1、式 (6)(7)</span>。</p>
+<p>关键在注意力。掩码扩散等价于对随机顺序做 AR：只要按去噪顺序把输入重排成“干净 token 在前、待去噪的 [M] 在后”，再用普通因果注意力，那么已经定稿的 token 就不依赖之后才去噪的 token，它们的 K/V 便可以一直缓存<span class="src">Eso-LM §3.2、§4.1.1</span>。采样前先预计算整个去噪调度 \(\mathcal S\)；第 k 步只前向“上一步刚定稿的 token + 本步要去噪的 [M]”，其余从缓存读取。新定稿的 token 要到下一步才写入缓存，因此有一步的延迟<span class="src">Eso-LM §4.2、§6 KV Caching</span>。</p>
+<p>同样的因果结构让<b>任意顺序 NELBO</b> \(\mathcal L_{\text{AO}}\) 只需一次前向即可估计（一个排列对应一整条扩散轨迹），再取 K 个排列构造重要性加权界，就得到随 K 增大而收敛的<b>精确似然</b>：\(-\log p_\theta(x)\le\mathcal L^K_{\text{AO}}\le\mathcal L_{\text{MDM}}\)<span class="src">Eso-LM §3.3、定理 3.1</span>。在一条 OWT 序列上重复 100 次，\(\mathcal L_{\text{MDM}}\)（每次 10 个 MC 样本）的标准差为 0.56，\(\mathcal L_{\text{AO}}\)（每次 1 个排列）为 0.03<span class="src">Eso-LM Tab. 2</span>。</p>
+<div class="callout code-note"><span class="callout-title">版本与对照协议</span>本页读的是 Eso-LM v5（2026-08，ICML 2026 camera ready），早期版本的数字与变体可能不同。Eso-LM 表中的 BD3-LM OWT 困惑度（B = 16 / 8 / 4：23.57 / 22.04 / 20.96）是作者用 250K 步从头重训得到的；BD3-LM 原文的 22.27 / 21.68 / 20.73 则是从 MDLM 微调、共 524B tokens 的结果。两组数字不能混用。<span class="src">Eso-LM Tab. 1、App. C.3；BD3-LM Tab. 4、App. C.3</span></div>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>BD3-LM</th><th>Eso-LM</th><th>同规模 AR（参照：110M Transformer）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>逐块掩码 NELBO，配合裁剪调度；B = 1 且全掩码时等于 AR 的 NLL<span class="src">式 (8)、§4.2</span></td><td>AR 损失 + MDM 损失的混合界（式 (7)），batch 各占一半（κ = 0.5）<span class="src">§4.1</span></td><td>next-token CE</td></tr>
+    <tr><td>注意力与 KV cache</td><td>块内双向、块间因果；只缓存已定稿的块，块内步骤无缓存<span class="src">§3.1、Alg. 2</span></td><td>按去噪顺序重排后的因果注意力；所有 token 都有精确 KV，延迟一步<span class="src">§3.2、§6</span></td><td>因果，精确 KV</td></tr>
+    <tr><td>每次前向定稿多少 token（NFE）</td><td>每步最多 B 个；NFE ≤ L（不重掩码）。Tab. 7 中 L = 1024 时 NFE = 1K<span class="src">Tab. 7</span></td><td>NFE = |S|，由 \(T\) 与 \(\alpha_0^{\text{eval}}\) 调节；长上下文测速时取 NFE = L<span class="src">§3.2、§5.3</span></td><td>L</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>块内并行；可变长度（比 SEDD 长约 10 倍）；有可计算的似然上界<span class="src">Tab. 6</span></td><td>全序列并行生成且有精确 KV；精确似然；单次前向估计 NELBO，便于 RL<span class="src">§3.3</span></td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>困惑度仍高于 AR（OWT ≤ 20.73 对 17.54）；训练开销约为扩散的 2 倍以内；块小时速度与可控性接近 AR；低 NFE 时样本退化（Eso-LM 观察）<span class="src">Tab. 4、§7；Eso-LM §5.2</span></td><td>\(\alpha_0=1\) 时 NELBO 困惑度比 MDLM 差约 4（LM1B 36.12 对 31.78）；\(\alpha_0\lt 1\) 时训练慢 1.37 倍；同 NFE 下略慢于 AR；只在 110M 规模、无下游任务<span class="src">Tab. 1、§6</span></td><td>串行，一次一个 token</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、块与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>一个 batch（OWT）</td><td>\([512, 1024]\)</td><td>batch 512，GPT-2 分词，序列打包到 1024<span class="src">BD3-LM App. C.1–C.2</span></td></tr>
+    <tr><td>每块噪声水平</td><td>\([512, L/B]\)</td><td>低差异采样后线性映射到 [β, ω]<span class="src">App. C.4</span></td></tr>
+    <tr><td>拼接输入</td><td>\([512, 2048]\)</td><td>\(x_t\oplus x\)，两半共享位置编码<span class="src">§3.2</span></td></tr>
+    <tr><td>注意力掩码</td><td>\([2048, 2048]\) 布尔，块稀疏</td><td>由 M_BD、M_OBC、M_BC 三块组成<span class="src">App. B.6</span></td></tr>
+    <tr><td>参与损失的 logits</td><td>\([512, 1024, V]\)，\(V\approx 50\mathrm k\)（GPT-2 词表）</td><td>只取噪声半边，再只取 [M] 位置</td></tr>
+    <tr><td>推理一步</td><td>query \([1, B]\)，key 为缓存 + 当前块</td><td>块定稿后再前向 \([1,B]\) 一次以写 K/V<span class="src">Alg. 2</span></td></tr>
+    <tr><td>Eso-LM 序列阶段训练</td><td>\(z_0\oplus x\)，长 2L</td><td>只用于一半 batch，所以训练慢 1.37 倍而非 2 倍<span class="src">Eso-LM §4.1.2、§6</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>BD3-LM 对每个块应用 MDLM 的简化 NELBO 并求和（\(\alpha_t'\lt 0\)，所以每一项都是正的）：</p>
+<div class="formula">$$-\log p_\theta(x)\le\mathcal L_{\text{BD}}(x;\theta)=\sum_{b=1}^{L/B}\mathbb E_{t\sim\mathrm U[0,1]}\,\mathbb E_{q}\,\frac{\alpha_t'}{1-\alpha_t}\log p_\theta\big(x^b\mid x_t^b,x^{\lt b}\big).$$</div>
+<p>NELBO 本身与调度无关，但它的 MC 估计及梯度的方差依赖调度，所以作者用 \(\min_{\beta,\omega}\mathrm{Var}_{X,t}[\mathcal L(X;\theta,\beta,\omega)]\) 来选调度；评测时仍按均匀掩码率报告似然<span class="src">BD3-LM §4.3、§5.3、§6</span>。Eso-LM 的混合界：</p>
+<div class="formula">$$-\log p_\theta(x)\le\mathbb E_{z_0\sim q_0}\Big[-\!\!\sum_{\ell\in\mathcal M(z_0)}\!\!\log p_\theta\big(x^\ell\mid z_0\odot x^{\lt\ell}\big)\Big]+\mathbb E_{t,z_t}\Big[\frac{\alpha_t'}{1-\alpha_t}\sum_{\ell\in\mathcal M(z_t)}\log p_\theta(x^\ell\mid z_t)\Big],\quad \alpha_t=\alpha_0(1-t).$$</div>
+<p>第一项是 AR 阶段的交叉熵（\(z_0\odot x^{\lt\ell}\) 表示把 \(z_0\) 的前 \(\ell-1\) 个位置换成干净 token），第二项是 MDM 阶段的 NELBO。纯扩散训练（\(\alpha_0=1\)）时，作者把系数 \(\alpha_t'/(1-\alpha_t)\) 换成常数 −1，以降低方差<span class="src">Eso-LM 式 (7)、§5.1</span>。精确似然用 K 个随机排列的重要性加权界，LM1B 取 K = 5000，OWT 取 K = 1000<span class="src">Eso-LM 定理 3.1、§5.1</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">bd3lm_step.py（训练依据 Alg. 1 + 官方代码；采样依据 Alg. 2）</div>
+<pre><code class="lang-py">def train_step(model, x, B, beta, omega):              # x: [K, L] 干净 token
+    K, L = x.shape
+    nb = L // B
+    u = low_discrepancy_uniform(K, nb)                  # 每块一个时间
+    rate = (beta + (omega - beta) * u).repeat_interleave(B, dim=1)   # 掩码率 [K, L]
+    x_t = where(rand(K, L) &lt; rate, MASK, x)
+    x_t = resample_blocks_outside(x_t, beta, omega)     # 官方代码：实际比例越界的块重采样
+    inp = cat([x_t, x], dim=1)                          # [K, 2L]
+    pos = cat([arange(L), arange(L)])                   # 两半共享位置
+    logits = model(inp, pos, mask=block_diff_mask(L, B))[:, :L]   # 只取噪声半边
+    logp = log_softmax(logits).gather(-1, x[..., None]).squeeze(-1)
+    w = 1.0 / rate                                      # log-linear 调度：-α'/(1-α) = 1/掩码率
+    if beta > 0.5:
+        w = ones_like(w)                                # 官方代码：重掩码区间用常数权重
+    loss = -(w * logp * (x_t == MASK)).sum() / K
+    loss.backward()
+
+def block_diff_mask(L, B):                              # True = 允许注意
+    def allow(q, k):
+        qc, kc = q >= L, k >= L                         # 是否属于干净半边
+        bq, bk = (q % L) // B, (k % L) // B
+        if not qc and not kc: return bq == bk           # M_BD：噪声块内部
+        if not qc and kc:     return bk &lt; bq            # M_OBC：看前面的干净块
+        if qc and kc:         return bk &lt;= bq           # M_BC：干净半边块因果
+        return False                                    # 干净 -&gt; 噪声：屏蔽
+    return [[allow(q, k) for k in range(2 * L)] for q in range(2 * L)]
+
+def sample(model, B, T_block, max_blocks):
+    out, cache = [], KVCache()
+    for b in range(max_blocks):
+        blk = [MASK] * B
+        for s in reversed(range(1, T_block + 1)):       # 块内去噪，已解码的不再掩码
+            logits = model(blk, cache=cache)
+            blk = mdlm_ancestral_update(blk, logits, s / T_block, (s - 1) / T_block)
+        cache.append(model.encode_kv(blk))              # 定稿后一次前向写 K/V
+        out += blk
+        if EOS in blk or mean_entropy(out[-256:]) &lt; 4:  # 变长停止条件
+            break
+    return out</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>BD3-LM 主干</td><td>12 层 / 768 / 12 头，110M；不输入时间步</td><td>BD3-LM App. C.2</td></tr>
+    <tr><td>BD3-LM 训练</td><td>B = L 预训练 850K 步 + 按块长微调 150K 步；LM1B 65B tokens（73 epoch），OWT 524B tokens（60 epoch）；batch 512，lr 3e-4，预热 2.5K 步</td><td>BD3-LM §6、App. C.2–C.3</td></tr>
+    <tr><td>裁剪区间示例</td><td>B = 4：U[0.45, 0.95] 困惑度 29.21，线性 U[0, 1] 30.18；B = 16：U[0.3, 0.8] 31.12，线性 31.72</td><td>BD3-LM Tab. 8</td></tr>
+    <tr><td>BD3-LM 采样</td><td>nucleus p = 0.9；T = 5K；first-hitting；64 位 Gumbel</td><td>BD3-LM App. C.5</td></tr>
+    <tr><td>Eso-LM 训练</td><td>与 BD3 同主干；κ = 0.5；LM1B 1M 步、OWT 250K 步；8 × H200 节点；OWT 约 27 h（\(\alpha_0=1\)）/ 37 h（\(\alpha_0\lt 1\)）</td><td>Eso-LM §5.1、App. C.3</td></tr>
+    <tr><td>Eso-LM 采样网格</td><td>\(\alpha_0^{\text{eval}}\in\{0.0625, 0.25, 0.5, 1\}\)，\(T\in\{16, 128, 1024\}\)</td><td>Eso-LM §5.2</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>困惑度</b>（扩散模型均为上界 ≤；BD3-LM 原文协议：LM1B 65B tokens，OWT 524B tokens）<span class="src">BD3-LM Tab. 3–4</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">LM1B PPL</th><th class="num">OWT PPL</th></tr></thead>
+  <tbody>
+    <tr><td>AR Transformer</td><td class="num">22.83</td><td class="num">17.54</td></tr>
+    <tr><td>SEDD</td><td class="num">≤ 32.68</td><td class="num">≤ 24.10</td></tr>
+    <tr><td>MDLM</td><td class="num">≤ 31.78</td><td class="num">≤ 22.98</td></tr>
+    <tr><td>BD3-LM B = 16</td><td class="num">≤ 30.60</td><td class="num">≤ 22.27</td></tr>
+    <tr><td>BD3-LM B = 8</td><td class="num">≤ 29.83</td><td class="num">≤ 21.68</td></tr>
+    <tr class="hl"><td>BD3-LM B = 4</td><td class="num">≤ 28.23</td><td class="num">≤ 20.73</td></tr>
+  </tbody>
+</table></div>
+<p><b>样本质量</b>（OWT，110M 模型，300 个样本，GPT-2 Large 评生成困惑度；SSD-LM 为 400M、122B tokens）<span class="src">BD3-LM Tab. 7</span>：AR 为 14.1（L = 1024，1K NFE）；MDLM 46.8；SEDD 52.0；SSD-LM 37.2（40K NFE），NFE 降到 1K 时为 281.3；BD3-LM B = 16 / 8 / 4 分别为 33.4 / 30.4 / 25.7（均 1K NFE）。L = 2048 时 BD3-LM B = 4 为 23.6，AR 为 13.2。</p>
+<p><b>Eso-LM 的插值与精确似然</b>（Eso-LM 协议：LM1B 1M 步，OWT 250K 步；与上表协议不同）<span class="src">Eso-LM Tab. 1</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">LM1B 精确</th><th class="num">LM1B NELBO</th><th class="num">OWT 精确</th><th class="num">OWT NELBO</th></tr></thead>
+  <tbody>
+    <tr><td>AR + AdaLN</td><td class="num">21.86</td><td class="num">—</td><td class="num">17.78</td><td class="num">—</td></tr>
+    <tr><td>MDLM</td><td class="num">26.82</td><td class="num">31.78</td><td class="num">—</td><td class="num">25.19</td></tr>
+    <tr><td>Eso-LM \(\alpha_0=1\)</td><td class="num">31.65</td><td class="num">36.12</td><td class="num">29.31</td><td class="num">30.06</td></tr>
+    <tr><td>Eso-LM \(\alpha_0=0.25\)</td><td class="num">24.80</td><td class="num">29.23</td><td class="num">23.15</td><td class="num">24.71</td></tr>
+    <tr class="hl"><td>Eso-LM \(\alpha_0=0.125\)</td><td class="num">23.02</td><td class="num">26.29</td><td class="num">20.53</td><td class="num">21.92</td></tr>
+  </tbody>
+</table></div>
+<p><b>长序列采样时间</b>（单张 A6000，batch 1，first-hitting 采样器，所有方法 NFE = L，不用 nucleus；5 次平均，单位秒）<span class="src">Eso-LM §5.3、Tab. 11</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">L = 2048</th><th class="num">L = 8192</th></tr></thead>
+  <tbody>
+    <tr><td>AR</td><td class="num">13.3</td><td class="num">54.0</td></tr>
+    <tr><td>MDLM（无 KV cache）</td><td class="num">201.3</td><td class="num">5438.3</td></tr>
+    <tr><td>BD3-LM B = 4</td><td class="num">24.3</td><td class="num">312.0</td></tr>
+    <tr><td>BD3-LM B = 16</td><td class="num">21.3</td><td class="num">268.1</td></tr>
+    <tr class="hl"><td>Eso-LM</td><td class="num">14.6</td><td class="num">82.1</td></tr>
+  </tbody>
+</table></div>
+<p>L = 8192 时，Eso-LM 比 MDLM 快约 66 倍，比 BD3-LM 快 3.3–3.8 倍，仍比 AR 慢约 1.5 倍（一步缓存延迟）。注意这组测速取的是“NFE = L”的最坏情形，比较的是缓存机制，而不是并行度。在 L = 10240、微调 1K 步的设置下，Eso-LM（\(\alpha_0=0.125\)）的生成困惑度为 23.40、用时 116.4 s，BD3-LM B = 4 为 29.50、588.6 s<span class="src">Eso-LM Tab. 12</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul>
+    <li>相对 <a href="03-mdlm.html">MDLM</a>：获得变长生成与跨块的精确 KV cache，困惑度也更好（部分来自优化后的调度，作者称这一改进同样可用于 MDLM）。</li>
+    <li>相对 SSD-LM 等高斯块扩散：有可计算的似然上界，NFE 少一个数量级。</li>
+    <li>Eso-LM 进一步让块内（乃至全序列）也有缓存，并首次给出 MDM 的精确似然。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>两者都只在 110M 规模、无条件生成上验证。把块扩散用到大模型的主流做法是从 AR 权重转换：<a href="12-ar-to-block.html">SDAR、Fast-dLLM v2、WeDLM</a>（WeDLM 也用因果注意力），以及 <a href="09-llada2.html">LLaDA2.0 的块长 WSD</a>。</li>
+    <li>块扩散天然适合给 AR 当草稿器或与 AR 共享一个模型：<a href="13-hybrid.html">TiDAR、Nemotron-Labs-Diffusion、DFlash</a>。</li>
+    <li>块小时并行解码相邻 token 容易冲突（Eso-LM §5.2）；阈值类并行解码与缓存技巧见 <a href="14-kv-cache.html">KV cache 页</a>。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q21"><span class="qid">Q21</span>为什么说块长 B 是从 AR 到全序列扩散的旋钮？B = 1 时 BD3-LM 在期望上等价于 AR，为什么实测困惑度仍更差，裁剪调度又如何补上差距？</h3>
+  <div class="ans"><p class="short">块分解 \(\log p(x)=\sum_b\log p(x^b\mid x^{\lt b})\) 中，B = 1 时每个条件项就是 next-token 预测，B = L 时只剩一个块，即 MDLM。B 越大，块内并行度越高，但 NELBO 越松，可用精确 KV 的上下文比例越小。B = 1 时目标虽在期望上与 AR 相同，但线性调度让每个 token 平均只有一半时间被掩码、参与损失，梯度估计的方差明显更大，困惑度为 ≤ 25.56，AR 为 22.88。</p>
+    <ul>
+      <li>把 B = 1 的调度改为“总是全掩码”，目标就与 AR 一模一样：困惑度回到 22.88，损失方差从 1.52 降到 0.11。</li>
+      <li>B &gt; 1 时用 \(1-\alpha_t\sim\mathrm U[\beta,\omega]\) 去掉极端掩码率，并周期性地按 NELBO 方差网格搜索 β, ω：B = 4 时 U[0.45, 0.95] 的困惑度 29.21，优于线性的 30.18。</li>
+      <li>NELBO 与调度无关，但它的 MC 估计方差与调度有关；裁剪调度改变的是优化，而不是目标本身。</li>
+      <li>块长不同，最优区间也不同（小块偏好重掩码），所以每个 B 需要单独调。</li>
+    </ul>
+    <p class="cite">依据：BD3-LM §4.2–5.3、Tab. 1、Tab. 2、Tab. 8、App. B.4–B.5。</p>
+  </div>
+  <h3 id="q22"><span class="qid">Q22</span>BD3-LM 与 Eso-LM 都声称支持 KV cache——二者缓存的粒度有何不同？Eso-LM 为什么能给出精确似然，代价是什么？</h3>
+  <div class="ans"><p class="short">BD3-LM 只缓存已定稿的块；块内每个去噪步都要重算整块，因为块内是双向注意力。Eso-LM 把输入按去噪顺序重排（干净在前、待去噪在后）后用因果注意力，已定稿 token 不再依赖之后的 token，所以每个 token 的 K/V 在定稿后的下一步写入缓存，并且之后保持不变。因果结构也让一个排列就对应一整条扩散轨迹的 AR 分解，一次前向就能得到 \(\mathcal L_{\text{AO}}\)；对 K 个排列做重要性加权，界随 K 增大收敛到 \(-\log p_\theta(x)\)。</p>
+    <ul>
+      <li>速度（A6000、batch 1、NFE = L）：L = 8192 时 Eso-LM 82.1 s，BD3-LM B = 16 为 268.1 s，MDLM 为 5438.3 s，AR 为 54.0 s。</li>
+      <li>代价一：干净 token 之间也只用因果注意力，\(\alpha_0=1\) 时 NELBO 困惑度比 MDLM 差约 4（LM1B 36.12 对 31.78）。消融中只把 [M] 改成因果的变体能追平 MDLM，但失去了扩散阶段的缓存。</li>
+      <li>代价二：\(\alpha_0\lt 1\) 时序列阶段要用 2L 的输入，训练慢 1.37 倍；缓存延迟一步，同 NFE 下略慢于 AR。</li>
+      <li>代价三：精确似然需要 K 次前向（K = 1000–5000）；对标准 MDM 而言同一个界需要 K × L 次前向，一般不可行。</li>
+    </ul>
+    <p class="cite">依据：BD3-LM Alg. 2；Eso-LM §3.2–3.3、§4、§5.1、§5.3、§6、Tab. 1–2、Tab. 11。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Arriola, Gokaslan, Chiu, Yang, Qi, Han, Sahoo, Kuleshov. <i>Block Diffusion: Interpolating Between Autoregressive and Diffusion Language Models.</i> ICLR 2025（Oral）；本页读 arXiv v3。<a href="https://arxiv.org/abs/2503.09573">论文</a> · <a href="https://github.com/kuleshov-group/bd3lms">代码</a> · <a href="https://m-arriola.com/bd3lms">项目页与权重</a>。</li>
+  <li>Sahoo, Yang, Akhauri, Liu, Singh, Cheng, Liu, Xing, Thickstun, Vahdat. <i>Esoteric Language Models: A Family of Any-Order Diffusion LLMs.</i> ICML 2026；本页读 arXiv v5。<a href="https://arxiv.org/abs/2506.01928">论文</a> · <a href="https://github.com/s-sahoo/Eso-LMs">代码</a> · <a href="https://huggingface.co/collections/sahoo-diffusion/eso-lms-6838e86cb2c49f45302f0092">权重</a> · <a href="https://s-sahoo.com/Eso-LMs">项目页</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

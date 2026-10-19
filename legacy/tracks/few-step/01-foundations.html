@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>少步生成基础：速度场、监督与评估</title>
+<meta name="description" content="从扩散与流匹配的概率流 ODE 出发，比较轨迹蒸馏、一致性、score、对抗与特征匹配，解释 NFE、条件均值、评估协议和视频迁移。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/fewstep2d.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="fs-foundations">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：网络学会了方向，为什么还要走很久</h2>
+<p>扩散模型把数据 \(x_0\) 逐渐变成噪声，再学习如何逆转这个过程。DDPM 常用噪声预测损失训练去噪网络；给定噪声尺度，噪声预测可以换算成 score，即带噪分布对输入的对数密度梯度。它回答的是“当前位置往哪里走”，而不是“从这份噪声最终生成哪张图”<span class="src">DDPM §3.2、Eq. (11)；Score SDE §3</span>。DDIM 则给出共享训练目标的确定性采样过程：固定初始噪声，就能定义一个可蒸馏的噪声到图像映射<span class="src">DDIM §4、Eq. (12)，η = 0</span>。</p>
+<p>Flow Matching 直接回归连续流的速度场，也通常需要积分后才能生成。训练用的条件路径可以是直线，但各路径在同一时刻会混合；网络学习的是条件速度的平均，实际 ODE 轨迹因此未必直<span class="src">Flow Matching §3–4；Rectified Flow §2.2</span>。本 track 统一把数据端记为 \(t=0\)、噪声端记为 \(t=1\)，在线性路径下 \(x_t=(1-t)x_0+t\epsilon\)、\(v=\epsilon-x_0\)，生成从噪声端向数据端积分；这是对原论文记号的重写<span class="src">Flow Matching §4；Rectified Flow §2.1，时间反向重写</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  少步生成把“推理时反复修正方向”的工作搬进训练。可以教学生跳过一段轨迹，可以教它识别同一条轨迹的共同终点，也可以只要求它生成的整批样本具有正确分布。三种监督约束不同，所需教师、数据和训练成本也不同。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：学生向谁学习</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 隐变量</span><span><i class="sw enc"></i>学生生成器（可训练）</span>
+  <span><i class="sw tgt"></i>教师 / 冻结网络</span><span><i class="sw pred"></i>辅助可训练网络</span>
+  <span><i class="sw act"></i>条件</span><span><i class="sw loss"></i>损失</span><span><i class="sw reg"></i>正则项</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 490" role="img" aria-label="少步生成监督地图：教师终点、score、判别器或冻结特征">
+    <g data-part="input" data-step="1">
+      <g class="data"><rect class="box" x="24" y="64" width="156" height="76" rx="10"/></g>
+      <text class="t-c t-b" x="102" y="94">初始噪声 ε</text><text class="t-c t-xs" x="102" y="118">决定生成的随机性</text>
+      <g class="act"><rect class="box" x="24" y="164" width="156" height="60" rx="10"/></g>
+      <text class="t-c t-b" x="102" y="189">条件 c</text><text class="t-c t-xs" x="102" y="210">文本 / 类别 / 历史</text>
+    </g>
+    <path class="edge" d="M180,102 H226" data-step="2"/>
+    <path class="edge" d="M180,118 H204 V260 H226" data-step="3"/>
+    <path class="edge act" d="M180,190 H214 V132 H226" data-step="2"/>
+    <path class="edge act" d="M180,206 H214 V284 H226" data-step="3"/>
+    <g class="tgt" data-part="teacher" data-step="2">
+      <rect class="box frozen" x="230" y="64" width="230" height="92" rx="10"/>
+      <text class="t-c t-b" x="345" y="92">教师多步 ODE</text><text class="t-c t-sm" x="345" y="118">逐段计算速度 / score</text><text class="t-c t-xs" x="345" y="140">高精度数值积分</text>
+    </g>
+    <path class="edge sg" d="M460,110 H506" data-step="2"/>
+    <g class="data" data-part="endpoint" data-step="2">
+      <rect class="box" x="510" y="64" width="210" height="92" rx="10"/>
+      <text class="t-c t-b" x="615" y="92">教师端点 / 邻近状态</text><text class="t-c t-xs" x="615" y="117">有配对：约束样本映射</text><text class="t-c t-xs" x="615" y="139">轨迹回归 / CD</text>
+    </g>
+    <g class="enc" data-part="student" data-step="3">
+      <rect class="box" x="230" y="216" width="230" height="92" rx="10"/>
+      <text class="t-c t-b" x="345" y="245">学生 G_θ / f_θ</text><text class="t-c t-sm" x="345" y="272">一步映射或少步复用</text><text class="t-c t-xs" x="345" y="294">推理时只运行这一支</text>
+    </g>
+    <path class="edge enc" d="M460,262 H788" data-step="5"/>
+    <text class="t-c t-sm" x="620" y="248" data-step="3">生成样本 x̂₀</text>
+    <path class="edge sg" d="M720,110 H755 V211 H788" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="794" y="180" width="142" height="120" rx="10"/>
+      <text class="t-c t-b" x="865" y="210">选定监督目标</text><text class="t-c t-xs" x="865" y="237">回归 / 一致性</text><text class="t-c t-xs" x="865" y="258">分布匹配</text><text class="t-c t-xs" x="865" y="281">可混合使用</text>
+    </g>
+    <path class="edge grad" d="M865,180 V174 H345 V212" data-step="6"/>
+    <text class="t-c t-xs" x="600" y="168" data-step="6">训练梯度回到学生</text>
+    <g class="tgt" data-part="score" data-step="4">
+      <rect class="box frozen" x="30" y="370" width="235" height="86" rx="10"/>
+      <text class="t-c t-b" x="147" y="397">教师 score s_real</text><text class="t-c t-xs" x="147" y="420">配合可训练 s_fake</text><text class="t-c t-xs" x="147" y="442">DMD / VSD</text>
+    </g>
+    <g class="pred" data-part="critic" data-step="4">
+      <rect class="box" x="310" y="370" width="235" height="86" rx="10"/>
+      <text class="t-c t-b" x="427" y="397">判别器 D_ψ</text><text class="t-c t-xs" x="427" y="420">真实样本与生成样本</text><text class="t-c t-xs" x="427" y="442">ADD / APT</text>
+    </g>
+    <g class="tgt" data-part="features" data-step="4">
+      <rect class="box frozen" x="590" y="370" width="250" height="86" rx="10"/>
+      <text class="t-c t-b" x="715" y="397">冻结特征编码器 φ</text><text class="t-c t-xs" x="715" y="420">数据 / 参考样本的特征</text><text class="t-c t-xs" x="715" y="442">Drifting / RDM</text>
+    </g>
+    <path class="edge loss" d="M147,370 V330 H823 V304" data-step="4 5"/>
+    <path class="edge loss" d="M427,370 V346 H865 V304" data-step="4 5"/>
+    <path class="edge loss" d="M715,370 V360 H907 V304" data-step="4 5"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>噪声与条件</h4><p>同一条件下仍应有不同样本。噪声不是需要消灭的训练误差，而是生成分布的随机输入；固定噪声—端点配对才有明确的逐样本回归目标。</p></div>
+    <div data-note="teacher"><h4>教师的两种用法</h4><p>完整求解可提供端点；局部求解可提供相邻轨迹状态。教师 score 也能只负责评价学生样本，完全不生成配对端点<span class="src">Progressive Distillation §3；CM §4；DMD §3</span>。</p></div>
+    <div data-note="endpoint"><h4>映射级监督</h4><p>端点回归保留初始噪声到输出的对应关系。一致性蒸馏只要求邻近状态预测同一终点，不必预先生成整条教师轨迹<span class="src">CM §4</span>。</p></div>
+    <div data-note="student"><h4>被训练的生成器</h4><p>少步通常减少采样次数，不保证缩小网络。纯一致性训练、MeanFlow 或特征匹配还能直接从数据学习，未必存在被蒸馏的扩散教师。</p></div>
+    <div data-note="score"><h4>score 是分布的方向</h4><p>教师与 fake score 在学生生成并加噪后的样本上评价真实分布与生成分布；差值驱动分布靠近。原始 DMD 另有教师端点回归项，DMD2 才移除了它<span class="src">DMD §3；见 <a href="06-dmd2.html">DMD2</a></span>。</p></div>
+    <div data-note="critic"><h4>可训练的评委</h4><p>对抗训练用真实数据训练判别器，学生梯度穿过判别器回到生成器。ADD 同时带有教师蒸馏信号；APT 的核心是把已初始化的生成器继续做对抗后训练。详见 <a href="04-adversarial-distillation.html">ADD</a> 与 <a href="10-apt.html">APT</a>。</p></div>
+    <div data-note="features"><h4>冻结不等于阻断输入梯度</h4><p>特征编码器参数不更新，但生成分支的梯度要经过它返回学生。真实数据可以在线取样，也可以预先编码为固定参考；参考还可能由教师离线生成<span class="src">Drifting §3.4；RDM §3、§4.2</span>。</p></div>
+    <div data-note="loss"><h4>这是一张监督地图</h4><p>下面几条分布监督分支是备选方案，图中汇合不表示所有方法都必须同时训练这些网络。目标相同——快速生成——不意味着损失、训练资源相同。</p></div>
+    <div data-step-note="1"><h4>① 定义输入</h4><p>采样噪声并给出条件；需要真实数据的方法另采样数据批次。</p></div>
+    <div data-step-note="2"><h4>② 构造轨迹监督</h4><p>若选择轨迹回归或 CD，由冻结教师产生端点或局部邻居。</p></div>
+    <div data-step-note="3"><h4>③ 学生生成</h4><p>学生从当前输入直接预测样本或终点表示。</p></div>
+    <div data-step-note="4"><h4>④ 分布级评价</h4><p>若选择分布匹配，在 score、判别器或冻结特征空间里构造监督。</p></div>
+    <div data-step-note="5"><h4>⑤ 计算目标</h4><p>选择映射级或分布级损失；混合方法可以兼有两者。</p></div>
+    <div data-step-note="6"><h4>⑥ 更新学生</h4><p>教师目标停止梯度；生成分支必须保留对学生的梯度。</p></div>
+  </div>
+  <figcaption>图 1　训练监督的概念地图，依据 Progressive Distillation §3、CM §4–5、DMD §3、Drifting §3、RDM §3 综合绘制；不是某一篇论文的完整算法。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解：速度场、积分器、监督信号</h2>
+<h3 id="c-field">3.1 score 与速度场：同一个生成过程的不同参数化</h3>
+<p>对前向 SDE \(\mathrm dx=a(x,t)\mathrm dt+b(t)\mathrm dW_t\)，score 为 \(s_\text{real}(x_t,t)=\nabla_{x_t}\log p_t(x_t)\)。对应的 probability-flow ODE 与 SDE 具有相同时间边缘分布，方向场为<span class="src">Score SDE §4.3、Eq. (13)</span>：</p>
+<div class="formula">$$\frac{\mathrm dx_t}{\mathrm dt}=a(x_t,t)-\frac12 b(t)^2s_\text{real}(x_t,t).$$</div>
+<p>这里“相同”指边缘分布，不是每个随机 SDE 样本的路径。Flow Matching 则直接训练 \(v_\theta\)，用每个训练对的条件速度作可计算监督；线性路径的总体最优速度是 \(\mathbb E[\epsilon-x_0\mid x_t,t]\)<span class="src">Flow Matching §3–4；Rectified Flow Eq. (2)，按本页时间约定改写</span>。学到了真实速度场，也仍然需要数值求解 ODE。</p>
+
+<h3 id="c-nfe">3.2 NFE 为什么高：弯曲、截断误差与 guidance</h3>
+<p>NFE 是采样时网络评价次数。ODE 求解器只在离散状态计算方向：若轨迹弯曲，大步 Euler 就沿切线切过弯道，偏离真实轨迹。EDM 明确把截断误差与轨迹曲率联系起来，并用预条件、时间表和 Heun 校正改善效率<span class="src">EDM §3、Fig. 3</span>。所以“把原采样器的步数直接调小”和“训练一个适合大跳跃的新映射”是不同操作。</p>
+<p>步数也不一定等于 NFE。Heun 的预测与校正通常各需一次速度评价，最后落到数据端的步骤可退回 Euler<span class="src">EDM Alg. 1</span>。普通 classifier-free guidance（CFG）还要分别评价条件与无条件分支；把两支并进一个 batch 不能消除这两份样本计算量<span class="src">CFG §3、Alg. 1</span>。本页统一写 \(s_w=s_\text{uncond}+w(s_\text{cond}-s_\text{uncond})\)；原 CFG 论文的系数比这里少一，后文遇到另一种约定会明确换算<span class="src">CFG Alg. 1，代数重写</span>。</p>
+<div data-widget="fewstep-2d" data-focus="sampling"></div>
+<p>演示里是环形排列的八个高斯模式，用解析后验算出精确速度场，再用 Euler 从噪声端采样；参考线也是数值解，使用四十八次评价，并非精确 ODE 端点<span class="src">组件 <code>assets/js/widgets/fewstep2d.js</code>：<code>post</code>、<code>vel</code>、<code>euler</code>、<code>draw</code></span>。改变滑块看的是离散化误差，网络本身没有训练误差。演示的单步输出恰好是原点来自其独立配对与对称数据分布，不能外推为所有扩散模型单步都会精确输出均值。</p>
+
+<h3 id="c-taxonomy">3.3 本 track 的分类：到底约束什么</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>范式 / 入口</th><th>监督约束</th><th>需要什么</th><th>主要代价</th></tr></thead>
+  <tbody>
+    <tr><td><a href="02-trajectory-distillation.html">轨迹 / ODE 回归</a></td><td>同一输入的学生跳跃匹配教师端点</td><td>冻结教师；端点数据集或在线局部 ODE 求解</td><td>教师求解与配对存储；高维映射的回归误差<span class="src">PD §3；InstaFlow §3</span></td></tr>
+    <tr><td><a href="03-consistency-models.html">一致性</a> / <a href="08-scm.html">sCM</a> / <a href="11-meanflow.html">MeanFlow</a></td><td>沿轨迹保持共同端点，或学习跨时间区间的流映射 / 平均速度</td><td>CD 用教师局部求解；CT、sCM、MeanFlow 可用数据与自身目标</td><td>自举目标、边界、时间间隔与导数估计要稳定<span class="src">CM §4–5；sCM §3；MeanFlow §4</span></td></tr>
+    <tr><td><a href="05-dmd.html">DMD / VSD</a></td><td>带噪生成分布向教师分布匹配；反向 KL 的 score 差梯度</td><td>教师 score + 可训练 fake score；原 DMD 还要教师配对</td><td>辅助网络追踪当前生成分布；score 估计滞后<span class="src">DMD §3；VSD §3</span></td></tr>
+    <tr><td><a href="04-adversarial-distillation.html">ADD</a> / <a href="10-apt.html">APT</a></td><td>真实与生成样本的可训练判别</td><td>真实数据 + 判别器；ADD 另加教师蒸馏，APT 依赖预训练初始化</td><td>对抗平衡与视频训练显存；不是统一的反向 KL 目标</td></tr>
+    <tr><td><a href="15-drifting.html">Drifting</a> / <a href="16-rdm.html">RDM</a></td><td>冻结特征里的核化吸引与排斥，或 MMD</td><td>冻结特征编码器 + 数据 / 固定参考；不必有在线扩散教师</td><td>特征盲区、批量与核估计；Drifting 的归一化场不应直接等同于原始 MMD 梯度<span class="src">Drifting §3；RDM §3</span></td></tr>
+  </tbody>
+</table></div>
+<p>这里的“distillation”广义上指把慢生成流程的能力转移给快生成器，学生网络可以与教师一样大。CT、MeanFlow 与从数据训练的 Drifting 更准确地说是在<b>替换生成范式</b>；预训练初始化、训练监督和推理所需网络应分开记录。同一个系统还可以先回归初始化，再用分布目标后训练。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与计算账本</h2>
+<p>以下是符号级开销推导，不指定某个模型的尺寸；\(B\) 为 batch，\(C\) 为通道，\(H,W\) 为 latent 空间尺寸，\(F\) 为 latent 帧数，\(L\) 为 token 数，\(D\) 为特征宽度。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 开销</th><th>读法</th></tr></thead>
+  <tbody>
+    <tr><td>图像 latent / 预测值</td><td>[B, C, H, W]</td><td>改变噪声或时间不改变张量形状</td></tr>
+    <tr><td>视频 latent / 预测值</td><td>[B, C, F, H, W]</td><td>元素数随 F 增长；不把像素帧数与压缩帧数混用</td></tr>
+    <tr><td>完整教师轨迹</td><td>[B, N + 1, C, F, H, W]</td><td>若保存所有状态，存储再乘轨迹长度；局部 CD 不需要这张完整轨迹</td></tr>
+    <tr><td>密集注意力</td><td>token [B, L, D]；概念上的注意力矩阵 [B, heads, L, L]</td><td>平方项来自两两 token 交互；融合内核可避免把整张矩阵写入显存</td></tr>
+    <tr><td>普通 CFG 的评价账本</td><td>条件分支次数 + 无条件分支次数</td><td>按单样本分支计数；论文若按合并调用报 NFE，需要注明</td></tr>
+  </tbody>
+</table></div>
+<p><span class="src">形状与存储：按计算图推导；局部 CD：CM §4；CFG：CFG Alg. 1</span> 减少 NFE 主要减少重复前向，并不自动减小单次视频前向的峰值显存、VAE 解码成本或 KV cache。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 目标决定失败方式</h2>
+<h3 id="c-mean">5.1 为什么直接回归会学到模糊均值</h3>
+<div class="formula">$$\underset{G}{\arg\min}\ \mathbb E\|G(\epsilon,c)-x_0\|^2=\mathbb E[x_0\mid\epsilon,c].$$</div>
+<p>这是平方损失的条件期望性质（数学推导）。若噪声与真实图像独立，同一输入对应很多互不相容的目标，最优解就是条件下的平均图像。教师 ODE 配对 \(x_0=\Phi_\phi(\epsilon,c)\) 则把目标变成确定函数，理论最优解可以保留所有模式<span class="src">PD §3；Rectified Flow §2.2</span>。仍有模糊时，应区分学生容量不足、配对映射过复杂、损失偏好平均与学生漏掉教师条件；不能把所有回归失败归为独立配对。</p>
+<h3 id="c-kl">5.2 mode-seeking 与 mode-covering 是哪一种 KL</h3>
+<div class="formula">$$D_{\mathrm{KL}}(q_\theta\|p)=\mathbb E_{x\sim q_\theta}\log\frac{q_\theta(x)}{p(x)},\qquad D_{\mathrm{KL}}(p\|q_\theta)=\mathbb E_{x\sim p}\log\frac{p(x)}{q_\theta(x)}.$$
+</div>
+<p>反向 KL 在生成分布 \(q_\theta\) 上取期望，强烈惩罚样本落入教师低密度区，但漏掉一个数据模式未必立即付出大代价；有限容量或优化不充分时常表现为 mode-seeking。正向 KL 在目标分布取期望，漏掉目标模式会被惩罚，因而常称 mode-covering。<b>在可表达且全局优化的理想情形，两者的最优解都是匹配目标分布</b>，反向 KL 并非必然坍塌<span class="src">DMD §3 的 KL 方向；性质按 KL 定义推导</span>。</p>
+<p>DMD/VSD 在带噪分布上比较 score；教师 CFG 又改变了有效目标。GAN 与核匹配也有各自的估计误差和覆盖问题，不能仅按名称给它们贴同一个 KL 标签。生成多样性需要另看 recall、条件覆盖和多随机种子结果，单项质量分不足以判定。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码：慢采样与映射蒸馏</h2>
+<div class="code-title">conceptual_flow.py（教学重写：Flow Matching §3–4、DDIM §4、Denoising Student §3）</div>
+<pre><code class="lang-py"># 本页约定：t=1 是噪声，t=0 是数据；这不是统一的训练配方
+def guided_velocity(x, t, c, w):
+    v_cond = teacher_velocity(x, t, c)
+    if guidance_is_disabled:
+        return v_cond
+    v_uncond = teacher_velocity(x, t, null_condition)
+    return v_uncond + w * (v_cond - v_uncond)
+
+def teacher_endpoint(eps, c, descending_times):
+    x = eps
+    for t, s in adjacent_pairs(descending_times):
+        v = guided_velocity(x, t, c, guidance_scale)
+        x = x + (s - t) * v              # Euler 教学示意；实际可用高阶求解器
+    return x
+
+# 映射回归需要保留“同一份噪声”的对应关系
+for eps, c in prior_and_condition_loader:
+    with no_grad():
+        target = teacher_endpoint(eps, c, teacher_times)
+    prediction = G(eps, c)
+    loss = distance(prediction, target)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# 分布匹配分支替换上面的逐样本目标，具体见 DMD / ADD / RDM 页面
+sample = G(new_noise(), new_condition())  # 推理只运行学生</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参：读论文时先统一口径</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>必须记录</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td>时间 / 噪声参数</td><td>数据端在哪边，VP 的 α/σ、EDM 的 σ，是否扭曲时间表</td><td>公式与采样顺序的符号，步数不能脱离求解器比较</td></tr>
+    <tr><td>CFG</td><td>系数约定、教师强度、学生是否吸收 guidance</td><td>质量—多样性与分支计算量<span class="src">CFG §3</span></td></tr>
+    <tr><td>监督范围</td><td>局部跳跃、整条 ODE 端点、score 或真实样本</td><td>每个训练更新的教师成本和数据需求</td></tr>
+    <tr><td>一致性时间间隔</td><td>离散 / 连续，如何缩短或跳步</td><td>局部近似误差与监督强度<span class="src">CM §4–5；LCM §4.3</span></td></tr>
+    <tr><td>视频部署</td><td>每 chunk 的去噪、写 cache、VAE 解码；首帧延迟与吞吐分列</td><td>采样少步不等于流式实时<span class="src">Self Forcing §3</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 评估指标与“学生能否超过教师”</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>指标</th><th>测什么 / 方向</th><th>不能独自证明什么</th></tr></thead>
+  <tbody>
+    <tr><td>FID ↓</td><td>生成与真实图像的 Inception 特征均值、协方差之间的 Fréchet 距离<span class="src">FID 论文 Eq. (6)</span></td><td>不是逐图误差，也不检验提示词遵循；样本数、参考集、预处理与实现必须一致</td></tr>
+    <tr><td>CLIP score ↑</td><td>图像与文本嵌入的相似度；常用余弦相似度及其缩放<span class="src">CLIPScore §3</span></td><td>不同 CLIP 编码器、缩放与聚合不能直接比较；复杂空间关系可能被遗漏</td></tr>
+    <tr><td>GenEval ↑</td><td>检测器与属性检查评估物体、计数、颜色、位置和属性绑定的组合遵循<span class="src">GenEval §3、Tab. 1</span></td><td>依赖评估器识别能力；总分会掩盖计数与位置等弱项</td></tr>
+    <tr><td>VBench quality ↑</td><td>主体 / 背景一致性、运动、闪烁、美学、成像等视频质量维度的归一化聚合<span class="src">VBench §3；官方 <code>scripts/constant.py</code></span></td><td>静止或重复画面可能在某些时序项上得高分，需同时看运动与语义</td></tr>
+    <tr><td>VBench semantic ↑</td><td>物体、动作、颜色、关系与场景等条件遵循维度<span class="src">VBench §3；官方 <code>scripts/constant.py</code></span></td><td>不能替代时间质量；也不要与单独的 Text / Temporal 子项混称</td></tr>
+    <tr><td>VBench total ↑</td><td>官方汇总按 quality : semantic = 4 : 1 加权<span class="src">官方 <code>scripts/cal_final_score.py</code>、<code>scripts/constant.py</code></span></td><td>不是所有原始维度的直接算术平均；版本、归一化边界、提示词集要一致</td></tr>
+  </tbody>
+</table></div>
+<div class="formula">$$\mathrm{FID}=\|\mu_g-\mu_r\|^2+\mathrm{Tr}\!\left(\Sigma_g+\Sigma_r-2(\Sigma_g\Sigma_r)^{1/2}\right).$$</div>
+<p><span class="src">FID 论文 Eq. (6)</span> 即使训练目标严格复制教师，也只有理想精确复制才保证分布相同；有限样本的指标、数值采样误差与学生归纳偏好会产生差异。分布后训练若加入真实数据、特征约束或奖励，还获得了超出教师轨迹的信号。比如 RDM 的文生图后训练把基座的四步改为一步，GenEval 从 0.794 提高到 0.826<span class="src">RDM Tab. 2</span>。这说明学生可以在指定评估上更好，不能据此声称它在所有条件、多样性和人类偏好上都超过教师。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>多步生成的工作方式</h4><ul><li>学习局部方向，推理时重复积分。</li><li>质量依赖曲率、求解器、时间表与 guidance。</li></ul></div>
+  <div class="now"><h4>把工作搬进训练</h4><ul><li><a href="02-trajectory-distillation.html">轨迹回归</a>学习大跳跃；<a href="03-consistency-models.html">一致性</a>学习共同终点。</li><li><a href="05-dmd.html">DMD</a>、<a href="04-adversarial-distillation.html">对抗</a>与<a href="16-rdm.html">表征匹配</a>重新约束生成分布。</li></ul></div>
+</div>
+<h3 id="from-image">从图像到视频为什么更难</h3>
+<p>视频不是把图像的噪声多复制几份。三维 latent 带来时间维存储、更多 token 与较大的注意力开销；一致的对象身份、运动和遮挡也要求整段联合建模。教师完整采样更贵，离线端点数据集的生产成本随之上升。这里的开销关系来自上面的形状推导，而非某篇论文的硬件测量。</p>
+<p>为了降低首帧延迟，可以把双向整段去噪改成因果 / AR 生成。新的历史条件却改变了训练问题：训练看真实历史、推理看自己输出的历史，会导致 exposure bias 和误差累积；因果学生还可能看不到双向教师目标依赖的未来噪声<span class="src">Self Forcing §1、§3；详见 <a href="14-causal-forcing.html">Causal Forcing</a></span>。因此要同时比较少步质量、时间一致性、首帧延迟和长时间 rollout。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>接下来追踪的问题</th><th>阅读入口</th></tr></thead>
+  <tbody>
+    <tr><td>一致性如何进 latent 视频；连续时间与区间映射怎样改进训练</td><td><a href="07-video-consistency.html">07 VideoLCM / AnimateLCM / T2V-Turbo</a> · <a href="08-scm.html">08 sCM</a> · <a href="11-meanflow.html">11 MeanFlow</a> · <a href="13-rcm.html">13 rCM</a></td></tr>
+    <tr><td>双向教师如何服务因果学生；历史如何从训练到部署对齐</td><td><a href="09-causvid.html">09 CausVid</a> · <a href="12-self-forcing.html">12 Self Forcing</a> · <a href="14-causal-forcing.html">14 Causal Forcing</a></td></tr>
+    <tr><td>能否用新的分布监督改善一步质量，并将它迁到视频</td><td><a href="10-apt.html">10 APT</a> · <a href="15-drifting.html">15 Drifting</a> · <a href="16-rdm.html">16 RDM</a> · <a href="17-virdm.html">17 ViRDM</a></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q1"><span class="qid">Q1</span>速度场已经学准了，为什么直接把采样器改成单步仍会失败？</h3>
+  <div class="ans"><p class="short">速度场是局部方向，单步需要整段流的积分；轨迹弯曲时局部切线不能代表全程位移。学生要学习适合大跳跃的映射，或重新设计可单步生成的目标。</p><ul><li>数值误差与模型误差分开：解析速度场也可能有大步积分误差。</li><li>条件训练直线不保证边缘 ODE 轨迹直；配对和条件平均决定实际场。</li><li>步数与 NFE 还受求解器和 CFG 分支影响。</li></ul><p class="cite">依据：Score SDE §4.3；EDM §3；Flow Matching §3–4；Rectified Flow §2.2；CFG Alg. 1。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q2"><span class="qid">Q2</span>端点回归与分布匹配各需要什么监督，学生指标超过教师意味着什么？</h3>
+  <div class="ans"><p class="short">回归需要确定的输入—目标配对，分布匹配允许重排噪声与样本的关系，依赖 score、判别器或特征参考。超过教师的某个指标是协议内的结果，不能自动推广为整体分布更准确。</p><ul><li>独立配对的平方回归会给出条件均值；ODE 配对在理论上可避免这一点。</li><li>分布目标可能额外使用真实数据或编码器，也可能偏向容易获得高分的模式。</li><li>检查相同采样协议、条件覆盖、多样性、留出指标和时间成本。</li></ul><p class="cite">依据：PD §3；DMD §3；Drifting §3；RDM §3、Tab. 2；GenEval §3；VBench §3。</p></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Ho, Jain, Abbeel. <i>Denoising Diffusion Probabilistic Models.</i> NeurIPS 2020. <a href="https://arxiv.org/abs/2006.11239">arXiv:2006.11239</a> · <a href="https://github.com/hojonathanho/diffusion">代码</a></li>
+  <li>Song, Meng, Ermon. <i>Denoising Diffusion Implicit Models.</i> ICLR 2021. <a href="https://arxiv.org/abs/2010.02502">arXiv:2010.02502</a> · <a href="https://github.com/ermongroup/ddim">代码</a></li>
+  <li>Song et al. <i>Score-Based Generative Modeling through Stochastic Differential Equations.</i> ICLR 2021. <a href="https://arxiv.org/abs/2011.13456">arXiv:2011.13456</a> · <a href="https://github.com/yang-song/score_sde">代码</a></li>
+  <li>Karras et al. <i>Elucidating the Design Space of Diffusion-Based Generative Models.</i> NeurIPS 2022. <a href="https://arxiv.org/abs/2206.00364">arXiv:2206.00364</a> · <a href="https://github.com/NVlabs/edm">代码</a></li>
+  <li>Lipman et al. <i>Flow Matching for Generative Modeling.</i> ICLR 2023. <a href="https://arxiv.org/abs/2210.02747">arXiv:2210.02747</a></li>
+  <li>Ho, Salimans. <i>Classifier-Free Diffusion Guidance.</i> 2022. <a href="https://arxiv.org/abs/2207.12598">arXiv:2207.12598</a></li>
+  <li>Salimans, Ho. <i>Progressive Distillation for Fast Sampling of Diffusion Models.</i> ICLR 2022. <a href="https://arxiv.org/abs/2202.00512">arXiv:2202.00512</a>；Liu, Gong, Liu. <i>Flow Straight and Fast.</i> ICLR 2023. <a href="https://arxiv.org/abs/2209.03003">arXiv:2209.03003</a></li>
+  <li>Song et al. <i>Consistency Models.</i> ICML 2023. <a href="https://arxiv.org/abs/2303.01469">arXiv:2303.01469</a>；Lu, Song. <i>Simplifying, Stabilizing and Scaling Continuous-Time Consistency Models.</i> ICLR 2025. <a href="https://arxiv.org/abs/2410.11081">arXiv:2410.11081</a>；Geng et al. <i>Mean Flows for One-step Generative Modeling.</i> 2025. <a href="https://arxiv.org/abs/2505.13447">arXiv:2505.13447</a></li>
+  <li>Yin et al. <i>One-step Diffusion with Distribution Matching Distillation.</i> CVPR 2024. <a href="https://arxiv.org/abs/2311.18828">arXiv:2311.18828</a>；Wang et al. <i>ProlificDreamer: High-Fidelity and Diverse Text-to-3D Generation with Variational Score Distillation.</i> NeurIPS 2023. <a href="https://arxiv.org/abs/2305.16213">arXiv:2305.16213</a></li>
+  <li>Deng et al. <i>Generative Modeling via Drifting.</i> 2026. <a href="https://arxiv.org/abs/2602.04770">arXiv:2602.04770</a>；Feng et al. <i>Representation Distribution Matching for One-Step Visual Generation.</i> 2026. <a href="https://arxiv.org/abs/2607.02375">arXiv:2607.02375</a></li>
+  <li>Heusel et al. <i>GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium.</i> NeurIPS 2017（FID）. <a href="https://arxiv.org/abs/1706.08500">arXiv:1706.08500</a>；Hessel et al. <i>CLIPScore: A Reference-free Evaluation Metric for Image Captioning.</i> EMNLP 2021. <a href="https://arxiv.org/abs/2104.08718">arXiv:2104.08718</a></li>
+  <li>Ghosh et al. <i>GenEval: An Object-Focused Framework for Evaluating Text-to-Image Alignment.</i> NeurIPS 2023. <a href="https://arxiv.org/abs/2310.11513">arXiv:2310.11513</a> · <a href="https://github.com/djghosh13/geneval">代码</a></li>
+  <li>Huang et al. <i>VBench: Comprehensive Benchmark Suite for Video Generative Models.</i> CVPR 2024. <a href="https://arxiv.org/abs/2311.17982">arXiv:2311.17982</a> · <a href="https://github.com/Vchitect/VBench/blob/master/scripts/cal_final_score.py">官方汇总脚本</a></li>
+  <li>Huang et al. <i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion.</i> NeurIPS 2025. <a href="https://arxiv.org/abs/2506.08009">arXiv:2506.08009</a> · <a href="https://github.com/guandeh17/Self-Forcing">代码</a></li>
+  <li>本 track 其余方法的逐项来源见对应页面与 <code>SOURCES.md</code>；本页二维演示见 <a href="../../../assets/js/widgets/fewstep2d.js">组件源码</a>。</li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <code>SOURCES.md</code></footer>
+</body>
+</html>
+

@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Self Forcing 自回归视频蒸馏</title>
+<meta name="description" content="Self Forcing：训练时就让自回归视频扩散模型带着 KV cache 自己展开整段视频，用整段视频的分布匹配损失（DMD / SiD / GAN）监督，配合随机梯度截断把显存压住；以及滚动 KV cache 与长视频后续（Self-Forcing++、LongLive、Rolling Forcing）。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="self-forcing">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：训练时看真值，推理时看自己</h2>
+<p>自回归视频扩散模型在推理时，第 i 个 chunk 以<b>自己刚生成的</b>前 i−1 个 chunk 为条件。但两种主流训练方式给它的历史都不是这样的：<b>Teacher Forcing（TF）</b>给干净的真实历史帧；<b>Diffusion Forcing（DF）</b>给每帧独立加噪的真实历史帧<span class="src">论文 §1、Fig. 1</span>。<a href="09-causvid.html">CausVid</a> 的 DMD 阶段属于后者——Self Forcing 的消融把“DF + DMD”明确当作 CausVid 配方在同一代码框架下的复现<span class="src">论文 §4</span>。训练从没见过“带着自身瑕疵的历史”，推理时误差就逐帧累积——即序列模型里熟知的<b>暴露偏差</b>（exposure bias）。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  训练就照推理的样子做：学生从噪声出发，带着 KV cache <b>逐 chunk 自回归地生成整段视频</b>，再对这段自生成视频整体做分布匹配（默认 DMD，教师为 Wan2.1-T2V-14B）。为了让“串行展开 + 反传”放得进显存，每个 chunk 只在随机选中的那一步去噪保留梯度，历史 KV 一律截断梯度。结果：1.3B 模型在单张 H100 上 17.0 FPS、首帧 0.69 s，VBench 总分 84.31，略高于多步采样的 Wan2.1 基座（84.26）<span class="src">论文 Tab. 1</span>。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：一次训练迭代</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 隐变量</span><span><i class="sw enc"></i>学生生成器（可训练）</span>
+  <span><i class="sw tgt"></i>教师（冻结）</span><span><i class="sw pred"></i>fake score / critic</span>
+  <span><i class="sw loss"></i>损失</span><span><i class="sw act"></i>KV cache（条件）</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 520" role="img" aria-label="Self Forcing 训练：自回归展开、随机梯度截断与整段 DMD">
+    <text class="t-xs" x="24" y="87">t=1000</text>
+    <text class="t-xs" x="24" y="120">t=750 = s</text>
+    <text class="t-xs" x="24" y="154">t=500</text>
+    <text class="t-xs" x="24" y="188">t=250</text>
+    <g class="data" data-part="noise" data-step="1">
+      <rect class="box" x="112" y="30" width="80" height="26" rx="6"/><text class="t-c t-xs" x="152" y="43" style="fill:var(--text)">噪声 ε¹</text>
+      <rect class="box" x="262" y="30" width="80" height="26" rx="6"/><text class="t-c t-xs" x="302" y="43" style="fill:var(--text)">噪声 ε²</text>
+      <rect class="box" x="412" y="30" width="80" height="26" rx="6"/><text class="t-c t-xs" x="452" y="43" style="fill:var(--text)">噪声 ε³</text>
+      <text class="t-xs" x="508" y="43">… 共 7 个</text>
+    </g>
+    <g data-part="rollout" data-step="2">
+      <path class="edge" d="M152,56 V70"/><path class="edge" d="M302,56 V70"/><path class="edge" d="M452,56 V70"/>
+      <g class="enc"><rect class="box" x="90" y="74" width="124" height="26" rx="6"/><rect class="box" x="240" y="74" width="124" height="26" rx="6"/><rect class="box" x="390" y="74" width="124" height="26" rx="6"/></g>
+      <text class="t-c t-xs" x="152" y="87" style="fill:var(--text)">G_θ · no_grad</text>
+      <text class="t-c t-xs" x="302" y="87" style="fill:var(--text)">G_θ · no_grad</text>
+      <text class="t-c t-xs" x="452" y="87" style="fill:var(--text)">G_θ · no_grad</text>
+      <rect class="frame" x="90" y="142" width="124" height="24" rx="6"/><rect class="frame" x="240" y="142" width="124" height="24" rx="6"/><rect class="frame" x="390" y="142" width="124" height="24" rx="6"/>
+      <rect class="frame" x="90" y="176" width="124" height="24" rx="6"/><rect class="frame" x="240" y="176" width="124" height="24" rx="6"/><rect class="frame" x="390" y="176" width="124" height="24" rx="6"/>
+      <text class="t-c t-xs" x="132" y="154">跳过</text><text class="t-c t-xs" x="282" y="154">跳过</text><text class="t-c t-xs" x="432" y="154">跳过</text>
+      <text class="t-c t-xs" x="132" y="188">跳过</text><text class="t-c t-xs" x="282" y="188">跳过</text><text class="t-c t-xs" x="432" y="188">跳过</text>
+    </g>
+    <g class="loss" data-part="trunc" data-step="3">
+      <rect class="box" x="90" y="108" width="124" height="24" rx="6"/><rect class="box" x="240" y="108" width="124" height="24" rx="6"/><rect class="box" x="390" y="108" width="124" height="24" rx="6"/>
+      <text class="t-c t-xs" x="152" y="120" style="fill:var(--text)">留梯度 · 即输出</text>
+      <text class="t-c t-xs" x="302" y="120" style="fill:var(--text)">留梯度 · 即输出</text>
+      <text class="t-c t-xs" x="452" y="120" style="fill:var(--text)">留梯度 · 即输出</text>
+      <path class="edge enc" d="M192,132 V206"/><path class="edge enc" d="M342,132 V206"/><path class="edge enc" d="M492,132 V206"/>
+    </g>
+    <g data-part="kv" data-step="4">
+      <rect class="tk enc" x="180" y="210" width="24" height="24"/><rect class="tk enc" x="330" y="210" width="24" height="24"/><rect class="tk enc" x="480" y="210" width="24" height="24"/>
+      <text class="t-c t-xs" x="160" y="208">x̂¹</text><text class="t-c t-xs" x="310" y="208">x̂²</text><text class="t-c t-xs" x="460" y="208">x̂³</text>
+      <path class="edge act" d="M192,234 V248"/><path class="edge act" d="M342,234 V248"/><path class="edge act" d="M492,234 V248"/>
+      <g class="act"><rect class="box" x="90" y="252" width="124" height="30" rx="6"/><rect class="box" x="240" y="252" width="124" height="30" rx="6"/><rect class="box" x="390" y="252" width="124" height="30" rx="6"/></g>
+      <text class="t-c t-xs" x="152" y="267" style="fill:var(--text)">t=0 重跑 → KV</text>
+      <text class="t-c t-xs" x="302" y="267" style="fill:var(--text)">t=0 重跑 → KV</text>
+      <text class="t-c t-xs" x="452" y="267" style="fill:var(--text)">t=0 重跑 → KV</text>
+      <path class="edge sg" d="M214,267 C230,267 226,87 236,87" style="stroke:var(--c-act)"/>
+      <path class="edge sg" d="M364,267 C380,267 376,87 386,87" style="stroke:var(--c-act)"/>
+    </g>
+    <g data-part="video" data-step="5">
+      <path class="edge idx no-head" d="M204,222 H330"/><path class="edge idx no-head" d="M354,222 H480"/>
+      <path class="edge enc" d="M504,222 C536,222 532,114 556,114"/>
+      <text class="t-c t-sm" x="636" y="92">自生成整段视频</text>
+      <rect class="tk enc" x="560" y="104" width="20" height="20"/><rect class="tk enc" x="582" y="104" width="20" height="20"/><rect class="tk enc" x="604" y="104" width="20" height="20"/><rect class="tk enc" x="626" y="104" width="20" height="20"/><rect class="tk enc" x="648" y="104" width="20" height="20"/><rect class="tk enc" x="670" y="104" width="20" height="20"/><rect class="tk enc" x="692" y="104" width="20" height="20"/>
+      <text class="t-c t-xs" x="636" y="140">7 chunk × 3 latent 帧</text>
+    </g>
+    <path class="edge" d="M714,110 C736,110 736,62 756,62" data-step="6"/>
+    <path class="edge" d="M714,120 C736,120 736,234 756,234" data-step="6"/>
+    <g class="tgt" data-part="real" data-step="6">
+      <rect class="box frozen" x="760" y="30" width="180" height="64" rx="10"/>
+      <text class="t-c t-b" x="850" y="52">教师 s<tspan font-size="9" dy="3">real</tspan></text>
+      <text class="t-c t-xs" x="850" y="76">Wan2.1-T2V-14B · 冻结 · CFG 3</text>
+    </g>
+    <path class="edge" d="M850,94 V114" data-step="6" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <g class="loss" data-part="dmd" data-step="6">
+      <rect class="box" x="760" y="118" width="180" height="60" rx="10"/>
+      <text class="t-c t-b" x="850" y="138">整段视频 DMD</text>
+      <text class="t-c t-xs" x="850" y="160">加噪后比较两个 score</text>
+    </g>
+    <path class="edge pred" d="M850,202 V182" data-step="6"/>
+    <g class="pred" data-part="fake" data-step="6">
+      <rect class="box" x="760" y="202" width="180" height="64" rx="10"/>
+      <text class="t-c t-b" x="850" y="224">fake score s<tspan font-size="9" dy="3">fake</tspan></text>
+      <text class="t-c t-xs" x="850" y="248">1.3B · 可训练 · 5 : 1</text>
+    </g>
+    <path class="edge grad" d="M760,162 C700,178 600,178 518,120" data-step="7"/>
+    <text class="t-c t-xs" x="650" y="196" data-step="7">梯度只经第 s 步回到 G_θ</text>
+    <!-- inference: rolling KV cache -->
+    <g data-part="rolling" data-step="8">
+      <rect class="panel" x="20" y="304" width="920" height="200" rx="12"/>
+      <text class="t-sm" x="36" y="326" style="fill:var(--text);font-weight:650">推理：滚动 KV cache 外推（训练只见过 21 个 latent 帧）</text>
+      <rect class="tk off" x="40" y="350" width="58" height="36" rx="6"/><rect class="tk off" x="106" y="350" width="58" height="36" rx="6"/><rect class="tk off" x="172" y="350" width="58" height="36" rx="6"/>
+      <g class="act"><rect class="box" x="238" y="350" width="58" height="36" rx="6"/><rect class="box" x="304" y="350" width="58" height="36" rx="6"/><rect class="box" x="370" y="350" width="58" height="36" rx="6"/><rect class="box" x="436" y="350" width="58" height="36" rx="6"/><rect class="box" x="502" y="350" width="58" height="36" rx="6"/><rect class="box" x="568" y="350" width="58" height="36" rx="6"/></g>
+      <g class="enc"><rect class="box" x="634" y="350" width="58" height="36" rx="6"/></g>
+      <text class="t-c t-xs" x="69" y="368">c1</text><text class="t-c t-xs" x="135" y="368">c2</text><text class="t-c t-xs" x="201" y="368">c3</text>
+      <text class="t-c t-xs" x="267" y="368" style="fill:var(--text)">c4</text><text class="t-c t-xs" x="333" y="368" style="fill:var(--text)">c5</text><text class="t-c t-xs" x="399" y="368" style="fill:var(--text)">c6</text><text class="t-c t-xs" x="465" y="368" style="fill:var(--text)">c7</text><text class="t-c t-xs" x="531" y="368" style="fill:var(--text)">c8</text><text class="t-c t-xs" x="597" y="368" style="fill:var(--text)">c9</text>
+      <text class="t-c t-xs" x="663" y="368" style="fill:var(--text)">c10</text>
+      <text class="t-c t-xs" x="135" y="402">已逐出</text>
+      <path class="edge act no-head" d="M238,394 V400 H626 V394"/>
+      <text class="t-c t-xs" x="432" y="414">最近 L 帧的 KV（固定大小）</text>
+      <text class="t-c t-xs" x="663" y="402">当前 chunk</text>
+      <text class="t-xs" x="716" y="352">每步只读固定窗口：O(TL)</text>
+      <text class="t-xs" x="716" y="372">朴素滚动会闪烁：首个 latent</text>
+      <text class="t-xs" x="716" y="392">帧统计不同（没有时间压缩）</text>
+      <text class="t-xs" x="716" y="412">训练技巧：最后一个 chunk</text>
+      <text class="t-xs" x="716" y="432">不看第一个 chunk</text>
+      <text class="t-xs" x="40" y="456">实测（10 秒视频）：每次平移都重算窗口 KV → 4.6 FPS；滚动 KV + 训练技巧 → 16.1 FPS</text>
+      <text class="t-xs" x="40" y="480">更长的视频仍会退化：后续工作加入 attention sink、长时训练等（见 3.7）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="noise"><h4>每个 chunk 一份噪声</h4><p>训练不需要真实视频：DMD / SiD 版本是 data-free 的，只需要文本 prompt（约 25 万条，来自 VidProM 的 VidProS 子集，经 Qwen2.5-7B-Instruct 扩写）<span class="src">论文 §3.3、附录 A</span>。chunk-wise 版本每个 chunk 3 个 latent 帧，frame-wise 版本每块 1 帧<span class="src">论文 §4</span>。</p></div>
+    <div data-note="rollout"><h4>自回归展开（不带梯度的部分）</h4><p>每个 chunk 从噪声出发，按 4 步时间表 [1000, 750, 500, 250]（再经 shift = 5 扭曲）去噪：预测 x̂₀、再加噪到下一个时刻<span class="src">论文附录 A</span>。在随机选中的退出步 s 之前，所有前向都在 <code>no_grad</code> 下进行；s 之后的步骤不执行。注意力就是普通的“读 KV cache”，不需要 TF / DF 那样的特殊掩码，可以直接用 FlashAttention-3。</p></div>
+    <div data-note="trunc"><h4>随机梯度截断</h4><p>每次迭代采样 s ~ Uniform{1,…,T}，所有 chunk 都在第 s 步“提前退出”：这一步的 x̂₀ 就是该 chunk 的最终输出，也是<b>唯一</b>保留计算图的一次前向<span class="src">论文 §3.2、Alg. 1</span>。s 随机保证 4 个时间步的去噪都被训练到（与推理用到的每一步一一对应）；只留一步梯度让显存与单步前向相当。代码里 <code>same_step_across_blocks: true</code>，与论文“每次迭代采样一个 s”一致。</p></div>
+    <div data-note="kv"><h4>KV cache 与梯度截断</h4><p>chunk 生成完后，以 t = 0 把干净的 x̂ⁱ 再前向一次，写入 KV cache；这次前向在 <code>no_grad</code> 下，所以后续 chunk 读历史时梯度不会流回前面的 chunk<span class="src">论文 §3.2</span> <span class="src">官方代码 <code>pipeline/self_forcing_training.py</code></span>。代价是学不到“为了让后面更好而改变前面”的长程依赖，论文在局限中承认了这点<span class="src">论文 §5</span>。</p></div>
+    <div data-note="video"><h4>整段自生成视频</h4><p>7 个 chunk 拼成 21 个 latent 帧（81 帧、832×480，Wan2.1 的 5 秒）。损失对这一整段计算：匹配的是联合分布 \(p_\theta(x^{1:N})\)，而联合分布按链式法则包含了“以自己生成的历史为条件”的每一个条件分布。 <span class="src">Self Forcing §3、Alg. 1、App. A/B</span> <span class="src">官方 pipeline/self_forcing_training.py</span></p></div>
+    <div data-note="real"><h4>教师 / real score</h4><p>DMD 版本用 <b>Wan2.1-T2V-14B</b> 作 real score（CFG 3.0），而不是 1.3B 基座<span class="src">论文附录 Tab. 3</span> <span class="src">官方代码 <code>real_name: Wan2.1-T2V-14B</code></span>。它是双向模型，看整段视频打分，与 CausVid 的“非对称”一致。</p></div>
+    <div data-note="dmd"><h4>整段视频的分布匹配</h4><p>对自生成视频加噪（全片同一噪声水平），用 real score 与 fake score 的差作为反向 KL 的梯度，回传到学生<span class="src">论文 §3.3</span>。论文也实现了 SiD（Fisher 散度）与 GAN（相对论损失 + 近似 R1/R2）两种替代，DMD 为默认且最好。</p></div>
+    <div data-note="fake"><h4>fake score（critic）</h4><p>从 1.3B 基座初始化，在学生样本上做去噪训练；lr 4e-7，学生 lr 2e-6；每 5 次 critic 更新对应 1 次学生更新<span class="src">论文附录 Tab. 3</span> <span class="src">官方代码 <code>dfake_gen_update_ratio: 5</code></span>。</p></div>
+    <div data-note="rolling"><h4>滚动 KV cache</h4><p>推理超过训练长度时，只保留最近 L 帧的 KV，满了就逐出最旧的——每步代价 O(TL)，对比“双向模型滑窗重算”的 O(TL²) 与“因果模型每次平移重算窗口”的 O(L²+TL)<span class="src">论文 §3.4</span>。朴素滚动会出现闪烁：Wan 的第一个 latent 帧没有时间压缩，统计上与其他帧不同，而模型训练时总能看到它；于是训练时限制注意力窗口，让最后一个 chunk 看不到第一个 chunk，模拟“首帧被逐出”的情形<span class="src">论文附录 B</span>。</p></div>
+    <div data-step-note="1"><h4>① 采噪声</h4><p>每个 chunk 一份噪声，只需要 prompt。</p></div>
+    <div data-step-note="2"><h4>② 无梯度去噪</h4><p>退出步之前的去噪都不留计算图。</p></div>
+    <div data-step-note="3"><h4>③ 在第 s 步退出</h4><p>唯一保留梯度的一次前向，输出该 chunk。</p></div>
+    <div data-step-note="4"><h4>④ 写 KV cache</h4><p>t = 0 重跑写入干净历史，梯度截断。</p></div>
+    <div data-step-note="5"><h4>⑤ 拼成整段视频</h4><p>对 7 个 chunk 重复 ①–④。 <span class="src">Self Forcing §3、Alg. 1、App. A/B</span> <span class="src">官方 pipeline/self_forcing_training.py</span></p></div>
+    <div data-step-note="6"><h4>⑥ 整段 DMD</h4><p>14B 教师与 fake score 评估同一段自生成视频。 <span class="src">Self Forcing §3、Alg. 1、App. A/B</span> <span class="src">官方 pipeline/self_forcing_training.py</span></p></div>
+    <div data-step-note="7"><h4>⑦ 反传</h4><p>梯度经每个 chunk 的第 s 步回到学生；fake score 另做去噪更新。</p></div>
+    <div data-step-note="8"><h4>⑧ 推理外推</h4><p>滚动 KV cache 生成超过 5 秒的视频。 <span class="src">Self Forcing §3、Alg. 1、App. A/B</span> <span class="src">官方 pipeline/self_forcing_training.py</span></p></div>
+  </div>
+  <figcaption>图 1　Self Forcing 一次训练迭代（示意 s = 第 2 步、3 个 chunk）与推理时的滚动 KV cache。<span class="src">依据论文 §3、Alg. 1、附录 A–B 与官方代码 <code>pipeline/self_forcing_training.py</code>、<code>configs/self_forcing_dmd.yaml</code>。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-exposure">3.1 三种训练范式：历史帧从哪来</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>范式</th><th>训练时的历史</th><th>推理时的历史</th><th>是否一致</th></tr></thead>
+  <tbody>
+    <tr><td>Teacher Forcing<br><span class="src">Self Forcing §1、Fig. 1</span></td><td>干净的真实帧</td><td rowspan="3">模型自己生成的帧</td><td>否</td></tr>
+    <tr><td>Diffusion Forcing（CausVid 属此类）<br><span class="src">Self Forcing §1、Fig. 1</span></td><td>独立加噪的真实帧</td><td>否</td></tr>
+    <tr class="hl"><td>Self Forcing<br><span class="src">Self Forcing §1、Fig. 1</span></td><td>模型自己生成的帧（带 KV cache）</td><td>是</td></tr>
+  </tbody>
+</table></div>
+<p>对比在少步区间最明显。同样用 DMD 蒸馏成 4 步，chunk-wise 下 TF + DMD 82.32、DF + DMD 82.76、SF + DMD 84.31；frame-wise 下差距更大：78.12 / 80.56 / 84.26<span class="src">论文 Tab. 2</span>。frame-wise 每步只生成 1 个 latent 帧、自回归次数是 chunk-wise 的 3 倍，误差累积的机会更多，因此“训练时是否见过自己的历史”影响更大。有意思的是，多步（50×2）的 TF / DF 模型本身在 chunk-wise 下分别是 83.58 / 82.95——4 步的 SF 学生超过了它们。</p>
+
+<h3 id="c-rollout">3.2 训练时的自回归展开为什么不慢</h3>
+<p>串行展开看似比 TF / DF 的“整段一次前向”慢，论文给出两点理由<span class="src">论文 §3.2、Fig. 6</span>：① 每个 chunk 内部的所有 token 仍然并行，GPU 利用率不低；② TF / DF 需要特殊注意力掩码（FlexAttention），SF 用的是推理同款的普通注意力 + KV cache，可以上 FlashAttention-3。实测每次迭代耗时与 TF / DF 相当，同样墙钟预算下质量更好；DMD 版本在 64 张 H100 上约 1.5 小时收敛<span class="src">论文 §4</span>（README：600 次迭代，64 张 H100 不到 2 小时<span class="src">官方 README</span>）。</p>
+
+<h3 id="c-trunc">3.3 随机梯度截断：三个“只”</h3>
+<ul>
+  <li><b>只有一步留梯度</b>：每个 chunk 只有退出步 s 的那次前向保留计算图，前面的去噪在 no_grad 下完成；</li>
+  <li><b>只在一个随机的 s</b>：s 每次迭代均匀采样，使学生在 4 个时间步上都得到训练，也让“第 s 步的输入”恰好来自学生自己前面几步的输出——这就是 DMD2 的 backward simulation； <span class="src">Self Forcing §3–5、Tab. 2</span> <span class="src">LongLive / Rolling Forcing / Self-Forcing++ 原文</span></li>
+  <li><b>只对当前 chunk</b>：历史 KV 由 no_grad 的 t = 0 前向写入，梯度不跨 chunk。</li>
+</ul>
+<p>三者合起来，一次迭代的反传开销约等于“7 个 chunk 各做一次单步前向”的计算图（推算）。代价是不能学习跨 chunk 的长程依赖，论文把它列为局限，并提议未来用循环结构（如状态空间模型）<span class="src">论文 §5</span>。</p>
+
+<h3 id="c-loss">3.4 整段视频的分布匹配：DMD、SiD 还是 GAN</h3>
+<p>Self Forcing 的损失是“整段视频层面”的：先对模型分布与数据分布都加噪，再度量两者的散度<span class="src">论文 §3.3</span>。三种实例：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>损失</th><th>散度</th><th>需要</th><th class="num">chunk-wise 总分</th><th class="num">frame-wise 总分</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>DMD（默认）<br><span class="src">Self Forcing Tab. 2、App. A、Tab. 3</span></td><td>反向 KL，score 差作梯度</td><td>real score（14B）+ critic，只要 prompt</td><td class="num">84.31</td><td class="num">84.26</td></tr>
+    <tr><td>SiD<br><span class="src">Self Forcing Tab. 2、App. A、Tab. 3</span></td><td>Fisher 散度（实际用 α = 1）</td><td>real score（1.3B）+ critic，只要 prompt</td><td class="num">84.07</td><td class="num">83.54</td></tr>
+    <tr><td>GAN<br><span class="src">Self Forcing Tab. 2、App. A、Tab. 3</span></td><td>JS 散度近似（相对论损失 + 近似 R1/R2）</td><td>判别器 + 7 万条 14B 生成的视频</td><td class="num">83.88</td><td class="num">83.27</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">分数来自论文 Tab. 2；“需要”一列来自附录 A 与 Tab. 3。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部不一致 / 需注意的对比条件</span>
+  <ul>
+    <li>附录 Tab. 3 中 DMD 的 real score 是 Wan2.1-T2V-14B，SiD 是 Wan2.1-T2V-1.3B——DMD 与 SiD 的对比同时换了教师规模，不是纯粹的损失对比。 <span class="src">Self Forcing §3–5、Tab. 2</span> <span class="src">LongLive / Rolling Forcing / Self-Forcing++ 原文</span></li>
+    <li>Tab. 3 的行名为“Generator/critic update ratio”，DMD / SiD 单元格写 5，但代码 <code>dfake_gen_update_ratio: 5</code> 表示 critic 每更新 5 次才更新生成器 1 次，行名与数值方向容易混淆；本页以代码的实际更新方向为准 <span class="src">论文 Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span>。</li>
+    <li>论文的 4 步时间表写作均匀的 [1000, 750, 500, 250]，官方默认配置的 <code>same_step_across_blocks: true</code> 让各块共用退出步；DMD 教师 CFG 在代码中写成 <code>cond + 3·(cond−uncond)</code>，按常见 <code>uncond + w·(cond−uncond)</code> 写法相当于 w = 4（推算）。代码用 <code>warp_denoising_step: true</code> 按 shift = 5 映射到调度器的实际时刻，即 t ≈ 1, 0.9375, 0.833, 0.625（推算；Causal Forcing 附录 D 给出相同取值）。 <span class="src">Self Forcing §3–5、Tab. 2</span> <span class="src">LongLive / Rolling Forcing / Self-Forcing++ 原文</span></li>
+  </ul>
+</div>
+
+<h3 id="c-rolling">3.5 滚动 KV cache 与外推</h3>
+<p>训练只见过 5 秒（21 个 latent 帧）。推理时用固定大小的滚动缓存外推：满了就逐出最旧的 KV。关键坑是 Wan VAE 的第一个 latent 帧（不做时间压缩）统计上与其他帧不同，训练中模型总能看到它，缓存一旦把它逐出画面就闪烁；修正办法是训练时让最后一个 chunk 的注意力看不到第一个 chunk<span class="src">论文 §3.4、附录 B</span>。10 秒视频上，每次平移都重算 KV 只有 4.6 FPS，滚动缓存 + 该技巧为 16.1 FPS<span class="src">论文 §4</span>。即便如此，远超训练长度的视频质量仍会下降<span class="src">论文 §5</span>。</p>
+
+<h3 id="from-image">3.6 从图像到视频：把 DMD2 的 backward simulation 推广到时间维</h3>
+<p><a href="06-dmd2.html">DMD2</a> 训练多步生成器时遇到过同样的问题：如果第 k 步的训练输入是“给真实图像加噪”，而推理时第 k 步的输入是“生成器自己前几步的输出”，训练与推理就不一致。它的解法是 <b>backward simulation</b>——训练时先让生成器自己从噪声跑几步，产生中间输入<span class="src">DMD2 §4.5</span>。这是<b>步数维度</b>上的“self forcing”。</p>
+<p>搬到因果视频，“输入”多了一个维度：当前 chunk 还以历史 chunk 为条件。<a href="09-causvid.html">CausVid</a> 的代码里其实有 backward simulation 的开关，但视频版配置把它关掉了（<code>backward_simulation: false</code>），历史仍用带噪真值。Self Forcing 做的事可以看成把 backward simulation <b>同时推广到步数与时间两个维度</b>，并处理随之而来的三个新问题：</p>
+<div class="diff">
+  <div class="was"><h4>图像（DMD2）时成立的假设</h4><ul>
+    <li>模拟几步去噪的成本可以接受，整条链都能留梯度或只留最后一步；</li>
+    <li>生成器输入只有 xₜ，不存在“条件从哪来”；</li>
+    <li>损失对单张图计算即可；</li>
+    <li>推理长度 = 训练长度。</li>
+  </ul></div>
+  <div class="now"><h4>视频里失效后的改动</h4><ul>
+    <li>7 个 chunk × 4 步无法全程反传 → 随机退出步 + 只留一步梯度 + KV 截断； <span class="src">Self Forcing §3–5、Tab. 2</span> <span class="src">LongLive / Rolling Forcing / Self-Forcing++ 原文</span></li>
+    <li>条件就是 KV cache：训练时用推理同款的缓存路径（无特殊掩码，FlashAttention-3）；</li>
+    <li>损失必须对整段视频计算，才能覆盖“以自生成历史为条件”的分布；</li>
+    <li>要外推到更长 → 滚动 KV cache + 训练时屏蔽首个 chunk。</li>
+  </ul></div>
+</div>
+<p>没有变的是“非对称”：评委仍是双向教师（这里升级为 14B）。<a href="14-causal-forcing.html">Causal Forcing</a> 后来指出，这条流水线里真正有问题的环节不在 DMD，而在它沿用自 CausVid 的 ODE 初始化。 <span class="src">Self Forcing §3–5、Tab. 2</span> <span class="src">LongLive / Rolling Forcing / Self-Forcing++ 原文</span></p>
+
+<h3 id="c-long">3.7 长视频后续</h3>
+<p>Self Forcing 训练 5 秒、靠滚动缓存外推，几十秒后仍会漂移。2025 年秋有三篇工作直接以它为起点，分别从“训练时见更长的自生成视频”“注意力结构”“去噪调度”三个方向补长视频： <span class="src">Self Forcing §3.4</span> <span class="src">CausVid §5.1</span> <span class="src">LongLive Tab. 1</span> <span class="src">Rolling Forcing Tab. 1</span> <span class="src">Self-Forcing++ §1（按段落所述工作）</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>工作</th><th>核心改动</th><th>代表数字</th></tr></thead>
+  <tbody>
+    <tr><td><b>LongLive</b>（NVIDIA 等，2025-09）<br><span class="src">LongLive 摘要、Tab. 1</span></td><td>帧级自回归，以 Self Forcing 流程初始化；<b>streaming long tuning</b>：每次迭代沿用已存的 KV cache 把上一段续写，只对新生成的一段做 DMD（教师仍为 14B）——“训练长、测试长”；短窗口注意力 + <b>frame sink</b>（保留首个 chunk 的 KV）；切换 prompt 时 <b>KV-recache</b></td><td>单张 H100 20.7 FPS，最长 240 s，微调约 32 GPU·天；短视频 VBench 总分 84.87（Self Forcing 84.31）</td></tr>
+    <tr><td><b>Rolling Forcing</b>（NTU、腾讯 ARC，2025-09）<br><span class="src">Rolling Forcing Tab. 1</span></td><td>滚动窗口<b>联合去噪</b>：窗口内各 chunk 处在递增的噪声水平、每步整体前移，放松相邻帧的严格因果；<b>attention sink</b> 保留开头 3 帧的 KV 作全局锚点；训练在扩展窗口上做 DMD，并与 Self Forcing 目标交替</td><td>30 秒视频 ΔDrift（质量漂移）0.01，Self Forcing 1.66；15.79 FPS / 0.76 s</td></tr>
+    <tr><td><b>Self-Forcing++</b>（UCLA、字节 Seed 等，2025-10）<br><span class="src">Self-Forcing++ §1、摘要、项目页</span></td><td>学生用滚动 KV cache 生成远超 5 秒的视频，从中均匀截取窗口、用 backward noise initialization 重新加噪，再用 5 秒的双向教师对窗口做 DMD；可选 GRPO 后训练；推理代码与 Self Forcing 相同</td><td>标准长视频实验为 100 秒（5 秒基座的约 20 倍）；扩大训练计算后达到 4 分 15 秒（位置编码跨度的 99.9%，约 50 倍）</td></tr>
+  </tbody>
+</table></div>
+<p>三者共同的判断是：短时教师仍然可用，关键是让学生<b>在训练中见到自己长时间生成后的状态</b>（Self-Forcing++、LongLive），或用 sink / 联合去噪限制误差的传播路径（LongLive、Rolling Forcing）。<a href="14-causal-forcing.html">Causal Forcing</a> 则把这些长视频方法视为与自己正交的补充。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与开销</h2>
+<p>基座 Wan2.1-T2V-1.3B，流匹配约定 \(x_t=(1-t)x_0+t\epsilon\)，t ∈ [0, 1] 以 1000 为刻度，shift = 5<span class="src">论文附录 A</span> <span class="src">官方代码 <code>configs/self_forcing_dmd.yaml</code></span>。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>训练视频 latent<br><span class="src">Self Forcing §4、App. A</span> <span class="src">官方 pipeline/self_forcing_training.py（计数为推算）</span></td><td>[B, 21, 16, 60, 104]</td><td>81 帧 · 832×480；B = 1/卡，64 卡总 batch 64</td></tr>
+    <tr><td>chunk-wise 块<br><span class="src">Self Forcing §4、App. A</span> <span class="src">官方 pipeline/self_forcing_training.py（计数为推算）</span></td><td>3 帧 × 1560 token = 4680</td><td>7 个块；frame-wise 为 21 个 1560-token 块</td></tr>
+    <tr><td>训练 KV cache（每层）<br><span class="src">代码 <code>self_forcing_training.py</code></span></td><td>K、V 各 [B, 32760, 12, 128]</td><td>21 × 1560；30 层</td></tr>
+    <tr><td>一次展开的前向次数<br><span class="src">Self Forcing §4、App. A</span> <span class="src">官方 pipeline/self_forcing_training.py（计数为推算）</span></td><td>每块 s 次去噪 + 1 次写缓存</td><td>s ∈ {1,…,4}；只有每块 1 次前向留梯度</td></tr>
+    <tr><td>推理 NFE（chunk-wise，5 秒）<br><span class="src">Self Forcing §4、App. A</span> <span class="src">官方 pipeline/self_forcing_training.py（计数为推算）</span></td><td>7 × (4 + 1) = 35 次块前向</td><td>4 步去噪 + 1 次写缓存（推算）</td></tr>
+    <tr><td>滚动推理每步代价<br><span class="src">论文 §3.4</span></td><td>O(TL)</td><td>T 去噪步数，L 窗口长度</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标</h2>
+<p>记 \(\hat x^{1:N}=\mathrm{Rollout}_\theta(\epsilon^{1:N},c)\) 为带 KV cache 的自回归展开（第 i 块以 \(\hat x^{\lt i}\) 为条件），\(q_t\) 为前向加噪。整段视频的目标<span class="src">论文 §3.3</span>：</p>
+<div class="formula">$$\mathcal L_\text{SF}(\theta)=\mathbb E_{t}\;D\big(p_{\theta,t}(x^{1:N})\,\big\|\,p_{\text{data},t}(x^{1:N})\big),\qquad p_{\theta}(x^{1:N})=\prod_{i=1}^{N}p_\theta\big(x^{i}\mid \hat x^{\lt i}\big)$$</div>
+<p>D 取反向 KL（DMD）时，梯度为</p>
+<div class="formula">$$\nabla_\theta\mathcal L_\text{DMD}\approx-\mathbb E_{t,\epsilon}\Big[\big(s_\text{real}(\hat x^{1:N}_t,t)-s_\text{fake}(\hat x^{1:N}_t,t)\big)\,\frac{\partial \hat x^{1:N}}{\partial\theta}\Big],$$</div>
+<p>其中 \(\partial \hat x^{i}/\partial\theta\) 只经过第 i 块第 s 步的那一次前向（随机梯度截断），且 \(\partial \hat x^{i}/\partial \hat x^{\lt i}\) 被置零（KV 截断）。SiD 把 D 换成 Fisher 散度 \(\mathbb E\lVert\nabla\log p_{\theta,t}-\nabla\log p_{\text{data},t}\rVert^2\)；GAN 版用相对论配对损失加近似 R1/R2 正则，按 APT 的做法用有限差分近似<span class="src">论文 §3.3、附录 A</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">self_forcing.py（依据论文 Alg. 1 与 pipeline/self_forcing_training.py，简化）</div>
+<pre><code class="lang-py">STEPS = [1000, 750, 500, 250]                     # 代码中再按 shift=5 映射
+
+def rollout(G, noise, c):                         # noise: [B, 21, 16, 60, 104]
+    kv = init_kv_cache(frames=21)                 # 训练时也用 KV cache
+    s = randint(0, len(STEPS))                    # 本次迭代的退出步，各 chunk 共用
+    outs = []
+    for eps in noise.split(3, dim=1):             # chunk-wise：每块 3 个 latent 帧
+        x = eps
+        for j, t in enumerate(STEPS):
+            if j &lt; s:
+                with no_grad():                   # 退出前：无梯度去噪
+                    x0 = G(x, t, c, kv)           # 只读历史 KV
+                    x = add_noise(x0, randn_like(x0), STEPS[j + 1])
+            else:
+                x0 = G(x, t, c, kv)               # 唯一保留计算图的前向
+                break
+        outs.append(x0)
+        with no_grad():
+            G(x0.detach(), 0, c, kv, write=True)  # t=0 写入干净 KV；梯度不跨 chunk
+    return cat(outs, dim=1)
+
+for it in range(600):                             # README：600 次迭代
+    c = sample_prompts(64)                        # 只需要 prompt
+    if it % 5 == 0:                               # 生成器 : critic = 1 : 5
+        video = rollout(G, randn(B, 21, 16, 60, 104), c)
+        loss_G = dmd_loss(video, real=wan_14b, fake=critic, cfg=3.0)   # 整段视频一个损失
+        loss_G.backward(); opt_G.step(); ema.update(G, 0.99)
+    with no_grad():
+        video = rollout(G, randn(B, 21, 16, 60, 104), c)
+    loss_c = denoise_loss(critic, video, c)       # critic 学“学生分布”的 score
+    loss_c.backward(); opt_c.step()</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>基座 / 学生<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>Wan2.1-T2V-1.3B；5 秒、16 FPS、832×480</td><td>论文 §4</td></tr>
+    <tr><td>初始化<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>按 CausVid 流程：在 16k 条基座 ODE 轨迹上做因果回归</td><td>论文 §4</td></tr>
+    <tr><td>步数<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>4 步 [1000, 750, 500, 250]，shift 5</td><td>论文附录 A</td></tr>
+    <tr><td>DMD<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>real score Wan2.1-T2V-14B（CFG 3.0）；critic 从 1.3B 初始化</td><td>附录 Tab. 3</td></tr>
+    <tr><td>优化<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>batch 64；生成器 lr 2e-6、critic lr 4e-7；AdamW β₁ = 0、β₂ = 0.999、wd 0.01；EMA 0.99</td><td>附录 Tab. 3</td></tr>
+    <tr><td>更新比<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>critic 5 : 生成器 1</td><td>官方代码 <code>dfake_gen_update_ratio</code></td></tr>
+    <tr><td>算力<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>DMD 约 1.5 h / 64 H100；SiD、GAN 约 2–3 h</td><td>论文 §4、附录 A</td></tr>
+    <tr><td>GAN 版<br><span class="src">Self Forcing §4、App. A、Tab. 3</span> <span class="src">官方 configs/self_forcing_dmd.yaml</span></td><td>batch 768；7 万条 14B 生成视频</td><td>附录 A、Tab. 3</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Tab. 1（单张 H100）</th><th class="num">参数</th><th>分辨率</th><th class="num">吞吐 FPS</th><th class="num">首帧延迟 s</th><th class="num">VBench 总分</th><th class="num">质量</th><th class="num">语义</th></tr></thead>
+  <tbody>
+    <tr><td>Wan2.1（双向，多步）<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.3B</td><td>832×480</td><td class="num">0.78</td><td class="num">103</td><td class="num">84.26</td><td class="num">85.30</td><td class="num">80.09</td></tr>
+    <tr><td>SkyReels-V2<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.3B</td><td>960×540</td><td class="num">0.49</td><td class="num">112</td><td class="num">82.67</td><td class="num">84.70</td><td class="num">74.53</td></tr>
+    <tr><td>MAGI-1<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">4.5B</td><td>832×480</td><td class="num">0.19</td><td class="num">282</td><td class="num">79.18</td><td class="num">82.04</td><td class="num">67.74</td></tr>
+    <tr><td>LTX-Video<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.9B</td><td>768×512</td><td class="num">8.98</td><td class="num">13.5</td><td class="num">80.00</td><td class="num">82.30</td><td class="num">70.79</td></tr>
+    <tr><td>CausVid（官方 Wan 版）<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.3B</td><td>832×480</td><td class="num">17.0</td><td class="num">0.69</td><td class="num">81.20</td><td class="num">84.05</td><td class="num">69.80</td></tr>
+    <tr class="hl"><td>Self Forcing（chunk-wise）<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.3B</td><td>832×480</td><td class="num">17.0</td><td class="num">0.69</td><td class="num">84.31</td><td class="num">85.07</td><td class="num">81.28</td></tr>
+    <tr><td>NOVA<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">0.6B</td><td>768×480</td><td class="num">0.88</td><td class="num">4.1</td><td class="num">80.12</td><td class="num">80.39</td><td class="num">79.05</td></tr>
+    <tr><td>Pyramid Flow<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">2B</td><td>640×384</td><td class="num">6.7</td><td class="num">2.5</td><td class="num">81.72</td><td class="num">84.74</td><td class="num">69.62</td></tr>
+    <tr class="hl"><td>Self Forcing（frame-wise）<br><span class="src">Self Forcing Tab. 1</span></td><td class="num">1.3B</td><td>832×480</td><td class="num">8.9</td><td class="num">0.45</td><td class="num">84.26</td><td class="num">85.25</td><td class="num">80.30</td></tr>
+  </tbody>
+</table></div>
+<ul>
+  <li>与 CausVid 速度完全相同（同一推理路径），差别全在训练：VBench 总分 81.20 → 84.31，语义分 69.80 → 81.28。 <span class="src">Self Forcing Tab. 1、Fig. 4</span> <span class="src">官方 README</span></li>
+  <li>chunk-wise 首帧延迟比 Wan2.1 / SkyReels-V2 低约 150 倍<span class="src">论文 §4</span>；frame-wise 首帧更快（0.45 s）但吞吐减半。</li>
+  <li>用户研究中 Self Forcing 胜过所有基线，包括 Wan2.1 基座<span class="src">论文 Fig. 4</span>。官方 README 称可在单张 RTX 4090 上实时流式生成。</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>Self Forcing 解决了</h4><ul>
+    <li>CausVid 训练 / 推理历史不一致的暴露偏差：训练即自回归展开；</li>
+    <li>展开带来的显存问题：随机退出步 + KV 截断，训练成本与 TF / DF 相当；</li>
+    <li>流式推理的外推：滚动 KV cache 与首帧屏蔽技巧。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>ODE 初始化仍来自双向教师 → <a href="14-causal-forcing.html">Causal Forcing</a>：先训练自回归教师再做因果 ODE / 一致性蒸馏；</li>
+    <li>一致性路线的自回归蒸馏与 teacher-forcing 初始化 → <a href="13-rcm.html">rCM / Causal-rCM</a>；</li>
+    <li>远超 5 秒仍漂移 → 3.7 的 LongLive、Rolling Forcing、Self-Forcing++； <span class="src">Self Forcing §5</span> <span class="src">Causal Forcing §3</span></li>
+    <li>梯度不跨 chunk，学不到长程依赖；GAN 路线的自回归蒸馏见 <a href="10-apt.html">APT2</a>。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q23"><span class="qid">Q23</span>Teacher Forcing、Diffusion Forcing 与 Self Forcing 在训练时给模型的“历史帧”分别是什么？为什么前两者蒸馏成少步模型后更容易误差累积？</h3>
+  <div class="ans">
+    <p class="short">TF 给干净的真实历史，DF 给每帧独立加噪的真实历史，Self Forcing 给模型自己（带 KV cache）刚生成的历史。推理时历史一定是模型自己的输出，带着它特有的瑕疵；TF / DF 训练时从未见过这种输入，于是一旦某帧出错，后续帧处在训练分布之外，错误被放大并逐帧传递（暴露偏差）。少步模型每步“修正”的余地更小，这种偏差更难被后续去噪抹平。</p>
+    <ul>
+      <li>数据：4 步 DMD 下 chunk-wise TF / DF / SF 为 82.32 / 82.76 / 84.31；frame-wise 为 78.12 / 80.56 / 84.26——自回归次数越多（frame-wise），差距越大。 <span class="src">Self Forcing §3–5、Tab. 2、Alg. 1</span></li>
+      <li>Self Forcing 还把损失放在整段视频上：联合分布按链式法则包含了每个“以自生成历史为条件”的条件分布，逐帧损失做不到这一点。</li>
+      <li>与 LLM 的 scheduled sampling 思路相同，但这里不需要真值对齐：分布匹配损失只看整段输出是否像真实视频。</li>
+    </ul>
+    <p class="cite">依据：Self Forcing §1、§3.2–3.3、Tab. 2。</p>
+  </div>
+  <h3 id="q24"><span class="qid">Q24</span>Self Forcing 训练时要串行展开整段视频，它靠哪些设计把显存和时间压到与 TF / DF 相当？各自牺牲了什么？</h3>
+  <div class="ans">
+    <p class="short">三处设计：① 随机梯度截断——每个 chunk 只在随机退出步 s 那一次前向留梯度，之前的去噪在 no_grad 下完成，显存约等于每块一次单步前向；② KV cache 截断——历史由 no_grad 的 t = 0 前向写入，梯度不跨 chunk；③ 推理同款的注意力路径——chunk 内 token 并行、无需特殊掩码，可用 FlashAttention-3。实测每次迭代耗时与 TF / DF 相当，DMD 版约 1.5 小时（64 张 H100）收敛。 <span class="src">Self Forcing §3–5、Tab. 2、Alg. 1</span></p>
+    <ul>
+      <li>牺牲①：每次迭代只训练一个时间步（靠随机 s 在期望上覆盖全部 4 步）。 <span class="src">Self Forcing §3–5、Tab. 2、Alg. 1</span></li>
+      <li>牺牲②：学不到“为了后续帧而调整当前帧”的长程依赖，论文列为局限。</li>
+      <li>s 随机还带来一个好处：第 s 步的输入正是学生自己前几步的输出——这就是 DMD2 的 backward simulation。</li>
+    </ul>
+    <p class="cite">依据：Self Forcing §3.2、§4、§5、Alg. 1；官方代码 <code>pipeline/self_forcing_training.py</code>；DMD2 §4.5。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Huang, Li, He, Zhou, Shechtman. <i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion.</i> NeurIPS 2025（spotlight）. <a href="https://arxiv.org/abs/2506.08009">arXiv:2506.08009</a> · <a href="https://github.com/guandeh17/Self-Forcing">代码</a> · <a href="https://self-forcing.github.io/">项目主页</a></li>
+  <li>Yin et al. <i>From Slow Bidirectional to Fast Autoregressive Video Diffusion Models</i>（CausVid）. CVPR 2025. <a href="https://arxiv.org/abs/2412.07772">arXiv:2412.07772</a></li>
+  <li>Yin et al. <i>Improved Distribution Matching Distillation for Fast Image Synthesis</i>（DMD2）. NeurIPS 2024. <a href="https://arxiv.org/abs/2405.14867">arXiv:2405.14867</a></li>
+  <li>Chen et al. <i>Diffusion Forcing: Next-token Prediction Meets Full-Sequence Diffusion.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2407.01392">arXiv:2407.01392</a></li>
+  <li>Yang et al. <i>LongLive: Real-time Interactive Long Video Generation.</i> 2025. <a href="https://arxiv.org/abs/2509.22622">arXiv:2509.22622</a> · <a href="https://github.com/NVlabs/LongLive">代码</a></li>
+  <li>Liu, Hu, Xu, Shan, Lu. <i>Rolling Forcing: Autoregressive Long Video Diffusion in Real Time.</i> 2025. <a href="https://arxiv.org/abs/2509.25161">arXiv:2509.25161</a></li>
+  <li>Cui et al. <i>Self-Forcing++: Towards Minute-Scale High-Quality Video Generation.</i> ICLR 2026（arXiv 首版 2025）. <a href="https://arxiv.org/abs/2510.02283">arXiv:2510.02283</a> · <a href="https://self-forcing-plus-plus.github.io/">项目主页</a></li>
+  <li>Zhu, Zhao, He, Su, Li, Zhu. <i>Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation.</i> ICML 2026. <a href="https://arxiv.org/abs/2602.02214">arXiv:2602.02214</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

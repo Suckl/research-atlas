@@ -1,0 +1,882 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V3 技术报告 精读</title>
+<meta name="description" content="DeepSeek-V3 技术报告（arXiv 2412.19437）的逐节中文精读：MLA、无辅助损失的 MoE 负载均衡、多 token 预测、DualPipe 与跨节点 all-to-all、细粒度 FP8 训练、推理部署、预训练与后训练，附 KV 缓存与 FP8 量化的手算例子。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+<script defer src="../assets/js/widgets/collectives.js"></script>
+<script defer src="../assets/js/widgets/specdec.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="deepseek-v3">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · 技术报告（arXiv，2024-12）</div>
+  <h1>DeepSeek-V3 技术报告</h1>
+  <p class="en-title">DeepSeek-V3 Technical Report</p>
+  <div class="paper-authors">DeepSeek-AI</div>
+  <div class="paper-affil">research@deepseek.com　（署名为机构；约 200 位贡献者的名单见原文附录 A，按角色分组、组内按名字字母排序）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">arXiv 2412.19437 ↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/DeepSeek-V3" target="_blank" rel="noopener">Code / 权重说明：deepseek-ai/DeepSeek-V3 ↗</a>
+    <a class="pill" href="https://huggingface.co/deepseek-ai/DeepSeek-V3" target="_blank" rel="noopener">Hugging Face 权重 ↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/DualPipe" target="_blank" rel="noopener">DualPipe ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/09-deepseek-v3.html">结构拆解：EP / FP8 / MLA 架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>104.5k</b><span>GitHub star（deepseek-ai/DeepSeek-V3，截至 2026-10-19）</span></div>
+    <div><b>671B / 37B</b><span>总参数 / 每 token 激活参数</span></div>
+    <div><b>2.788M</b><span>H800 GPU 小时（完整训练）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按报告的章节顺序，用本站自己的话把整篇报告从头讲一遍。报告很长（正文加附录约 50 页），这里把篇幅集中在研究者最需要真正弄懂的几处：MLA、无辅助损失的负载均衡、多 token 预测、DualPipe 与跨节点通信、细粒度 FP8 训练。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。报告的许可证不允许转载原图，所以本页的图都是本站自己画的示意图，并附上对应原图的链接。标“推算”的数字是本站根据报告数据算出来的，不是报告原话；标“论文 vs 代码”的地方是报告与官方开源代码的出入。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这份报告讲了什么</h3>
+<p>2024 年 12 月，DeepSeek 发布了 DeepSeek-V3。它是一个<b>混合专家（MoE）</b>语言模型：总共有 6710 亿（671B）个参数，但处理每个 token 时只用到其中约 370 亿（37B）个。它在 14.8 万亿（14.8T）个 token 上预训练，再经过监督微调和强化学习，最终在许多评测上与当时最强的闭源模型 GPT-4o、Claude-3.5-Sonnet 相当，并且权重完全公开。</p>
+<p>这份报告引起轰动，主要不是因为分数，而是因为<b>成本</b>：报告说，整个正式训练只用了 278.8 万个 H800 GPU 小时，按每 GPU 小时 2 美元的租价折算约 557.6 万美元。报告自己的对比是：V3 每训练 1 万亿 token 只需 18 万 GPU 小时，比训练 72B 或 405B 的稠密模型便宜得多。报告用将近一半的篇幅解释这个成本是怎么压下来的，答案是模型结构、训练框架和硬件特性三者一起设计（报告称为 co-design）。</p>
+<p>可以把报告的内容分成四块：</p>
+<ul>
+  <li><b>模型结构（§2）。</b>沿用上一代 DeepSeek-V2 的两项设计：<b>MLA</b>（多头潜在注意力）把推理时要保存的 KV 缓存压缩到同规模标准多头注意力的约 1/57；<b>DeepSeekMoE</b> 用很多小专家加一个共享专家。V3 新加了两样：一种<b>不靠辅助损失</b>的专家负载均衡方法，以及<b>多 token 预测（MTP）</b>训练目标。</li>
+  <li><b>训练与推理系统（§3）。</b>新的流水线并行调度 <b>DualPipe</b>，把专家并行带来的大量跨节点通信藏到计算后面；专门写的跨节点 all-to-all 通信内核；以及在这个规模上首次被验证可行的 <b>FP8 混合精度训练</b>，关键是“细粒度的缩放因子”和“定期把累加结果搬到 FP32”。再加上预填充与解码分开部署的推理方案，和写给芯片厂商的硬件建议。</li>
+  <li><b>预训练（§4）。</b>数据、超参数、从 4K 扩展到 128K 的长上下文训练、基座模型评测，以及两组关键消融实验（MTP 和无辅助损失均衡到底有没有用）。</li>
+  <li><b>后训练（§5）。</b>监督微调和强化学习（GRPO），其中最特别的一点是从当时尚未发布的推理模型 DeepSeek-R1 中<b>蒸馏</b>长链推理能力。</li>
+</ul>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>MoE 为什么能用 37B 的计算量撑起 671B 的参数？为什么专家之间的负载必须均衡，传统的做法又有什么副作用？</li>
+  <li>KV 缓存是什么，MLA 怎么把它压到每个 token 每层只存 576 个数？为了这个压缩，位置编码 RoPE 为什么要单独处理？</li>
+  <li>多 token 预测和普通的“预测下一个 token”有什么不同？为什么训练完可以把它扔掉，又可以拿来加速推理？</li>
+  <li>流水线并行的“气泡”是什么？DualPipe 是怎么同时减少气泡、又把通信藏起来的？</li>
+  <li>FP8 只有 8 位，为什么“整个张量共用一个缩放因子”在有离群值时会出问题？细粒度缩放和 FP32 提升累加分别解决了什么？</li>
+  <li>557.6 万美元这个数字包括什么、不包括什么？哪些评测结论需要打折看？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：一个 671B 的模型，278.8 万 GPU 小时</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DeepSeek-V3 想做的是一个既强、又便宜的开源模型。“强”由后面的评测来证明；“便宜”具体便宜到什么程度，这个成本是怎么算出来的，又包括哪些部分？报告自己认为它的主要贡献是什么？</div>
+
+<div class="note-pre"><b>先补一点背景：为什么 MoE 能“参数多、计算少”。</b>
+<p>普通的（稠密）Transformer 处理每个 token 时，所有参数都要参与计算。训练的计算量常用一个粗略的估计：每个 token 每个参数约 6 次浮点运算（前向 2 次、反向 4 次）。所以参数翻倍，训练成本也翻倍。</p>
+<p>混合专家模型（Mixture-of-Experts，MoE）把 Transformer 里的前馈网络（FFN）换成很多个并列的小 FFN，每个叫一个“专家”。每个 token 进来时，一个小小的“路由器”只挑出其中几个专家来处理它，其余专家不参与。于是模型的总参数可以很多（知识容量大），而每个 token 实际经过的参数（称为<b>激活参数</b>）很少（计算量小）。DeepSeek-V3 的总参数是 671B，激活参数是 37B。</p>
+<p>按“6 × 激活参数 × token 数”估算，V3 预训练的计算量约为 \(6\times 37\times10^{9}\times14.8\times10^{12}\approx3.3\times10^{24}\) 次浮点运算（推算）。同样的数据如果喂给一个 405B 的稠密模型（比如报告用作对比的 LLaMA-3.1 405B），计算量要大约 11 倍（推算：405 ÷ 37）。</p>
+</div>
+
+<p>报告给出的训练成本如下表。它假设 H800 的租价是每 GPU 小时 2 美元：</p>
+<div class="table-wrap"><table>
+  <tr><th>阶段</th><th>预训练</th><th>上下文扩展</th><th>后训练</th><th>合计</th></tr>
+  <tr><td>H800 GPU 小时</td><td>2664K</td><td>119K</td><td>5K</td><td>2788K</td></tr>
+  <tr><td>折合美元</td><td>5.328M</td><td>0.238M</td><td>0.01M</td><td>5.576M</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 1。</p>
+<p>报告还给了一个更直观的单位：每训练 1 万亿个 token 需要 18 万 GPU 小时，在他们 2048 张 H800 的集群上相当于 3.7 天。14.8T token 的预训练因此不到两个月就完成了（推算：14.8 × 3.7 ≈ 54 天）。</p>
+<p>报告把贡献归纳为三组：</p>
+<ul>
+  <li><b>结构上</b>：首创无辅助损失的负载均衡策略（§2.1.2），尽量减少“为了均衡而牺牲性能”；验证多 token 预测（MTP）目标对性能有帮助，并且它还能用于推理时的投机解码（§2.2）。</li>
+  <li><b>预训练效率上</b>：设计了 FP8 混合精度训练框架，并第一次在超大规模模型上验证了它可行；通过算法、框架、硬件的协同设计，基本消除了跨节点 MoE 训练的通信瓶颈，计算与通信几乎完全重叠（§3）。</li>
+  <li><b>后训练上</b>：把 DeepSeek-R1 系列长链推理模型的能力（包括验证和反思的习惯）蒸馏进 V3，同时控制住输出的风格和长度（§5）。</li>
+</ul>
+<p>评测方面的结论放在后面讲（§4.4、§5.3），这里只记两个最常被引用的数字：对话模型在 MMLU 上得 88.5、GPQA-Diamond 上得 59.1；数学上（MATH-500 得 90.2）它是当时所有“非长链推理”模型里最好的，编程竞赛类基准（LiveCodeBench、Codeforces）也排第一。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>557.6 万美元<b>不是</b>“DeepSeek 做出 V3 一共花了多少钱”。报告明确说，这个数字只包括 V3 这一次正式训练的 GPU 租金，不包括此前在模型结构、算法、数据上的研究和消融实验，也不包括集群的购置、人员等费用。它衡量的是“这套方法训一次有多省”，而不是一个公司的研发总投入。另外 2 美元/GPU 小时是报告假设的租价，不是实际支出。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2.1 基础架构：MLA 与 DeepSeekMoE</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DeepSeek-V3 的每一层长什么样？它在注意力层用 MLA，是为了解决推理时 KV 缓存太大的问题；在前馈层用 DeepSeekMoE，是为了用更少的计算获得更大的模型。这两样都是上一代 V2 里验证过的。V3 真正新加的是一种负载均衡方法：MoE 必须让各个专家分到的 token 大致一样多，传统办法是在损失函数里加一项“辅助损失”去逼模型均衡，但这一项会伤害模型本身的效果。V3 想换一种不伤效果的办法。</div>
+
+<h4 id="n-2-0">先看整体：61 层，每层“注意力 + 前馈”</h4>
+<div class="note-pre"><b>先补一点背景：Transformer 的一层在做什么。</b>
+<p>Transformer 由很多结构相同的层叠起来。每一层有两个部分，各自带一条“残差连接”（把输入直接加到输出上，让信息和梯度可以绕过这一部分）：</p>
+<ul>
+  <li><b>注意力</b>：让每个 token 去“看”它前面的 token，把相关的信息汇总过来。这是唯一让不同位置的 token 交换信息的地方。</li>
+  <li><b>前馈网络（FFN）</b>：对每个 token 各自做一次非线性变换（两次矩阵乘，中间一个激活函数），不同 token 之间互不相干。模型的大部分参数都在这里。</li>
+</ul>
+<p>每个部分之前先做一次归一化（DeepSeek-V3 用 RMSNorm），把向量的尺度拉回到稳定的范围。</p>
+</div>
+<p>DeepSeek-V3 的配置（原文 §4.2）是：61 层，每个 token 的隐藏向量是 7168 维。注意力全部用 MLA，128 个头。前馈网络里，<b>前 3 层是普通的稠密 FFN，其余 58 层都换成了 MoE 层</b>。每个 MoE 层有 1 个共享专家和 256 个路由专家，每个专家是一个中间维度为 2048 的小 FFN；每个 token 从 256 个路由专家里挑 8 个，并且这 8 个最多分布在 4 个节点上。在这个配置下，模型总参数 671B，每个 token 激活 37B。</p>
+<div class="dia">
+  <div class="dia-title">示意图：DeepSeek-V3 的层结构与一个 MoE 层里的专家</div>
+  <div class="dia-row"><span class="lbl">61 层</span><div class="dia-track"><span class="dia-seg w" style="flex:3">前 3 层：稠密 FFN</span><span class="dia-seg kv" style="flex:58">第 4–61 层：MoE 层（58 层）</span></div></div>
+  <div class="dia-out">每一层都是：RMSNorm → MLA 注意力 → 残差 → RMSNorm → FFN 或 MoE → 残差。</div>
+  <div class="dia-row"><span class="lbl">一个 MoE 层</span><div class="cells"><span class="cell b">共</span><span class="cell a">1</span><span class="cell">2</span><span class="cell a">3</span><span class="cell">4</span><span class="cell">5</span><span class="cell">6</span><span class="cell a">7</span><span class="cell">…</span><span class="cell a">90</span><span class="cell">…</span><span class="cell a">131</span><span class="cell">…</span><span class="cell a">177</span><span class="cell">…</span><span class="cell a">203</span><span class="cell">…</span><span class="cell a">250</span><span class="cell">…</span><span class="cell">256</span></div></div>
+  <div class="dia-out">绿色“共”是共享专家，每个 token 必经；蓝色是这个 token 被路由器选中的 8 个路由专家（编号是随手举的例子）；其余 248 个专家这一次不参与计算。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2412.19437#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>（原图左边是一个 Transformer 层，右上是 DeepSeekMoE，右下是 MLA，并标出了推理时需要缓存的两个向量）。</div>
+</div>
+
+<h4 id="n-2-1">2.1.1 多头潜在注意力（MLA）：把 KV 缓存压到每层 576 个数</h4>
+<div class="note-pre"><b>先补一点背景：KV 缓存，以及它为什么值得压缩。</b>
+<p>注意力的计算可以想成一次查资料：每个 token 先算出三个向量，query（我想找什么）、key（我能提供什么的标签）、value（我携带的内容）。处理第 \(t\) 个 token 时，用它的 query 去和前面所有 token 的 key 比相似度，得到权重，再按权重把它们的 value 加起来。</p>
+<p>模型生成文字是一个 token 一个 token 往外吐的。生成第 \(t\) 个 token 时，前面 \(t-1\) 个 token 的 key 和 value 在之前的步骤里早就算过了，没必要每一步重算，于是把它们存起来，这份数据就叫 <b>KV 缓存</b>。它有两个麻烦：一是<b>大</b>，每个 token、每一层、每个注意力头都要存一个 key 和一个 value；二是<b>每一步都要整份读一遍</b>。生成阶段每一步只算一个新 token，计算量很小，但要把参数和全部 KV 缓存从显存读到计算单元，所以速度主要受显存带宽限制。KV 缓存越大，每一步读得越久；显存里能同时放下的请求也越少，批开不大，吞吐量就上不去。（KV 缓存和批大小的关系，本站 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a> 有更详细的讲解。）</p>
+<p>压缩 KV 缓存的常见办法是让多个 query 头共用 key 和 value：所有头共用一组叫 MQA，每几个头共用一组叫 GQA。它们省显存，但共用之后每个头能看到的信息变少，效果通常会打折扣。MLA 走的是另一条路：不减少头，而是把 key 和 value <b>压缩成一个低维向量</b>再存。</p>
+</div>
+
+<p><b>先算一笔账。</b>如果 DeepSeek-V3 用标准的多头注意力（MHA），128 个头、每个头 128 维，那么每个 token 在每一层要存 128 个 key 和 128 个 value：</p>
+<div class="formula">$$\underbrace{2}_{\text{key 和 value}}\times\underbrace{128}_{\text{头数}}\times\underbrace{128}_{\text{每头维度}}=32768\ \text{个数 / 层}$$</div>
+<p>MLA 每个 token 每层只存两个向量：一个 512 维的压缩向量 \(\mathbf{c}_t^{KV}\)，和一个 64 维的、带位置信息的 key \(\mathbf{k}_t^{R}\)，合计 576 个数。两者相差约 57 倍（推算：32768 ÷ 576 ≈ 56.9）。下面把它换算成显存（推算，按 BF16 每个数 2 字节、61 层计）：</p>
+<div class="dia">
+  <div class="dia-title">示意图：每个 token 每层要缓存多少个数（条的长度按比例画）</div>
+  <div class="dia-row"><span class="lbl">MHA（128 头全存）</span><div class="dia-track"><span class="dia-seg kv" style="flex:32768">32,768</span></div></div>
+  <div class="dia-out">61 层 × 2 字节 → 每 token 约 3.81 MiB；一条 128K token 的上下文约 488 GiB，是一张 80 GB 显卡全部显存的 6 倍多。</div>
+  <div class="dia-row"><span class="lbl">GQA（假设 8 组）</span><div class="dia-track"><span class="dia-seg kv" style="flex:2048">2,048</span><span class="dia-seg oth" style="flex:30720"></span></div></div>
+  <div class="dia-out">每 token 约 244 KiB；128K 上下文约 30.5 GiB。</div>
+  <div class="dia-row"><span class="lbl">MLA（V3 实际）</span><div class="dia-track"><span class="dia-seg w" style="flex:1100">576</span><span class="dia-seg oth" style="flex:31668"></span></div></div>
+  <div class="dia-out">每 token 约 68.6 KiB；128K 上下文约 8.6 GiB。</div>
+  <div class="dia-note">全部为推算：MHA、GQA 两行是假想的对照（把 V3 的注意力换成这两种结构），MLA 一行用的是原文 §4.2 的维度 \(d_c=512\)、\(d_h^R=64\)。MLA 的条为了能看见，画得比实际比例略宽。DeepSeek-V2 的报告把 MLA 的缓存量描述为“相当于只有 2.25 组的 GQA”，与这里 576 = 4.5 × 128 的关系一致。</div>
+</div>
+
+<p><b>MLA 是怎么做的。</b>普通的 MHA 从每个 token 的输入 \(\mathbf{h}_t\) 直接投影出 128 个头的 key 和 value。MLA 多了一个“先压缩、再展开”的步骤：</p>
+<ol>
+  <li>先用一个降维矩阵 \(W^{DKV}\) 把 7168 维的 \(\mathbf{h}_t\) 压成 512 维的<b>潜向量</b> \(\mathbf{c}_t^{KV}=W^{DKV}\mathbf{h}_t\)。</li>
+  <li>需要 key 和 value 时，再用两个升维矩阵从这个潜向量展开出每个头的 key 和 value：\(\mathbf{k}_t^{C}=W^{UK}\mathbf{c}_t^{KV}\)，\(\mathbf{v}_t^{C}=W^{UV}\mathbf{c}_t^{KV}\)（上标 C 表示“由压缩向量得来”）。</li>
+  <li>推理时只缓存潜向量 \(\mathbf{c}_t^{KV}\)，不缓存展开后的 key 和 value。</li>
+</ol>
+<p>这里的直觉是：128 个头的 key 和 value 虽然有 32768 个数，但它们都是从同一个 \(\mathbf{h}_t\) 线性算出来的，彼此高度相关，真正的信息量远小于 32768 维。MLA 让模型在训练中自己学会把这些信息挤进 512 维（这叫<b>低秩联合压缩</b>，“联合”指 key 和 value 共用一个潜向量）。查询（query）这边也做了类似的压缩，压到 1536 维，但它的目的不同：query 不需要缓存，压缩它只是为了减少训练时要保存的中间结果（激活）。</p>
+
+<div class="note-pre"><b>先补一点背景：RoPE 位置编码，以及它为什么和压缩“合不来”。</b>
+<p>注意力本身不知道 token 的先后顺序，必须额外注入位置信息。RoPE（旋转位置编码）的做法是：把第 \(t\) 个位置的 query 和第 \(j\) 个位置的 key 分别按各自的位置“旋转”一个角度（乘一个旋转矩阵 \(R_t\)、\(R_j\)），这样两者的点积只依赖于相对距离 \(j-t\)。它简单有效，几乎是当时所有大模型的标配。（更多细节见本站 <a href="../legacy/tracks/ai-infra/10-rope.html">RoPE 拆解页</a>。）</p>
+</div>
+<p><b>推理时的一个小技巧，以及 RoPE 带来的麻烦。</b>如果每一步都要把缓存里所有 token 的潜向量展开成 128 个头的 key，那就白压缩了：展开的计算量和显存读写都会回来。MLA 的办法是利用矩阵乘法的结合律。第 \(i\) 个头的注意力分数（先不管位置编码）可以改写成：</p>
+<div class="formula">$$\mathbf{q}_{t,i}^{C\top}\mathbf{k}_{j,i}^{C}=\mathbf{q}_{t,i}^{C\top}W^{UK}_{i}\mathbf{c}_j^{KV}=\big(W^{UK\top}_{i}\mathbf{q}_{t,i}^{C}\big)^{\top}\mathbf{c}_j^{KV}$$</div>
+<p>其中 \(W^{UK}_i\) 是 \(W^{UK}\) 里属于第 \(i\) 个头的那 128 行。也就是说，可以先把当前 token 的 query 乘上 \(W^{UK}_i\) 的转置，变成一个 512 维的向量，再直接和缓存里的潜向量做点积，根本不用展开 key。value 那边同理：先用注意力权重把潜向量加权求和，最后再乘一次 \(W^{UV}\)。这个技巧叫<b>矩阵吸收</b>，V2 的报告里讲过，V3 官方推理代码里的 <code>attn_impl = "absorb"</code> 就是它。</p>
+<p>问题出在 RoPE 上。如果 key 是先展开、再旋转的，即 \(\mathbf{k}_j=R_j W^{UK}\mathbf{c}_j^{KV}\)，那么分数里 query 和潜向量之间就夹了一个 \(R_t^{\top}R_j\)，它随两个 token 的相对位置而变。矩阵乘法不能交换顺序，所以没法预先把 \(W^{UK}\) 吸收进 query，吸收技巧就失效了。</p>
+<p>MLA 的解决办法叫<b>解耦 RoPE</b>：把位置信息从压缩通道里剥离出来，单独走一条小路。</p>
+<ul>
+  <li>key 分成两段：一段是不带位置的 \(\mathbf{k}_{j,i}^{C}\)（128 维，由潜向量展开，可以被吸收）；另一段是带 RoPE 的 \(\mathbf{k}_j^{R}=\mathrm{RoPE}(W^{KR}\mathbf{h}_j)\)，只有 64 维，而且<b>所有 128 个头共用这一份</b>，所以它也要缓存，但只占 64 个数。</li>
+  <li>query 也分成两段：不带位置的 \(\mathbf{q}_{t,i}^{C}\)（128 维）和每个头各自的带 RoPE 的 \(\mathbf{q}_{t,i}^{R}\)（64 维）。</li>
+  <li>两段分别做点积再相加，就是最终的注意力分数；除以 \(\sqrt{d_h+d_h^R}=\sqrt{192}\) 后做 softmax。</li>
+</ul>
+<div class="formula">$$\mathbf{o}_{t,i}=\sum_{j=1}^{t}\mathrm{Softmax}_j\!\left(\frac{\mathbf{q}_{t,i}^{C\top}\mathbf{k}_{j,i}^{C}+\mathbf{q}_{t,i}^{R\top}\mathbf{k}_{j}^{R}}{\sqrt{d_h+d_h^{R}}}\right)\mathbf{v}_{j,i}^{C},\qquad \mathbf{u}_t=W^{O}[\mathbf{o}_{t,1};\dots;\mathbf{o}_{t,128}]$$</div>
+<p>这个式子是原文式 (10) 把 query、key 的拼接拆开写的样子：拼接后的点积就等于两段点积之和。每个 token 每层因此只缓存 \(\mathbf{c}_t^{KV}\)（512）和 \(\mathbf{k}_t^{R}\)（64），合计 576 个数。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：MLA 一层的计算路径（橙色框是推理时要缓存的两个向量）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="MLA 计算路径示意图">
+    <g class="act"><rect class="box" x="16" y="134" width="112" height="58" rx="8"/><text x="72" y="155" class="t-c t-b">输入 h<tspan baseline-shift="sub" style="font-size:9px">t</tspan></text><text x="72" y="176" class="t-c t-sm">7168 维</text></g>
+    <g class="enc"><rect class="box" x="168" y="26" width="132" height="50" rx="8"/><text x="234" y="44" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">DQ</tspan> 降维</text><text x="234" y="63" class="t-c t-sm">查询这一路</text></g>
+    <g class="enc"><rect class="box" x="168" y="134" width="132" height="58" rx="8"/><text x="234" y="155" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">DKV</tspan> 降维</text><text x="234" y="176" class="t-c t-sm">键和值共用</text></g>
+    <g class="enc"><rect class="box" x="168" y="246" width="132" height="58" rx="8"/><text x="234" y="267" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">KR</tspan> + RoPE</text><text x="234" y="288" class="t-c t-sm">只管位置的键</text></g>
+    <g class="data"><rect class="box" x="340" y="26" width="132" height="50" rx="8"/><text x="406" y="44" class="t-c">c<tspan baseline-shift="super" style="font-size:9px">Q</tspan></text><text x="406" y="63" class="t-c t-sm">1536 维，不缓存</text></g>
+    <g class="pred"><rect class="box" x="340" y="134" width="132" height="58" rx="8"/><text x="406" y="155" class="t-c t-b">c<tspan baseline-shift="super" style="font-size:9px">KV</tspan>：512 维</text><text x="406" y="176" class="t-c t-sm">缓存</text></g>
+    <g class="pred"><rect class="box" x="340" y="246" width="132" height="58" rx="8"/><text x="406" y="267" class="t-c t-b">k<tspan baseline-shift="super" style="font-size:9px">R</tspan>：64 维</text><text x="406" y="288" class="t-c t-sm">缓存，128 头共用</text></g>
+    <g class="enc"><rect class="box" x="516" y="6" width="178" height="44" rx="8"/><text x="605" y="22" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">UQ</tspan> → q<tspan baseline-shift="super" style="font-size:9px">C</tspan></text><text x="605" y="39" class="t-c t-xs">128 头 × 128 维，无位置</text></g>
+    <g class="enc"><rect class="box" x="516" y="58" width="178" height="44" rx="8"/><text x="605" y="74" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">QR</tspan> + RoPE → q<tspan baseline-shift="super" style="font-size:9px">R</tspan></text><text x="605" y="91" class="t-c t-xs">128 头 × 64 维，带位置</text></g>
+    <g class="enc"><rect class="box" x="516" y="122" width="178" height="44" rx="8"/><text x="605" y="138" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">UK</tspan> → k<tspan baseline-shift="super" style="font-size:9px">C</tspan></text><text x="605" y="155" class="t-c t-xs">128 头 × 128 维（可被吸收）</text></g>
+    <g class="enc"><rect class="box" x="516" y="174" width="178" height="44" rx="8"/><text x="605" y="190" class="t-c">W<tspan baseline-shift="super" style="font-size:9px">UV</tspan> → v<tspan baseline-shift="super" style="font-size:9px">C</tspan></text><text x="605" y="207" class="t-c t-xs">128 头 × 128 维（可被吸收）</text></g>
+    <g class="loss"><rect class="box" x="736" y="60" width="210" height="196" rx="10"/><text x="841" y="84" class="t-c t-b">每个头 i 的注意力</text><text x="841" y="112" class="t-c t-sm">分数 = q<tspan baseline-shift="super" style="font-size:8px">C</tspan>·k<tspan baseline-shift="super" style="font-size:8px">C</tspan> + q<tspan baseline-shift="super" style="font-size:8px">R</tspan>·k<tspan baseline-shift="super" style="font-size:8px">R</tspan></text><text x="841" y="136" class="t-c t-sm">÷ √192，softmax</text><text x="841" y="160" class="t-c t-sm">权重 × v<tspan baseline-shift="super" style="font-size:8px">C</tspan> 求和</text><text x="841" y="188" class="t-c t-sm">128 个头拼接</text><text x="841" y="212" class="t-c t-sm">× W<tspan baseline-shift="super" style="font-size:8px">O</tspan> → 输出 u<tspan baseline-shift="sub" style="font-size:8px">t</tspan></text></g>
+    <path class="edge" d="M128,150 C146,150 146,51 166,51"/>
+    <path class="edge" d="M128,163 L166,163"/>
+    <path class="edge" d="M128,176 C146,176 146,275 166,275"/>
+    <path class="edge" d="M300,51 L338,51"/>
+    <path class="edge" d="M300,163 L338,163"/>
+    <path class="edge" d="M300,275 L338,275"/>
+    <path class="edge" d="M472,44 C494,44 494,28 514,28"/>
+    <path class="edge" d="M472,58 C494,58 494,80 514,80"/>
+    <path class="edge" d="M472,155 C494,155 494,144 514,144"/>
+    <path class="edge" d="M472,172 C494,172 494,196 514,196"/>
+    <path class="edge" d="M694,28 C716,28 716,100 734,100"/>
+    <path class="edge" d="M694,80 C716,80 716,118 734,118"/>
+    <path class="edge" d="M694,144 L734,144"/>
+    <path class="edge" d="M694,196 C716,196 716,170 734,170"/>
+    <path class="edge" d="M472,288 C640,288 700,232 734,232"/>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2412.19437#S2.F2" target="_blank" rel="noopener">原文图 2 右下 ↗</a> 和原文式 (1)–(11)。蓝框是可训练的投影矩阵。推理时用“矩阵吸收”，\(W^{UK}\) 并进 query 一侧、\(W^{UV}\) 并进输出一侧，于是每一步都直接拿缓存里的 \(\mathbf{c}^{KV}\) 和 \(\mathbf{k}^{R}\) 算注意力，不必展开出 128 个头的 key 和 value。</div>
+</div>
+<p><b>代价是什么。</b>吸收之后，每个头的“有效 key”变成了 512 + 64 = 576 维，而如果不吸收、把 key 展开再算，每个头的 key 只有 128 + 64 = 192 维。所以 MLA 在每个缓存 token 上做的乘加次数反而更多。这笔交易在生成阶段很划算：生成阶段的瓶颈是读显存，计算单元本来就闲着；用多一点计算换少得多的读取量，正好把闲着的算力用上。DeepSeek 后来开源的 FlashMLA，就是专为 MLA 写的注意力内核库。下面的小工具里可以选 “DeepSeek-V3 (MLA)” 和其他模型对比 KV 缓存随上下文长度的增长。</p>
+<div data-widget="roofline" data-panel="kv"></div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>MLA 压缩的是<b>推理时的 KV 缓存</b>，不是参数量，也不直接减少训练的计算量。查询的压缩只是为了省训练时的激活显存。</li>
+  <li>“只缓存 576 个数”成立的前提是推理时用矩阵吸收。如果用朴素实现、每步把 key 和 value 展开再存，缓存量和 MHA 一样大（官方代码的 <code>naive</code> 模式就是这样）。</li>
+  <li>MLA 不是 V3 的新贡献，它来自 DeepSeek-V2（2024 年 5 月）。V3 报告只是简要回顾。</li>
+</ul></div>
+
+<h4 id="n-2-2">2.1.2 DeepSeekMoE：细粒度专家 + 共享专家</h4>
+<div class="note-pre"><b>先补一点背景：MoE 的路由是怎么算的。</b>
+<p>每个路由专家 \(i\) 有一个可学习的向量 \(\mathbf{e}_i\)（可以理解为这个专家的“特长标签”）。token 进来时，用它的隐藏向量 \(\mathbf{u}_t\) 和每个专家的标签做点积，得到“这个 token 和这个专家有多合得来”的分数，叫<b>亲和度</b>。然后选出分数最高的 \(K\) 个专家，把 token 交给它们处理，再把它们的输出按分数加权求和。没被选中的专家不计算。</p>
+<p>早期的 MoE（比如 GShard）用十几到几十个大专家，每个 token 选 1 到 2 个。DeepSeekMoE（2024 年 1 月的论文）提出两点改进：一是把专家切得更细、数量更多，每个 token 选更多个，这样专家的组合方式多得多，每个专家可以学得更专；二是单独拿出几个<b>共享专家</b>，所有 token 都必须经过，用来承担各领域通用的知识，免得每个路由专家都重复学一遍。</p>
+</div>
+<p>写成公式，第 \(t\) 个 token 经过 MoE 层后的输出是：</p>
+<div class="formula">$$\mathbf{h}'_t=\mathbf{u}_t+\sum_{i=1}^{N_s}\mathrm{FFN}^{(s)}_i(\mathbf{u}_t)+\sum_{i=1}^{N_r}g_{i,t}\,\mathrm{FFN}^{(r)}_i(\mathbf{u}_t),\qquad s_{i,t}=\mathrm{Sigmoid}(\mathbf{u}_t^{\top}\mathbf{e}_i)$$</div>
+<p>其中 \(N_s=1\) 是共享专家数，\(N_r=256\) 是路由专家数。门控值 \(g_{i,t}\) 的算法是：先在 256 个亲和度 \(s_{i,t}\) 里选出最大的 \(K_r=8\) 个，没选中的置零，选中的 8 个再除以它们的和，让 8 个门控值加起来等于 1。</p>
+<p>和 V2 相比，这里有一个小改动：亲和度用 <b>sigmoid</b> 而不是 softmax 计算。softmax 会让 256 个专家的分数互相竞争、加起来等于 1；sigmoid 让每个专家的分数各自独立地落在 0 到 1 之间，最后只在被选中的 8 个之间做归一化。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>官方推理代码（<code>inference/model.py</code> 的 <code>Gate</code>）在做完上面的归一化之后，还把门控值整体乘了一个 <code>route_scale = 2.5</code>（见 <code>configs/config_671B.json</code>）。报告正文没有提到这个系数。另外，代码里前 3 层稠密 FFN 的中间维度是 18432，报告也没有写出这个数。</div>
+
+<h4 id="n-2-3">2.1.2（续）负载均衡：不用辅助损失，改用偏置项</h4>
+<div class="note-pre"><b>先补一点背景：专家负载为什么必须均衡。</b>
+<p>路由器是和模型一起训练的，这会带来两个问题。</p>
+<p>第一个问题是<b>路由塌缩</b>。训练刚开始时，某几个专家碰巧被多选了一些，它们因此多得到训练、变得更好用，路由器就更愿意选它们，形成“强者愈强”的循环。最后只有少数专家在干活，其余专家几乎学不到东西，模型的容量白白浪费。</p>
+<p>第二个问题是<b>效率</b>。大 MoE 训练时，不同的专家放在不同的 GPU 上（叫专家并行，后面 §3.2 细讲）。所有 GPU 要等最忙的那一张算完，才能一起进入下一步。所以只要有一个专家分到的 token 比平均多一倍，它所在的 GPU 就要多算一倍的时间，其他 GPU 只能干等。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一步的时间由最忙的那张卡决定（4 张卡，数字为示意）</div>
+  <div class="dia-row"><span class="lbl">GPU 0（热门专家）</span><div class="dia-track"><span class="dia-seg frag" style="flex:55">算 55 份 token</span></div></div>
+  <div class="dia-row"><span class="lbl">GPU 1</span><div class="dia-track"><span class="dia-seg kv" style="flex:25">25 份</span><span class="dia-seg oth" style="flex:30">等待</span></div></div>
+  <div class="dia-row"><span class="lbl">GPU 2</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">15 份</span><span class="dia-seg oth" style="flex:40">等待</span></div></div>
+  <div class="dia-row"><span class="lbl">GPU 3</span><div class="dia-track"><span class="dia-seg kv" style="flex:5">5</span><span class="dia-seg oth" style="flex:50">等待</span></div></div>
+  <div class="dia-out">总共 100 份工作，均匀分配时每张卡 25 份就能结束；现在要等 55 份，整体时间是均衡时的 2.2 倍（推算）。</div>
+</div>
+<p>传统的对策有两个。一是在训练损失里加一项<b>辅助损失</b>，当负载不均时这一项变大，梯度就会推着路由器把 token 分得更匀。二是给每个专家设一个容量上限，超出上限的 token 直接<b>丢弃</b>（不经过这个专家，只走残差连接）。辅助损失的问题在于，它的梯度会流进路由器和模型参数，和语言建模的目标争夺方向：系数大了，均衡是均衡了，模型效果却变差；系数小了，又压不住不均衡。丢弃 token 则直接损失了信息。</p>
+</div>
+<p>DeepSeek-V3 采用的办法来自同一团队 2024 年 8 月的一篇论文：给每个路由专家 \(i\) 加一个偏置项 \(b_i\)，<b>只在“选哪 8 个专家”时把偏置加到亲和度上</b>：</p>
+<div class="formula">$$g'_{i,t}=\begin{cases}s_{i,t}, &amp; s_{i,t}+b_i\in\mathrm{Topk}\big(\{s_{j,t}+b_j\mid 1\le j\le N_r\},K_r\big)\\ 0, &amp; \text{其他}\end{cases}$$</div>
+<p>注意等号右边写的是 \(s_{i,t}\) 而不是 \(s_{i,t}+b_i\)：偏置只影响“选谁”，被选中之后的加权仍然用原始的亲和度。偏置也不是靠梯度学的，而是一个简单的反馈调节：每一步训练结束时，统计整个批里每个专家分到了多少 token，过载的专家把偏置减小 \(\gamma\)，欠载的专家把偏置增大 \(\gamma\)。\(\gamma\) 叫偏置更新速度，V3 在前 14.3T token 里取 0.001，最后 500B token 里取 0（即冻结偏置）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：偏置项怎样只挪走“可去可不去”的 token（4 个专家、每个 token 选 1 个、\(\gamma=0.05\)，数字为示意）</div>
+  <div class="dia-row"><span class="lbl">本步负载</span><div class="dia-track"><span class="dia-seg frag" style="flex:55">专家 1：55</span><span class="dia-seg kv" style="flex:25">专家 2：25</span><span class="dia-seg kv" style="flex:15">专家 3：15</span><span class="dia-seg kv" style="flex:5">4：5</span></div></div>
+  <div class="dia-out">理想值是每个专家 25。更新偏置：\(b_1=-0.05\)（过载）、\(b_2=0\)（刚好）、\(b_3=b_4=+0.05\)（欠载）。</div>
+  <div class="dia-flow"><span class="dia-box">token A：亲和度 (0.62, 0.60, 0.41, 0.30)<small>原本选专家 1（0.62 最大）</small></span><span class="dia-arrow">→ 加偏置 →</span><span class="dia-box enc">(0.57, 0.60, 0.46, 0.35)<small>改选专家 2；门控值用原始的 0.60</small></span></div>
+  <div class="dia-flow"><span class="dia-box">token B：亲和度 (0.90, 0.35, 0.30, 0.20)<small>原本选专家 1</small></span><span class="dia-arrow">→ 加偏置 →</span><span class="dia-box act">(0.85, 0.35, 0.35, 0.25)<small>仍然选专家 1，不受影响</small></span></div>
+  <div class="dia-note">本站示意。真实设置是 256 个专家选 8 个、\(\gamma=0.001\)，每一步只把偏置挪动一点点。被挪走的只是那些对两个专家“几乎一样合得来”的 token，明确偏好某个专家的 token 不受影响，所以对模型效果的伤害很小。</div>
+</div>
+<p>这个办法的好处可以这样理解：辅助损失是在<b>改变模型本身</b>（通过梯度修改路由器的参数，甚至影响上游的表示），逼它“喜欢”均衡；偏置项则<b>不碰模型</b>，只是在分配时做一点“交通管制”，把边缘的 token 引导到空闲的专家。语言建模的梯度因此不受干扰。</p>
+<p><b>补充的序列级辅助损失。</b>偏置项按整个批统计负载，只保证“全批加起来”是均衡的。为了防止某一条序列内部极端不均衡，V3 仍保留了一个系数极小的辅助损失，按单条序列计算：</p>
+<div class="formula">$$\mathcal{L}_{\mathrm{Bal}}=\alpha\sum_{i=1}^{N_r}f_iP_i,\qquad f_i=\frac{N_r}{K_rT}\sum_{t=1}^{T}\mathbf{1}\big(\text{token }t\text{ 选中了专家 }i\big),\qquad P_i=\frac{1}{T}\sum_{t=1}^{T}\frac{s_{i,t}}{\sum_j s_{j,t}}$$</div>
+<p>\(f_i\) 是这条序列里专家 \(i\) 实际分到的 token 比例（乘了一个系数，使得完全均衡时 \(f_i=1\)），\(P_i\) 是专家 \(i\) 的平均（归一化）亲和度。两者的乘积在“分得多的专家亲和度也高”时最大，所以最小化它会把路由推向均匀。\(f_i\) 本身不可导，梯度只通过 \(P_i\) 流回路由器。V3 的 \(\alpha=0.0001\)，报告说这只是用来“防止单条序列极端不均衡”的保险。</p>
+<p><b>节点受限路由。</b>和 V2 的“设备受限路由”类似，V3 规定每个 token 最多被发往 \(M=4\) 个节点。具体做法是：先对每个节点算一个分数，等于这个节点上亲和度最高的 \(K_r/M=2\) 个专家的亲和度之和，选出分数最高的 4 个节点，再只在这 4 个节点的专家里选 8 个。这样每个 token 的跨节点通信量有了上限，§3.2.2 会讲它为什么关键。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>官方推理代码把 256 个专家分成 8 组（<code>n_expert_groups = 8</code>，对应训练时专家分布的 8 个节点），每组取最高的 2 个分数相加作为组分数，再选 4 组（<code>n_limited_groups = 4</code>），与报告的描述一致。一个报告没有写明的细节是：代码在算组分数时用的是<b>加了偏置之后</b>的分数 \(s+b\)。</div>
+<p><b>不丢 token。</b>由于负载均衡做得好，V3 在整个训练过程中没有丢弃任何 token；推理时也通过专门的部署策略（§3.4 的冗余专家）保证均衡，同样不丢 token。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“无辅助损失”并不是完全没有辅助损失：V3 仍保留了 \(\alpha=0.0001\) 的序列级损失，只是主要靠偏置项。</li>
+  <li>偏置项按<b>整个批</b>来均衡，不保证每条序列、每个小批内部均衡。§4.5.3 会讲到，这正是它效果更好的原因，同时也带来两个效率上的隐患。</li>
+  <li>“首创”的说法要放在上下文里理解：这个方法最早发表在 Wang 等人 2024 年 8 月的论文里（作者同属 DeepSeek），V3 是第一个在这么大规模的模型上使用它的。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a> · 原始方法：<a href="https://arxiv.org/abs/2408.15664" target="_blank" rel="noopener">Auxiliary-Loss-Free Load Balancing（arXiv 2408.15664）↗</a> · MLA 的出处：<a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener">DeepSeek-V2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">2.2 多 token 预测（MTP）：每个位置多猜一个 token</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>普通语言模型在每个位置只学“下一个 token 是什么”。如果让模型在每个位置同时学着猜后面第二个、第三个 token，会不会学得更好？Meta 在 2024 年的一篇论文里试过用几个并列的输出头同时猜，V3 换了一种“按顺序、一个接一个猜”的做法。这一节讲这个模块的结构、训练目标，以及为什么它训练完既可以扔掉，也可以留着给推理加速。</div>
+<div class="note-pre"><b>先补一点背景：“预测下一个 token”是怎么训练的。</b>
+<p>训练时，把一段文字 \(t_1,t_2,\dots,t_T\) 整段喂给模型。因为注意力被“因果掩码”限制，位置 \(i\) 只能看到 \(t_1\) 到 \(t_i\)。模型在每个位置输出一个概率分布，去猜 \(t_{i+1}\)，猜错的程度用交叉熵衡量，所有位置的交叉熵平均起来就是损失。这样一段长度为 \(T\) 的文字，一次前向就能提供 \(T\) 个训练信号。注意，训练时位置 \(i\) 之前的 token 都是真实文本（这叫 teacher forcing），而不是模型自己猜出来的。</p>
+<p>多 token 预测（MTP）的想法是：在每个位置除了猜 \(t_{i+1}\)，再额外猜 \(t_{i+2}\)（甚至更远）。这有两个可能的好处。一是<b>训练信号更密</b>：同样一段数据，每个位置提供不止一个监督信号。二是迫使模型在位置 \(i\) 的表示里<b>提前规划</b>：要猜得出两步之后的 token，表示里就得装着“接下来大概要往哪儿走”的信息，而不只是“下一个词”。</p>
+</div>
+<p><b>V3 的 MTP 模块长什么样。</b>V3 用 \(D\) 个按顺序排列的模块去预测额外的 \(D\) 个 token（V3 实际取 \(D=1\)，即只多猜一个）。第 \(k\) 个模块由四样东西组成：和主模型共用的嵌入层、和主模型共用的输出头、一层自己的 Transformer 块 \(\mathrm{TRM}_k\)，以及一个投影矩阵 \(M_k\in\mathbb{R}^{d\times 2d}\)。在位置 \(i\)、第 \(k\) 个深度上，它做三件事：</p>
+<ol>
+  <li>取出上一个深度在位置 \(i\) 的表示 \(\mathbf{h}_i^{k-1}\)（\(k=1\) 时就是主模型最后一层的输出），再取出<b>真实的</b>第 \(i+k\) 个 token 的嵌入 \(\mathrm{Emb}(t_{i+k})\)。两者各做一次 RMSNorm，拼接成 \(2d\) 维，用 \(M_k\) 投影回 \(d\) 维：<div class="formula">$$\mathbf{h}_i'^{k}=M_k\big[\mathrm{RMSNorm}(\mathbf{h}_i^{k-1});\ \mathrm{RMSNorm}(\mathrm{Emb}(t_{i+k}))\big]$$</div></li>
+  <li>把这个结果送进本深度的 Transformer 块，得到 \(\mathbf{h}_i^{k}\)。</li>
+  <li>用共享的输出头把 \(\mathbf{h}_i^{k}\) 变成概率分布，去猜第 \(i+k+1\) 个 token。</li>
+</ol>
+<p>用一个例子走一遍。设句子是“今天 / 天气 / 很 / 好 / 。”，记为 \(t_1\) 到 \(t_5\)。在位置 1（“今天”）：</p>
+<ul>
+  <li>主模型只看到“今天”，猜 \(t_2\)，正确答案是“天气”。</li>
+  <li>MTP 模块 1 拿到主模型在位置 1 的表示（概括了“今天”），再拿到<b>真实</b>的 \(t_2\)“天气”的嵌入，猜 \(t_3\)，正确答案是“很”。它回答的问题是：“已知前面是‘今天’，而且下一个词确实是‘天气’，那再下一个是什么？”</li>
+</ul>
+<p>报告强调这种做法“保持了完整的因果链”：猜 \(t_{i+2}\) 时明确地以 \(t_{i+1}\) 为条件，而不是像 Meta 的并列输出头那样，在只看到 \(t_1,\dots,t_i\) 的情况下直接跳着猜 \(t_{i+2}\)。这个原则和投机解码方法 EAGLE 的草稿头相似，但 EAGLE 训练草稿头是为了推理加速，V3 的 MTP 是为了让主模型本身学得更好。</p>
+<div class="dia">
+  <div class="dia-title">示意图：主模型与 MTP 模块 1（\(D=1\)），输入输出错开一位</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="多 token 预测模块示意图">
+    <g class="data">
+      <rect class="box" x="72" y="270" width="52" height="26" rx="5"/><text x="98" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">1</tspan></text>
+      <rect class="box" x="134" y="270" width="52" height="26" rx="5"/><text x="160" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">2</tspan></text>
+      <rect class="box" x="196" y="270" width="52" height="26" rx="5"/><text x="222" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">3</tspan></text>
+      <rect class="box" x="258" y="270" width="52" height="26" rx="5"/><text x="284" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">4</tspan></text>
+      <rect class="box" x="72" y="10" width="52" height="26" rx="5"/><text x="98" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">2</tspan></text>
+      <rect class="box" x="134" y="10" width="52" height="26" rx="5"/><text x="160" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">3</tspan></text>
+      <rect class="box" x="196" y="10" width="52" height="26" rx="5"/><text x="222" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">4</tspan></text>
+      <rect class="box" x="258" y="10" width="52" height="26" rx="5"/><text x="284" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">5</tspan></text>
+      <rect class="box" x="572" y="270" width="52" height="26" rx="5"/><text x="598" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">2</tspan></text>
+      <rect class="box" x="634" y="270" width="52" height="26" rx="5"/><text x="660" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">3</tspan></text>
+      <rect class="box" x="696" y="270" width="52" height="26" rx="5"/><text x="722" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">4</tspan></text>
+      <rect class="box" x="758" y="270" width="52" height="26" rx="5"/><text x="784" y="283" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">5</tspan></text>
+      <rect class="box" x="572" y="10" width="52" height="26" rx="5"/><text x="598" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">3</tspan></text>
+      <rect class="box" x="634" y="10" width="52" height="26" rx="5"/><text x="660" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">4</tspan></text>
+      <rect class="box" x="696" y="10" width="52" height="26" rx="5"/><text x="722" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">5</tspan></text>
+      <rect class="box" x="758" y="10" width="52" height="26" rx="5"/><text x="784" y="23" class="t-c">t<tspan baseline-shift="sub" style="font-size:9px">6</tspan></text>
+    </g>
+    <g class="reg"><rect class="box" x="60" y="218" width="262" height="34" rx="8"/><text x="191" y="235" class="t-c">嵌入层 Emb</text></g>
+    <g class="enc"><rect class="box" x="60" y="122" width="262" height="72" rx="8"/><text x="191" y="148" class="t-c t-b">主模型：61 层 Transformer</text><text x="191" y="172" class="t-c t-sm">输出每个位置的表示 h⁰</text></g>
+    <g class="reg"><rect class="box" x="60" y="62" width="262" height="34" rx="8"/><text x="191" y="79" class="t-c">输出头 OutHead</text></g>
+    <g class="reg"><rect class="box" x="560" y="218" width="262" height="34" rx="8"/><text x="691" y="235" class="t-c">嵌入层 Emb（与主模型共用）</text></g>
+    <g class="pred"><rect class="box" x="560" y="164" width="262" height="38" rx="8"/><text x="691" y="183" class="t-c t-sm">RMSNorm(h⁰) ‖ RMSNorm(Emb) → 投影 M₁</text></g>
+    <g class="enc"><rect class="box" x="560" y="112" width="262" height="36" rx="8"/><text x="691" y="130" class="t-c">1 层 Transformer 块 TRM₁</text></g>
+    <g class="reg"><rect class="box" x="560" y="62" width="262" height="34" rx="8"/><text x="691" y="79" class="t-c">输出头 OutHead（与主模型共用）</text></g>
+    <path class="edge" d="M191,268 L191,254"/>
+    <path class="edge" d="M191,218 L191,196"/>
+    <path class="edge" d="M191,122 L191,98"/>
+    <path class="edge" d="M191,62 L191,38"/>
+    <path class="edge" d="M691,268 L691,254"/>
+    <path class="edge" d="M691,218 L691,204"/>
+    <path class="edge" d="M691,164 L691,150"/>
+    <path class="edge" d="M691,112 L691,98"/>
+    <path class="edge" d="M691,62 L691,38"/>
+    <path class="edge pred" d="M322,150 C440,150 440,183 558,183"/>
+    <text x="440" y="140" class="t-c t-sm" style="fill:var(--c-pred)">把 h⁰ 交给 MTP 模块</text>
+    <path class="edge idx no-head" d="M322,235 L560,235"/>
+    <text x="440" y="226" class="t-c t-xs">共享参数</text>
+    <path class="edge idx no-head" d="M322,79 L560,79"/>
+    <text x="440" y="70" class="t-c t-xs">共享参数</text>
+    <text x="330" y="23" class="t-sm" style="fill:var(--c-loss)">→ 主损失 L<tspan baseline-shift="sub" style="font-size:9px">main</tspan></text>
+    <text x="830" y="23" class="t-sm" style="fill:var(--c-loss)">→ 损失 L<tspan baseline-shift="sub" style="font-size:9px">MTP</tspan></text>
+    <text x="191" y="316" class="t-c t-sm">主模型：每个位置猜下一个 token</text>
+    <text x="691" y="316" class="t-c t-sm">MTP 模块 1：每个位置猜下下个 token</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2412.19437#S2.F3" target="_blank" rel="noopener">原文图 3 ↗</a>（原图画了两个 MTP 模块以说明一般的 \(D\)，V3 实际只用一个）。下排是输入，上排是要猜的目标。位置 1 上，主模型看到 \(t_1\) 猜 \(t_2\)；MTP 模块拿到主模型位置 1 的表示和真实的 \(t_2\)，猜 \(t_3\)。</div>
+</div>
+<p><b>训练目标。</b>第 \(k\) 个深度的损失就是它在所有能算的位置上的交叉熵：</p>
+<div class="formula">$$\mathcal{L}^{k}_{\mathrm{MTP}}=-\frac{1}{T}\sum_{i=2+k}^{T+1}\log P_i^{k}[t_i],\qquad \mathcal{L}_{\mathrm{MTP}}=\frac{\lambda}{D}\sum_{k=1}^{D}\mathcal{L}^{k}_{\mathrm{MTP}}$$</div>
+<p>\(P_i^{k}[t_i]\) 是第 \(k\) 个模块给正确答案 \(t_i\) 的概率。所有深度的损失取平均后乘上权重 \(\lambda\)，加到主模型的“下一个 token”损失上一起优化。V3 在前 10T token 里取 \(\lambda=0.3\)，之后的 4.8T token 取 0.1。MTP 损失的梯度会经过 \(\mathbf{h}^{0}\) 流回主模型，主模型的表示就是这样被“逼着”去为更远的未来做准备的。</p>
+<div class="note-pre"><b>先补一点背景：投机解码。</b>
+<p>大模型生成文字时，每一步只能产出一个 token，而每一步都要把整个模型读一遍。投机解码的想法是：先用一个便宜的“草稿”方法猜出后面几个 token，再让大模型<b>一次前向</b>同时检查这些猜测。猜对的直接收下，猜错的从第一个错处丢掉、改用大模型自己的结果。只要草稿的猜中率高，一次大模型前向就能平均产出不止一个 token，速度就上去了，而且通过一种修正的拒绝采样，输出分布和不用投机时完全一样。（详见本站 <a href="../legacy/tracks/ai-infra/05-speculative-decoding.html">投机解码</a> 与 <a href="../legacy/tracks/ai-infra/17-eagle.html">EAGLE</a> 拆解页。）</p>
+</div>
+<p><b>推理时怎么办。</b>MTP 的主要目的是让主模型学得更好，所以推理时可以直接把 MTP 模块丢掉，主模型照常独立工作，推理成本与没有 MTP 的模型完全相同。另一种用法是把 MTP 模块当作投机解码的草稿：主模型给出下一个 token 的同时，MTP 模块顺手猜出再下一个，下一步由主模型验证。§5.4.3 报告的结果是，第二个 token 的接受率在 85% 到 90% 之间，生成速度（每秒 token 数）提高到 1.8 倍。</p>
+<p>这两个数字是对得上的：如果每步只多猜 1 个 token、接受率为 \(p\)，那么每次主模型前向平均产出 \(1+p\) 个 token，\(p=0.85\sim0.90\) 时是 1.85 到 1.9 个（推算）。实际测到 1.8 倍，略低于这个上限，差额是运行 MTP 模块本身和验证带来的额外开销。下面的小工具可以把接受率 α 调到 0.85–0.9，看看草稿长度 γ = 1 时的期望产出。</p>
+<div data-widget="specdec"></div>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>官方仓库的说明（<code>README.md</code>、<code>README_WEIGHTS.md</code>）补充了几个报告没写的数字：Hugging Face 上的权重总共 685B，其中 671B 是主模型，14B 是 MTP 模块；MTP 模块在权重文件里被存成第 62 层（编号 61），结构与主模型的隐藏层相同，嵌入层和输出头与主模型共用。主模型的激活参数在说明里写作 36.7B（含嵌入层和输出头各 0.9B），报告取整为 37B。仓库发布时写明 MTP 的推理支持“仍在社区开发中”。</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>MTP 让<b>训练</b>变贵了一点（每个 token 多算一层 Transformer 和一次输出头），换来主模型效果的提升；推理时如果丢掉模块，成本不变。“671B”这个参数量不含 MTP 模块。</li>
+  <li>V3 的 MTP 是“顺序的”（模块 \(k\) 依赖模块 \(k-1\) 的输出和真实的 \(t_{i+k}\)），所以不同深度之间不能并行；Meta 的版本是并列的独立输出头。</li>
+  <li>1.8 倍的加速是 DeepSeek 在自己的服务上测的端到端结果，报告没有给出测量条件（批大小、硬件、温度等）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2 ↗</a> · 并列输出头的版本：<a href="https://arxiv.org/abs/2404.19737" target="_blank" rel="noopener">Gloeckle et al. 2024 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">3.1–3.2 训练框架：DualPipe、跨节点 all-to-all 与省显存</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>671B 的模型放不进一张 GPU，必须拆到 2048 张 GPU 上协同训练。V3 的专家分布在多个节点上，每个 token 都要跨节点送到它选中的专家那里再送回来，这部分通信的耗时和计算差不多一样长（报告说计算与通信之比约为 1:1）。如果通信和计算轮流进行，一半的时间 GPU 都在等数据。这一节讲 V3 怎么把通信藏到计算后面：一是新的流水线调度 DualPipe，二是充分利用两种网络带宽的通信内核，三是一系列省显存的手段，让训练根本不需要最耗通信的张量并行。</div>
+
+<div class="note-pre"><b>先补一点背景：大模型训练的四种并行方式。</b>
+<ul>
+  <li><b>数据并行（DP）</b>：每组 GPU 持有一份完整的模型，各自处理不同的数据，最后把梯度加起来同步。ZeRO 是它的省显存版本，把优化器状态（ZeRO-1）、梯度、参数分片存到不同的 GPU 上。V3 用 ZeRO-1。（见 <a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP 拆解页</a>。）</li>
+  <li><b>张量并行（TP）</b>：把每一层的大矩阵切开，分给几张 GPU 各算一块，每一层算完都要用 all-reduce 把结果拼起来。通信非常频繁，一般只在节点内部的高速互联上用。V3 训练时<b>完全不用 TP</b>。（见 <a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron 拆解页</a>。）</li>
+  <li><b>流水线并行（PP）</b>：把模型按层切成几段，每段放在不同的 GPU 上，数据像流水线一样一段段往后传。V3 用 16 段。</li>
+  <li><b>专家并行（EP）</b>：MoE 特有。同一层的不同专家放在不同的 GPU 上。每个 token 要被发送到它选中的专家所在的 GPU（叫 <b>dispatch</b>），算完再把结果送回原来的 GPU（叫 <b>combine</b>）。这种“每张卡都要给其他每张卡发一些数据”的通信模式叫 <b>all-to-all</b>。V3 用 64 路 EP，跨 8 个节点，所以 256 个路由专家平均每张卡 4 个（推算）。</li>
+</ul>
+</div>
+<p><b>硬件。</b>V3 在一个 2048 张 NVIDIA H800 的集群上训练。每个节点 8 张 GPU，节点内用 NVLink 和 NVSwitch 互联，节点之间用 InfiniBand（IB）互联。训练框架是 DeepSeek 自己从头写的 HAI-LLM。</p>
+
+<h4 id="n-4-1">3.2.1 DualPipe：让一个微批的通信藏在另一个微批的计算后面</h4>
+<div class="note-pre"><b>先补一点背景：流水线的“气泡”。</b>
+<p>流水线并行把一个大批切成若干个<b>微批</b>（micro-batch），一个接一个送进流水线。问题在于开头和结尾：第一个微批还没传到最后一段时，后面的 GPU 只能空等；最后一个微批的反向传播还没传回第一段时，前面的 GPU 也只能空等。这些空等的时间叫<b>气泡</b>。</p>
+<p>常用的 1F1B 调度让每张 GPU 在稳定阶段交替做“一个微批的前向、一个微批的反向”，可以把同时保存的激活控制住，但气泡的总长仍是 \((PP-1)(F+B)\)，其中 \(PP\) 是流水线段数，\(F\)、\(B\) 是一个微批在一段上做前向、反向的时间。下图是 4 段、4 个微批、反向耗时是前向两倍的例子。</p>
+<div class="dia">
+  <div class="dia-title">示意图：4 段流水线、4 个微批的 1F1B 调度（每格一个时间单位，前向 1 格、反向 2 格）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td class="lbl">时间 →</td><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th><th>15</th><th>16</th><th>17</th><th>18</th><th>19</th><th>20</th><th>21</th></tr>
+    <tr><td class="lbl">GPU 0（第 1 段层）</td><td class="r" style="color:var(--surface)">1</td><td class="r" style="color:var(--surface)">2</td><td class="r" style="color:var(--surface)">3</td><td class="r" style="color:var(--surface)">4</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="p" style="color:var(--c-loss)">1</td><td class="p" style="color:var(--c-loss)">1</td><td class="q"></td><td class="p" style="color:var(--c-loss)">2</td><td class="p" style="color:var(--c-loss)">2</td><td class="q"></td><td class="p" style="color:var(--c-loss)">3</td><td class="p" style="color:var(--c-loss)">3</td><td class="q"></td><td class="p" style="color:var(--c-loss)">4</td><td class="p" style="color:var(--c-loss)">4</td></tr>
+    <tr><td class="lbl">GPU 1（第 2 段层）</td><td class="q"></td><td class="r" style="color:var(--surface)">1</td><td class="r" style="color:var(--surface)">2</td><td class="r" style="color:var(--surface)">3</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="p" style="color:var(--c-loss)">1</td><td class="p" style="color:var(--c-loss)">1</td><td class="r" style="color:var(--surface)">4</td><td class="p" style="color:var(--c-loss)">2</td><td class="p" style="color:var(--c-loss)">2</td><td class="q"></td><td class="p" style="color:var(--c-loss)">3</td><td class="p" style="color:var(--c-loss)">3</td><td class="q"></td><td class="p" style="color:var(--c-loss)">4</td><td class="p" style="color:var(--c-loss)">4</td><td class="q"></td><td class="q"></td></tr>
+    <tr><td class="lbl">GPU 2（第 3 段层）</td><td class="q"></td><td class="q"></td><td class="r" style="color:var(--surface)">1</td><td class="r" style="color:var(--surface)">2</td><td class="q"></td><td class="q"></td><td class="p" style="color:var(--c-loss)">1</td><td class="p" style="color:var(--c-loss)">1</td><td class="r" style="color:var(--surface)">3</td><td class="p" style="color:var(--c-loss)">2</td><td class="p" style="color:var(--c-loss)">2</td><td class="r" style="color:var(--surface)">4</td><td class="p" style="color:var(--c-loss)">3</td><td class="p" style="color:var(--c-loss)">3</td><td class="q"></td><td class="p" style="color:var(--c-loss)">4</td><td class="p" style="color:var(--c-loss)">4</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td></tr>
+    <tr><td class="lbl">GPU 3（第 4 段层）</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r" style="color:var(--surface)">1</td><td class="p" style="color:var(--c-loss)">1</td><td class="p" style="color:var(--c-loss)">1</td><td class="r" style="color:var(--surface)">2</td><td class="p" style="color:var(--c-loss)">2</td><td class="p" style="color:var(--c-loss)">2</td><td class="r" style="color:var(--surface)">3</td><td class="p" style="color:var(--c-loss)">3</td><td class="p" style="color:var(--c-loss)">3</td><td class="r" style="color:var(--surface)">4</td><td class="p" style="color:var(--c-loss)">4</td><td class="p" style="color:var(--c-loss)">4</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">蓝格是前向（数字是微批编号），粉格是反向，斜纹是气泡。每张卡空等 9 格，正好等于 \((PP-1)(F+B)=3\times3\)；总时长 21 格里有 9 格是空的（推算）。微批越多，气泡在总时间里占的比例越小；但总批大小固定时，微批越多每个微批就越小，每次计算都更“碎”，GPU 的效率随之下降。</div>
+</div>
+</div>
+<p><b>DualPipe 的第一个想法：在一对前向、反向块内部重叠计算和通信。</b>V3 把一个微批在一段流水线上的工作（叫一个“块”）拆成四个部分：注意力、all-to-all dispatch、MLP（即 MoE 专家计算）、all-to-all combine。反向的块再把注意力和 MLP 各拆成“对输入求梯度”和“对权重求梯度”两部分（这个拆法来自 ZeroBubble）。另外还有流水线段之间传递激活的 PP 通信。拆开之后，就可以把<b>一个微批的前向块</b>和<b>另一个微批的反向块</b>配成一对，交错执行：GPU 的计算单元在算其中一个的注意力或 MLP 时，网络正在为另一个传 dispatch 或 combine。报告还手动调节了 GPU 上用于通信和用于计算的 SM（流式多处理器）比例，让两边的耗时对得上。按报告的说法，这样 all-to-all 和 PP 通信都可以完全藏起来。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一对前向块（△）与反向块（▲）如何交错，计算流和通信流同时在忙</div>
+  <div class="dia-row"><span class="lbl">计算</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3">MLP 反向（对输入）▲</span><span class="dia-seg kv" style="flex:1.6">MLP 反向（对权重）▲</span><span class="dia-seg w" style="flex:3">MLP 前向 △</span><span class="dia-seg frag" style="flex:0.3"></span><span class="dia-seg cmp" style="flex:5">注意力反向（对输入）▲</span><span class="dia-seg kv" style="flex:1.8">注意力反向（对权重）▲</span><span class="dia-seg w" style="flex:2.5">注意力前向 △</span><span class="dia-seg frag" style="flex:0.3"></span></div></div>
+  <div class="dia-row"><span class="lbl">通信</span><div class="dia-track"><span class="dia-seg w" style="flex:3.2">dispatch 前向 △</span><span class="dia-seg cmp" style="flex:4.4">dispatch 反向 ▲</span><span class="dia-seg frag" style="flex:0.3"></span><span class="dia-seg w" style="flex:4.4">combine 前向 △</span><span class="dia-seg oth" style="flex:1">PP</span><span class="dia-seg cmp" style="flex:3.9">combine 反向 ▲</span><span class="dia-seg frag" style="flex:0.3"></span></div></div>
+  <div class="dia-out">紫色属于前向块，绿色和蓝色属于反向块（绿 = 对输入求梯度，蓝 = 对权重求梯度），灰色是流水线段间通信，红色细条是同步点。上下两行同时进行：计算单元在算反向块的 MLP 时，网络在为前向块做 dispatch，以此类推。</div>
+  <div class="dia-note">本站示意图，各段的先后顺序按 <a href="https://arxiv.org/html/2412.19437#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>，长度只是示意。</div>
+</div>
+<p><b>第二个想法：从流水线两端同时喂微批。</b>完整的 DualPipe 调度是“双向”的：一半微批从第 1 段往后流，另一半从最后一段往前流。为此每张 GPU 要同时持有两段模型：比如 8 段时，GPU 0 既是正向的第 1 段，也是反向的第 8 段（原文图 5 的画法）。这样在调度的大部分时间里，每张 GPU 上都同时有一个方向的前向块和另一个方向的反向块，正好可以配成上面那样的重叠对。</p>
+<div class="dia">
+  <div class="dia-title">示意图：双向流水线（以 4 张 GPU 为例）</div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2);width:84px">正向的微批</span><span class="dia-box enc">GPU 0<small>第 1 段</small></span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 1<small>第 2 段</small></span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 2<small>第 3 段</small></span><span class="dia-arrow">→</span><span class="dia-box enc">GPU 3<small>第 4 段</small></span></div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2);width:84px">反向的微批</span><span class="dia-box act">GPU 0<small>第 4 段</small></span><span class="dia-arrow">←</span><span class="dia-box act">GPU 1<small>第 3 段</small></span><span class="dia-arrow">←</span><span class="dia-box act">GPU 2<small>第 2 段</small></span><span class="dia-arrow">←</span><span class="dia-box act">GPU 3<small>第 1 段</small></span></div>
+  <div class="dia-note">本站示意图。每张 GPU 持有两段模型（蓝、绿各一段），所以全局来看模型参数存了两份。开头时 GPU 0 和 GPU 3 同时开工，比单向流水线少等一半的路程；中间阶段每张卡上的正向前向块与反向反向块配对重叠。完整的 8 段、20 个微批的调度见 <a href="https://arxiv.org/html/2412.19437#S3.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 或 <a href="https://github.com/deepseek-ai/DualPipe" target="_blank" rel="noopener">DualPipe 仓库 ↗</a>。</div>
+</div>
+<p>原文表 2 比较了三种调度的气泡和显存（\(W\) 是“对权重求梯度”那部分的时间，\(F\&amp;B\) 是一对互相重叠的前向、反向块的总时间）：</p>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th>气泡</th><th>参数</th><th>激活</th><th>推算例子（\(PP=8\)，\(F{=}1,B{=}2,W{=}1,F\&amp;B{=}3\)）</th></tr>
+  <tr><td>1F1B</td><td>\((PP-1)(F+B)\)</td><td>1×</td><td>\(PP\)</td><td>7 × 3 = 21</td></tr>
+  <tr><td>ZB1P</td><td>\((PP-1)(F+B-2W)\)</td><td>1×</td><td>\(PP\)</td><td>7 × 1 = 7</td></tr>
+  <tr><td>DualPipe</td><td>\((\tfrac{PP}{2}-1)(F\&amp;B+B-3W)\)</td><td>2×</td><td>\(PP+1\)</td><td>3 × 2 = 6</td></tr>
+</table></div>
+<p>表里的规律是：DualPipe 把气泡公式里的系数从 \(PP-1\) 降到 \(PP/2-1\)，因为双向喂入让流水线“填满”和“排空”的路程各缩短了一半。代价是参数要存两份（报告说因为 EP 很大，每张卡上的参数本来就不多，所以影响不大），峰值激活只多 \(1/PP\)。另外，DualPipe 只要求段数和微批数是 2 的倍数，不要求微批数是段数的倍数（Chimera 要求）；而且微批数增加时，气泡和激活都不会随之增长。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>上面的推算例子假设前向、反向块重叠后的总时间 \(F\&amp;B\) 等于 \(F+B\)，也就是只算计算时间。在这个假设下，DualPipe 的气泡（6）只比 ZB1P（7）少一点。DualPipe 真正的价值不在表 2，而在于它让 all-to-all 通信可以被另一个方向的计算掩盖：如果不重叠，V3 每个块的耗时要加上与计算差不多长的通信时间。报告由此得出一个更一般的结论：只要保持计算与通信之比不变，模型再放大、专家再细，跨节点的 all-to-all 开销也可以接近于零。</div>
+
+<h4 id="n-4-2">3.2.2 跨节点 all-to-all：先走 IB、再走 NVLink</h4>
+<div class="note-pre"><b>先补一点背景：all-to-all 通信、两种网络和 SM。</b>
+<p>在专家并行里，每张 GPU 上都有一批 token，每个 token 要去不同的 GPU 找专家，每张 GPU 又要从所有其他 GPU 收 token。这就是 all-to-all：可以想成一个矩阵转置，第 \(i\) 张卡的第 \(j\) 块数据发给第 \(j\) 张卡。下面的小工具可以选 “All-to-All” 一步步看数据怎么流动。</p>
+<div data-widget="collectives" data-ranks="4"></div>
+<p>V3 的集群里有两种网络：节点内部的 NVLink，带宽 160 GB/s；节点之间的 IB，带宽 50 GB/s，NVLink 大约是 IB 的 3.2 倍（报告给出的数字）。所以跨节点的流量才是瓶颈。</p>
+<p>GPU 的计算单元组织成很多个 <b>SM</b>（流式多处理器），H800 有 132 个。在 NVIDIA GPU 上，搬运数据、在两种网络之间转发等通信工作也要占用 SM 来执行。分给通信的 SM 越多，留给矩阵计算的就越少。</p>
+</div>
+<p>V3 的通信内核和路由算法、集群拓扑是一起设计的，核心是三点：</p>
+<ul>
+  <li><b>每个 token 最多去 4 个节点</b>（§2.1.2 的节点受限路由）。这样每个 token 在 IB 上最多传 4 份，而不是选中 8 个专家就可能传 8 份。</li>
+  <li><b>两跳转发</b>：token 先通过 IB 发到目标节点上“与自己卡号相同”的那张 GPU，一到达就立即通过 NVLink 转发给本节点内真正持有目标专家的 GPU，并保证不会被后到的 token 堵住。这样 IB 和 NVLink 的传输完全重叠。</li>
+  <li><b>为什么一个节点平均能选 3.2 个专家而不增加开销</b>：一份数据通过 IB 送到一个节点所需的时间，足够 NVLink 在节点内转发约 3.2 份（带宽之比）。所以在一个节点内选 3.2 个专家，NVLink 那一跳不会拖慢整体。报告据此指出，虽然 V3 实际只选 8 个路由专家，但在同样的通信成本下最多可以扩到 13 个（4 个节点 × 3.2）。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：一个 token 怎样到达分布在 2 个节点上的 3 个专家</div>
+  <div class="dia-flow"><span class="dia-box act">节点 A 的 GPU 3<small>token 在这里，路由选中节点 B、C</small></span><span class="dia-arrow">→ IB 50 GB/s，每个节点只传一份 →</span><span class="dia-box enc">节点 B 的 GPU 3<small>同号卡，收到后立即转发</small></span><span class="dia-arrow">→ NVLink 160 GB/s →</span><span class="dia-box pred">节点 B 的 GPU 1、GPU 6<small>持有目标专家</small></span></div>
+  <div class="dia-flow"><span class="dia-box act" style="visibility:hidden">节点 A 的 GPU 3<small>占位</small></span><span class="dia-arrow">→ IB →</span><span class="dia-box enc">节点 C 的 GPU 3<small>同号卡</small></span><span class="dia-arrow">→ NVLink →</span><span class="dia-box pred">节点 C 的 GPU 4<small>持有目标专家</small></span></div>
+  <div class="dia-note">本站示意图，卡号是随手举的例子。combine 时方向相反：节点内先经 NVLink 汇总并累加，再经 IB 发回。dispatch 的数据用 FP8 传（§3.3.3），每份约 7 KB（推算：7168 维 × 1 字节，另加少量缩放因子）。</div>
+</div>
+<p>在这种设计下，<b>只需 20 个 SM</b> 就能把 IB 和 NVLink 的带宽跑满。具体实现上，20 个 SM 被分成 10 个通信通道，用 warp 专门化的技术（让同一个 SM 里不同的线程组各管一件事）分工：dispatch 时，分别有 warp 负责 IB 发送、IB 到 NVLink 的转发、NVLink 接收；combine 时，分别负责 NVLink 发送、NVLink 到 IB 的转发与累加、IB 接收与累加。每项任务分到多少个 warp 会按实际负载动态调整。由于这些通信内核和计算内核同时运行，报告还用定制的 PTX 指令（比 CUDA 更底层的 GPU 汇编）并自动调节每次传输的数据块大小，以减少它们对 L2 缓存的占用和对其他计算 SM 的干扰。</p>
+<p>DeepSeek 后来开源的通信库 <a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener">DeepEP</a> 提供的正是这类面向 MoE dispatch / combine 的 all-to-all 内核（包括 FP8 的 dispatch）。20 个 SM 占 H800 全部 132 个的约 15%（推算）；§3.5 里报告会反过来指出，这部分算力被通信占着，限制了计算吞吐。</p>
+
+<h4 id="n-4-3">3.2.3 省显存：重算、把 EMA 放到 CPU、共享嵌入层</h4>
+<p>不用张量并行，意味着每张 GPU 要装下更多的东西（每段的完整注意力层，以及更多的激活）。V3 用三个办法把显存压下来：</p>
+<ul>
+  <li><b>重算 RMSNorm 和 MLA 的升维投影。</b>反向传播需要前向的中间结果。对这两类计算量很小的操作，V3 不保存它们的输出，而是在反向时重新算一遍。多花一点计算，省下大量激活显存。</li>
+  <li><b>在 CPU 上维护参数的指数滑动平均（EMA）。</b>训练中保留一份参数的 EMA，可以提前估计“学习率衰减之后模型大概有多好”。这份 EMA 放在 CPU 内存里，每步训练后异步更新，不占 GPU 显存也不拖慢训练。</li>
+  <li><b>MTP 与主模型物理上共享嵌入层和输出头。</b>DualPipe 让每张卡同时持有一头一尾两段模型，于是最浅的层（含嵌入层）和最深的层（含输出头）可以放在同一张卡上。MTP 模块需要的嵌入层和输出头就和主模型用同一份参数和梯度，而不是各存一份。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S3.SS2" target="_blank" rel="noopener">英文原文 §3.1–3.2 ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">EP / FP8 结构拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">3.3 FP8 训练：只有 8 位，怎样不丢精度</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>按报告的说法，在 H800 上用 FP8 做矩阵乘，理论速度是 BF16 的两倍；FP8 的数据也只占一半的显存和带宽。但 FP8 只有 8 位，能表示的数很少，训练中一旦出现特别大的“离群值”，其他数的精度就会被拖垮；而且 H800 上 FP8 矩阵乘的累加精度本身也不够。当时还很少有人在大模型预训练里成功用上低精度。这一节讲 V3 的 FP8 混合精度框架：哪些计算用 FP8、哪些坚持用高精度，以及让 FP8 不出问题的两个关键技巧——细粒度缩放和定期提升到 FP32 累加。</div>
+
+<div class="note-pre"><b>先补一点背景：浮点数格式，指数管范围，尾数管精度。</b>
+<p>一个浮点数由三部分组成：1 位符号、若干位<b>指数</b>、若干位<b>尾数</b>，表示的值大致是 \(\pm 1.\text{尾数}\times 2^{\text{指数}}\)。指数位越多，能表示的数从多小到多大的<b>范围</b>越宽；尾数位越多，相邻两个可表示的数之间越密，也就是<b>精度</b>越高。</p>
+<div class="dia">
+  <div class="dia-title">示意图：几种格式的位分配（条的长度按位数画）</div>
+  <div class="dia-row"><span class="lbl">FP32（32 位）</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg kv" style="flex:8">指数 8</span><span class="dia-seg w" style="flex:23">尾数 23</span></div></div>
+  <div class="dia-row"><span class="lbl">BF16（16 位）</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg kv" style="flex:8">指数 8</span><span class="dia-seg w" style="flex:7">尾数 7</span><span style="flex:16"></span></div></div>
+  <div class="dia-row"><span class="lbl">FP8 E4M3</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg kv" style="flex:4">指数 4</span><span class="dia-seg w" style="flex:3">尾 3</span><span style="flex:24"></span></div></div>
+  <div class="dia-out">最大约 448；最小的“正规数”是 \(2^{-6}\approx0.0156\)；再往下是“次正规数”，间隔固定为 \(2^{-9}\approx0.00195\)，最小能到 0.00195。</div>
+  <div class="dia-row"><span class="lbl">FP8 E5M2</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg kv" style="flex:5">指数 5</span><span class="dia-seg w" style="flex:2">尾 2</span><span style="flex:24"></span></div></div>
+  <div class="dia-out">最大 57344，范围宽得多，但每个数量级里的取值更稀。</div>
+  <div class="dia-note">FP8 两种格式的取值范围来自 NVIDIA、Arm、Intel 的 FP8 格式提案（Micikevicius et al. 2022，报告引用了它）。详见本站 <a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解页</a>。</div>
+</div>
+<p>E4M3 只有 3 位尾数，所以在每个 2 的整数次幂区间里只有 8 个取值。比如 1 到 2 之间只有 1、1.125、1.25、……、1.875；256 到 448 之间相邻两个数差 32。任何一个数四舍五入到最近的取值时，相对误差最多约 6.25%（推算：半个间隔除以区间下端，\(2^{-4}\)）。这个精度对神经网络的矩阵乘通常够用，前提是数值落在<b>正规数的范围</b>里。一旦小于 \(2^{-6}\)，就进入间隔固定为 \(2^{-9}\) 的次正规区，越小的数相对误差越大，更小的直接变成 0。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：缩放因子，以及为什么“整张量一个缩放因子”怕离群值。</b>
+<p>神经网络里的数值往往很小（比如 0.001 量级），直接存成 E4M3 会掉进次正规区甚至变成 0。标准做法是先乘一个<b>缩放因子</b>：找出张量里绝对值最大的数（记为 amax），把整个张量乘上 \(448/\text{amax}\)，让最大的数正好对上 FP8 能表示的最大值，再存成 FP8；用的时候再除回去。这样张量就尽量用满了 FP8 的范围。</p>
+<p>问题在于整个张量只有一个缩放因子。只要有一个离群值特别大，缩放因子就得很小，其余普通的数被缩得更小，掉进次正规区。下面手算一个例子（推算，按 E4M3 的“就近取偶”舍入）。设一个张量只有两个 token，每个 token 4 个通道；token 2 的第 2 个通道是离群值 224：</p>
+<div class="table-wrap"><table>
+  <tr><th>token 1 的原值</th><th>整张量缩放（×2）后存成 FP8，再还原</th><th>误差</th><th>按行各自缩放（×112000）后存成 FP8，再还原</th><th>误差</th></tr>
+  <tr><td>0.0040</td><td>0.008 → 0.0078125 → 0.00391</td><td>−2.3%</td><td>448 → 448 → 0.00400</td><td>0%</td></tr>
+  <tr><td>−0.0015</td><td>−0.003 → −0.0039063 → −0.00195</td><td>大了 30%</td><td>−168 → −160 → −0.00143</td><td>−4.8%</td></tr>
+  <tr><td>0.0004</td><td>0.0008 → <b>0</b> → 0</td><td>完全丢失</td><td>44.8 → 44 → 0.000393</td><td>−1.8%</td></tr>
+  <tr><td>0.0027</td><td>0.0054 → 0.0058594 → 0.00293</td><td>+8.5%</td><td>302.4 → 288 → 0.00257</td><td>−4.8%</td></tr>
+</table></div>
+<p>整张量缩放时，离群值 224 决定了缩放因子只能是 \(448/224=2\)，token 1 的数乘 2 之后仍然只有 0.001 量级，全部掉进次正规区（间隔 0.00195），误差从 2% 到 100% 不等。如果 token 1 用自己的缩放因子（它自己的最大值是 0.004，因子是 \(448/0.004=112000\)），它的数就被放大到 44 到 448 之间，落在正规区，误差都在 5% 以内。离群值只伤害和它共用缩放因子的那些数：token 2 的其他小数值在两种做法下都一样差，但伤害被限制在了 token 2 这一行里。</p>
+</div>
+
+<h4 id="n-5-1">3.3.1 混合精度框架：哪些用 FP8，哪些不用</h4>
+<p>一个线性层 \(Y=XW\) 在训练中要做三次矩阵乘（GEMM）：前向的 <b>Fprop</b> 算 \(Y=XW\)；反向的 <b>Dgrad</b> 算输入的梯度 \(\partial X=\partial Y\,W^{\top}\)；反向的 <b>Wgrad</b> 算权重的梯度 \(\partial W=X^{\top}\partial Y\)。V3 把这三次 GEMM 全部用 FP8 做：输入是 FP8，输出是 BF16 或 FP32。报告说，这在理论上让计算速度比 BF16 快一倍。还有一个附带的好处：因为 Wgrad 本来就吃 FP8 的输入，前向时的激活 \(X\) 可以直接以 FP8 存下来留给反向用，激活显存也省了一半。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个线性层在 FP8 混合精度下的数据流</div>
+  <div class="dia-flow"><b style="width:56px">前向</b><span class="dia-box">输入 X<small>BF16</small></span><span class="dia-arrow">→ 转 FP8 →</span><span class="dia-box pred">Fprop：X·W<small>FP8 相乘，FP32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box">输出 Y<small>BF16</small></span></div>
+  <div class="dia-flow"><b style="width:56px">反向</b><span class="dia-box">输出梯度 ∂Y<small>BF16 → FP8</small></span><span class="dia-arrow">→</span><span class="dia-box pred">Dgrad：∂Y·Wᵀ<small>FP8 相乘，FP32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box">输入梯度 ∂X<small>BF16</small></span></div>
+  <div class="dia-flow"><b style="width:56px"></b><span class="dia-box">存下的 X（FP8）与 ∂Y（FP8）</span><span class="dia-arrow">→</span><span class="dia-box pred">Wgrad：Xᵀ·∂Y<small>FP8 相乘，FP32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">权重梯度<small>FP32</small></span></div>
+  <div class="dia-flow"><b style="width:56px">更新</b><span class="dia-box tgt">优化器<small>Adam 的两个矩：BF16</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">主权重<small>FP32</small></span><span class="dia-arrow">→ 转 FP8 →</span><span class="dia-box">下一步用的 W<small>FP8，128×128 分块缩放</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2412.19437#S3.F6" target="_blank" rel="noopener">原文图 6 ↗</a>（原图只画了 Linear 算子）。橙色是三次 FP8 GEMM，紫色是始终保持高精度的部分。</div>
+</div>
+<p>并非所有计算都适合 FP8。报告逐一排查后，让以下部分保持原来的精度（BF16 或 FP32）：嵌入层、输出头、MoE 的门控（路由）、各种归一化、注意力算子本身。它们要么对精度很敏感，要么计算量很小、用高精度几乎不增加成本。主权重、权重梯度和优化器状态也保持较高精度；这部分额外的显存通过 ZeRO-1 分片到各个数据并行副本上，摊薄了。</p>
+
+<h4 id="n-5-2">3.3.2 两个关键技巧：细粒度缩放与提升累加精度</h4>
+<p><b>细粒度量化。</b>背景框里的例子说明了“整张量一个缩放因子”的问题。V3 的办法是把缩放因子细分到小块：</p>
+<ul>
+  <li><b>激活</b>按 1×128 的小条分组：同一个 token 的每 128 个通道共用一个缩放因子。</li>
+  <li><b>权重</b>按 128×128 的方块分组：每 128 个输入通道 × 128 个输出通道共用一个缩放因子。</li>
+</ul>
+<p>为什么激活用细长条、权重用方块？激活的离群值往往集中在个别 token 或个别通道上，按 token 分组能把它们隔离；权重的分布平稳得多，用大一些的方块就够了。附录 B.2 还试过让激活梯度也用 128×128 的方块，结果在一个约 16B 的 MoE 模型上训练约 300B token 后发散了。报告的解释是激活梯度在不同 token 之间极不均衡，存在“与 token 相关的离群值”，方块分组没法隔离它们。</p>
+<p>这里有一个容易被忽略的技术难点：这些缩放因子沿着矩阵乘的<b>内维</b>（求和的那一维）变化。矩阵乘 \(C=AB\) 的每个元素是 \(C_{mn}=\sum_k A_{mk}B_{kn}\)。如果缩放因子只随 \(m\) 或 \(n\) 变化（比如每行一个），可以从求和号里提出来，算完再乘，标准的 FP8 GEMM 就支持。但 V3 的缩放因子随 \(k\) 每 128 个变一次，提不出来，只能分段处理：</p>
+<div class="formula">$$C_{mn}=\sum_{g}\; s^{A}_{m,g}\,s^{B}_{g,n}\Big(\sum_{k\in g}\hat A_{mk}\hat B_{kn}\Big)$$</div>
+<p>其中 \(g\) 遍历内维上每 128 个一组，\(\hat A\)、\(\hat B\) 是 FP8 的值，\(s\) 是对应小块的缩放因子（这里写成“还原用”的乘法因子）。括号里的部分在 Tensor Core 上用 FP8 算，每算完一组，就要乘上这一组的两个缩放因子再累加进总和。标准 FP8 GEMM 不支持这种做法，但它正好可以和下面的累加技巧合在一起高效实现。报告指出，这个思路和“微缩放”（microscaling）格式一致，而 NVIDIA 下一代 Blackwell GPU 的 Tensor Core 已经宣布直接支持更小粒度的微缩放格式。</p>
+<p><b>提升累加精度。</b>矩阵乘的结果是很多个乘积的和，累加器的精度很关键，通常用 FP32。但报告发现，H800 上 FP8 GEMM 的累加只保留了大约 14 位，远低于 FP32。§3.5.2 说得更具体：Tensor Core 把 32 个乘积按其中最大的指数对齐（其余的右移），只保留每个乘积最高的 14 位相加，多出的位直接截掉。</p>
+<p>为什么这会出问题？用一个简化的模型想一想（推算）：如果累加器只有 14 位有效数字，那么当部分和累积到 512 到 1024 之间时，相邻两个可表示值的间隔是 \(2^{9-13}=0.0625\)；这时再加上一个 0.05 的乘积，它比这个间隔还小，又是直接截断，就会被整个丢掉。内维 \(K\) 越大，要加的项越多，被截掉的误差就积累得越多。报告的实测是：两个随机矩阵、\(K=4096\) 时，最大相对误差接近 2%。大模型训练里 \(K\) 动辄几千，这个误差不能接受。</p>
+<p>V3 的解决办法是<b>定期把部分和提升到 CUDA Core 上用 FP32 累加</b>：Tensor Core 每累加完内维上的 \(N_C=128\) 个元素（相当于 4 条 WGMMA 指令），就把这段部分和拷到 CUDA Core 的 FP32 寄存器里，乘上这一组的缩放因子，再以完整的 FP32 精度加进总和。这样，低精度累加最多只连续进行 128 项，误差积累被截断；而缩放因子的乘法正好在这一步顺手完成。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每 128 个元素把部分和交给 FP32（内维 K = 4096 时重复 32 次）</div>
+  <div class="dia-row"><span class="lbl">Tensor Core</span><div class="dia-track"><span class="dia-seg kv" style="flex:1">WGMMA 1</span><span class="dia-seg kv" style="flex:1">WGMMA 2</span><span class="dia-seg kv" style="flex:1">WGMMA 3</span><span class="dia-seg kv" style="flex:1">WGMMA 4</span><span class="dia-seg oth" style="flex:0.6">→</span><span class="dia-seg kv" style="flex:1">下一组 128 …</span></div></div>
+  <div class="dia-out">在 Tensor Core 里用约 14 位的精度累加这 128 个乘积。</div>
+  <div class="dia-row"><span class="lbl">CUDA Core</span><div class="dia-track"><span class="dia-seg oth" style="flex:4"></span><span class="dia-seg w" style="flex:1.6">× 缩放因子，加进 FP32</span><span class="dia-seg oth" style="flex:1"></span></div></div>
+  <div class="dia-out">部分和乘上该组的两个缩放因子（相当于反量化），加到 FP32 寄存器里的总和上。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2412.19437#S3.F7" target="_blank" rel="noopener">原文图 7 ↗</a>（原图 (a) 是细粒度量化，(b) 是提升累加精度）。</div>
+</div>
+<p>这样做会降低单个线程组（warpgroup）发出矩阵乘指令的频率。但 H800 上通常有两个线程组同时工作：一个在做提升和累加时，另一个可以继续用 Tensor Core 做矩阵乘，两者交替，Tensor Core 的利用率仍然很高。报告的实验结论是，\(N_C=128\) 是“既能明显提高精度、又不引入显著开销”的最小间隔。</p>
+<p><b>全部用 E4M3。</b>以往的 FP8 训练（如 NVIDIA 的 Transformer Engine）在前向用 E4M3、在反向（Dgrad、Wgrad）用范围更宽的 E5M2，因为梯度的数值跨度更大。V3 对所有张量都用 E4M3，换取更高的精度。报告把这件事的可行性归功于细粒度量化：每 128 个元素有自己的缩放因子，等于让这一小组数共用一个额外的“指数”，每组内部需要覆盖的数值范围就小得多了。</p>
+<p><b>在线量化。</b>以往按整张量缩放的框架用“延迟量化”：根据前几步记录的 amax 历史，推测这一步的 amax，从而提前定好缩放因子。V3 为了缩放因子准确、也为了框架简单，在每个 1×128 小条或 128×128 方块上<b>当场</b>算出 amax，当场定缩放因子并量化。</p>
+
+<h4 id="n-5-3">3.3.3 低精度的存储与通信</h4>
+<ul>
+  <li><b>优化器状态。</b>AdamW 的一阶矩和二阶矩用 BF16 而不是 FP32 存，报告说没有观察到性能下降。主权重（由优化器保存）和用于梯度累积的梯度仍用 FP32。</li>
+  <li><b>缓存的激活。</b>大部分线性层的输入以 FP8 缓存给反向用，但有两处特殊处理。(1) 注意力之后那个线性层的输入，在注意力的反向里也要用到，对精度更敏感，于是用一种定制的 E5M6 格式存。这些激活在反向时还要从 1×128 的分组改成 128×1 的分组：因为 Wgrad 算的是 \(X^{\top}\partial Y\)，求和的那一维变成了 token 维，缩放因子也得沿 token 方向分组。为了这次重新分组不引入额外的误差，它们的缩放因子都取 2 的整数次幂（乘除 2 的整数次幂只改变指数，不产生舍入）。(2) MoE 里 SwiGLU 的输入以 FP8 缓存，输出在反向时重算。</li>
+  <li><b>通信。</b>MoE 上投影之前的激活先量化成 FP8 再 dispatch，这和上投影本来就用 FP8 做 Fprop 正好衔接，缩放因子同样取 2 的整数次幂；MoE 下投影之前的激活梯度也同样处理。但前向和反向的 combine 都保留 BF16，因为这一步要把多个专家的输出加权求和，对精度更关键。</li>
+</ul>
+<p><b>验证。</b>报告在两个规模上把 FP8 训练和 BF16 训练对比（附录 B.1）：约 16B 总参数的 MoE 训练 1.33T token，约 230B 总参数的 MoE 训练约 0.9T token。两种精度的损失曲线几乎重合，FP8 相对 BF16 的损失相对误差始终低于 0.25%，报告认为这在训练随机性的正常范围之内。</p>
+<p class="w-note">原文图 10 怎么看（本站描述，未转载原图，<a href="https://arxiv.org/html/2412.19437#A2.F10" target="_blank" rel="noopener">原图链接 ↗</a>）：左右两张图分别是 16B 和 230B 模型，横轴是训练的 token 数（单位十亿），纵轴是训练损失，蓝线 BF16、红线 FP8，两条线几乎完全重叠；右上角的放大图画的是两者的相对差，在 ±0.1% 量级的范围内上下波动，没有随训练逐渐变大的趋势。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>公开的权重本身就是 FP8 的：<code>README_WEIGHTS.md</code> 写明格式为 E4M3、权重按 128×128 分块缩放、激活采用动态（在线）量化，与报告一致。仓库说明“因为训练原生采用 FP8，所以只提供 FP8 权重”，需要 BF16 时要用附带的脚本转换。</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“FP8 训练”不是所有东西都用 FP8：被换成 FP8 的主要是线性层的三次 GEMM、部分缓存的激活和 dispatch 的通信；主权重、梯度、敏感算子都还是高精度。“速度翻倍”只针对这些 GEMM，而且是理论值，报告没有给出端到端的加速比。</li>
+  <li>0.25% 的验证是在 16B 和 230B 的模型、约 1T token 上做的；671B 的正式训练本身没有 BF16 对照。</li>
+  <li>“约 14 位累加”是 Hopper 架构（H800）的特性，换一代硬件结论可能不同。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/html/2412.19437#A2" target="_blank" rel="noopener">附录 B ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解页</a> · <a href="../legacy/tracks/ai-infra/19-fp4-training.html">FP4 训练</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">3.4 推理部署：预填充和解码分开，用冗余专家保持均衡</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练时的并行方式不一定适合在线服务。在线服务既要满足每个请求的延迟要求（SLO，服务等级目标），又要有足够高的吞吐。MoE 模型在推理时同样面临专家负载不均和 all-to-all 通信的问题。V3 是怎样部署的？</div>
+<div class="note-pre"><b>先补一点背景：预填充、解码，以及为什么把它们分开。</b>
+<p>推理分两个阶段。<b>预填充</b>（prefill）一次性处理用户输入的整段文字，所有位置同时算，计算量大、算力能用满。<b>解码</b>（decode）逐个生成输出 token，每步计算量小，主要受显存读取限制。两者的最佳配置完全不同，于是越来越多的系统把它们放到不同的 GPU 组上分别优化，这叫 PD 分离。（见本站 <a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离拆解页</a>。）V3 的部署就采用了这种分离。</p>
+</div>
+<p><b>预填充。</b>最小部署单元是 4 个节点、32 张 GPU。注意力部分用 4 路张量并行加序列并行（TP4 + SP），再加 8 路数据并行（DP8）；张量并行只开到 4，是为了限制它的通信开销。MoE 部分用 32 路专家并行（EP32），这样每个专家分到的批足够大，计算效率高。all-to-all 的走法和训练时一样：先经 IB 跨节点，再经 NVLink 在节点内转发。浅层的几个稠密 MLP 用 1 路张量并行（即不切），省掉张量并行的通信。</p>
+<p>为了让每张 GPU 处理的 token 数大致相同，V3 部署了<b>冗余专家</b>：根据线上服务统计的负载，找出最忙的专家，多复制一份放到别的卡上，分担它的流量。这份名单定期更新（比如每 10 分钟一次），确定之后再在节点内部按负载重新排布专家，尽量在不增加跨节点通信的前提下把各卡的负载拉平。预填充阶段设了 32 个冗余专家：每张卡除了原本的 8 个专家（推算：256 ÷ 32），再多放 1 个冗余专家。此外，预填充同时处理两个计算量相近的微批，让一个微批的注意力和 MoE 计算与另一个微批的 dispatch、combine 通信重叠。报告还在探索“动态冗余”：每张卡放更多专家（比如 16 个），但每步只激活其中 9 个，在每层的 all-to-all 开始之前当场算出全局最优的路由方案。</p>
+<p><b>解码。</b>解码时把共享专家也当成一个路由专家看待，于是每个 token 选 9 个专家，其中共享专家是一个“永远被选中”的重负载专家。最小部署单元是 40 个节点、320 张 GPU：注意力用 TP4 + SP 加 80 路数据并行（DP80），MoE 用 320 路专家并行（EP320），<b>每张卡只放一个专家</b>，其中 64 张卡放冗余专家和共享专家（推算：256 + 64 = 320）。dispatch 和 combine 直接走 IB 点对点传输以降低延迟，并用 IBGDA 技术（让 GPU 直接发起 IB 网络操作、不经过 CPU）进一步减少延迟。冗余专家同样定期更新，但因为每张卡只有一个专家，不需要重新排布。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两种部署单元的规模与专家摆放</div>
+  <div class="dia-row"><span class="lbl">预填充：32 卡</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">每卡 8 个路由专家（共 256 个）</span><span class="dia-seg w" style="flex:32">+1 冗余</span></div></div>
+  <div class="dia-out">注意力 TP4 + SP + DP8；MoE EP32；共 32 个冗余专家。</div>
+  <div class="dia-row"><span class="lbl">解码：320 卡</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">256 张卡，每卡 1 个路由专家</span><span class="dia-seg w" style="flex:64">64 卡：冗余 + 共享</span></div></div>
+  <div class="dia-out">注意力 TP4 + SP + DP80；MoE EP320；每个 token 选 9 个专家（8 个路由 + 共享）。</div>
+  <div class="dia-note">本站示意图，数字来自原文 §3.4。</div>
+</div>
+<p>为什么解码要摊到 320 张卡上？解码时每个专家分到的批很小（报告说通常不超过 256 个 token），瓶颈是读显存而不是计算。每张卡只放一个专家，每步只需读一个专家的参数，读显存的开销很小，所以 MoE 部分只分配少量 SM 也不会明显变慢，可以把大部分 SM 留给注意力。报告同样在探索解码阶段的双微批重叠：解码时注意力占的时间更多，所以是让一个微批的注意力与另一个微批的 dispatch + MoE + combine 重叠。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>§4.5.3 提到，按批均衡的负载均衡方法在推理时可能遇到“领域偏移导致的不均衡”：比如某段时间线上请求都是代码，代码专家就会过载。冗余专家正是为这个问题设计的。另外，这里的“最小部署单元”是 DeepSeek 自己在线服务的配置，§6 承认它对小团队来说偏大。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S3.SS4" target="_blank" rel="noopener">英文原文 §3.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">3.5 写给芯片厂商的建议</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在实现 all-to-all 和 FP8 训练的过程中，DeepSeek 绕过了 H800 的许多硬件限制。这些“绕”本身有代价。他们希望下一代 AI 芯片在哪些地方直接提供支持？这一节读起来像一份需求清单，但它能帮助理解前面那些软件技巧到底在补什么洞。</div>
+<p><b>通信硬件。</b>V3 把通信藏进了计算，对带宽的依赖降低了；但通信本身是靠 SM 执行的，H800 的 132 个 SM 里拿出 20 个专门干这件事，限制了计算吞吐，而且 SM 上的 Tensor Core 在通信时完全闲着。这些 SM 主要在做四件事：在 IB 和 NVLink 两个网络之间转发数据，并把发往同一节点内多张卡的 IB 流量合并；在 RDMA 缓冲区和输入输出缓冲区之间搬运数据；执行 combine 所需的累加；在把数据分块发往多个专家时管理细粒度的内存布局。报告希望厂商把这些工作交给专门的 GPU 协处理器或网络协处理器（类似 NVIDIA SHARP），并且从计算单元的角度把 IB（scale-out，跨节点扩展）和 NVLink（scale-up，节点内扩展）统一成一个网络，只需提交读、写、多播、规约这样的简单请求。</p>
+<p><b>计算硬件。</b>四条建议，每条都对应前面的一个技巧：</p>
+<ul>
+  <li><b>提高 Tensor Core 中 FP8 GEMM 的累加精度。</b>§3.3.2 的“每 128 个元素提升到 FP32”只是对 Hopper 硬件缺陷的妥协。</li>
+  <li><b>原生支持按小块（tile / block）缩放的量化。</b>现在的 GPU 只支持整张量量化，V3 不得不在 Tensor Core 和 CUDA Core 之间频繁搬运部分和。如果 Tensor Core 能直接接收缩放因子、做带分组缩放的矩阵乘，整个部分和累加与反量化就能在 Tensor Core 内部完成。</li>
+  <li><b>支持在线量化。</b>现在量化一组激活要先从显存（HBM）读出 128 个 BF16 值，量化后把 FP8 写回 HBM，做矩阵乘时再读一次。报告建议把 FP8 转换和 TMA（张量内存加速器，负责在全局显存和共享内存之间搬数据）融合成一个操作，在搬运途中完成量化；或者支持线程束级别的转换指令。另一条路是近存计算：在数据从 HBM 读进 GPU 时就转成 FP8，报告估计能减少约 50% 的片外访存。</li>
+  <li><b>支持转置的矩阵乘。</b>§3.3.3 讲过，前向存下的 1×128 FP8 激活，在反向要读出、反量化、转置、再量化成 128×1 的小块存回 HBM。如果硬件能在矩阵乘之前直接从共享内存里转置读取，这一串操作就能省掉。</li>
+</ul>
+<div class="note-warn"><b>读的时候要注意：</b>这一节是建议，不是实验结果。其中“小粒度缩放”一条，报告自己就提到 NVIDIA 的 Blackwell 已经宣布支持微缩放格式。DeepSeek 后来在 ISCA 2025 上发表的论文《Insights into DeepSeek-V3》把这些硬件讨论展开得更详细。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S3.SS5" target="_blank" rel="noopener">英文原文 §3.5 ↗</a> · <a href="https://arxiv.org/abs/2505.09343" target="_blank" rel="noopener">Insights into DeepSeek-V3（ISCA 2025）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">4.1–4.3 预训练：数据、超参数与长上下文</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V3 用了什么数据、怎么切词、用什么样的学习率和批大小训了 14.8T token？前面讲的偏置更新速度 \(\gamma\)、序列级损失系数 \(\alpha\)、MTP 权重 \(\lambda\) 在训练中具体取什么值？预训练只用 4K 长度的序列，最后又是怎样扩展到 128K 的？</div>
+
+<h4 id="n-8-1">4.1 数据构造</h4>
+<p>相比 V2，V3 的预训练语料提高了数学和编程样本的比例，并把多语言覆盖扩展到英文和中文以外；数据处理流程也做了改进，在保持多样性的同时减少冗余。最终语料是 14.8T 个 token（按 V3 自己的分词器计）。文档采用“打包”的方式拼进训练序列（参考 Ding 等人 2024 年的方法，以保持文档的完整性），但训练时<b>不</b>在同一条序列里的不同文档之间加注意力掩码，也就是说一个文档的 token 可以看到同一序列里前面另一个文档的内容。</p>
+<div class="note-pre"><b>先补一点背景：填中间（FIM）。</b>
+<p>普通的语言模型只会从左往右续写。但写代码时常常需要“在中间插一段”：光标前后都有代码，要补的是中间。FIM（Fill-in-the-Middle）训练把一部分文档切成前缀、中间、后缀三段，再按“前缀、后缀、中间”的顺序重新排列，让模型学会根据两头去生成中间。V3 采用 PSM（Prefix-Suffix-Middle）格式：</p>
+<p style="overflow-x:auto"><code>&lt;|fim_begin|&gt;</code> 前缀 <code>&lt;|fim_hole|&gt;</code> 后缀 <code>&lt;|fim_end|&gt;</code> 中间 <code>&lt;|eos_token|&gt;</code></p>
+<p>DeepSeek 在训练 DeepSeekCoder-V2 时发现，这样做不损害正常的“预测下一个 token”能力，于是 V3 沿用，作用于 10% 的文档。</p>
+</div>
+<p><b>分词器</b>用字节级 BPE，词表扩展到 128K。分词器的预切分规则和训练数据都做了调整，以提高多语言的压缩效率。和 V2 相比，新的预切分会产生“标点 + 换行”合在一起的 token。这带来一个副作用，叫<b>token 边界偏差</b>：比如训练数据里“句号 + 换行”总被切成一个 token，那么一个以句号结尾、后面没有换行的提示（在少样本评测的提示里很常见）就会产生模型很少见过的 token 序列，影响表现。V3 的对策是在训练时随机把一部分这种合并 token 拆开，让模型见过更多这类特殊情况。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>报告说词表为 128K，官方配置文件里的 <code>vocab_size</code> 是 129280，“128K”应理解为约数。</div>
+
+<h4 id="n-8-2">4.2 超参数</h4>
+<p><b>模型超参数</b>（多数已在 §2 用过）：61 层，隐藏维度 7168，所有参数用标准差 0.006 随机初始化；MLA 的头数 \(n_h=128\)、每头维度 \(d_h=128\)、KV 压缩维度 \(d_c=512\)、查询压缩维度 \(d_c'=1536\)、解耦 RoPE 的每头维度 \(d_h^R=64\)；除前 3 层外都是 MoE 层，每层 1 个共享专家 + 256 个路由专家，专家中间维度 2048，每个 token 激活 8 个路由专家、最多发往 4 个节点；MTP 深度 \(D=1\)。和 V2 一样，在压缩后的潜向量之后加了 RMSNorm，并在“宽度瓶颈”处乘以额外的缩放因子。</p>
+<p><b>训练超参数</b>：AdamW 优化器，\(\beta_1=0.9\)、\(\beta_2=0.95\)、权重衰减 0.1；预训练的最大序列长度 4K；梯度裁剪阈值 1.0。学习率、批大小和几个负载均衡相关系数的时间表如下图。</p>
+<div class="dia">
+  <div class="dia-title">示意图：预训练 14.8T token 期间各项超参数的变化（学习率纵轴为对数刻度）</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="DeepSeek-V3 预训练学习率与其他超参数的时间表">
+    <line class="axis" x1="100" y1="215" x2="905" y2="215"/>
+    <line class="axis" x1="100" y1="30" x2="100" y2="215"/>
+    <line class="grid-ln" x1="100" y1="40" x2="900" y2="40" style="stroke-dasharray:3 4"/>
+    <line class="grid-ln" x1="100" y1="150" x2="900" y2="150" style="stroke-dasharray:3 4"/>
+    <line class="grid-ln" x1="100" y1="202.7" x2="900" y2="202.7" style="stroke-dasharray:3 4"/>
+    <text x="94" y="40" class="t-r t-xs">2.2×10⁻⁴</text>
+    <text x="94" y="150" class="t-r t-xs">2.2×10⁻⁵</text>
+    <text x="94" y="200" class="t-r t-xs">7.3×10⁻⁶</text>
+    <text x="22" y="122" class="t-c t-sm" transform="rotate(-90 22 122)">学习率</text>
+    <path d="M100.0,40.0 L640.5,40.0 L652.2,40.3 L663.8,41.1 L675.4,42.4 L687.0,44.3 L698.6,46.8 L710.3,49.8 L721.9,53.5 L733.5,57.8 L745.1,62.8 L756.8,68.6 L768.4,75.1 L780.0,82.5 L791.6,90.7 L803.2,99.9 L814.9,109.8 L826.5,120.4 L838.1,130.9 L849.7,140.5 L861.4,147.4 L873.0,150.0 L891.0,150.0 L891.0,202.7 L900.0,202.7" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <text x="370" y="58" class="t-c t-sm">从 0 线性预热 2K 步后，恒定 2.2×10⁻⁴ 直到 10T token</text>
+    <text x="752" y="112" class="t-r t-sm">余弦衰减，用 4.3T token</text>
+    <text x="752" y="128" class="t-r t-sm">降到 2.2×10⁻⁵</text>
+    <text x="884" y="176" class="t-r t-xs">最后 500B：前 333B 保持 2.2×10⁻⁵，</text>
+    <text x="884" y="190" class="t-r t-xs">后 167B 降到 7.3×10⁻⁶</text>
+    <line x1="640.5" y1="215" x2="640.5" y2="221" class="axis"/><text x="640.5" y="230" class="t-c t-xs">10T</text>
+    <line x1="873" y1="215" x2="873" y2="221" class="axis"/><text x="868" y="230" class="t-r t-xs">14.3T</text>
+    <line x1="900" y1="215" x2="900" y2="221" class="axis"/><text x="904" y="230" class="t-xs">14.8T</text>
+    <text x="100" y="230" class="t-c t-xs">0</text>
+    <text x="16" y="262" class="t-sm">批大小</text>
+    <rect x="100" y="252" width="25.4" height="18" rx="3" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+    <rect x="125.4" y="252" width="774.6" height="18" rx="3" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+    <text x="132" y="261" class="t-xs">← 前 469B token 从 3072 逐渐增到 15360（条序列），之后保持 15360</text>
+    <text x="16" y="290" class="t-sm">MTP 权重 λ</text>
+    <rect x="100" y="280" width="540.5" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+    <rect x="640.5" y="280" width="259.5" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--c-pred)"/>
+    <text x="370" y="289" class="t-c t-xs">0.3</text><text x="770" y="289" class="t-c t-xs">0.1</text>
+    <text x="16" y="318" class="t-sm">偏置速度 γ</text>
+    <rect x="100" y="308" width="773" height="18" rx="3" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+    <rect x="873" y="308" width="27" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--c-tgt)"/>
+    <text x="486" y="317" class="t-c t-xs">0.001（之后冻结为 0）</text>
+  </svg>
+  <div class="dia-note">本站根据原文 §4.2 的数字画的示意图，横轴是已训练的 token 数。另外两项全程不变：序列级平衡损失系数 \(\alpha=0.0001\)，梯度裁剪 1.0。预热的 2K 步和批大小的增长期在图上很窄，用文字标出。</div>
+</div>
+<p>这里有一个有意思的巧合（推算）：预训练后期每步的 token 数是 15360 × 4096 ≈ 6290 万；后面长上下文扩展的两个阶段分别是 1920 × 32K 和 480 × 128K，也都正好是 6290 万。也就是说，三个阶段每一步处理的 token 总量相同，只是切成了长短不同的序列。</p>
+<p>流水线并行把模型的不同层放在不同的 GPU 上；每一层的路由专家均匀分布在属于 8 个节点的 64 张 GPU 上。节点受限路由取 \(M=4\)。</p>
+
+<h4 id="n-8-3">4.3 长上下文扩展：4K → 32K → 128K</h4>
+<div class="note-pre"><b>先补一点背景：为什么要单独扩展上下文，YaRN 做了什么。</b>
+<p>用 128K 长的序列从头预训练太贵，通常的做法是先用短序列（V3 是 4K）预训练，再用少量长序列继续训练，把模型能处理的长度“拉长”。难点在位置编码：RoPE 用不同频率的旋转来编码位置，模型在预训练里只见过 4K 以内的旋转角度，直接用到更长的位置上，角度超出了见过的范围，效果会崩。YaRN 是一种调整 RoPE 频率的方法：对高频（编码近距离）的维度基本不动，对低频（编码远距离）的维度按比例拉伸，使得长位置的角度落回模型熟悉的范围，同时稍微调整注意力的温度。这样只需少量长文本训练就能适应新长度。</p>
+</div>
+<p>V3 沿用 V2 的做法，预训练结束后用 YaRN 做两个阶段的扩展训练，每阶段 1000 步：第一阶段序列长度 32K、批大小 1920；第二阶段序列长度 128K、批大小 480。两阶段的学习率都是 \(7.3\times10^{-6}\)，即预训练最后的学习率。YaRN 的超参数两阶段相同：缩放倍数 \(s=40\)、\(\alpha=1\)、\(\beta=32\)，注意力温度系数 \(\sqrt{t}=0.1\ln s+1\)（推算：约 1.37）。</p>
+<p>两阶段各训练多少 token，报告没有直接写。按每步约 6290 万 token × 1000 步推算，每阶段约 630 亿（63B）token。这个推算可以和 DeepSeek-V3.1 的模型卡对上：V3.1 说它把 32K 阶段扩大了 10 倍到 630B token、把 128K 阶段扩大了 3.3 倍到 209B token，倒推回去，V3 的两个阶段分别约为 63B 和 63B。</p>
+<p>值得注意的是，YaRN <b>只作用于解耦出来的那个共享 key \(\mathbf{k}_t^{R}\)</b>。这和 §2.1.1 的设计是一致的：在 MLA 里，位置信息只存在于这条 64 维的小路上，压缩通道本身不带位置，所以也只需要调整这一路。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 代码</span>Hugging Face 上的 <code>config.json</code> 与报告一致：<code>rope_scaling</code> 为 YaRN，<code>factor = 40</code>、<code>beta_fast = 32</code>、<code>beta_slow = 1</code>、<code>original_max_position_embeddings = 4096</code>；<code>max_position_embeddings = 163840</code>，正好是 4096 × 40。同一文件里路由方法写作 <code>topk_method = "noaux_tc"</code>（无辅助损失），门控缩放 <code>routed_scaling_factor = 2.5</code>，与 §2.1.2 提到的推理代码一致。</div>
+<p>两阶段训练之后，V3 能处理 128K 长的输入。报告用“大海捞针”测试来验证：在一段长文本的不同深度处藏一句关键信息，看模型能不能找出来。</p>
+<p class="w-note">原文图 8 怎么看（本站描述，未转载原图，<a href="https://arxiv.org/html/2412.19437#S4.F8" target="_blank" rel="noopener">原图链接 ↗</a>）：横轴是上下文长度，从 2K 到 128K；纵轴是“针”藏在文档中的深度百分比，从 0% 到 100%；每个格子的颜色是得分（1 到 10 分）。整张图是均匀的满分颜色，说明在所有长度和所有位置上都能找到。注意这张图测的是经过监督微调之后的模型。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“大海捞针”只测“能不能找到一句明显的话”，是长上下文能力的最低门槛，不代表模型能在 128K 的材料上做复杂推理。报告后面在 LongBench v2 和 FRAMES 上的结果（§5.3）更能说明问题。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S4.SS1" target="_blank" rel="noopener">英文原文 §4.1–4.3 ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/10-rope.html">RoPE 拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">4.4–4.5 基座模型评测与消融：MTP 和无辅助损失均衡到底有没有用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>预训练完的基座模型（DeepSeek-V3-Base）和当时最强的开源基座比怎么样？更重要的是，§2 提出的两个新设计——多 token 预测和无辅助损失的负载均衡——单独拿出来是否真的带来了提升？无辅助损失的方法好在哪里，是“没有损失项”本身，还是别的原因？</div>
+
+<h4 id="n-9-1">4.4 基座模型评测</h4>
+<p>报告在自家的评测框架里，用相同的设置评测了四个基座模型：自家的 DeepSeek-V2-Base，当时最强的中文开源模型 Qwen2.5 72B Base，以及最大的开源模型 LLaMA-3.1 405B Base。评测分两种方式：选择题类的数据集按困惑度判断（看模型给哪个选项的概率最高），其余按生成的结果判断；语言建模测 Pile 测试集上的每字节比特数（BPB，越低越好），这个指标与分词器无关，不同模型之间可以公平比较。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准（指标）</th><th>V2 Base</th><th>Qwen2.5 72B</th><th>LLaMA-3.1 405B</th><th>V3 Base</th></tr>
+  <tr><td>激活 / 总参数</td><td>21B / 236B</td><td>72B / 72B</td><td>405B / 405B</td><td>37B / 671B</td></tr>
+  <tr><td>Pile-test（BPB，越低越好）</td><td>0.606</td><td>0.638</td><td><b>0.542</b></td><td>0.548</td></tr>
+  <tr><td>MMLU（5-shot）</td><td>78.4</td><td>85.0</td><td>84.4</td><td><b>87.1</b></td></tr>
+  <tr><td>MMLU-Pro（5-shot）</td><td>51.4</td><td>58.3</td><td>52.8</td><td><b>64.4</b></td></tr>
+  <tr><td>BBH（3-shot）</td><td>78.8</td><td>79.8</td><td>82.9</td><td><b>87.5</b></td></tr>
+  <tr><td>HumanEval（Pass@1）</td><td>43.3</td><td>53.0</td><td>54.9</td><td><b>65.2</b></td></tr>
+  <tr><td>LiveCodeBench-Base（Pass@1）</td><td>11.6</td><td>12.9</td><td>15.5</td><td><b>19.4</b></td></tr>
+  <tr><td>GSM8K（8-shot）</td><td>81.6</td><td>88.3</td><td>83.5</td><td><b>89.3</b></td></tr>
+  <tr><td>MATH（4-shot）</td><td>43.4</td><td>54.4</td><td>49.0</td><td><b>61.6</b></td></tr>
+  <tr><td>C-Eval（5-shot）</td><td>81.4</td><td>89.2</td><td>72.5</td><td><b>90.1</b></td></tr>
+  <tr><td>CMMLU（5-shot）</td><td>84.0</td><td><b>89.5</b></td><td>73.7</td><td>88.8</td></tr>
+  <tr><td>MMMLU 非英语（5-shot）</td><td>64.0</td><td>74.8</td><td>73.8</td><td><b>79.4</b></td></tr>
+  <tr><td>HellaSwag（10-shot）</td><td>87.1</td><td>84.8</td><td><b>89.2</b></td><td>88.9</td></tr>
+  <tr><td>WinoGrande（5-shot）</td><td><b>86.3</b></td><td>82.3</td><td>85.2</td><td>84.9</td></tr>
+  <tr><td>NaturalQuestions（5-shot）</td><td>38.6</td><td>33.2</td><td><b>41.5</b></td><td>40.0</td></tr>
+</table></div>
+<p class="w-note">摘自原文表 3（共 30 多项，这里挑了代表性的几项，包括 V3 不是第一的几项）。报告把相差不超过 0.3 的分数视为同一水平。</p>
+<p>报告的结论是：V3-Base 全面超过 V2-Base 和 Qwen2.5 72B Base，在大多数基准上超过 LLaMA-3.1 405B Base，在数学和代码上优势尤其明显。和 Qwen2.5 72B 相比，V3 的激活参数只有它的一半；和 LLaMA-3.1 405B 相比，后者的激活参数是 V3 的 11 倍。报告也再次强调，V3 每训练 1T token 只需 18 万 H800 GPU 小时，比训练 72B 或 405B 的稠密模型便宜得多。</p>
+<div class="note-warn"><b>读的时候要注意：</b>所有基座模型都是 DeepSeek 在自己的框架里重新评测的，分数和各家自己公布的可能不同（报告承认连 V2-Base 的分数都因为框架更新和以前公布的略有差别）。另外，V3 并非处处第一：常识推理类（HellaSwag、PIQA、WinoGrande）、阅读理解（RACE）、开放问答（NaturalQuestions）、部分中文任务（CMMLU、C3、CMRC）上都有别的模型略高。</div>
+
+<h4 id="n-9-2">4.5.1 多 token 预测的消融</h4>
+<p>做法是：在两个规模的 MoE 基线上，保持数据和其他结构不变，只加一个深度为 1 的 MTP 模块，比较加与不加的效果。小模型总参数 15.7B（激活 2.4B），训练 1.33T token；大模型总参数 228.7B（激活 20.9B），训练 540B token。推理时 MTP 模块被丢掉，所以两个模型的推理成本完全相同。</p>
+<h4 id="n-9-3">4.5.2 无辅助损失均衡的消融</h4>
+<p>做法类似：两个基线都只靠辅助损失做负载均衡（辅助损失的强度沿用 DeepSeek-V2-Lite 和 V2 的设置），都用 sigmoid 门控加 top-K 归一化。对比模型去掉全部辅助损失、换成偏置项方法。规模同上，只是大模型训练 578B token。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th>小模型：基线 → +MTP</th><th>大模型：基线 → +MTP</th><th>小模型：辅助损失 → 无辅助损失</th><th>大模型：辅助损失 → 无辅助损失</th></tr>
+  <tr><td>Pile-test（BPB）</td><td>0.729 → 0.729</td><td>0.658 → 0.657</td><td>0.727 → 0.724</td><td>0.656 → 0.652</td></tr>
+  <tr><td>BBH</td><td>39.0 → 41.4</td><td>70.0 → 70.7</td><td>37.3 → 39.3</td><td>66.7 → 67.9</td></tr>
+  <tr><td>MMLU</td><td>50.0 → 53.3</td><td>67.5 → <b>66.6</b></td><td>51.0 → 51.8</td><td>68.3 → <b>67.2</b></td></tr>
+  <tr><td>NaturalQuestions</td><td>22.7 → <b>22.3</b></td><td>27.2 → 28.5</td><td>23.2 → 23.4</td><td>27.1 → 28.1</td></tr>
+  <tr><td>HumanEval</td><td>20.7 → 26.8</td><td>44.5 → 53.7</td><td>22.0 → 22.6</td><td>40.2 → 46.3</td></tr>
+  <tr><td>MBPP</td><td>35.8 → 36.8</td><td>61.6 → 62.2</td><td>36.6 → <b>35.8</b></td><td>59.2 → 61.2</td></tr>
+  <tr><td>GSM8K</td><td>25.4 → 31.4</td><td>72.3 → 74.0</td><td>27.1 → 29.6</td><td>70.7 → 74.5</td></tr>
+  <tr><td>MATH</td><td>10.7 → 12.6</td><td>38.6 → 39.8</td><td>10.9 → 11.1</td><td>37.2 → 39.6</td></tr>
+</table></div>
+<p class="w-note">摘自原文表 4（MTP）和表 5（无辅助损失），各挑了 8 项；加粗的是新方法反而变差的格子。</p>
+<p>两组消融的结论都是“在大多数基准上更好”。从表里能读出更具体的规律：提升最大的是代码和数学（例如大模型 HumanEval 加 MTP 后从 44.5 到 53.7，换成无辅助损失后从 40.2 到 46.3），知识类的 MMLU 在大模型上反而略降。</p>
+<div class="note-warn"><b>读的时候要注意：</b>每组对比都只有一次训练，没有给出多次运行的波动范围，1 分以内的差别可能在噪声之内。MTP 的大模型对比只训练了 540B token，远少于 V3 的 14.8T，收益在更长的训练中是否保持，报告没有直接验证。</div>
+
+<h4 id="n-9-4">4.5.3 按批均衡还是按序列均衡：好处到底从哪来</h4>
+<p>这一小节是全文最有洞察力的分析之一。报告指出，偏置项方法和序列级辅助损失的关键区别，其实不在“有没有损失项”，而在<b>均衡的范围</b>：偏置项按整个批统计负载，只要求“全批加起来”均衡；序列级辅助损失要求<b>每一条序列</b>都均衡。</p>
+<p>后者的约束其实不合理。一篇数学文章的 token 理应大量交给擅长数学的专家，一段代码理应交给擅长代码的专家；强迫每条序列都均匀地使用所有专家，等于不让专家按领域分工。按批均衡则没有这个限制：批里有各种领域的序列，各领域的专家都有活干，全批加起来仍然均衡。</p>
+<p>报告用两组证据支持这个解释。第一，他们统计了 16B 的辅助损失基线和 16B 的无辅助损失模型在 Pile 测试集三个领域（英文维基、GitHub 代码、DM 数学题）上各专家分到的负载，发现无辅助损失模型的专家明显更“专”。</p>
+<p class="w-note">原文图 9 怎么看（本站描述，未转载原图，<a href="https://arxiv.org/html/2412.19437#S4.F9" target="_blank" rel="noopener">原图链接 ↗</a>）：四块热力图分别是两种模型的第 9 层和第 18 层，每块有三行（三个领域）、64 列（64 个专家）。颜色表示“相对负载”，即实际负载除以完全均衡时的负载，1 表示正好平均。辅助损失模型的四块图几乎全是浅色，每个专家在三个领域分到的量都接近平均；无辅助损失模型的图上则散布着深色格子，某些专家在某个领域上分到数倍于平均的 token（图例最高到 10）。附录 C 给出了全部层的同类图，规律一致。</p>
+<p>第二，他们设计了一个“按批计算的辅助损失”作为对照：仍然是辅助损失，但统计范围从单条序列换成整个批。结果，只要达到相近的按批均衡程度，这种辅助损失和偏置项方法的效果一样好：</p>
+<div class="table-wrap"><table>
+  <tr><th>验证集损失（越低越好）</th><th>序列级辅助损失</th><th>无辅助损失（偏置项）</th><th>批级辅助损失</th></tr>
+  <tr><td>1B MoE</td><td>2.258</td><td>2.253</td><td>2.253</td></tr>
+  <tr><td>3B MoE</td><td>2.085</td><td>2.080</td><td>2.080</td></tr>
+</table></div>
+<p>也就是说，无辅助损失方法的优势主要来自“按批均衡”这个更宽松的约束。报告也坦率地指出了按批均衡的两个效率隐患：一是某些序列或小批内部可能不均衡，二是推理时如果线上请求的领域分布变了，负载也可能失衡。第一个问题在训练中被大规模专家并行和数据并行化解了，因为每个微批都足够大；第二个问题则靠 §3.4 的冗余专家部署来解决。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S4.SS4" target="_blank" rel="noopener">英文原文 §4.4–4.5 ↗</a> · <a href="https://arxiv.org/html/2412.19437#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">5.1–5.2 后训练：从 R1 蒸馏推理能力，再用 GRPO 强化学习</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>基座模型只会续写，要变成能对话、会推理的助手，还需要监督微调（SFT）和强化学习（RL）。V3 后训练最特别的地方，是借用了当时内部的长链推理模型 DeepSeek-R1 来生成推理类的训练数据。但 R1 的回答虽然准确，却常常想太多、格式乱、特别长。怎样把 R1 的推理能力“借”过来，又不把它的这些毛病一起带过来？强化学习阶段的奖励又从哪里来？</div>
+
+<h4 id="n-10-1">5.1 监督微调</h4>
+<p>SFT 数据共 150 万条，覆盖多个领域，不同领域用不同的方法构造。</p>
+<p><b>推理类数据</b>（数学、编程竞赛题、逻辑谜题）用内部的 DeepSeek-R1 生成。为了兼顾 R1 的准确和普通格式回答的简洁清晰，报告设计了一个三步流程：</p>
+<ol>
+  <li><b>先为每个领域训练一个“专家模型”</b>（比如代码专家、数学专家、通用推理专家），同样经过 SFT 和 RL，用作最终数据的生成器。训练这个专家时，每道题构造两种 SFT 样本：一种是“问题 + 原始回答”；另一种是“系统提示 + 问题 + R1 的回答”，其中系统提示精心设计过，引导模型在回答里做反思和验证。</li>
+  <li><b>在 RL 阶段用高温采样</b>，让专家模型生成的回答混合两类数据的特点，即使不给系统提示也会如此。经过几百步 RL，这个中间模型学会了把 R1 的推理模式（反思、验证）融进自己的回答里。</li>
+  <li><b>用拒绝采样筛选最终数据</b>：让专家模型对每道题生成多个回答，只保留高质量的，作为 V3 的 SFT 数据。这样得到的数据保留了 R1 的长处，同时简洁有效。</li>
+</ol>
+<p><b>非推理类数据</b>（创意写作、角色扮演、简单问答）由 DeepSeek-V2.5 生成回答，再请人工标注员核对其准确性。</p>
+<p><b>SFT 设置</b>：在 V3-Base 上训练 2 个 epoch，学习率按余弦从 \(5\times10^{-6}\) 降到 \(1\times10^{-6}\)。每条训练序列由多个样本拼接而成，但用样本掩码让它们彼此不可见（注意这和预训练不同，预训练拼接文档时不加这种掩码）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：V3 后训练的数据与训练流程</div>
+  <div class="dia-flow"><b style="width:64px">推理类</b><span class="dia-box tgt">内部的 DeepSeek-R1<small>准确，但啰嗦、格式乱</small></span><span class="dia-arrow">→</span><span class="dia-box enc">领域专家模型<small>SFT（两种样本）+ RL（高温采样）</small></span><span class="dia-arrow">→ 拒绝采样 →</span><span class="dia-box">推理类 SFT 数据</span></div>
+  <div class="dia-flow"><b style="width:64px">非推理类</b><span class="dia-box tgt">DeepSeek-V2.5 生成</span><span class="dia-arrow">→ 人工核验 →</span><span class="dia-box">非推理类 SFT 数据</span></div>
+  <div class="dia-flow"><b style="width:64px">主流程</b><span class="dia-box act">V3-Base</span><span class="dia-arrow">→</span><span class="dia-box enc">SFT<small>150 万条，2 个 epoch</small></span><span class="dia-arrow">→</span><span class="dia-box pred">RL：GRPO<small>规则奖励 + 模型奖励</small></span><span class="dia-arrow">→</span><span class="dia-box act">DeepSeek-V3（对话版）</span></div>
+  <div class="dia-note">本站根据原文 §5.1–5.2 画的示意图。</div>
+</div>
+
+<h4 id="n-10-2">5.2 强化学习</h4>
+<p><b>奖励从哪里来。</b>V3 同时用两种奖励模型（RM）：</p>
+<ul>
+  <li><b>规则奖励。</b>能用规则验证的问题就用规则判分。比如答案确定的数学题，要求模型把最终答案写在指定格式里（比如方框中），然后直接比对；LeetCode 类编程题，用编译器跑测试用例。规则判分很可靠，模型也很难“钻空子”骗分。</li>
+  <li><b>模型奖励。</b>答案是自由形式但有参考答案的问题，由奖励模型判断回答是否与参考答案一致；没有标准答案的问题（比如创意写作），奖励模型根据问题和回答给出评价。奖励模型从 V3 的 SFT 检查点训练而来。为了更可靠，它的偏好数据不只包含最终的打分，还包含得出这个打分的思维链，报告说这有助于减少“奖励作弊”（reward hacking，即模型找到让奖励模型给高分、实际上却不好的回答方式）。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：PPO 的 critic，以及 GRPO 怎么省掉它。</b>
+<p>用强化学习训练语言模型时，模型对一个问题生成一个回答，得到一个奖励，然后调整参数，让高奖励的回答更可能出现。关键是要知道这个回答比“平均水平”好多少（叫<b>优势</b>），而不只是奖励本身的高低。常用的 PPO 算法为此另外训练一个<b>价值模型</b>（critic）来估计平均水平，它通常和策略模型一样大，显存和计算都要再花一份。</p>
+<p>GRPO（组相对策略优化，DeepSeekMath 提出，V2 已经在用）的办法是：对同一个问题一次采样 \(G\) 个回答，用这一组回答的平均奖励当作“平均水平”，用组内标准差做归一化。比如一道数学题采样 4 个回答，奖励分别是 1、0、0、1，平均 0.5、标准差 0.5（推算，按总体标准差），优势就是 +1、−1、−1、+1：答对的被鼓励，答错的被抑制。不再需要 critic。</p>
+</div>
+<p>GRPO 的优化目标是（原文式 26–28）：</p>
+<div class="formula">$$\mathcal{J}(\theta)=\mathbb{E}\Bigg[\frac{1}{G}\sum_{i=1}^{G}\Big(\min\big(\rho_i A_i,\ \mathrm{clip}(\rho_i,1-\varepsilon,1+\varepsilon)A_i\big)-\beta\,\mathbb{D}_{KL}(\pi_\theta\Vert\pi_{ref})\Big)\Bigg],\quad \rho_i=\frac{\pi_\theta(o_i\mid q)}{\pi_{\theta_{old}}(o_i\mid q)},\quad A_i=\frac{r_i-\mathrm{mean}(r)}{\mathrm{std}(r)}$$</div>
+<p>其中 \(\rho_i\) 是新旧策略生成回答 \(o_i\) 的概率之比；clip 把它限制在 \([1-\varepsilon,1+\varepsilon]\) 内，防止一次更新走得太远（这一点继承自 PPO）；KL 项让模型不要离参考模型太远，报告用的估计式是 \(\frac{\pi_{ref}}{\pi_\theta}-\log\frac{\pi_{ref}}{\pi_\theta}-1\)，它总是非负的。RL 阶段的提示覆盖编程、数学、写作、角色扮演、问答等多个领域，报告说这不仅让模型更符合人的偏好，还提高了基准分数，在 SFT 数据不足的场景里尤其明显。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1–5.2 ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 训练系统拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">5.3–5.4 对话模型评测与讨论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>后训练之后的 DeepSeek-V3 和当时最强的开源、闭源对话模型相比如何？强在哪里、弱在哪里？从 R1 蒸馏到底带来了多少提升，代价是什么？V3 自己当“裁判”的能力怎么样？</div>
+<h4 id="n-11-1">5.3.1 评测设置</h4>
+<p>在基座评测用过的基准之外，报告为对话模型加了一批：指令遵循 IFEval；长上下文 FRAMES、LongBench v2；研究生水平的问答 GPQA；事实性问答 SimpleQA 和中文版 C-SimpleQA；软件工程 SWE-Bench Verified、Aider；编程竞赛 LiveCodeBench（2024 年 8 月到 11 月的题）、Codeforces；数学竞赛 CNMO 2024（全国高中数学联赛）和 AIME 2024。对比对象是 DeepSeek-V2-0506、V2.5-0905、Qwen2.5 72B Instruct、LLaMA-3.1 405B Instruct、Claude-Sonnet-3.5-1022 和 GPT-4o-0513，闭源模型通过 API 评测。几个影响结果的设置：所有模型的输出上限都是 8192 个 token；AIME 和 CNMO 用温度 0.7 采样 16 次取平均，MATH-500 用贪心解码；Codeforces 的分数是“超过了多少比例的参赛者”；SWE-Bench Verified 用 agentless 框架评测。</p>
+<h4 id="n-11-2">5.3.2 标准评测</h4>
+<div class="table-wrap"><table>
+  <tr><th>基准（指标）</th><th>Qwen2.5 72B</th><th>LLaMA-3.1 405B</th><th>Claude-3.5-Sonnet-1022</th><th>GPT-4o-0513</th><th>DeepSeek-V3</th></tr>
+  <tr><td>MMLU（EM）</td><td>85.3</td><td><b>88.6</b></td><td>88.3</td><td>87.2</td><td>88.5</td></tr>
+  <tr><td>MMLU-Pro（EM）</td><td>71.6</td><td>73.3</td><td><b>78.0</b></td><td>72.6</td><td>75.9</td></tr>
+  <tr><td>GPQA-Diamond（Pass@1）</td><td>49.0</td><td>51.1</td><td><b>65.0</b></td><td>49.9</td><td>59.1</td></tr>
+  <tr><td>SimpleQA（正确率）</td><td>9.1</td><td>17.1</td><td>28.4</td><td><b>38.2</b></td><td>24.9</td></tr>
+  <tr><td>C-SimpleQA（正确率）</td><td>48.4</td><td>50.4</td><td>51.3</td><td>59.3</td><td><b>64.8</b></td></tr>
+  <tr><td>LongBench v2（准确率）</td><td>39.4</td><td>36.1</td><td>41.0</td><td>48.1</td><td><b>48.7</b></td></tr>
+  <tr><td>LiveCodeBench（Pass@1，CoT）</td><td>31.1</td><td>28.4</td><td>36.3</td><td>33.4</td><td><b>40.5</b></td></tr>
+  <tr><td>Codeforces（百分位）</td><td>24.8</td><td>25.3</td><td>20.3</td><td>23.6</td><td><b>51.6</b></td></tr>
+  <tr><td>SWE-Bench Verified（解决率）</td><td>23.8</td><td>24.5</td><td><b>50.8</b></td><td>38.8</td><td>42.0</td></tr>
+  <tr><td>Aider-Polyglot（准确率）</td><td>7.6</td><td>5.8</td><td>45.3</td><td>16.0</td><td><b>49.6</b></td></tr>
+  <tr><td>AIME 2024（Pass@1）</td><td>23.3</td><td>23.3</td><td>16.0</td><td>9.3</td><td><b>39.2</b></td></tr>
+  <tr><td>MATH-500（EM）</td><td>80.0</td><td>73.8</td><td>78.3</td><td>74.6</td><td><b>90.2</b></td></tr>
+  <tr><td>CNMO 2024（Pass@1）</td><td>15.9</td><td>6.8</td><td>13.1</td><td>10.8</td><td><b>43.2</b></td></tr>
+</table></div>
+<p class="w-note">摘自原文表 6（省略了 V2 系列两列和部分基准）。原文图 1 是其中六项的柱状图。</p>
+<p>把这张表按领域读一遍：</p>
+<ul>
+  <li><b>知识类</b>（MMLU 系列、GPQA）：与 Claude-3.5-Sonnet、GPT-4o 同一档，GPQA-Diamond 仅次于 Claude，明显高于其他开源模型。</li>
+  <li><b>事实性</b>：英文 SimpleQA 落后于 GPT-4o 和 Claude，报告解释为设计侧重和资源分配：V3 把更多训练 token 用在了中文知识上，所以中文 C-SimpleQA 最好，比 Qwen2.5 72B 高 16.4 分（后者的预训练语料是 18T token，比 V3 的 14.8T 多 20%）。</li>
+  <li><b>长上下文</b>：DROP（3-shot F1 91.6）、LongBench v2（48.7，发布于 V3 推出前几周）都是第一；FRAMES（需要在 10 万 token 的上下文里答题）仅次于 GPT-4o。</li>
+  <li><b>代码</b>：算法类（HumanEval-Mul、LiveCodeBench、Codeforces）全面领先，报告归功于从 R1 的蒸馏；工程类（SWE-Bench Verified、Aider-Edit）落后于 Claude-3.5-Sonnet-1022，但大幅领先其他开源模型。</li>
+  <li><b>数学</b>：AIME、MATH-500、CNMO 全部大幅领先，是当时“非 o1 类”（不做长链推理）模型里最好的。</li>
+</ul>
+<div class="note-warn"><b>报告文字与表格对不上的地方：</b>
+<ul>
+  <li>数学部分正文说 V3 在 AIME、MATH-500、CNMO 上比第二名 Qwen2.5 72B“高出约 10 个百分点”。按表 6 算，差距分别是 15.9、10.2、27.3 分（推算），正文的说法偏保守。</li>
+  <li>开放式评测部分正文说 V3 在 Arena-Hard 上对基线 GPT-4-0314 的胜率“超过 86%”，而表 7 给出的数字是 85.5。正文同一段又说 V3 是“第一个超过 85% 的开源模型”，与表 7 一致。</li>
+</ul></div>
+<h4 id="n-11-3">5.3.3 开放式评测与 5.3.4 当裁判的能力</h4>
+<p>开放式生成用大模型当裁判打分，遵循 Arena-Hard 和 AlpacaEval 2.0 的原始设置（裁判是 GPT-4-Turbo-1106，两两比较）。V3 在 Arena-Hard 上得 85.5，与 Claude-3.5-Sonnet-1022（85.2）持平；在 AlpacaEval 2.0（长度控制胜率）上得 70.0，明显高于 Claude（52.0）、GPT-4o（51.1）和 V2.5（50.5）。</p>
+<p>报告还测了 V3 当“奖励模型”的判断能力（RewardBench）：平均 87.0，与 GPT-4o-0806（86.7）和 Claude-3.5-Sonnet-1022（88.7）同一水平；如果让 V3 判 6 次再投票（maj@6），平均升到 89.6。报告据此在对齐过程中用 V3 加投票给开放式问题提供自我反馈。</p>
+<h4 id="n-11-4">5.4.1 从 R1 蒸馏：准确率与回答长度的权衡</h4>
+<p>为了单独衡量 R1 蒸馏的贡献，报告在 DeepSeek-V2.5 上做了对照：基线用短思维链的数据训练，对照组用前面那些专家检查点生成的数据训练。</p>
+<div class="dia">
+  <div class="dia-title">示意图：在 DeepSeek-V2.5 上加入 R1 蒸馏数据前后（数字来自原文表 9）</div>
+  <div class="dia-row"><span class="lbl">MATH-500 准确率</span><div class="dia-track"><span class="dia-seg kv" style="flex:74.6">基线 74.6</span><span class="dia-seg oth" style="flex:25.4"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg w" style="flex:83.2">蒸馏后 83.2</span><span class="dia-seg oth" style="flex:16.8"></span></div></div>
+  <div class="dia-row"><span class="lbl">MATH-500 回答长度</span><div class="dia-track"><span class="dia-seg kv" style="flex:769">基线 769</span><span class="dia-seg oth" style="flex:831"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg frag" style="flex:1510">蒸馏后 1510（约 2 倍）</span><span class="dia-seg oth" style="flex:90"></span></div></div>
+  <div class="dia-row"><span class="lbl">LiveCodeBench-CoT</span><div class="dia-track"><span class="dia-seg kv" style="flex:31.1">基线 31.1</span><span class="dia-seg oth" style="flex:68.9"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg w" style="flex:37.4">蒸馏后 37.4</span><span class="dia-seg oth" style="flex:62.6"></span></div></div>
+  <div class="dia-out">LiveCodeBench-CoT 的平均回答长度从 718 增到 783，只多了约 9%（推算）。准确率条按 100 分满格画，长度条按 1600 个 token 满格画。</div>
+</div>
+<p>蒸馏带来了明显提升：LiveCodeBench-CoT 从 31.1 到 37.4，MATH-500 从 74.6 到 83.2。但它也有一个有意思的代价：回答变长了，MATH-500 上的平均长度几乎翻倍。为了在准确率和计算效率之间取得平衡，报告说为 V3 仔细挑选了蒸馏的设置（没有公开具体做法）。报告认为，从推理模型蒸馏是后训练的一个有前途的方向；目前只蒸馏了数学和代码，将来可以推广到更多需要复杂推理的领域。</p>
+<h4 id="n-11-5">5.4.2 自我奖励与 5.4.3 MTP 的接受率</h4>
+<p>强化学习的效果取决于奖励。在代码、数学这类能用外部工具验证的领域，RL 非常有效；但在更一般的场景里，很难手写规则给出反馈。V3 的做法借鉴了 Constitutional AI：用 V3 自己投票评判的结果作为反馈来源，并加入额外的“宪法”（原则性说明）让它朝期望的方向优化。报告说这在主观评测上带来了显著提升，并认为“补充信息 + 大模型作为反馈来源”这一范式对模型的自我改进非常重要。</p>
+<p>MTP 用于投机解码时，第二个 token 的接受率在 85% 到 90% 之间，生成速度提高到 1.8 倍，这一点在 §2.2 的笔记里已经讲过。</p>
+<div class="note-warn"><b>读评测结果时要注意的几点：</b>
+<ul>
+  <li>对比的闭源模型版本是 GPT-4o-0513 和 Claude-3.5-Sonnet-1022，并且所有模型的输出都被限制在 8K token 以内。</li>
+  <li>V3 的数学、算法题优势很大程度上来自 R1 蒸馏，而蒸馏让回答更长。和不做长链推理的模型比，V3 在这些题上“想得更久”，这是分数差距的一部分原因。它和真正的长链推理模型（o1、R1）不在同一档，报告也只声称在“非 o1 类”模型里领先。</li>
+  <li>多数基准只跑一次；样本少于 1000 的基准用不同温度跑多次取结果。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S5.SS3" target="_blank" rel="noopener">英文原文 §5.3–5.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">6 结论、局限与未来方向</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者自己怎么总结 V3？他们承认了哪些不足，下一步打算往哪里走？</div>
+<p>报告的总结与引言呼应：V3 是一个 671B 总参数、37B 激活参数的 MoE 模型，训练了 14.8T token；在 MLA 和 DeepSeekMoE 的基础上首创了无辅助损失的负载均衡、设定了多 token 预测目标；FP8 训练和细致的工程优化让训练很便宜（完整训练 278.8 万 H800 GPU 小时）；后训练成功地从 R1 系列蒸馏了推理能力；评测上是当时最强的开源模型，与 GPT-4o、Claude-3.5-Sonnet 相当。</p>
+<p>报告承认的局限主要在<b>部署</b>上：一是为了推理高效，推荐的部署单元比较大（§3.4 的预填充 32 卡、解码 320 卡），对小团队是负担；二是端到端的生成速度虽然已经是 V2 的两倍多，仍有提升空间。报告认为这两点会随着更先进的硬件出现而自然缓解。</p>
+<p>未来方向有四条：继续改进模型结构，提高训练和推理效率，向“高效支持无限长上下文”逼近，并尝试突破 Transformer 的结构限制；在更多维度上扩展训练数据的数量与质量，引入更多种类的训练信号；继续加强模型的深度思考能力，扩展推理的长度和深度；探索更全面、多维度的评测方法，避免研究过程中只盯着一组固定基准优化，从而对模型能力产生误判。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2412.19437#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>V3 发布后的一年多里，它既是一个被广泛部署的开源模型，也成了 DeepSeek 后续几乎所有模型的底座。下面只列能查证的事实（日期为 arXiv 首版或 Hugging Face 模型仓库的创建日期）。</p>
+<ul>
+  <li><b>DeepSeek-R1（2025-01）。</b>V3 报告里“内部的 R1”在一个月后公开。R1 的论文（<a href="https://arxiv.org/abs/2501.12948" target="_blank" rel="noopener">arXiv 2501.12948</a>，2025-01-22）写明它以 DeepSeek-V3-Base 为基座，用 GRPO 做大规模强化学习；其中 R1 的最终训练还混入了来自 DeepSeek-V3 的写作、事实问答等监督数据。这篇论文后来发表在 Nature 第 645 卷（2025 年）。V3 与 R1 因此形成了一个循环：V3-Base 训练出 R1，R1 的数据又蒸馏回 V3 的对话版。</li>
+  <li><b>基础设施开源（2025-02）。</b>报告里的几项系统工作被拆成独立仓库公开：MLA 解码内核 <a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">FlashMLA</a>、专家并行通信库 <a href="https://github.com/deepseek-ai/DeepEP" target="_blank" rel="noopener">DeepEP</a>（§3.2.2 的 all-to-all 内核）、FP8 矩阵乘库 <a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener">DeepGEMM</a>（§3.3 的细粒度缩放 GEMM）、<a href="https://github.com/deepseek-ai/DualPipe" target="_blank" rel="noopener">DualPipe</a>、冗余专家的负载均衡器 <a href="https://github.com/deepseek-ai/EPLB" target="_blank" rel="noopener">EPLB</a>，以及计算通信重叠的 <a href="https://github.com/deepseek-ai/profile-data" target="_blank" rel="noopener">profile 数据</a>。DualPipe 仓库后来还加入了 DualPipeV：Sea AI Lab 提出的“对半切”V 形调度，气泡与 DualPipe 相同，但所需设备数减半。</li>
+  <li><b>V3 的迭代版本。</b>DeepSeek-V3-0324（2025-03）是 V3 的更新版，Hugging Face 上的配置文件与 V3 完全相同（只差 transformers 版本号），许可证改为 MIT。DeepSeek-V3.1（2025-08）的模型卡写明，它建立在原始 V3 的基座检查点之上，按 V3 报告的方法重做了两阶段长上下文扩展，并把数据量大幅增加（32K 阶段增至 630B token，128K 阶段增至 209B token）。DeepSeek-V3.1-Terminus（2025-09）是 V3.1 的最后一个版本。</li>
+  <li><b>V3.2 与 DSA（2025-09 / 2025-12）。</b>DeepSeek-V3.2-Exp（2025-09）以及之后的 DeepSeek-V3.2（<a href="https://arxiv.org/abs/2512.02556" target="_blank" rel="noopener">arXiv 2512.02556</a>）在 V3.1-Terminus 的基础上通过继续训练加入了 DeepSeek 稀疏注意力（DSA），报告写明这是相对 V3.1-Terminus 唯一的结构改动。DSA 用一个轻量的“闪电索引器”给每个查询挑出最相关的 2048 个历史 token，只对它们做注意力；它直接建立在 MLA 之上，复用的正是本报告 §2.1.1 讲的潜向量缓存。见本站 <a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DSA 拆解页</a>。</li>
+  <li><b>DeepSeek-V4（2026-04）。</b><a href="https://arxiv.org/abs/2606.19348" target="_blank" rel="noopener">arXiv 2606.19348</a> 发布了 V4 预览版：V4-Pro（1.6T 总参数、49B 激活）和 V4-Flash（284B 总参数、13B 激活），都支持 100 万 token 的上下文。结构上改用压缩稀疏注意力（CSA）与重度压缩注意力（HCA）的混合，并引入流形约束超连接（mHC）和 Muon 优化器。摘要称在 100 万 token 的设置下，V4-Pro 每个 token 的推理 FLOPs 只有 V3.2 的 27%，KV 缓存只有 10%。见本站 <a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">V4 拆解页</a>。</li>
+  <li><b>硬件协同设计的回顾。</b>DeepSeek 在 ISCA 2025（计算机体系结构会议）的工业论文《Insights into DeepSeek-V3》（<a href="https://arxiv.org/abs/2505.09343" target="_blank" rel="noopener">arXiv 2505.09343</a>）里，系统回顾了 V3 的 MLA、MoE、FP8 和多平面网络拓扑，并展开讨论了 §3.5 那些对未来硬件的期望。</li>
+</ul>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">报告的署名是机构 DeepSeek-AI，不是个人。下面只列能从报告本身和官方仓库查证的信息，不推测个人背景。</p>
+<div class="author-cards">
+  <div class="author-card senior"><b>DeepSeek-AI</b><div class="aff">署名机构，联系邮箱 research@deepseek.com</div>DeepSeek 的研究团队。本报告沿用的 MLA 来自 DeepSeek-V2 的报告（arXiv 2405.04434，同样署名 DeepSeek-AI），DeepSeekMoE 来自 2024 年 1 月的同名论文。</div>
+  <div class="author-card"><b>附录 A：贡献者名单</b><div class="aff">按角色分三组，组内按名字字母排序</div>本站按附录 A 清点：研究与工程 150 人、数据标注 31 人、商务与合规 18 人，共约 200 人；名字后带星号的是已离开团队的成员。报告没有标注第一作者或通讯作者。</div>
+  <div class="author-card"><b>相关前作的署名</b><div class="aff">可从 arXiv 查证</div>无辅助损失负载均衡的原始论文（arXiv 2408.15664）由 Lean Wang、Huazuo Gao、Chenggang Zhao、Xu Sun、Damai Dai 署名；DeepSeekMoE（arXiv 2401.06066）第一作者为 Damai Dai。DualPipe 仓库的说明写明该算法由 Jiashi Li、Chengqi Deng、Wenfeng Liang 开发。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表形式</b>：技术报告，只在 arXiv 发布（v1 2024-12-27，v2 2025-02-18），没有经过会议或期刊评审。</li>
+  <li><b>开源</b>：<a href="https://github.com/deepseek-ai/DeepSeek-V3" target="_blank" rel="noopener">deepseek-ai/DeepSeek-V3</a> 仓库 104,515 个 star、16,701 个 fork（截至 2026-10-19）。代码为 MIT 许可证；V3 的 Base 和对话模型权重使用 DeepSeek 的模型许可协议，允许商用；后续的 V3-0324 权重改为 MIT 许可证。</li>
+  <li><b>配套基础设施</b>（截至 2026-10-19 的 star 数）：FlashMLA 13,092，DeepEP 10,291，DeepGEMM 8,984，DualPipe 3,019，EPLB 1,448，profile-data 1,194。</li>
+  <li><b>推理生态</b>：仓库说明列出了发布时已支持 V3 的推理框架，包括 SGLang、LMDeploy、TensorRT-LLM、vLLM，以及 AMD GPU（通过 SGLang）和华为昇腾 NPU（通过 MindIE）。</li>
+  <li><b>后续模型</b>：DeepSeek-R1 以 V3-Base 为基座；V3.1、V3.2 都从 V3 的检查点继续训练（见上文“后来怎么样了”）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="megatron-lm.html">Megatron-LM</a>、<a href="zero.html">ZeRO</a>、<a href="roformer.html">RoFormer / RoPE</a>、<a href="speculative-decoding.html">投机解码</a>、<a href="distserve.html">DistServe</a></li>
+  <li><a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3 结构拆解</a>：一个 MoE 层的专家并行与 FP8 路径的可点击架构图，以及相关简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式</a>：E4M3 与 E5M2 的取值、缩放策略和硬件支持。</li>
+  <li><a href="../legacy/tracks/ai-infra/19-fp4-training.html">FP4 训练</a>：比 FP8 更进一步的低精度训练。</li>
+  <li><a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron</a> 与 <a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP</a>：张量并行、流水线并行、数据并行的基础。</li>
+  <li><a href="../legacy/tracks/ai-infra/05-speculative-decoding.html">投机解码</a> 与 <a href="../legacy/tracks/ai-infra/17-eagle.html">EAGLE</a>：MTP 模块用于推理加速时的原理。</li>
+  <li><a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a>：§3.4 预填充、解码分开部署的背景。</li>
+  <li><a href="../legacy/tracks/ai-infra/10-rope.html">RoPE</a>：解耦 RoPE 与 YaRN 扩展的背景。</li>
+  <li><a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 训练系统</a>：GRPO 等强化学习后训练的系统问题。</li>
+  <li><a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek 稀疏注意力 DSA</a> 与 <a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4</a>：在 MLA 之上继续压缩注意力的后续工作。</li>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：KV 缓存为什么决定推理吞吐。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：DeepSeek-AI. <em>DeepSeek-V3 Technical Report.</em> <a href="https://arxiv.org/abs/2412.19437" target="_blank" rel="noopener">arXiv:2412.19437</a>（v1 2024-12-27，v2 2025-02-18），以 arXiv 非独占分发许可（<a href="https://arxiv.org/licenses/nonexclusive-distrib/1.0/" target="_blank" rel="noopener">arXiv.org perpetual non-exclusive license</a>）发布，该许可不允许转载原图。本页是对报告的中文精读笔记，正文与所有示意图均为本站撰写和绘制，并非翻译或复制；数字与结论以原文为准，标“推算”的为本站计算。官方代码与配置引自 <a href="https://github.com/deepseek-ai/DeepSeek-V3" target="_blank" rel="noopener">deepseek-ai/DeepSeek-V3</a>（MIT 许可证）。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

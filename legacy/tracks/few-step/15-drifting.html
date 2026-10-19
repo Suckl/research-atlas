@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drifting Models 漂移生成</title>
+<meta name="description" content="Generative Modeling via Drifting：把迭代从推理挪到训练——一步生成器的推前分布在训练中被反对称的核化漂移场推动，正样本吸引、生成样本排斥，分布相等时漂移为零；在冻结 SSL 特征空间计算；ImageNet 256 一步 FID 1.54 / 1.61；Drifting Policy 与第一个视频用例 DriftWorld。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/fewstep2d.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="drifting">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：把“迭代”从推理挪到训练</h2>
+<p>扩散 / 流模型把“噪声分布 → 数据分布”这个难的推前映射拆成很多小步，在<b>推理时</b>一步步走完；本 track 的前几页都在想办法把这些步压少——要么蒸馏一个教师（<a href="05-dmd.html">DMD</a>、<a href="03-consistency-models.html">一致性蒸馏</a>），要么从零训练时去近似 ODE 轨迹（<a href="08-scm.html">sCM</a>、<a href="11-meanflow.html">MeanFlow</a>）。Drifting 换了一个角度：神经网络的训练本来就是迭代的，每次 SGD 更新都会让同一个噪声 \(\epsilon\) 对应的输出移动一点，于是生成分布 \(q_i\) 在<b>训练过程中</b>本来就在演化。只要设计一个“样本该往哪漂”的场，让网络去追它，推理时就只剩一次前向 <span class="src">论文 §1、§3.1</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  对每个生成样本 \(x\)，在一个冻结特征空间里算一个漂移向量 \(V=V^+_p-V^-_q\)：被附近的真实样本吸引、被附近的其他生成样本排斥，两者都是核加权的 mean-shift 向量；当生成分布等于数据分布时吸引与排斥正好抵消，\(V\equiv0\)。训练目标就是把 \(x\) 回归到冻结的 \(x+V\)。没有教师、没有判别器、没有 ODE，ImageNet 256 一步 FID 1.54（潜空间）/ 1.61（像素空间）<span class="src">论文 Tab. 5、Tab. 6</span>。
+</div>
+<div class="callout info">
+  <span class="callout-title">它不是蒸馏，为什么放在这个 track</span>
+  Drifting 从零训练、不需要任何预训练扩散教师，所以它不属于“蒸馏”；但它回答的是同一个问题——<b>怎样用 1 次网络评估达到多步模型的质量</b>——论文直接拿 iCT、Shortcut、MeanFlow、iMF 等一步方法作对照 <span class="src">论文 Tab. 5</span>。更重要的是它开启了本 track 的最后一条泳道“表征空间匹配”：<a href="16-rdm.html">RDM</a> 把“在冻结编码器特征里匹配分布”变成后训练配方，可以把 4 步 FLUX.2 [klein] 压成 1 步（参考集来自教师的离线采样，相当于不在线调用教师的蒸馏）；<a href="17-virdm.html">ViRDM</a> 再把它带到少步因果视频，替代 DMD 的教师 + critic。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 训练时的一步（ImageNet 潜空间版）</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 真实样本</span><span><i class="sw enc"></i>生成器（可训练）</span><span><i class="sw tgt"></i>冻结特征编码器</span>
+  <span><i class="sw act"></i>条件</span><span><i class="sw loss"></i>损失</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 440" role="img" aria-label="Drifting 训练一步的计算图">
+    <g data-part="input" data-step="1">
+      <g class="data"><rect class="box" x="20" y="50" width="130" height="54" rx="8"/></g>
+      <text class="t-c t-b" x="85" y="70">噪声 ε</text>
+      <text class="t-c t-xs" x="85" y="90">高斯 + 风格索引</text>
+      <g class="act"><rect class="box" x="20" y="118" width="130" height="54" rx="8"/></g>
+      <text class="t-c t-b" x="85" y="138">条件 c, α</text>
+      <text class="t-c t-xs" x="85" y="158">类别 · CFG 强度</text>
+    </g>
+    <path class="edge" d="M150,77 C168,77 170,100 186,100" data-step="2"/>
+    <path class="edge act" d="M150,145 C168,145 170,130 186,130" data-step="2"/>
+    <g class="enc" data-part="gen" data-step="2">
+      <rect class="box" x="190" y="50" width="170" height="130" rx="10"/>
+      <text class="t-c t-b" x="275" y="74">生成器 G<tspan font-size="9" dy="3">θ</tspan></text>
+      <text class="t-c t-xs" x="275" y="98">DiT-B/2 或 L/2（潜空间）</text>
+      <text class="t-c t-xs" x="275" y="116">adaLN + 上下文 token</text>
+      <text class="t-c t-xs" x="275" y="134">一次前向 = 1 NFE</text>
+      <text class="t-c t-xs" x="275" y="156">可训练</text>
+    </g>
+    <path class="edge enc" d="M360,115 H400" data-step="3"/>
+    <text class="t-c t-sm" x="380" y="104" data-step="3">x</text>
+    <g class="tgt" data-part="phi" data-step="3">
+      <rect class="box frozen" x="404" y="50" width="180" height="130" rx="10"/>
+      <text class="t-c t-b" x="494" y="74">特征编码器 φ（冻结）</text>
+      <text class="t-c t-xs" x="494" y="98">latent-MAE ResNet</text>
+      <text class="t-c t-xs" x="494" y="116">4 个尺度 · 逐位置</text>
+      <text class="t-c t-xs" x="494" y="134">+ 局部 / 全局均值、方差</text>
+      <text class="t-c t-xs" x="494" y="156">梯度可穿过，参数不更新</text>
+    </g>
+    <g data-part="real" data-step="3">
+      <g class="data"><rect class="box" x="404" y="236" width="86" height="50" rx="8"/><rect class="box" x="498" y="236" width="86" height="50" rx="8"/></g>
+      <text class="t-c t-sm" x="447" y="254" style="fill:var(--text)">正样本 y⁺</text>
+      <text class="t-c t-xs" x="447" y="272">同类真实</text>
+      <text class="t-c t-sm" x="541" y="254" style="fill:var(--text)">无条件样本</text>
+      <text class="t-c t-xs" x="541" y="272">CFG 负样本</text>
+      <path class="edge" d="M447,236 V184"/>
+      <path class="edge" d="M541,236 V184"/>
+      <text class="t-c t-xs" x="494" y="302">来自真实样本队列</text>
+    </g>
+    <path class="edge tgt" d="M584,115 H624" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="4"/>
+    <g data-part="field" data-step="4">
+      <rect class="box" x="628" y="50" width="180" height="130" rx="10"/>
+      <text class="t-c t-b" x="718" y="72">漂移场 V（无参数）</text>
+      <text class="t-c t-xs" x="718" y="94">V = V⁺ − V⁻</text>
+      <text class="t-c t-xs" x="718" y="112">V⁺：被正样本吸引</text>
+      <text class="t-c t-xs" x="718" y="130">V⁻：被生成样本排斥</text>
+      <text class="t-c t-xs" x="718" y="148">核 = softmax(−距离/τ)</text>
+      <text class="t-c t-xs" x="718" y="166">p = q 时处处为 0</text>
+    </g>
+    <path class="edge sg" d="M718,180 V232" data-step="5"/>
+    <g data-part="target" data-step="5">
+      <rect class="box" x="628" y="236" width="180" height="60" rx="10" style="stroke-dasharray:5 4"/>
+      <text class="t-c t-b" x="718" y="258">目标 sg(φ(x) + V)</text>
+      <text class="t-c t-xs" x="718" y="280">冻结：不对 V 反传</text>
+    </g>
+    <path class="edge enc" d="M540,50 V30 H898 V116" data-step="6"/>
+    <text class="t-c t-xs" x="720" y="20" data-step="6">预测 φ(x)（带梯度）</text>
+    <path class="edge sg" d="M808,266 C832,266 832,220 846,220" data-step="6"/>
+    <g class="loss" data-part="loss" data-step="6">
+      <rect class="box" x="850" y="120" width="96" height="120" rx="10"/>
+      <text class="t-c t-b" x="898" y="146">MSE</text>
+      <text class="t-c t-xs" x="898" y="170">逐特征求和</text>
+      <text class="t-c t-xs" x="898" y="190">数值 = ‖V‖²</text>
+      <text class="t-c t-xs" x="898" y="210">对 θ 求导</text>
+    </g>
+    <path class="edge grad" d="M898,240 V360 H275 V184" data-step="6"/>
+    <text class="t-c t-xs" x="590" y="376" data-step="6">梯度：MSE → φ（像素编码器时还经 VAE 解码器）→ G_θ；不经过 V</text>
+    <g data-part="infer" data-step="7">
+      <rect class="panel" x="20" y="392" width="926" height="40" rx="10"/>
+      <text class="t-sm" x="36" y="412" style="fill:var(--text)">推理：ε, c, α → G_θ → x（潜空间版再过 VAE 解码）· 1 NFE · 不需要 φ、正负样本或任何迭代</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>输入：噪声与条件</h4><p>噪声由两部分组成：32×32×4 的高斯噪声，以及 32 个“风格 token”——每个是从 64 个可学习嵌入的码本里均匀抽的随机下标，求和后加到条件向量上。本文对照的扩散模型使用高斯噪声，而 Drifting 的 \(G_\theta\) 只需是某个分布的推前，所以可以混入离散随机变量；去掉风格嵌入，消融 FID 8.46 → 8.86 <span class="src">论文 §A.2</span>。条件是类别 c 和 CFG 强度 α（训练时随机采样，见 3.4）。</p></div>
+    <div data-note="gen"><h4>生成器</h4><p>DiT 式 Transformer，patch 2（潜空间）或 16（像素空间），都得到 16×16 = 256 个 token；采用 SwiGLU、RoPE、RMSNorm、QK-Norm，条件经 adaLN 并额外拼 16 个上下文 token。B/2：宽 768、12 层，133M；L/2：宽 1024、24 层，463M <span class="src">论文 §A.2、Tab. 8、Tab. 5</span>。没有时间步输入——它只做一件事：ε ↦ x。</p></div>
+    <div data-note="phi"><h4>冻结特征编码器</h4><p>漂移场靠核函数度量“谁离谁近”，原始潜空间里的 L2 距离不够有语义，作者报告<b>不用特征编码器时在 ImageNet 上训不出来</b> <span class="src">论文 §5.2</span>。默认编码器是作者自训的 ResNet 式 MAE（直接在 SD-VAE 潜空间上做掩码重建，再做 3k 步分类微调），输出 32²、16²、8²、4² 四个尺度的特征图；像素版使用 pixel-MAE ResNet，再加 ConvNeXt-V2。编码器只在训练时使用。</p></div>
+    <div data-note="real"><h4>真实样本</h4><p>正样本：与当前类别相同的真实样本 \(y^+\)（N<sub>pos</sub> 个）；无条件样本：随机类别的真实样本，作为额外负样本以实现 CFG，核权重为 w。实现上不用专门的数据加载器，而是像 MoCo 一样维护样本队列：每类一个长 128 的队列、无条件全局队列长 1000，每步推入 64 个新样本 <span class="src">论文 §A.7、§A.8</span>。</p></div>
+    <div data-note="field"><h4>漂移场</h4><p>对每个生成特征 \(\varphi(x)\)，以同批其他生成特征为负样本、真实特征为正样本，算核加权的吸引向量与排斥向量之差。核 \(k=\exp(-\lVert\cdot\rVert/\tau)\)，实现为对距离 logits 做 softmax（对 y 轴和 x 轴各一次，再取几何平均）；温度 τ ∈ {0.02, 0.05, 0.2} 各算一次、各自归一化后相加。V 没有参数，不参与反向传播。 <span class="src">Drifting Alg. 1–2、App. A</span> <span class="src">官方 drift_loss.py</span></p></div>
+    <div data-note="target"><h4>冻结目标</h4><p>\(\mathrm{sg}(\varphi(x)+V)\)：把这一步“漂移后”的位置当作常数目标。V 依赖整个生成分布 \(q_\theta\)，对分布求导既不平凡也不是想要的目标，stop-gradient 让 V 只作为“这一步该往哪走”的指示 <span class="src">论文 §3.2</span>。</p></div>
+    <div data-note="loss"><h4>损失</h4><p>预测 \(\varphi(x)\) 与冻结目标的 MSE，对每个尺度 / 位置 / 统计量各算一项再相加，另外加一项不经 φ 的原始空间漂移损失 <span class="src">论文 §A.5</span>。损失的数值恰好等于 \(\lVert V\rVert^2\)，对 x 的梯度是 \(-2V\)：梯度下降就是让样本沿 V 移动。</p></div>
+    <div data-note="infer"><h4>推理</h4><p>只剩生成器一次前向；CFG 是训练时行为，推理时直接把 α 作为条件输入即可，不需要再跑一遍无条件模型。像素空间 L/16 生成一张图约 87 GFLOPs，StyleGAN-XL 为 1574 GFLOPs <span class="src">论文 §5.2</span>。</p></div>
+    <div data-step-note="1"><h4>① 采样输入</h4><p>每个类别采 N<sub>neg</sub> = 64 份噪声，并采一个 CFG 强度 α。 <span class="src">Drifting Alg. 1–2、App. A</span> <span class="src">官方 drift_loss.py</span></p></div>
+    <div data-step-note="2"><h4>② 生成</h4><p>\(x=G_\theta(\epsilon,c,\alpha)\)，一次前向。</p></div>
+    <div data-step-note="3"><h4>③ 编码</h4><p>生成样本、正样本、无条件样本经同一冻结编码器，得到多尺度特征。</p></div>
+    <div data-step-note="4"><h4>④ 漂移场</h4><p>逐特征计算 \(V=V^+-V^-\)，多温度相加并归一化。</p></div>
+    <div data-step-note="5"><h4>⑤ 冻结目标</h4><p>\(\mathrm{sg}(\varphi(x)+V)\)。</p></div>
+    <div data-step-note="6"><h4>⑥ 回归与反传</h4><p>MSE 的梯度穿过冻结编码器回到生成器。</p></div>
+    <div data-step-note="7"><h4>⑦ 推理</h4><p>一次前向，无任何迭代。</p></div>
+  </div>
+  <figcaption>图 1　Drifting 的一个训练步（ImageNet 潜空间默认设置）。<span class="src">依据论文 Alg. 1–2、§3–4、附录 A 与官方 JAX 实现 <code>drift_loss.py</code>。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-pushforward">3.1 训练时的推前分布</h3>
+<p>记生成器输出分布为推前 \(q=(G_\theta)_\#p_\epsilon\)。第 i 次迭代的参数更新让同一个 ε 的输出移动 \(\Delta x_i=G_{\theta_{i+1}}(\epsilon)-G_{\theta_i}(\epsilon)\)，作者把它称为样本的“漂移”。于是问题变成：设计一个只依赖 \(p\) 与当前 \(q_i\) 的场 \(V_{p,q}\)，让 \(x_{i+1}=x_i+V_{p,q_i}(x_i)\)，并且在 \(q=p\) 时所有样本都停下来 <span class="src">论文 §3.1–3.2</span>。与扩散的对照：扩散在推理时执行 \(x_{i+1}=x_i+\Delta x_i\) 若干次；Drifting 在训练时执行它，迭代的“步数”被摊进了几十万次优化步里。注意本页不存在噪声水平 t：ε 直接映射到样本。</p>
+
+<h3 id="c-field">3.2 漂移场：吸引、排斥与反对称</h3>
+<p><b>反对称是保证数据分布成为平衡点的充分条件。</b>若 \(V_{p,q}=-V_{q,p}\)，则 \(q=p\Rightarrow V=-V\Rightarrow V=0\)（论文 Prop. 3.1）。作者用 mean-shift 构造满足它的场：\(V^+_p\) 是以核为权重的“正样本均值减 x”，\(V^-_q\) 是“负样本均值减 x”，两者相减后 x 被消掉，得到只含 \(y^+-y^-\) 的形式（式 11），交换 p、q 恰好变号。反过来 \(V=0\Rightarrow q=p\) 并不总成立；论文附录 C.1 只给出一个可辨识性启发式论证（有限基展开下零漂移给出大量双线性约束，非退化时迫使 p = q）。 <span class="src">Drifting §3.2–3.3、Tab. 1/2/11</span></p>
+<p>反对称不是装饰：故意打破它，ImageNet 消融（B/2，100 epoch）立刻崩溃 <span class="src">论文 Tab. 1</span>——</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>漂移场</th><th class="num">FID</th><th>解读</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>\(V^+-V^-\)（默认）<br><span class="src">Drifting Tab. 1</span></td><td class="num">8.46</td><td>p = q 时精确抵消</td></tr>
+    <tr><td>\(1.5V^+-V^-\) / \(V^+-1.5V^-\)<br><span class="src">Drifting Tab. 1</span></td><td class="num">41.05 / 46.28</td><td>平衡点不再是数据分布</td></tr>
+    <tr><td>\(2V^+-V^-\) / \(V^+-2V^-\)<br><span class="src">Drifting Tab. 1</span></td><td class="num">86.16 / 112.84</td><td>偏离越大越差</td></tr>
+    <tr><td>只有吸引 \(V^+\)<br><span class="src">Drifting Tab. 1</span></td><td class="num">177.14</td><td>没有排斥，样本挤向核加权均值</td></tr>
+  </tbody>
+</table></div>
+<p><b>正负样本越多越好。</b>固定总批量 B = 4096，把每类正样本从 1 加到 64，FID 20.43 → 8.46；把负样本从 8 加到 64（类别数相应减少），11.82 → 8.46 <span class="src">论文 Tab. 2</span>。V 是期望的蒙特卡罗估计，样本越多估计越准——这一点与对比学习“负样本越多越好”同源，也正是 <a href="16-rdm.html">RDM</a> 后来批评的地方：Drifting 的参考样本每批重采，批量受限时估计噪声大。核归一化方面，对 x、y 两轴都做 softmax 8.46，只对 y 做 8.92，完全不归一化 10.54——三者都满足平衡条件，所以都不崩 <span class="src">论文 Tab. 11、§B.2</span>。下面的二维玩具演示同样的“数据吸引 − 生成排斥”：</p>
+<div data-widget="fewstep-2d" data-focus="drift"></div>
+<p>论文的二维实验也显示：即使 q 初始化时坍缩在一个模态上，其他模态的吸引仍会把样本拉过去，所以不出现模式坍缩 <span class="src">论文 Fig. 3、§5.1</span>。</p>
+
+<h3 id="c-feature">3.3 在特征空间里漂移</h3>
+<p>把损失写到特征 \(\varphi_j\) 上（式 13–14），正负样本也取特征。与感知损失的区别：感知损失要求 \(\lVert\varphi(x)-\varphi(x_\text{target})\rVert^2\) 有配对的目标；这里的目标是 \(\varphi(x)+V\)，不需要配对，本质是在匹配 \(\varphi_\#q\) 与 \(\varphi_\#p\) <span class="src">论文 §3.4</span>。实现细节决定成败：</p>
+<ul>
+  <li><b>多尺度、多位置、多统计量。</b>ResNet 每 2 个残差块取一次特征图，对每张图取 (a) 每个位置的向量、(b) 全局均值和标准差、(c) 2×2 块均值 / 标准差、(d) 4×4 块均值 / 标准差，每个向量单独算一个漂移损失。(a,b) 9.58 → (a–c) 9.10 → (a–d) 8.46 <span class="src">论文 §A.5</span>。</li>
+  <li><b>特征与漂移归一化。</b>每个特征按批内平均距离缩放到 \(\sqrt{C_j}\)，温度相应设为 \(\tau\sqrt{C_j}\)；漂移再按 \(\sqrt{\mathbb E\lVert V_j\rVert^2/C_j}\) 归一化，使上百个损失项量级一致 <span class="src">论文 §A.6</span>。</li>
+  <li><b>多温度。</b>单独用 τ = 0.02 / 0.05 / 0.2 分别为 10.62 / 8.67 / 8.96，三者相加 8.46，且之后不再调 <span class="src">论文 §A.6</span>。</li>
+  <li><b>编码器质量很关键。</b>公开的 SimCLR / MoCo-v2（ResNet-50，需先过 VAE 解码到像素）分别 11.05 / 8.41；潜空间 MAE 宽 256 为 8.46，加宽到 640 并训 1280 epoch 为 4.28，再做分类微调 3.36 <span class="src">论文 Tab. 3</span>。作者的解释：好的特征让语义相近的样本足够近，避免核“处处平坦”。像素空间更依赖编码器：同一 MAE 下像素版 32.11（潜空间 8.46），加入 ConvNeXt-V2 后 3.70 <span class="src">论文 Tab. 9</span>。</li>
+</ul>
+
+<h3 id="c-cfg">3.4 训练时的 CFG</h3>
+<p>负样本不只来自生成分布，还按比例 γ 混入无条件真实数据：\(\tilde q(\cdot|c)=(1-\gamma)q_\theta(\cdot|c)+\gamma p_\text{data}(\cdot|\varnothing)\)。平衡时 \(\tilde q=p_\text{data}(\cdot|c)\)，解出 \(q_\theta(\cdot|c)=\alpha p_\text{data}(\cdot|c)-(\alpha-1)p_\text{data}(\cdot|\varnothing)\)，\(\alpha=1/(1-\gamma)\)，正是 CFG 的外推形式 <span class="src">论文 §3.5</span>。实现上给 N<sub>unc</sub> 个无条件样本核权重 w，由 α 反解；α 在 [1, 4] 内按幂律采样并作为网络条件（B/2 与像素模型 \(p(\alpha)\propto\alpha^{-5}\)；L/2 一半取 α = 1、一半按 \(\alpha^{-3}\)；消融按 \(\alpha^{-3}\)），推理时任意指定 <span class="src">论文 §A.7、Tab. 8</span> <span class="src">官方 configs 一致</span>。L/2 的最佳 FID 出现在 α = 1.0（扩散里相当于“不用 CFG”），B/2 在 α = 1.1 <span class="src">论文 §B.3</span>。</p>
+
+<h3 id="c-mmd">3.5 与 MMD、mean-shift、对比学习、GAN 的关系</h3>
+<ul>
+  <li><b>MMD。</b>任何在 p = q 处取最小的差异都诱导一个漂移场 \(V\propto-\partial\mathcal L/\partial x\)。对 MMD²，\(V_\text{MMD}(x)=\mathbb E_p[\partial_x\xi(x,y^+)]-\mathbb E_q[\partial_x\xi(x,y^-)]\)，对应的（未归一化）核是 \(-2\xi'\)。所以“未归一化核 + 特定 ξ”的 Drifting 就是 MMD 的梯度流；区别在于 Drifting 用归一化核 \(k/Z\)（mean-shift 形式，MMD 推不出来）、可以对 V 做归一化与步长缩放、自然支持 CFG。作者明确说：在 MMD 框架下他们<b>得不到合理结果</b> <span class="src">论文 §C.2</span>。五个月后 <a href="16-rdm.html">RDM</a> 给出相反结论——MMD 本身不弱，弱在估计方式。</li>
+  <li><b>mean-shift 与对比学习。</b>\(V^\pm\) 就是 mean-shift 向量；softmax 归一化的核与 InfoNCE 的形式相同，正负样本也对应对比学习的正负对 <span class="src">论文 §2、§3.3</span>。</li>
+  <li><b>GAN。</b>同样是“一个单次前向的生成器 + 一个分布层面的损失”，但没有对抗优化，损失的平衡点由构造保证 <span class="src">论文 §2</span>。</li>
+  <li><b>与 DMD 的分数差。</b>后续理论工作指出：在高斯核下，漂移算子恰好是两个平滑后分布的分数之差 <span class="src">Turan 等 2603.09936 摘要</span>——形式上接近 <a href="05-dmd.html">DMD</a> 的 \(s_\text{real}-s_\text{fake}\)，只是两项都由样本的核估计给出，而不是由教师与 fake score 网络给出。论文本身用的是拉普拉斯型核 \(\exp(-\lVert\cdot\rVert/\tau)\)，这一对应关系对它是否精确成立<span class="unverified">未核实</span>。</li>
+</ul>
+
+<h3 id="c-policy">3.6 Drifting Policy：动作生成</h3>
+<p>把 Diffusion Policy 里 100 步的扩散生成器换成一步 Drifting 生成器，其余协议不变；动作空间维度低，<b>直接在原始动作表示上计算漂移损失，不用特征编码器</b> <span class="src">论文 §5.3</span>。成功率（最后 10 个 checkpoint 平均）大多持平或更好，个别任务略降 <span class="src">论文 Tab. 7</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>任务（设置）</th><th class="num">Diffusion Policy，NFE 100</th><th class="num">Drifting Policy，NFE 1</th></tr></thead>
+  <tbody>
+    <tr><td>Lift（state / visual）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">0.98 / 1.00</td><td class="num">1.00 / 1.00</td></tr>
+    <tr><td>Can（state / visual）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">0.96 / 0.97</td><td class="num">0.98 / 0.99</td></tr>
+    <tr><td>ToolHang（state / visual）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">0.30 / 0.73</td><td class="num">0.38 / 0.67</td></tr>
+    <tr><td>PushT（state / visual）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">0.91 / 0.84</td><td class="num">0.86 / 0.86</td></tr>
+    <tr><td>BlockPush（phase 1 / 2）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">0.36 / 0.11</td><td class="num">0.56 / 0.16</td></tr>
+    <tr><td>Kitchen（phase 3 / 4）<br><span class="src">Drifting Tab. 7、§5.3</span></td><td class="num">1.00 / 0.99</td><td class="num">0.99 / 0.96</td></tr>
+  </tbody>
+</table></div>
+
+<h3 id="c-driftworld">3.7 DriftWorld：漂移第一次用于视频（2026-07）</h3>
+<p>DriftWorld（Lu, Chen, Ye, Du）把 Drifting 用于动作条件的视频世界模型：给定当前帧、3 帧历史和 T 个动作，一次前向生成 T 帧未来；作者称这是漂移生成首次用于条件视频生成 <span class="src">DriftWorld §II、§IV-A</span>。图像版的三个假设在这里都要改：</p>
+<ul>
+  <li><b>只有一个正样本。</b>类别条件下每类有很多真实图像，而“这段历史 + 这串动作”在数据集里只对应一段真实未来。于是 \(V(x)=\tilde k(x,y^+)\,Z\,(y^+-\hat y^-)\)：方向是从“核加权的负样本中心”指向唯一的真值；与 MSE 不同，每个样本的更新依赖其他 N − 1 个生成样本，这一机制区别于独立 MSE 回归；它本身不保证不坍塌，但论文在语言条件实验中观察到同一指令能生成多条不同轨迹 <span class="src">DriftWorld 式 (2)、§III-C、§IV-E</span>。</li>
+  <li><b>模型会忽略动作。</b>把当前真实帧 \(o_t\) 也加作负样本（权重 \((\alpha-1)(N-1)\)，α 在 [1, 4] 内对数均匀采样并作为条件），把预测推离“什么都不变”。RT-1 上 FVD 191.05 → 62.84（α = 2.5）<span class="src">DriftWorld §III-D、Tab. V</span>——这是 CFG 式负样本思想的直接迁移。</li>
+  <li><b>特征空间与静态背景。</b>真实场景在 SD3 VAE 潜空间生成，漂移损失在 DINOv3 的逐帧 16×16 patch 特征上计算；背景 patch 占多数，于是按“目标帧与当前帧特征变化”的 tanh 加运动权重。Bridge-V2 单步预测：不用特征 FID 34.24 / FVD 168.34，DINOv3 0.62 / 6.20。之后再加一阶段 Self Forcing 式训练（以自己的预测为条件），自回归 rollout 更稳 <span class="src">DriftWorld §III-D、Tab. V</span>（见 <a href="12-self-forcing.html">Self Forcing</a>）。</li>
+</ul>
+<p>结构上它是带时空分解卷积的 U-Net、FiLM 注入动作，而不是 DiT。速度是主要卖点：Bridge-V2 每帧 0.0242 s，IRASim 1.1031 s；FID / FVD 4.86 / 46.05 对 10.46 / 91.55；但 RT-1 上 FID 8.99 不如 IRASim 的 4.60（FVD 62.84 对 93.02 更好）<span class="src">DriftWorld Tab. IV</span>。用它给 Push-T 策略的 50 个候选动作打分（GPC-RANK），IoU 0.635 → 0.772；作为离线评估器，与真实成功率的 Pearson 相关 0.9755 / 0.9958 / 0.9618（Push-T / Lift / Can）<span class="src">DriftWorld Tab. III、§IV-D</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪（L/2 潜空间，一个训练步）</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>类别 × 每类生成数<br><span class="src">Tab. 8、§4</span></td><td>N<sub>c</sub> × N<sub>neg</sub> = 128 × 64 = 8192</td><td>有效批量 B；每个类别独立计算漂移</td></tr>
+    <tr><td>噪声 ε<br><span class="src">§4、§A.2</span></td><td>[8192, 32, 32, 4] + 32 个风格下标 ∈ [0, 64)</td><td>与 SD-VAE 潜变量同形</td></tr>
+    <tr><td>生成器 token<br><span class="src">§A.2、Tab. 8</span></td><td>16 + 256 个，宽 1024，24 层</td><td>patch 2：32×32 → 16×16</td></tr>
+    <tr><td>生成样本 x<br><span class="src">Drifting Tab. 8、App. A.2–A.6（核矩阵形状为推算）</span></td><td>[8192, 32, 32, 4]</td><td>像素版为 [·, 256, 256, 3]，DiT/16 同样 256 个 token</td></tr>
+    <tr><td>编码器特征图<br><span class="src">§A.3、§A.5</span></td><td>32²×C, 16²×2C, 8²×4C, 4²×8C，C = 640</td><td>每 2 个残差块取一次</td></tr>
+    <tr><td>每个特征向量的核矩阵（每类）<br><span class="src">Drifting Tab. 8、App. A.2–A.6（核矩阵形状为推算）</span></td><td>[64, 64 + 64 + 32]</td><td>行：生成样本；列：负（含自身，对角屏蔽）+ 正 + 无条件 <span class="unverified">由 Tab. 8 的 N<sub>neg</sub>、N<sub>pos</sub>、N<sub>unc</sub> 推算</span></td></tr>
+    <tr><td>漂移 V<sub>j</sub><br><span class="src">Drifting Tab. 8、App. A.2–A.6（核矩阵形状为推算）</span></td><td>[64, C<sub>j</sub>]</td><td>3 个温度各算一次，归一化后相加</td></tr>
+    <tr><td>推理<br><span class="src">§5.2</span></td><td>1 NFE</td><td>无 φ、无队列；像素 L/16 约 87 GFLOPs</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标</h2>
+<p>符号：论文记生成器为 f，本页统一写作本 track 的 \(G_\theta\)；生成样本 \(x=G_\theta(\epsilon)\sim q_\theta\)，真实样本 \(y^+\sim p\)，生成负样本 \(y^-\sim q\)。</p>
+<div class="formula">$$x_{i+1}=x_i+V_{p,q_i}(x_i),\qquad \mathcal L=\mathbb E_{\epsilon}\Big\lVert G_\theta(\epsilon)-\mathrm{sg}\big(G_\theta(\epsilon)+V_{p,q_\theta}(G_\theta(\epsilon))\big)\Big\rVert^2$$</div>
+<div class="formula">$$V_{p,q}(x)=V^+_p(x)-V^-_q(x)=\frac{1}{Z_pZ_q}\,\mathbb E_{p,q}\big[k(x,y^+)\,k(x,y^-)\,(y^+-y^-)\big],\qquad k(x,y)=\exp\!\Big(-\tfrac{1}{\tau}\lVert x-y\rVert\Big)$$</div>
+<div class="formula">$$\mathcal L_\text{feat}=\sum_j\mathbb E\Big\lVert\tilde\varphi_j(x)-\mathrm{sg}\big(\tilde\varphi_j(x)+\tilde V_j\big)\Big\rVert^2,\qquad \tilde V_j=\sum_{\tau\in\{0.02,0.05,0.2\}}\frac{V_{j,\tau}}{\lambda_{j,\tau}}$$</div>
+<p>\(Z_p, Z_q\) 是核的归一化常数（实现为 softmax）；\(\tilde\varphi_j=\varphi_j/S_j\) 是按批内平均距离归一化的特征；\(\lambda\) 是漂移的均方根 <span class="src">论文式 (6)、(11)、(12)、(14)、(18)–(26)</span>。平衡性质指总体场；有限批量估计仍有采样误差。−2V 是对样本坐标的梯度，更新共享网络参数时还要经过生成器的 Jacobian，不保证每个输出严格执行 x←x+V（本页数学限定）。损失值等于 \(\mathbb E\lVert V\rVert^2\)，作者观察到它的下降与生成质量的提升相关 <span class="src">论文 Fig. 1、Fig. 4</span>。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部不一致</span>
+  ① 特征编码器的残差块类型：§A.3 写“全部是 basic block（两个 3×3 卷积）”，Tab. 3 也标 basic，但 Tab. 8 的配置表写 “ResNet: block type — bottleneck”。② 批量定义：Tab. 2 标题写 \(B=N_c\times N_\text{pos}\)（4096），但左半表 N<sub>pos</sub> 从 1 变到 64 时 B 始终是 4096，与 Tab. 8 的 \(B=N_c\times N_\text{neg}\) 一致——标题应为 N<sub>neg</sub>。③ 官方 JAX 仓库 README 用发布权重复测：潜空间 L/2 1.53、B/2 1.74，像素 L/16 1.62、B/16 1.73（论文 1.54 / 1.75 / 1.61 / 1.76），差异在评估噪声量级。仓库中 <code>drift_loss.py</code> 的实现与 Alg. 2 一致（双轴 softmax 几何平均、自身屏蔽、按温度归一化后相加）。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">drifting_step.py（据论文 Alg. 1–2、§A.5–A.9 与官方 drift_loss.py 简化）</div>
+<pre><code class="lang-py">def compute_V(x, y_pos, y_neg, T):            # 论文 Alg. 2，单一温度
+    N = x.shape[0]
+    d_pos, d_neg = cdist(x, y_pos), cdist(x, y_neg)   # [N, N_pos], [N, N_neg]
+    d_neg[:, :N] += eye(N) * 1e6               # y_neg 的前 N 个就是 x 本身：屏蔽自己
+    logit = cat([-d_pos / T, -d_neg / T], dim=1)
+    A = sqrt(logit.softmax(dim=-1) * logit.softmax(dim=-2))  # 对 y、x 两轴归一化
+    A_pos, A_neg = A[:, :d_pos.shape[1]], A[:, d_pos.shape[1]:]
+    W_pos = A_pos * A_neg.sum(1, keepdim=True)   # k(x,y+) · Σ k(x,y-)
+    W_neg = A_neg * A_pos.sum(1, keepdim=True)
+    return W_pos @ y_pos - W_neg @ y_neg        # ≈ E[k k (y+ − y−)]，p = q 时为 0
+
+def train_step(G, phi, labels):                 # 论文 §A.9 的训练循环
+    loss = 0.0
+    for c in labels:                            # N_c 个类别，各自独立
+        alpha = sample_alpha()                  # [1,4] 内幂律采样（Tab. 8）；作为条件输入
+        eps = (randn(64, 32, 32, 4), randint(64, size=(64, 32)))  # 高斯 + 风格下标
+        x = G(eps, c, alpha)                    # 一次前向
+        y_pos = class_queue[c].sample(N_pos)    # 同类真实样本
+        y_unc = global_queue.sample(32)         # 无条件真实样本（核权重 w(α)，此处省略）
+        for fx, fp, fu in multiscale_features(phi, x, y_pos, y_unc):   # 也含原始空间一项
+            S = stopgrad(mean_pairwise_dist(fx, fp, fu)) / sqrt(fx.shape[-1])
+            fx, fp, fu = fx / S, fp / S, fu / S # 特征归一化：平均距离 ≈ √C
+            V = 0
+            for tau in (0.02, 0.05, 0.2):
+                Vt = compute_V(fx, fp, cat([fx, fu]), tau * sqrt(fx.shape[-1]))
+                V = V + Vt / stopgrad(sqrt((Vt ** 2).mean()))   # 漂移归一化
+            loss = loss + mse(fx, stopgrad(fx + V))   # 值 = ‖V‖²，梯度 = −2V
+    loss.backward()                             # 穿过冻结的 φ 回到 G
+    opt.step()</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>生成器<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>DiT-B/2（133M）、L/2（463M）；像素 B/16（134M）、L/16（464M）；16 个上下文 token，32 个风格 token</td><td>论文 Tab. 5、6、8</td></tr>
+    <tr><td>批量（最终）<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>N<sub>c</sub> = 128，N<sub>neg</sub> = 64，N<sub>pos</sub> = 128（B/2）/ 64（L/2），N<sub>unc</sub> = 32，有效批 8192</td><td>论文 Tab. 8</td></tr>
+    <tr><td>消融默认<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>B/2，100 epoch（30k 步），N<sub>c</sub> = N<sub>pos</sub> = N<sub>neg</sub> = 64，有效批 4096</td><td>论文 Tab. 8</td></tr>
+    <tr><td>优化器<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>AdamW（β = 0.9, 0.95），lr 4e-4（B/2、L/2、L/16）/ 2e-4（消融、B/16），warmup 10k（消融 5k），梯度裁剪 2.0；潜空间 200k 步 = 1280 epoch，像素 100k 步 = 640 epoch；EMA 在 {0.999, 0.9995, 0.9998, 0.9999} 中取</td><td>论文 Tab. 8；官方 <code>configs/gen/*.yaml</code> 一致</td></tr>
+    <tr><td>温度<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>τ ∈ {0.02, 0.05, 0.2}，每个温度一项，全部相加，不随配置调整</td><td>论文 Tab. 8、§A.6</td></tr>
+    <tr><td>特征编码器<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>latent-MAE ResNet，宽 640，[3, 4, 6, 3] 块，掩码率 50%，预训练 1280 epoch + 3k 步分类微调；MAE 训练 lr 4e-3、批 8192</td><td>论文 Tab. 8、§A.3</td></tr>
+    <tr><td>CFG<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>训练 α ∈ [1, 4]；推理在 [1.0, 3.5] 内搜索</td><td>论文 Tab. 8</td></tr>
+    <tr><td>算力<br><span class="src">Drifting Tab. 5–6、Tab. 8、App. A</span> <span class="src">官方 README</span></td><td>消融 64 张 TPU v6e，最终模型 128 张 TPU v6e</td><td>官方仓库 README</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p>ImageNet 256×256，FID-50K，所有生成器都从零训练（无蒸馏）<span class="src">论文 Tab. 5、Tab. 6</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>空间</th><th class="num">参数</th><th class="num">NFE</th><th class="num">FID</th><th class="num">IS</th></tr></thead>
+  <tbody>
+    <tr><td>SiT-XL/2 + REPA<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">675M+49M</td><td class="num">250×2</td><td class="num">1.42</td><td class="num">305.7</td></tr>
+    <tr><td>RAE + DiT<sup>DH</sup>-XL/2<br><span class="src">Drifting Tab. 5–6</span></td><td>RAE</td><td class="num">839M+415M</td><td class="num">50×2</td><td class="num">1.13</td><td class="num">262.6</td></tr>
+    <tr><td>iCT-XL/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">675M+49M</td><td class="num">1</td><td class="num">34.24</td><td class="num">–</td></tr>
+    <tr><td>Shortcut-XL/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">675M+49M</td><td class="num">1</td><td class="num">10.60</td><td class="num">–</td></tr>
+    <tr><td>MeanFlow-XL/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">676M+49M</td><td class="num">1</td><td class="num">3.43</td><td class="num">–</td></tr>
+    <tr><td>iMeanFlow-XL/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">610M+49M</td><td class="num">1</td><td class="num">1.72</td><td class="num">282.0</td></tr>
+    <tr><td>Drifting B/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">133M+49M</td><td class="num">1</td><td class="num">1.75</td><td class="num">263.2</td></tr>
+    <tr class="hl"><td>Drifting L/2<br><span class="src">Drifting Tab. 5–6</span></td><td>SD-VAE</td><td class="num">463M+49M</td><td class="num">1</td><td class="num">1.54</td><td class="num">258.9</td></tr>
+    <tr><td>PixelDiT/16<br><span class="src">Drifting Tab. 5–6</span></td><td>像素</td><td class="num">797M</td><td class="num">200×2</td><td class="num">1.61</td><td class="num">292.7</td></tr>
+    <tr><td>StyleGAN-XL<br><span class="src">Drifting Tab. 5–6</span></td><td>像素</td><td class="num">166M</td><td class="num">1</td><td class="num">2.30</td><td class="num">265.1</td></tr>
+    <tr><td>EPG-L/16<br><span class="src">Drifting Tab. 5–6</span></td><td>像素</td><td class="num">540M</td><td class="num">1</td><td class="num">8.82</td><td class="num">–</td></tr>
+    <tr class="hl"><td>Drifting L/16<br><span class="src">Drifting Tab. 5–6</span></td><td>像素</td><td class="num">464M</td><td class="num">1</td><td class="num">1.61</td><td class="num">307.5</td></tr>
+  </tbody>
+</table></div>
+<ul>
+  <li>从消融到最终（潜空间）：3.36（B/2，100 epoch）→ 2.51（320 epoch）→ 1.75（1280 epoch + 调参）→ 1.54（L/2）；像素：3.70 → 2.19 → 1.76（640 epoch）→ 1.61（L/16）<span class="src">论文 Tab. 4、Tab. 10</span>。</li>
+  <li>B/2（133M）已与此前 XL 级一步模型相当；与 iMF 在相同 IS 下对比（CFG 1.5）为 FID 3.01 / IS 354.4，iMF 可视化设置为 3.92 / 348.2 <span class="src">论文 Fig. 11 说明</span>。</li>
+  <li>需要留意：FID 只看 Inception 一个特征空间。<a href="16-rdm.html">RDM</a> 用 14 个编码器的 SW<sub>r14</sub> 重新测量时，Drifting-L 在 Inception 上与真实数据持平（比值 0.97），但在 DINOv3 上比值高达 18.2，总分 5.93，是该表所列生成器中最差的（iMF-XL 5.02，SiT-XL/2 4.27）<span class="src">RDM Tab. 1</span>。单一特征空间的 FID 与多编码器的判断可以相差很大，这正是 RDM 的出发点之一。</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul>
+    <li>一步生成要么蒸馏教师（DMD、一致性蒸馏），要么从零训练时近似 ODE 轨迹（iCT、Shortcut、MeanFlow：最好 1.72）。 <span class="src">Drifting §C.1–C.2</span> <span class="src">各后续 arXiv 摘要</span></li>
+    <li>GAN 能一步出图，但依赖对抗训练；MMD / 矩匹配生成网络（2015）被认为太弱。 <span class="src">Drifting §C.1–C.2</span> <span class="src">各后续 arXiv 摘要</span></li>
+  </ul></div>
+  <div class="now"><h4>Drifting 之后 → 留下的问题</h4><ul>
+    <li>用反对称核场在训练时演化分布，不要 ODE、不要对抗，一步 1.54 / 1.61。 <span class="src">Drifting §C.1–C.2</span> <span class="src">各后续 arXiv 摘要</span></li>
+    <li>离不开好的特征编码器；参考样本每批重采、批量受限 → <a href="16-rdm.html">RDM</a> 改用冻结的全数据 Nyström 参考 + MMD，并用多编码器防“刷分”。</li>
+    <li>\(V\to0\Rightarrow q\to p\) 无一般保证 → 得分匹配视角、Sinkhorn 视角的理论补全。</li>
+    <li>计算从推理挪到训练（大批量 cdist）→ DriftXpress 用低秩 RKHS 投影加速；只能一步 → Drift Flow Matching 允许按需多步细化。</li>
+    <li>视频：<a href="#c-driftworld">DriftWorld</a> 做动作条件一步视频；文本条件的少步因果视频则走了 RDM 这一支，见 <a href="17-virdm.html">ViRDM</a>。</li>
+  </ul></div>
+</div>
+<p>已核实的后续工作（无单独页面）：Generative Drifting is Secretly Score Matching（2026-03，高斯核下漂移 = 平滑分布的分数差）；Sinkhorn-Drifting（2026-03，与 Sinkhorn 散度梯度流的联系）；Drift-AR（2026-03，把熵当作反对称漂移场初始状态的方差，让 AR-扩散混合模型的视觉解码一步完成，报告 3.8–5.5× 加速）；DriftXpress（2026-05）；Drift Flow Matching（2026-05）。 <span class="src">Drifting §C.1–C.2</span> <span class="src">各后续 arXiv 摘要</span></p>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q29"><span class="qid">Q29</span>Drifting 的损失 ‖x − sg(x + V)‖² 实际在优化什么？为什么要 stop-gradient，反对称怎样保证数据分布是平衡点？</h3>
+  <div class="ans">
+    <p class="short">这个损失的数值就是 \(\lVert V\rVert^2\)，对样本 x 的梯度是 \(-2V\)：一次梯度下降等于让每个生成样本沿漂移场移动一小步，即训练时执行不动点迭代 \(x\leftarrow x+V\)。V 依赖整个生成分布 \(q_\theta\)（所有其他生成样本都在核里），对它反传意味着对“分布”求导，既复杂也会改变目标的含义；stop-gradient 把 V 当作本次迭代的冻结指示，只让网络去追它。反对称保证 p = q 时 V ≡ 0，也就是数据分布是这个迭代的平衡点；打破它，平衡点就移到别处。</p>
+    <ul>
+      <li>消融：\(1.5V^+-V^-\) 时 FID 8.46 → 41.05，只留吸引项 177.14——没有生成样本之间的排斥，样本只会挤向核加权的数据均值。 <span class="src">Drifting §3.2–3.4、§5.2–5.3、Tab. 1/3</span> <span class="src">DriftWorld Tab. V</span></li>
+      <li>反方向（V = 0 ⇒ p = q）没有一般保证，论文只给可辨识性启发式；损失下降与 FID 改善在实验上相关。</li>
+      <li>与 MMD 梯度流的差别在于归一化核与对 V 的归一化——这些让“步长”可以独立于特征量级来设定。</li>
+    </ul>
+    <p class="cite">依据：论文 §3.2、Prop. 3.1、Tab. 1、§C.1–C.2。</p>
+  </div>
+  <h3 id="q30"><span class="qid">Q30</span>Drifting 与 MMD、与 DMD 的“分数差”分别是什么关系？为什么它在 ImageNet 上离不开冻结特征编码器，在机器人动作上却可以不用？</h3>
+  <div class="ans">
+    <p class="short">任何在 p = q 处最小化的差异都诱导一个漂移场；MMD² 诱导的场是“真实样本处核梯度的均值 − 生成样本处核梯度的均值”，Drifting 的场与它同形，但用的是归一化核（mean-shift），并对漂移做归一化、支持训练时 CFG——作者在纯 MMD 框架下没能训出好结果。与 DMD 相比，二者都是“把样本往数据方向推、往自身分布反方向推”：DMD 用教师分数与在线 fake score 的差在加噪空间给出方向，Drifting 用两组样本的核估计在特征空间给出方向，不需要任何网络去拟合分数。核方法完全依赖“近”的度量是否有语义：在高维潜变量 / 像素空间，L2 距离让核几乎处处平坦、漂移信号消失，所以 ImageNet 必须在 SSL 特征里算（编码器越好 FID 越低：11.05 → 3.36）；机器人动作维度低、欧氏距离本身有意义，直接在原始表示上算即可。 <span class="src">Drifting §3.2–3.4、§5.2–5.3、Tab. 1/3</span> <span class="src">DriftWorld Tab. V</span></p>
+    <ul>
+      <li>理论后续指出：高斯核下漂移恰为平滑后两分布的分数差，这把它与 DMD 一族联系起来（论文本身用的是拉普拉斯型核）。</li>
+      <li>DriftWorld 在视频上沿用这一点：真实场景用 DINOv3 特征，FID 34.24 → 0.62。 <span class="src">Drifting §3.2–3.4、§5.2–5.3、Tab. 1/3</span> <span class="src">DriftWorld Tab. V</span></li>
+    </ul>
+    <p class="cite">依据：论文 §3.4、§5.2、§5.3、Tab. 3、§C.2；DriftWorld Tab. V；Turan 等 2603.09936 摘要。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Deng, Li, Li, Du, He. <i>Generative Modeling via Drifting.</i> 2026（项目页标注 NeurIPS 2026 Oral）. <a href="https://arxiv.org/abs/2602.04770">arXiv:2602.04770</a> · <a href="https://lambertae.github.io/projects/drifting/">项目页</a> · <a href="https://github.com/lambertae/drifting">官方 JAX 代码</a></li>
+  <li>Lu, Chen, Ye, Du. <i>DriftWorld: Fast World Modeling through Drifting.</i> 2026. <a href="https://arxiv.org/abs/2607.15065">arXiv:2607.15065</a> · <a href="https://susie-lu.github.io/driftworld/">项目页</a></li>
+  <li>Turan, Dufour, Ovsjanikov. <i>Generative Drifting is Secretly Score Matching: a Spectral and Variational Perspective.</i> 2026. <a href="https://arxiv.org/abs/2603.09936">arXiv:2603.09936</a></li>
+  <li>He, Khangaonkar, Pirsiavash, Bai, Kolouri. <i>Sinkhorn-Drifting Generative Models.</i> 2026. <a href="https://arxiv.org/abs/2603.12366">arXiv:2603.12366</a></li>
+  <li>Zou et al. <i>Drift-AR: Single-Step Visual Autoregressive Generation via Anti-Symmetric Drifting.</i> 2026. <a href="https://arxiv.org/abs/2603.28049">arXiv:2603.28049</a></li>
+  <li>Falahati, Creager, Kamath, Mohapatra. <i>DriftXpress: Faster Drifting Models via Projected RKHS Fields.</i> 2026. <a href="https://arxiv.org/abs/2605.12183">arXiv:2605.12183</a></li>
+  <li>Ma et al. <i>Drift Flow Matching.</i> 2026. <a href="https://arxiv.org/abs/2605.17244">arXiv:2605.17244</a></li>
+  <li>Li, Swersky, Zemel. <i>Generative Moment Matching Networks.</i> ICML 2015. <a href="https://arxiv.org/abs/1502.02761">arXiv:1502.02761</a></li>
+  <li>Geng et al. <i>Mean Flows for One-step Generative Modeling.</i> 2025. <a href="https://arxiv.org/abs/2505.13447">arXiv:2505.13447</a>；<i>Improved Mean Flows.</i> <a href="https://arxiv.org/abs/2512.02012">arXiv:2512.02012</a></li>
+  <li>Chi et al. <i>Diffusion Policy: Visuomotor Policy Learning via Action Diffusion.</i> RSS 2023. <a href="https://arxiv.org/abs/2303.04137">arXiv:2303.04137</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

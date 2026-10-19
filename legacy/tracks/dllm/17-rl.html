@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dLLM 的强化学习：d1、LLaDA 1.5 与 TraceRL</title>
+<meta name="description" content="dLLM 后训练的核心难题是估计 log π：d1 的单步均场估计（diffu-GRPO）、LLaDA 1.5 对 ELBO 偏好优化的方差分析与降方差（VRPO）、TraceRL 按推理轨迹计算条件概率并配扩散价值模型；附 wd1、SPG、ESPO 时间线指针。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="d1">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：RL 算法都要 log π，dLLM 给不出来</h2>
+<p>PPO / GRPO 需要逐 token 的概率比 \(\pi_{\theta}(o^k\mid c,o^{&lt;k})/\pi_{\mathrm{old}}(\cdot)\) 和序列级 KL；DPO 需要序列对数似然之差。AR 模型一次因果前向就能给出全部条件概率。dLLM 没有这种分解：一条回答可以由许多种揭开顺序生成，序列似然是对所有去噪轨迹求和（长度 \(N\) 时轨迹数为 \(O(N!)\)）；能算的只有 ELBO 这个下界，而且要对时间 \(t\) 和掩码样本做双重蒙特卡洛。LLaDA 原文的似然估计用 128 个 MC 样本，放进在线 RL 的计算图里太贵。<span class="src">d1 §3、§3.1；Flexibility Trap §4.1；LLaDA 1.5 §2.2</span></p>
+<p>本页三篇分别给出一种 log π 的估计方式，代表三种取舍：</p>
+<ul>
+  <li><b>d1 / diffu-GRPO</b>：只做一次前向——随机掩码部分提示、回答全掩码，把这一步的逐 token 预测当作 \(\log\pi\)，序列似然取均场乘积。最便宜，偏差最大。<span class="src">d1 §3.1</span></li>
+  <li><a href="#llada-15">LLaDA 1.5 / VRPO</a>：老老实实用 ELBO 做 DPO，然后证明估计方差同时决定损失的偏差与方差，再用增加预算、最优分配与对偶采样三招无偏地降方差。<span class="src">LLaDA 1.5 §3</span></li>
+  <li><a href="#tracerl">TraceRL</a>：不再随机掩码，而是沿模型实际的推理轨迹，用“前几步已定稿的 token”作条件计算每一步定稿 token 的概率，并训练扩散价值模型做逐步优势。<span class="src">TraceRL §3–4</span></li>
+</ul>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  dLLM 的 RL 难点不在优化器，而在“被优化的到底是哪个分布”：d1 优化的是“一步全掩码”时的边缘，VRPO 优化的是 ELBO，TraceRL 优化的是实际采样器走过的那条轨迹上的条件概率。离实际采样器越近，估计越贴切，但需要的前向次数通常也越多。
+</div>
+<p>记号：提示 \(c\)，回答 \(o\)（第 \(k\) 个 token \(o^k\)），组大小 \(G\)，优势 \(A\)，裁剪 \(\varepsilon\)，KL / DPO 系数 \(\beta\)，去噪网络 \(f_{\theta}\)（即 \(p_{\theta}(x_0^i\mid x_t)\)），第 \(k\) 步同步定稿的 token 集合 \(S_k\)。d1 用 \(q\) 表示提示；LLaDA 1.5 用 \(x\) 表示提示、\(y_w,y_l\) 表示偏好对；TraceRL 用 \(\tau\) 表示轨迹、\(\mathcal T\) 表示阈值、\(Q\) 表示提示。</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：diffu-GRPO 的一次外循环</h2>
+<div class="legend">
+  <span><i class="sw act"></i>条件：提示、奖励</span><span><i class="sw enc"></i>策略 dLLM（可训练 / 本轮快照）</span>
+  <span><i class="sw tgt"></i>冻结参考策略</span><span><i class="sw data"></i>token 画布 / rollout</span>
+  <span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M]</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="diffu-GRPO：策略扩散采样 G 条回答并计算奖励优势；把提示随机掩码、回答全掩码后一次前向得到逐 token 对数概率，供当前、旧与参考策略计算裁剪比值与 KL；内循环每次重抽掩码">
+    <g class="act" data-part="prompt" data-step="1">
+      <rect class="box" x="20" y="40" width="140" height="64" rx="10"/>
+      <text class="t-c t-b" x="90" y="64">提示 c</text>
+      <text class="t-c t-sm" x="90" y="86">GSM8K 等训练集</text>
+    </g>
+    <path class="edge act" d="M160,72 H196" data-step="1"/>
+    <g class="enc" data-part="rollout" data-step="1">
+      <rect class="box" x="200" y="40" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="310" y="64">策略 π<tspan font-size="10" dy="3">old</tspan><tspan dy="-3"> 扩散采样</tspan></text>
+      <text class="t-c t-sm" x="310" y="86">块 32 · 每步 2 token · 128 步</text>
+    </g>
+    <path class="edge enc" d="M420,72 H456" data-step="1"/>
+    <g class="data" data-part="outs" data-step="1 2">
+      <rect class="box" x="460" y="34" width="240" height="76" rx="10"/>
+      <text class="t-sm" x="476" y="50">G=6 条回答</text>
+      <text class="t-xs" x="476" y="66">o1</text><text class="t-xs" x="476" y="82">o2</text><text class="t-xs" x="476" y="98">oG</text>
+      <rect class="tk enc" x="500" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="515" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="530" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="545" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="560" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="575" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="590" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="605" y="60" width="12" height="12" rx="2"/><rect class="tk enc" x="620" y="60" width="12" height="12" rx="2"/>
+      <rect class="tk enc" x="500" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="515" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="530" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="545" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="560" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="575" y="76" width="12" height="12" rx="2"/><rect class="tk enc" x="590" y="76" width="12" height="12" rx="2"/><rect class="tk off" x="605" y="76" width="12" height="12" rx="2"/><rect class="tk off" x="620" y="76" width="12" height="12" rx="2"/>
+      <rect class="tk enc" x="500" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="515" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="530" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="545" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="560" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="575" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="590" y="92" width="12" height="12" rx="2"/><rect class="tk enc" x="605" y="92" width="12" height="12" rx="2"/><rect class="tk off" x="620" y="92" width="12" height="12" rx="2"/>
+    </g>
+    <path class="edge act" d="M700,72 H736" data-step="2"/>
+    <g class="act" data-part="reward" data-step="2">
+      <rect class="box" x="740" y="40" width="200" height="64" rx="10"/>
+      <text class="t-c t-b" x="840" y="64">奖励 r<tspan font-size="10" dy="3">i</tspan></text>
+      <text class="t-c t-sm" x="840" y="86">A_i = r_i − 组均值</text>
+    </g>
+    <path class="edge" d="M90,104 V146" data-step="3"/>
+    <path class="edge" d="M580,110 V130 H300 V146" data-step="3"/>
+    <g class="data" data-part="estin" data-step="3">
+      <rect class="box" x="20" y="150" width="420" height="110" rx="10"/>
+      <text class="t-sm" x="36" y="168">估计输入：c′ ⊕ 全 [M] 回答</text>
+      <rect class="tk act" x="40" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="64" y="182" width="20" height="20" rx="3"/><rect class="tk act" x="88" y="182" width="20" height="20" rx="3"/><rect class="tk act" x="112" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="136" y="182" width="20" height="20" rx="3"/><rect class="tk act" x="160" y="182" width="20" height="20" rx="3"/>
+      <rect class="tk mask" x="196" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="220" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="244" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="268" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="292" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="316" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="340" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="364" y="182" width="20" height="20" rx="3"/><rect class="tk mask" x="388" y="182" width="20" height="20" rx="3"/>
+      <text class="t-c t-sm" x="120" y="220">提示：每个 token 以 0.15 掩码</text>
+      <text class="t-c t-sm" x="302" y="220">回答：全部 [M]</text>
+      <text class="t-c t-xs" x="230" y="244">一次前向读出每个回答 token 的对数概率</text>
+    </g>
+    <path class="edge" d="M440,218 H476" data-step="4"/>
+    <path class="edge" d="M458,218 V170 H476" data-step="4"/>
+    <path class="edge" d="M458,218 V266 H476" data-step="4"/>
+    <g class="enc" data-part="policy" data-step="4">
+      <rect class="box" x="480" y="150" width="220" height="40" rx="8"/>
+      <text class="t-c t-b" x="590" y="170">π<tspan font-size="10" dy="3">θ</tspan><tspan dy="-3">（LoRA，可训练）</tspan></text>
+      <rect class="box" x="480" y="198" width="220" height="40" rx="8"/>
+      <text class="t-c t-b" x="590" y="218">π<tspan font-size="10" dy="3">old</tspan><tspan dy="-3">（本轮快照）</tspan></text>
+    </g>
+    <g class="tgt" data-part="piref" data-step="4">
+      <rect class="box frozen" x="480" y="246" width="220" height="40" rx="8"/>
+      <text class="t-c t-b" x="590" y="266">π<tspan font-size="10" dy="3">ref</tspan><tspan dy="-3">（冻结参考）</tspan></text>
+    </g>
+    <path class="edge loss" d="M700,170 H720 V200 H736" data-step="5"/>
+    <path class="edge loss" d="M700,218 H736" data-step="5"/>
+    <path class="edge loss" d="M700,266 H720 V236 H736" data-step="5"/>
+    <path class="edge act" d="M840,104 V166" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="740" y="170" width="200" height="96" rx="10"/>
+      <text class="t-c t-b" x="840" y="196">diffu-GRPO 损失</text>
+      <text class="t-c t-sm" x="840" y="220">裁剪比值 × A_i</text>
+      <text class="t-c t-sm" x="840" y="242">− β·KL，β = 0.04</text>
+    </g>
+    <path class="edge loss" d="M840,266 V312 H230 V264" data-step="6"/>
+    <text class="t-c t-sm" x="535" y="328" data-step="6">内循环 μ=12：每次更新重抽提示掩码</text>
+    <g data-part="meanfield" data-step="4">
+      <rect class="panel" x="20" y="346" width="920" height="70" rx="10"/>
+      <text class="t-c t-sm" x="480" y="372">均场近似：log π(o|c) ≈ Σ_k log f_θ(o^k | c′ ⊕ [M]…[M])</text>
+      <text class="t-c t-xs" x="480" y="396">忽略回答内部 token 之间的依赖，也不对应实际多步采样器走过的轨迹</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>按任务分别训练</h4><p>GSM8K、MATH500 用训练集，Countdown、Sudoku 用合成数据，每个任务单独训一个模型；奖励由格式分与正确性分组成。<span class="src">d1 §4.1、App. D.1.1</span></p></div>
+    <div data-note="rollout"><h4>rollout 用真实的扩散采样</h4><p>在线生成限长 256（太慢，无法更长），按块 32 半自回归、每步定稿置信度最高的 2 个 token。<span class="src">d1 §4.1、App. D</span>官方配置为 128 个扩散步、低置信度重掩码。<span class="src">官方 train.yaml</span></p></div>
+    <div data-note="outs"><h4>G 条回答</h4><p>每个提示采样 \(G\) 条；官方配置 <code>num_generations: 6</code>。不同长度的回答以 EOS / 填充结束（图中灰块）。<span class="src">官方 train.yaml</span></p></div>
+    <div data-note="reward"><h4>不做标准差归一</h4><p>优势取 \(A_i=r_i-\mathrm{mean}(r)\)，不除以组内标准差（作者认为除以非零状态函数会引入偏差，参照 Dr. GRPO）。<span class="src">d1 §2.2、Eq. 2；官方 trainer</span></p></div>
+    <div data-note="estin"><h4>随机掩码提示 = 正则 / 数据增强</h4><p>提示中每个 token 以 \(p_{\mathrm{mask}}=0.15\) 换成 \([\mathrm M]\)，回答全部掩码。每次梯度更新换一个掩码模式，同一条 (提示, 回答) 得到不同的估计，作者把它看作正则化。0.1 / 0.3 稳定，0.5 / 0.7 后期不稳，0（不掩码）略差。<span class="src">d1 §3.1–3.2、Fig. 6、App. D.1</span></p></div>
+    <div data-note="policy"><h4>当前策略与旧策略</h4><p>同一掩码下分别前向，得到 \(\phi^{\pi_{\theta}}(o^k\mid c')\) 与 \(\phi^{\pi_{\mathrm{old}}}(o^k\mid c')\)，两者之比即逐 token 重要性比。LoRA r=128、α=64，4-bit 量化，8×A100-80G。<span class="src">d1 Eq. 4、App. D.1</span></p></div>
+    <div data-note="piref"><h4>参考策略</h4><p>论文称 \(\pi_{\mathrm{ref}}\) 通常为初始模型；官方配置开启 <code>sync_ref_model</code>，每 64 步把参考模型同步为当前策略。KL 用 k3 估计 \(e^{\Delta}-\Delta-1\)，\(\Delta=\log\pi_{\mathrm{ref}}-\log\pi_{\theta}\)。<span class="src">d1 §2.2；官方 train.yaml、diffu_grpo_trainer.py</span></p></div>
+    <div data-note="loss"><h4>其余与 GRPO 相同</h4><p>逐 token 裁剪比值乘优势，减去 \(\beta\) 倍 KL，对回答长度与组大小取平均。官方配置 \(\beta=0.04\)、裁剪 \(\varepsilon=0.5\)（论文未给出）。<span class="src">d1 Eq. 3–4；官方 train.yaml</span></p></div>
+    <div data-note="meanfield"><h4>估计的是什么</h4><p>序列对数概率取逐 token 之和（均场），每个 token 的概率取“回答全掩码”时的一步预测。它不等于实际多步采样器生成 \(o\) 的概率：采样时后面的 token 是在前面已定稿的条件下生成的。<span class="src">d1 §3.1</span>后续 <a href="#tracerl">TraceRL</a> 正是针对这一不一致。</p></div>
+    <div data-step-note="1"><h4>① 采样</h4><p>旧策略用完整扩散采样为每个提示生成 G 条回答。</p></div>
+    <div data-step-note="2"><h4>② 奖励与优势</h4><p>可验证奖励减去组均值得到优势，整条回答共享。</p></div>
+    <div data-step-note="3"><h4>③ 构造估计输入</h4><p>提示随机掩码 15%，回答全部换成 [M]。</p></div>
+    <div data-step-note="4"><h4>④ 单步前向</h4><p>当前、旧、参考三个模型在同一输入上各前向一次，得到逐 token 对数概率；序列似然取均场之和。</p></div>
+    <div data-step-note="5"><h4>⑤ 损失与更新</h4><p>裁剪比值乘优势减 KL，反传只经过 π_θ。</p></div>
+    <div data-step-note="6"><h4>⑥ 内循环</h4><p>同一批 rollout 上更新 μ=12 次，每次重抽提示掩码；更大的 μ 减少需要的在线生成次数。</p></div>
+  </div>
+  <figcaption>图 1　d1 的 diffu-GRPO 一次外循环。依据 d1 §3、Alg. 1、Fig. 2、App. D 与官方代码 <code>diffu-grpo/</code>。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-logp">3.1 核心问题：用什么代替 log π</h3>
+<p>三个层次的困难：① 序列似然对所有去噪轨迹求和，不可解；② 逐 token 的条件概率没有唯一定义（“第 \(k\) 个 token 在什么状态下被生成”取决于轨迹），因此 GRPO 的 token 级比值也没有唯一定义；③ 即使有好的似然近似，rollout 用的是置信度驱动的采样器，被优化的却是模型分布，两者并不一致。<span class="src">Flexibility Trap §4.1</span>ELBO \(\mathcal B_{\pi}(y\mid c)=\mathbb E_{t}\mathbb E_{y_t}[\ell_{\pi}(y_t,t,y\mid c)]\le\log\pi(y\mid c)\) 可以无偏估计，但它是下界而非似然本身，且估计方差随样本数 \(n\) 按 \(\Theta(1/n)\) 下降。<span class="src">LLaDA 1.5 Eq. 4–6、Prop. 1</span></p>
+<h3 id="c-diffu-grpo">3.2 d1：掩码 SFT + diffu-GRPO</h3>
+<p>第一阶段在 s1K（1000 条带验证、回溯的推理轨迹）上做掩码 SFT，序列长 4096；作者发现必须对 PAD / EOS 计损失并填充到最大长度，LLaDA 才能正确终止生成。<span class="src">d1 §3.3、App. D.2</span>第二阶段 diffu-GRPO 如图 1。单步估计让每次梯度更新只需一次前向，随机提示掩码使内循环更新次数 μ 可以从常见的 2 提高到 12 甚至 24 而不过拟合当前批次，从而减少昂贵的在线生成；图 5 显示更大的 μ 在更短墙钟时间内达到相同奖励。<span class="src">d1 §3.2、§4.4、Fig. 5</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码 / 评测口径</span>
+  ① 官方 <code>train.yaml</code>：<code>num_generations: 6</code>、<code>num_iterations: 12</code>、<code>beta: 0.04</code>、<code>epsilon: 0.5</code>、<code>p_mask_prompt: 0.15</code>、<code>diffusion_steps: 128</code>、<code>block_length: 32</code>；裁剪 0.5 比 PPO 常用的 0.2 宽得多，论文正文未给出。② 论文称参考策略“通常为初始模型”，代码开启 <code>sync_ref_model</code>、每 64 步同步。③ 评测时 diffu-GRPO 与 d1 模型“从第 600 步起每 100 步评测一次、报告最好结果”，即用测试集挑检查点，而基线只评最终检查点。<span class="src">d1 §2.2、§4.1；官方 train.yaml</span>
+</div>
+
+<h3 id="llada-15">3.3 LLaDA 1.5：VRPO，给 ELBO 偏好优化降方差</h3>
+<p>把 DPO 中的对数似然换成 ELBO，得到偏好分数 \(s_{\theta}\)（四个 ELBO 的线性组合）；实际训练中每个 ELBO 用 \(n=n_t\times n_{y_t}\) 个掩码样本估计。估计量 \(\hat s_{\theta}\) 本身无偏，但套上非线性的 \(\log\sigma\) 后损失有偏，且有方差。Theorem 1：损失的偏差不超过 \(\sqrt{\mathbb V\hat s_{\theta}}\)，方差不超过 \(4\,\mathbb E[\mathbb V\hat s_{\theta}]\)；梯度有类似结论。所以只需压低 \(\hat s_{\theta}\) 的方差。<span class="src">LLaDA 1.5 Eq. 7–8、Thm. 1、App. B.4</span></p>
+<p>三种无偏降方差手段：① 加大预算 \(n\)（方差 \(\Theta(1/n)\)）；② 固定总预算时全部分给时间步，\(n_t=n\)、每个时间步只取 1 个掩码样本（Prop. 1 证明这是最优分配）；③ 对偶采样：同一个回答 \(y\) 在当前策略与参考策略上共享相同的 \((t,\text{掩码})\)，两者正相关时差值的方差变小（Prop. 2）。后两项不增加计算，是“免费”的。<span class="src">LLaDA 1.5 §3.2、Prop. 1–2</span>默认 \(n=8\)，计算约为 \(n=1\) 的 8 倍，但总成本不到预训练的 0.5%（约 405 H100 GPU 小时）。<span class="src">LLaDA 1.5 §4、App. D.3</span>作者指出同样的技巧可以用于 PPO / GRPO 中的 ELBO 似然或似然比项。<span class="src">LLaDA 1.5 §3.3</span></p>
+<p>消融（固定其余设置）：score 估计量方差在 \(n_t=1\) 时为 44.0，\(n_t=4\) 时 2.2，\(n_t=8\) 时 1.0；同样预算 4 下 \((n_t,n_{y_t})=(1,4)\) 为 7.3、(2,2) 为 4.7；去掉对偶采样（\(n_t=4\)）高达 2183.7。GSM8K 依次为 80.1 / 82.8 / 83.3 / 81.4 / 82.3 / 82.0。<span class="src">LLaDA 1.5 Tab. 2</span></p>
+<div class="callout code-note">
+  <span class="callout-title">评测口径（LLaDA 1.5 App. D.4）</span>
+  ① 两个模型的答案长度（64–1024）与块长（8–128）按任务分别调优后取最好，配置不同（如 GSM8K：LLaDA 块 8、LLaDA 1.5 块 16）。② 评测时把 EOS 的置信度置零，LLaDA 的 HumanEval 从 47.6 升到 49.4，表中基线用的是后者。③ HumanEval 基线 49.4 来自低置信度重掩码，LLaDA 1.5 的 52.4 来自半自回归采样；同一采样器下比较时 LLaDA 1.5 在低置信度重掩码上反而略低（47.0 vs 49.4）。三次种子重跑：GSM8K 82.9 ± 0.6、HumanEval 52.0 ± 0.7。<span class="src">LLaDA 1.5 App. D.4、Tab. 4–6</span>
+</div>
+
+<h3 id="tracerl">3.4 TraceRL / TraDo：沿推理轨迹做 RL，配扩散价值模型</h3>
+<p><b>先看训练–推理不一致。</b>在“无 CoT 提示下学会 CoT”的 SFT 实验里（2000 条 Qwen2.5 生成数据，MATH500），等计算量下按模型自己偏好的推理轨迹微调最好：Dream-7B-Instruct（全注意力）轨迹 54.4%、半自回归 52.6%、完全随机掩码（扩增 35 倍到相同前向量）45.1%；SDAR-4B-Chat（块注意力，块 4）轨迹 71.3%、半自回归 70.0%。<span class="src">TraceRL §3、Tab. 1</span>RL 的 rollout 本身就产生这些轨迹，因此直接在轨迹上做 RL。<span class="src">TraceRL §3.3</span></p>
+<p><b>目标。</b>把一条 rollout 记成各步定稿集合 \((S_1,\dots,S_K)\)，第 \(k\) 步 token 的概率以前 \(k-1\) 步已定稿的 token 为条件（其余位置为 \([\mathrm M]\)）计算；为了减少前向次数，把相邻 \(s\) 步合并（收缩参数 \(s\)），计算量降为 \(1/s\)。块扩散模型还可以把各块的第 \(l\) 步拼成一个“切片”，借块注意力一次前向算完。<span class="src">TraceRL §4.1、§4.3、Eq. 3</span></p>
+<p><b>扩散价值模型。</b>只给最后一步的 token 记整条轨迹的奖励，其余为 0；冻结的旧价值网络对每步 token 估值并取平均作为步值，再按步计算回报与 GAE，映射回 token 级优势；价值网络用裁剪回归损失训练。作者报告加价值模型后训练曲线波动更小（4B 数学任务）。<span class="src">TraceRL §4.2、§5.7、Eq. 4、Fig. 6</span></p>
+<p><b>结果与副作用。</b>以 SDAR-4B / 8B-Chat（块 4）为底座，只用 TraceRL 训练得到 TraDo-4B / 8B-Instruct；再加长 CoT SFT 与课程得到 TraDo-8B-Thinking。RL 后动态解码每步定稿 token 数在 MATH500 上从 2.28 升到 2.63（+15.4%）；用 TraceRL 还能把块大小从 4 适配到 8（块 8 推理时 MATH500 60.2 → 67.7）。<span class="src">TraceRL §5.2–5.3、§5.8–5.9、Tab. 3–4</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部不一致（TraceRL v1）</span>
+  ① §5.3 称 TraDo-8B-Thinking 的 MATH500 为 85.8%，Tab. 2 与 Fig. 1 为 87.4%（摘要“比 Qwen2.5-7B-Instruct 相对高 18.1%”与 87.4 / 74.0 一致）。② Tab. 2 图注把长 CoT 模型写成 “TraDo-8B-Instruct”，应为 Thinking。③ §5.4 称 TraDo-4B 动态解码 MATH500 提升 4.2，表中为 71.8 − 67.4 = 4.4。<span class="src">TraceRL 摘要、§5.3–5.4、Tab. 2</span>
+</div>
+
+<h3 id="c-timeline">3.5 时间线上的其他估计器（只看摘要）</h3>
+<ul>
+  <li><a href="https://arxiv.org/abs/2507.08838">wd1</a>（2025-07，ICLR 2026）：把 RL 目标改写为加权对数似然，不需要重要性比，只近似当前策略的似然。<span class="src">wd1 摘要</span></li>
+  <li><a href="https://arxiv.org/abs/2510.09541">SPG</a>（2025-10，ICLR 2026）：同时用真实对数似然的上界与下界“夹逼”策略梯度，减小只用 ELBO 下界的单侧偏差。<span class="src">SPG 摘要</span></li>
+  <li><a href="https://arxiv.org/abs/2512.03759">ESPO</a>（2025-12）：把整条序列视为一个动作，用 ELBO 作序列级似然代理，配逐 token 归一化的重要性比与稳健 KL 估计。<span class="src">ESPO 摘要</span></li>
+  <li><a href="16-order-limits.html#flexibility-trap">JustGRPO</a>（2026-01）：RL 阶段放弃任意顺序，按左到右定义精确似然，直接套标准 GRPO。代码模型上的互补掩码 coupled-GRPO 见 <a href="18-code.html">DiffuCoder</a>。</li>
+</ul>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>d1（diffu-GRPO）</th><th>LLaDA 1.5（VRPO）</th><th>TraceRL（TraDo）</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>掩码 SFT + GRPO 式裁剪目标，log π 用单步均场估计。<span class="src">§3</span></td><td>DPO，log π 换成 ELBO，n=8 + 最优分配 + 对偶采样；另加 0.05 倍 SFT 损失。<span class="src">§3、App. D.3</span></td><td>PPO 式裁剪目标，log π 取轨迹上各步条件概率；可选扩散价值模型（GAE）。<span class="src">Eq. 3–4</span></td><td>GRPO / PPO / DPO，精确 token 对数概率。</td></tr>
+    <tr><td>注意力与 KV cache</td><td>LLaDA 全双向；估计 log π 只需一次前向（无缓存需求）。</td><td>LLaDA 全双向；训练时多条偏好数据打包进 4096 长序列，块对角注意力隔离。<span class="src">App. D.1</span></td><td>SDAR 块注意力（块 4）可精确缓存，rollout 用 JetEngine；全注意力模型用改进的 Fast-dLLM 缓存。<span class="src">App. B.3</span></td><td>因果注意力，精确 KV cache；一次前向得到全部条件概率。</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>rollout 与评测每步 2 个（块 32）。<span class="src">App. D</span></td><td>沿用 LLaDA 采样，长度与块长逐任务调优。<span class="src">App. D.4</span></td><td>动态解码（阈值 0.9）MATH500 平均 2.63 个 / 步（TraDo-4B）；静态 1 个。<span class="src">Tab. 4、§5.1.3</span></td><td>1。</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>随机掩码提示提供“免费”的估计多样性，内循环可更新 12 次。<span class="src">§3.2</span></td><td>对偶采样：当前与参考策略共享掩码，几乎不增成本地降方差。<span class="src">Prop. 2</span></td><td>RL 同时提升动态解码并行度，并能把块大小从 4 调到 8。<span class="src">§5.8–5.9</span></td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>估计有偏（均场、单步 ≠ 实际采样器）；rollout 限长 256，RL 后 CoT 没有变长。<span class="src">§3.1、§4.3</span></td><td>计算 ×8；ELBO 仍是下界；数据为私有 35 万对。<span class="src">§4</span></td><td>需记录每步轨迹；前向次数随步数增长（靠 s 收缩）；价值模型额外训练。<span class="src">§4.1–4.2</span></td><td>严格串行生成。</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 样本、估计次数与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 次数</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>d1 估计输入</td><td>[G, |c| + 256]，|c| ≤ 200</td><td>提示 15% 掩码，回答全掩码。<span class="src">官方 train.yaml</span></td></tr>
+    <tr><td>d1 每次内循环</td><td>π_θ、π_old、π_ref 各 1 次前向 × G 条</td><td>同一掩码种子；μ=12 次 / 批。<span class="src">官方 diffu_grpo_trainer.py</span></td></tr>
+    <tr><td>LLaDA 原 MC 似然</td><td>128 个掩码样本 / 序列</td><td>d1 认为放进在线 RL 太贵。<span class="src">d1 §3.1</span></td></tr>
+    <tr><td>VRPO 每个偏好对</td><td>2 条回答 × n=8 掩码 × 2 个模型 = 32 次序列前向（推算）</td><td>参考模型不反传；对偶采样共享掩码。<span class="src">LLaDA 1.5 §3.2、§4</span></td></tr>
+    <tr><td>TraceRL 全注意力</td><td>⌈|τ| / s⌉ 次前向 / 条</td><td>代码 RL 实验平均长 380、s=8 → 约 47.5 次。<span class="src">TraceRL App. B.5</span></td></tr>
+    <tr><td>TraceRL 块注意力</td><td>B′ ≤ ⌈B / s⌉ 个切片，每片 1 次前向</td><td>块 4 时最多 4 次。<span class="src">TraceRL §4.3</span></td></tr>
+    <tr><td>AR 参照</td><td>1 次因果前向 / 条</td><td>得到全部 token 的精确条件概率。</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然估计</h2>
+<p><b>diffu-GRPO</b>（最大化；\(\phi^{\pi}(o^k\mid c')=f(o^k\mid c'\oplus[\mathrm M]\cdots[\mathrm M])\)）：</p>
+<div class="formula">$$\mathcal J(\theta)=\mathbb E\Big[\frac1G\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{k}\min\big(\rho_i^kA_i,\ \mathrm{clip}(\rho_i^k,1-\varepsilon,1+\varepsilon)A_i\big)-\beta\,\mathrm{KL}\big(\phi^{\pi_{\theta}}\,\|\,\phi^{\pi_{\mathrm{ref}}}\big)\Big],\qquad \rho_i^k=\frac{\phi^{\pi_{\theta}}(o_i^k\mid c')}{\phi^{\pi_{\mathrm{old}}}(o_i^k\mid c')}.$$</div>
+<p><b>VRPO</b>（\(\hat{\mathcal B}\) 为 \(n\) 个掩码样本的 ELBO 估计）：</p>
+<div class="formula">$$\hat\ell=-\log\sigma\big(\hat s_{\theta}\big),\quad \hat s_{\theta}=\beta\big[\hat{\mathcal B}_{\pi_{\theta}}(y_w)-\hat{\mathcal B}_{\pi_{\mathrm{ref}}}(y_w)\big]-\beta\big[\hat{\mathcal B}_{\pi_{\theta}}(y_l)-\hat{\mathcal B}_{\pi_{\mathrm{ref}}}(y_l)\big],$$</div>
+<div class="formula">$$\mathbb V\hat s_{\theta}=\beta^2\sum_{y\in\{y_w,y_l\}}\Big[\mathbb V\hat{\mathcal B}_{\pi_{\theta}}(y)+\mathbb V\hat{\mathcal B}_{\pi_{\mathrm{ref}}}(y)-2\,\mathrm{Corr}\big(\hat{\mathcal B}_{\pi_{\theta}}(y),\hat{\mathcal B}_{\pi_{\mathrm{ref}}}(y)\big)\sqrt{\mathbb V\hat{\mathcal B}_{\pi_{\theta}}(y)\,\mathbb V\hat{\mathcal B}_{\pi_{\mathrm{ref}}}(y)}\Big].$$</div>
+<p>前两项靠增大预算与最优分配降低，第三项靠对偶采样提高相关性。<span class="src">LLaDA 1.5 Eq. 9</span></p>
+<p><b>TraceRL</b>（\(S^{s}_{i,k}\) 为第 \(i\) 条轨迹合并后的第 \(k\) 步集合，\(C_{\epsilon}(r,A)=\min(rA,\mathrm{clip}(r,1-\epsilon,1+\epsilon)A)\)）：</p>
+<div class="formula">$$\mathcal J_{\mathrm{policy}}=\mathbb E\Big[\sum_{i=1}^{G}\sum_{k}\frac{1}{|S^{s}_{i,k}|}\sum_{o\in S^{s}_{i,k}}C_{\epsilon}\Big(\frac{\pi_{\theta}(o\mid S^{s}_{i,1:k-1})}{\pi_{\mathrm{old}}(o\mid S^{s}_{i,1:k-1})},A\Big)\Big]-\beta\,\mathrm{KL}(\pi_{\theta}\,\|\,\pi_{\mathrm{old}}).$$</div>
+<p>使用价值模型时 \(A\) 换成按步 GAE 映射回 token 的 \(A_j\)，默认 \(\gamma=\lambda=1\)。<span class="src">TraceRL Eq. 3–4、§4.2、§5.1.2</span></p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">dllm_rl.py（机制示意；d1 Alg. 1 与官方 trainer、LLaDA 1.5 §3.2）</div>
+<pre><code class="lang-py">def onestep_logp(model, c, o, seed, p_mask=0.15):
+    g = Generator().manual_seed(seed)
+    c_ = where(rand(len(c), generator=g) &lt; p_mask, MASK, c)        # 随机掩码提示
+    x = cat([c_, full((len(o),), MASK)])                             # 回答全掩码
+    lp = log_softmax(model(x)[len(c):], dim=-1)                      # 单次前向
+    return lp.gather(-1, o[:, None]).squeeze(-1)                     # 均场：逐 token
+
+def diffu_grpo_batch(pi, ref, c, opt, G=6, mu=12, eps=0.5, beta=0.04):
+    old = frozen_copy(pi)
+    outs = [diffusion_generate(old, c, L=256, B=32, steps=128) for _ in range(G)]
+    r = tensor([reward(c, o) for o in outs])
+    A = r - r.mean()                                                 # 不除以标准差
+    for _ in range(mu):                                              # 内循环：每次换掩码
+        seed, loss = randint(2**31), 0.0
+        for o, a in zip(outs, A):
+            lp = onestep_logp(pi, c, o, seed)
+            with no_grad():
+                lp_old, lp_ref = onestep_logp(old, c, o, seed), onestep_logp(ref, c, o, seed)
+            ratio = (lp - lp_old).exp()
+            kl = (lp_ref - lp).exp() - (lp_ref - lp) - 1             # k3 估计
+            surr = minimum(ratio * a, ratio.clamp(1 - eps, 1 + eps) * a)
+            loss = loss - (surr - beta * kl).mean() / G
+        opt.zero_grad(); loss.backward(); opt.step()
+
+def vrpo_loss(pi, ref, c, yw, yl, n=8, beta=0.2):
+    s = 0.0
+    for y, sign in ((yw, 1.0), (yl, -1.0)):
+        ts = rand(n)                                                 # n_t = n，每个 t 一个掩码
+        masks = [rand(len(y)) &lt; t for t in ts]
+        b_pi = stack([elbo_term(pi, c, y, t, m) for t, m in zip(ts, masks)]).mean()
+        with no_grad():                                              # 对偶：共享 (t, 掩码)
+            b_ref = stack([elbo_term(ref, c, y, t, m) for t, m in zip(ts, masks)]).mean()
+        s = s + sign * beta * (b_pi - b_ref)
+    return -logsigmoid(s)                                            # 另加 0.05 × SFT 损失</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>d1</th><th>LLaDA 1.5</th><th>TraceRL</th></tr></thead>
+  <tbody>
+    <tr><td>底座</td><td>LLaDA-8B-Instruct<span class="src">§4.1</span></td><td>LLaDA 8B Instruct（亦为参考策略）<span class="src">App. D.3</span></td><td>SDAR-4B / 8B-Chat（块 4）；Dream-7B-Instruct、Dream-7B-Coder-Instruct<span class="src">§5.1.2、§5.6</span></td></tr>
+    <tr><td>数据</td><td>s1K（SFT）；各任务训练集 / 合成集（RL）<span class="src">§3.3、§4.1</span></td><td>35 万偏好对（私有），35% 创意写作、14% 数学、5% 代码等<span class="src">App. D.3</span></td><td>MATH L3–5 共 8K；PrimeIntellect 代码 6K<span class="src">§5.1.1</span></td></tr>
+    <tr><td>采样</td><td>G=6，长 256，块 32，128 步<span class="src">train.yaml</span></td><td>—（离线偏好数据）</td><td>块模型：每轮 128 题 × 32 条，阈值 0.9、温度 1.0；全注意力：56 题 × 8 条、静态<span class="src">§5.1.2</span></td></tr>
+    <tr><td>优化</td><td>LoRA r 128 / α 64，lr 3e-6，μ=12，p_mask 0.15，β 0.04<span class="src">App. D.1；train.yaml</span></td><td>全参数，1 epoch，batch 64，lr 5e-7，DPO β=0.2，n=8<span class="src">App. D.3、§4</span></td><td>策略 lr 1e-6，ε=0.2，β=0.01；用价值模型时 lr 5e-6，γ=λ=1<span class="src">§5.1.2、App. B.5</span></td></tr>
+    <tr><td>硬件</td><td>8×A100-80G；代码任务 4×RTX A5000<span class="src">App. D.1</span></td><td>约 405 H100 GPU 小时<span class="src">App. D.3</span></td><td><span class="unverified">RL 硬件未在正文给出</span>（轨迹 SFT 实验用 64×A100）<span class="src">App. B</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果（底座、长度、解码各不相同，横向数字不可直接比较）</h2>
+<p><b>d1</b>（LLaDA-8B-Instruct，0-shot，贪心，块 32、每步 2 token；生成长 256 / 512）：<span class="src">d1 Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">GSM8K</th><th class="num">MATH500</th><th class="num">Countdown</th><th class="num">Sudoku</th></tr></thead>
+  <tbody>
+    <tr><td>LLaDA-8B-Instruct</td><td class="num">76.7 / 78.2</td><td class="num">32.4 / 36.2</td><td class="num">19.5 / 16.0</td><td class="num">6.7 / 5.5</td></tr>
+    <tr><td>+ SFT（s1K）</td><td class="num">78.8 / 81.1</td><td class="num">32.6 / 34.8</td><td class="num">14.5 / 23.8</td><td class="num">8.5 / 4.6</td></tr>
+    <tr><td>+ diffu-GRPO</td><td class="num">79.8 / 81.9</td><td class="num">37.2 / 39.2</td><td class="num">31.3 / 37.1</td><td class="num">12.9 / 11.0</td></tr>
+    <tr class="hl"><td>d1-LLaDA（SFT + diffu-GRPO）</td><td class="num">81.1 / 82.1</td><td class="num">38.6 / 40.2</td><td class="num">32.0 / 42.2</td><td class="num">16.7 / 9.5</td></tr>
+  </tbody>
+</table></div>
+<p>代码（KodCode-Light-RL-10K 上训练，长 256）：HumanEval 35.3 → 39.0，MBPP 41.2 → 45.5。<span class="src">d1 Tab. 3</span>在统一协议（全参数、每步 1 token、长 256）下，Flexibility Trap 复现 d1 为 GSM8K 83.8，JustGRPO 为 89.1。<span class="src">Flexibility Trap 统一协议复现表</span></p>
+<p><b>LLaDA 1.5</b>（各模型按任务调优采样配置，见上方 code-note）：<span class="src">LLaDA 1.5 Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">GSM8K</th><th class="num">Math</th><th class="num">GPQA</th><th class="num">HumanEval</th><th class="num">MBPP</th><th class="num">IFEval</th><th class="num">Arena-Hard</th></tr></thead>
+  <tbody>
+    <tr><td>LLaDA 8B Instruct（SFT）</td><td class="num">78.6</td><td class="num">42.2</td><td class="num">33.3</td><td class="num">49.4</td><td class="num">41.0</td><td class="num">62.2</td><td class="num">10.0</td></tr>
+    <tr><td>+ 朴素 DPO（n=1，无对偶）</td><td class="num">80.7</td><td class="num">41.6</td><td class="num">34.3</td><td class="num">48.2</td><td class="num">41.4</td><td class="num">62.0</td><td class="num">11.9</td></tr>
+    <tr class="hl"><td>LLaDA 1.5（VRPO，n=8）</td><td class="num">83.3</td><td class="num">42.6</td><td class="num">36.9</td><td class="num">52.4</td><td class="num">42.8</td><td class="num">66.2</td><td class="num">14.3</td></tr>
+  </tbody>
+</table></div>
+<p><b>TraceRL / TraDo</b>（KV cache 下评测；静态 / 动态解码；AR 基线为常规解码）：<span class="src">TraceRL Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">MATH500</th><th class="num">AIME2024</th><th class="num">GSM8K</th><th class="num">LiveCodeBench-v2</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-7B-Instruct（AR）</td><td class="num">74.0</td><td class="num">8.2</td><td class="num">89.9</td><td class="num">26.9</td></tr>
+    <tr><td>Llama3.1-8B-Instruct（AR）</td><td class="num">51.9</td><td class="num">6.7</td><td class="num">84.5</td><td class="num">20.0</td></tr>
+    <tr><td>SDAR-8B-Chat（底座）</td><td class="num">74.3 / 70.7</td><td class="num">11.8 / 8.3</td><td class="num">91.1 / 90.4</td><td class="num">18.5 / 15.3</td></tr>
+    <tr class="hl"><td>TraDo-8B-Instruct</td><td class="num">78.5 / 75.5</td><td class="num">13.3 / 11.0</td><td class="num">92.3 / 91.2</td><td class="num">25.9 / 22.4</td></tr>
+    <tr><td>TraDo-8B-Thinking（动态）</td><td class="num">87.4</td><td class="num">35.5</td><td class="num">94.2</td><td class="num">34.6</td></tr>
+    <tr><td>LLaDA-8B-Instruct</td><td class="num">37.3 / 38.3</td><td class="num">0.5 / 1.7</td><td class="num">82.5 / 82.5</td><td class="num">5.9 / 5.5</td></tr>
+  </tbody>
+</table></div>
+<p>TraDo-4B-Instruct 静态解码 MATH500 75.6%，已超过 Qwen2.5-7B-Instruct。<span class="src">TraceRL Tab. 2</span>块扩散上的 RL 方法对比（随机掩码、块内互补掩码、TraceRL 有 / 无价值模型）只以训练曲线给出（Fig. 5），全注意力代码实验中 TraceRL 达到 LiveCodeBench-V2 25.0%。<span class="src">TraceRL §5.5–5.6</span></p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>出发点</h4><ul><li><a href="06-llada.html">LLaDA</a> 的 ELBO 与 MC 似然评测给出了“似然只能估计”的前提；<a href="03-mdlm.html">MDLM</a> 推导了加权交叉熵形式的 ELBO。</li><li>AR 侧的 GRPO / DPO 与 RL 系统见 <a href="../ai-infra/18-rl-systems.html">RL 训练系统</a>。</li><li><a href="12-ar-to-block.html#sdar">SDAR</a> 等块扩散模型提供了可缓存、逐块生成的底座，使轨迹级 RL 可行。</li></ul></div>
+  <div class="now"><h4>本页之后</h4><ul><li>估计器继续演化：wd1（免比值）→ SPG（上下界夹逼）→ ESPO（序列级 ELBO）。</li><li><a href="16-order-limits.html#flexibility-trap">Flexibility Trap</a> 质疑“必须保留任意顺序”这一前提，用左到右的精确似然做对照，在统一协议下高于 d1、ESPO、SPG。</li><li>代码场景的 RL（coupled-GRPO）与“草图优先”的生成顺序见 <a href="18-code.html">代码页</a>；多模态的统一 RL 见 <a href="19-multimodal.html">MMaDA</a>。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q33"><span class="qid">Q33</span>为什么“算 log π”是 dLLM 做 RL 的核心难题？比较 d1 的单步均场估计、VRPO 的 ELBO 降方差与 TraceRL 的轨迹条件概率在偏差、方差与计算量上的取舍。</h3>
+  <div class="ans"><p class="short">dLLM 的序列似然是对所有揭开顺序求和，逐 token 条件概率也依赖于“在什么状态下生成”，所以 GRPO 的比值与 DPO 的对数似然差都只能近似。d1 只做一次前向，把“提示部分掩码、回答全掩码”时的逐 token 预测当作 log π，序列似然取均场之和：计算最省，但估计的是“一步全掩码”的边缘，不等于实际多步采样器的概率，有系统性偏差。VRPO 用 ELBO（似然下界）的无偏估计，并证明 DPO 损失的偏差与方差都受估计方差控制，用 n=8 个时间步、每步一个掩码样本及对偶采样把方差压低（score 方差 44.0 → 1.0），代价是约 8 倍计算。TraceRL 沿实际推理轨迹，以前几步已定稿的 token 为条件计算每步 token 的概率，与采样器一致，前向次数随步数增长，靠合并相邻 s 步与块注意力切片控制。<span class="src">d1 §3.1；LLaDA 1.5 Thm. 1、Tab. 2；TraceRL §4.1、§4.3</span></p>
+    <ul><li>“采样器与被优化分布不一致”是 d1 与 ELBO 类方法共同的问题；TraceRL 与 JustGRPO 从两个方向消除它（前者跟随采样器，后者把采样器改成左到右）。</li><li>三篇的底座（LLaDA / SDAR）、生成长度与解码设置都不同，论文间分数不能直接比较；统一协议的对比见 Flexibility Trap。</li><li>d1 发现随机提示掩码让内循环可以更新 12 次，这是单步估计特有的“免费”数据增强。</li></ul>
+    <p class="cite">依据：d1 §3、Fig. 5；LLaDA 1.5 §3、Tab. 2；TraceRL §3–4、Tab. 1；Flexibility Trap §4.1。</p>
+  </div>
+  <h3 id="q34"><span class="qid">Q34</span>VRPO 的对偶采样为什么几乎不增加成本就能降方差？如果当前策略与参考策略差别很大，它还有效吗？</h3>
+  <div class="ans"><p class="short">偏好分数里每个回答都以“当前策略 ELBO − 参考策略 ELBO”的差出现；差值的方差等于两者方差之和减去两倍协方差。对偶采样让两个 ELBO 估计共享同一组时间步与掩码，本来就要算的前向一次也没多，只是把随机性对齐，于是两者高度正相关，差值的方差大幅下降：去掉对偶采样时 score 方差为 2183.7，加上后为 2.2（\(n_t=4\)）。这个收益依赖正相关的假设（Prop. 2）：DPO 中参考策略就是初始模型，训练只跑 1 个 epoch、学习率 5e-7，当前策略始终离参考很近。若两者差别很大，对同一掩码的损失响应不再同步，相关系数下降，收益随之消失；相关为负时共享样本反而会增大方差（由方差分解式推得，论文未做实验）。<span class="src">LLaDA 1.5 Eq. 9、Prop. 2、Tab. 2、App. D.3</span></p>
+    <ul><li>另外两招中，预算 n 让每个 ELBO 的方差按 1/n 下降但成本 ×n；最优分配（\(n_t=n,n_{y_t}=1\)）同样不加成本。</li><li>同一思路可以用到 PPO / GRPO 中的 ELBO 似然比项，作者在 §3.3 讨论但未实验。</li></ul>
+    <p class="cite">依据：LLaDA 1.5 §3.2–3.3、Prop. 1–2、Tab. 2、App. D.3。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zhao, Gupta, Zheng, Grover. <i>d1: Scaling Reasoning in Diffusion Large Language Models via Reinforcement Learning.</i> NeurIPS 2025；本页读 arXiv v2。<a href="https://arxiv.org/abs/2504.12216">论文</a> · <a href="https://dllm-reasoning.github.io">项目页</a> · <a href="https://github.com/dllm-reasoning/d1">代码</a>。</li>
+  <li>Zhu, Wang, Nie, Zhang, Wu, Hu, Zhou, Chen, Lin, Wen, Li. <i>LLaDA 1.5: Variance-Reduced Preference Optimization for Large Language Diffusion Models.</i> ACL 2026（2026.acl-long.524）；本页读 arXiv v2。<a href="https://arxiv.org/abs/2505.19223">论文</a> · <a href="https://github.com/ML-GSAI/LLaDA-1.5">代码</a> · <a href="https://huggingface.co/GSAI-ML/LLaDA-1.5">权重</a>。</li>
+  <li>Wang, Yang, Li, Tian, Shen, Wang. <i>Revolutionizing Reinforcement Learning Framework for Diffusion Large Language Models</i>（TraceRL / TraDo）. ICLR 2026（官方 README）；本页读 arXiv v1。<a href="https://arxiv.org/abs/2509.06949">论文</a> · <a href="https://github.com/Gen-Verse/dLLM-RL">代码</a> · <a href="https://huggingface.co/Gen-Verse/TraDo-8B-Instruct">权重</a>。</li>
+  <li>时间线：Tang et al. <i>wd1</i>. <a href="https://arxiv.org/abs/2507.08838">论文</a>；Wang et al. <i>SPG: Sandwiched Policy Gradient for Masked Diffusion Language Models</i>. <a href="https://arxiv.org/abs/2510.09541">论文</a>；Ou et al. <i>Principled RL for Diffusion LLMs Emerges from a Sequence-Level Perspective</i>（ESPO）. <a href="https://arxiv.org/abs/2512.03759">论文</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

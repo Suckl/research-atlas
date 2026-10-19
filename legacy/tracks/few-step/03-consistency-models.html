@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Consistency Models、LCM 与 LCM-LoRA</title>
+<meta name="description" content="解释一致性函数、恒等边界、CD 与 CT、EMA 目标、多步采样，追踪 iCT、ECT 与 latent guided consistency distillation。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="consistency-models">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：不学每一段路，直接识别共同终点</h2>
+<p><a href="02-trajectory-distillation.html">轨迹蒸馏</a>教学生用大跳跃替代教师小步。Consistency Models（CM）换了监督对象：一条 probability-flow ODE 轨迹上，所有状态都对应同一个数据端终点，能否让 \(f_\theta(x_t,t)\) 无论在哪个噪声尺度观察它，都给出相同答案？这种映射在最高噪声处直接预测样本，从而天然允许单次前向生成<span class="src">CM §3、Fig. 2</span>。</p>
+<p>关键在于<b>终点在哪里被固定</b>。仅要求输出一致，常数输出也能让损失很小；因此数据端必须有恒等边界。另一个关键是<b>邻近状态从哪里来</b>：可以用冻结扩散教师走局部 ODE，也可以直接从数据与共享噪声构造训练对。前者叫 consistency distillation（CD），后者叫 consistency training（CT）<span class="src">CM §3–5</span>。CT 本身是生成建模方法，不必有预训练教师。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  CM 把“同一轨迹的状态应预测同一终点”变成学习规则，用数据端的恒等映射把答案锚住。LCM 再把这条规则迁到 Stable Diffusion 的 latent，连教师 CFG 一起吸收进学生。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：CD 的局部教师与 EMA 终点目标</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 隐变量</span><span><i class="sw enc"></i>学生生成器（可训练）</span>
+  <span><i class="sw tgt"></i>教师 / 本次冻结的 EMA target</span><span><i class="sw pred"></i>辅助可训练网络</span>
+  <span><i class="sw act"></i>条件</span><span><i class="sw loss"></i>损失</span><span><i class="sw reg"></i>正则项</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="Consistency Distillation 计算图：冻结 score 教师构造邻居，EMA target 与在线学生预测共同终点">
+    <g class="data" data-part="input" data-step="1">
+      <rect class="box" x="24" y="70" width="170" height="130" rx="10"/>
+      <text class="t-c t-b" x="109" y="98">高噪声状态</text><text class="t-c t-sm" x="109" y="126">x₀ + σ_h ε</text><text class="t-c t-xs" x="109" y="154">数据 + 高斯噪声</text><text class="t-c t-xs" x="109" y="179">σ_h &gt; σ_l</text>
+    </g>
+    <path class="edge" d="M194,116 H240" data-step="2"/>
+    <g class="tgt" data-part="score" data-step="2">
+      <rect class="box frozen" x="244" y="70" width="220" height="130" rx="10"/>
+      <text class="t-c t-b" x="354" y="98">扩散教师 s_real</text><text class="t-c t-sm" x="354" y="126">局部 ODE 求解</text><text class="t-c t-xs" x="354" y="154">σ_h → σ_l</text><text class="t-c t-xs" x="354" y="179">固定模型，不跑全轨迹</text>
+    </g>
+    <path class="edge sg" d="M464,135 H546" data-step="2"/>
+    <g class="data" data-part="neighbor" data-step="2">
+      <rect class="box" x="550" y="70" width="180" height="130" rx="10"/>
+      <text class="t-c t-b" x="640" y="98">低噪声邻居</text><text class="t-c t-sm" x="640" y="126">x̂_l</text><text class="t-c t-xs" x="640" y="154">近似同一 ODE 轨迹</text><text class="t-c t-xs" x="640" y="179">不是数据端样本</text>
+    </g>
+    <path class="edge sg" d="M640,200 V266" data-step="3"/>
+    <g class="tgt" data-part="target" data-step="3">
+      <rect class="box frozen" x="550" y="270" width="180" height="112" rx="10"/>
+      <text class="t-c t-b" x="640" y="298">EMA f_θ⁻</text><text class="t-c t-xs" x="640" y="323">在低噪声邻居上预测</text><text class="t-c t-xs" x="640" y="346">当前损失无梯度</text><text class="t-c t-xs" x="640" y="369">终点目标</text>
+    </g>
+    <path class="edge" d="M194,168 H215 V298 H240" data-step="4"/>
+    <g class="enc" data-part="online" data-step="4">
+      <rect class="box" x="244" y="270" width="220" height="112" rx="10"/>
+      <text class="t-c t-b" x="354" y="298">在线 f_θ</text><text class="t-c t-xs" x="354" y="323">在高噪声输入上预测</text><text class="t-c t-xs" x="354" y="346">与 target 同一边界</text><text class="t-c t-xs" x="354" y="369">终点预测</text>
+    </g>
+    <g class="reg" data-part="boundary" data-step="4">
+      <rect class="box" x="24" y="270" width="170" height="112" rx="10"/>
+      <text class="t-c t-b" x="109" y="298">恒等边界</text><text class="t-c t-xs" x="109" y="323">f(x, σ_min) = x</text><text class="t-c t-xs" x="109" y="346">c_skip / c_out</text><text class="t-c t-xs" x="109" y="369">参数化内强制满足</text>
+    </g>
+    <path class="edge reg" d="M194,348 H240" data-step="4"/>
+    <path class="edge enc" d="M464,304 H484 V232 H858 V266" data-step="5"/>
+    <path class="edge sg" d="M730,326 H776" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="5 6">
+      <rect class="box" x="780" y="270" width="156" height="112" rx="10"/>
+      <text class="t-c t-b" x="858" y="299">一致性损失</text><text class="t-c t-xs" x="858" y="325">d(预测, 目标)</text><text class="t-c t-xs" x="858" y="350">更新在线 θ</text><text class="t-c t-xs" x="858" y="372">距离可加权</text>
+    </g>
+    <path class="edge grad" d="M936,326 H950 V446 H354 V386" data-step="6"/>
+    <text class="t-c t-xs" x="640" y="465" data-step="6">梯度只回到在线学生</text>
+    <path class="edge ema" d="M464,352 H488 V412 H640 V386" data-step="7"/>
+    <text class="t-c t-xs" x="551" y="431" data-step="7">参数 EMA 更新</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>采样一个噪声边缘</h4><p>原 CM 采用 EDM / VE 尺度，输入为 x₀ + σε。它不是 VP 的 αx₀ + σε；σ 就是噪声标准差<span class="src">CM §2、§4</span>。</p></div>
+    <div data-note="score"><h4>冻结扩散教师</h4><p>教师 score 给出局部 ODE 邻居。Euler 或 Heun 决定近似误差与教师评价成本；无需预先为每个噪声生成完整端点<span class="src">CM §4、Eq. (6)</span>。</p></div>
+    <div data-note="neighbor"><h4>局部状态</h4><p>CD 的邻居从同一 ODE 输入推进；CT 则替换为同一数据与同一噪声在较低尺度的加噪状态。CT 对是训练估计器，不能称为精确 ODE 轨迹点<span class="src">CM §5、Thm. 2</span>。</p></div>
+    <div data-note="target"><h4>另一个“教师”</h4><p>EMA target 是学生参数的历史平均，与冻结扩散教师是两个对象。目标分支停止梯度，EMA 在优化后更新<span class="src">CM Eq. (8)、Alg. 2</span>。</p></div>
+    <div data-note="online"><h4>直接预测终点</h4><p>学生在高噪声端给出的也是低噪声终点表示；它不预测相邻轨迹点。推理时可以从最高噪声直接调用这一接口。</p></div>
+    <div data-note="boundary"><h4>固定答案的锚点</h4><p>c_skip 在数据端为一，c_out 为零，强制恒等映射。否则常数函数也能满足一致性；边界排除这种全局平凡解，但不保证有限训练一定稳定<span class="src">CM §3–4</span>。</p></div>
+    <div data-note="loss"><h4>距离与自举稳定性</h4><p>原 CM 比较 L2、L1 与 LPIPS。iCT 后来替换感知距离、移除 CT 目标的 EMA；这些是不同训练配方，不应混写为原始 CD<span class="src">CM §4；iCT §3</span>。</p></div>
+    <div data-step-note="1"><h4>① 数据加噪</h4><p>取高噪声尺度、数据与高斯噪声。</p></div>
+    <div data-step-note="2"><h4>② 构造低噪声邻居</h4><p>CD 用冻结教师求局部 ODE；CT 用共享噪声加噪对。</p></div>
+    <div data-step-note="3"><h4>③ 目标预测终点</h4><p>EMA target 在邻居上前向，停止梯度。</p></div>
+    <div data-step-note="4"><h4>④ 在线预测终点</h4><p>在线学生在高噪声输入前向；参数化带恒等边界。</p></div>
+    <div data-step-note="5"><h4>⑤ 比较两个终点</h4><p>计算带时间权重的一致性距离。</p></div>
+    <div data-step-note="6"><h4>⑥ 优化在线学生</h4><p>只通过在线分支反传。</p></div>
+    <div data-step-note="7"><h4>⑦ 更新 EMA</h4><p>用新学生参数更新 target；下一次迭代再读取它。</p></div>
+  </div>
+  <figcaption>图 1　原始 CD 训练图，依据 CM Fig. 2、Eq. (5)–(8)、Alg. 2。CT 的输入构造及 iCT 的目标更新在正文单独区分。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-boundary">3.1 一致性与恒等边界必须一起成立</h3>
+<p>原 CM 使用噪声标准差作为时间 t，\(x_t=x_0+t\epsilon\)，从大噪声 T 向小正数 \(\sigma_{\min}\) 积分，最终样本近似数据端。论文用 T=80、\(\sigma_{\min}=0.002\)<span class="src">CM §2</span>；这里把原论文表示截止时间的小写 ε 改记为 \(\sigma_{\min}\)，保留 ε 表示高斯噪声。一致性函数满足：</p>
+<div class="formula">$$f(x_t,t)=x_{\sigma_{\min}},\qquad f(x_t,t)=f(x_s,s)\ \text{若两状态属于同一 ODE 轨迹},\qquad f(x,\sigma_{\min})=x.$$
+</div>
+<p><span class="src">CM §3</span> 用跳连参数化实现边界，不需要网络自己学会恒等映射：</p>
+<div class="formula">$$f_\theta(x,t)=c_\mathrm{skip}(t)x+c_\mathrm{out}(t)F_\theta(x,t),\qquad
+c_\mathrm{skip}(\sigma_{\min})=1,\quad c_\mathrm{out}(\sigma_{\min})=0.$$
+</div>
+<p><span class="src">CM Eq. (5)</span> 若只有一致性而没有边界，所有输入输出同一个常数也能得到零距离。边界将“沿路相同”锚定到真实端的输入；它防的是全局常数解，不代替对误差累积、目标质量和优化稳定性的设计。</p>
+
+<h3 id="c-cd-ct">3.2 CD 与 CT：相似的损失，不同的邻居来源</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>Consistency Distillation</th><th>Consistency Training</th></tr></thead>
+  <tbody>
+    <tr><td>高噪声输入</td><td colspan="2">x_h = x₀ + σ_h ε，来自真实数据加噪</td></tr>
+    <tr><td>低噪声邻居</td><td>从 x_h 用冻结 score 教师局部求解得到 x̂_l</td><td>x_l = x₀ + σ_l ε，与高噪声端共享同一 ε</td></tr>
+    <tr><td>需要的模型</td><td>扩散教师 + 在线 CM + 目标 CM</td><td>在线 CM + 目标 CM，不需要冻结 score 教师</td></tr>
+    <tr><td>成立的理由</td><td>ODE 求解精度随离散网格加密而提升</td><td>局部极限下与相应 score 监督的联系；不是共享噪声直线就是 ODE 轨迹</td></tr>
+    <tr><td>原始目标更新</td><td colspan="2">目标 θ⁻ 用 EMA；iCT 后来针对 CT 改为 sg(θ)</td></tr>
+  </tbody>
+</table></div>
+<p><span class="src">CM §4–5、Alg. 2–3、Thm. 1–2；iCT §3.2</span> “不跑教师完整轨迹”并不等于“不需要数据”；原始 CD 与 CT 都使用真实数据的加噪边缘。CD 的 target 也不是教师直接给出的数据样本，而是 EMA 学生对局部邻居的终点预测。</p>
+
+<h3 id="c-sampling">3.3 多步采样：每次都跳回终点，再重新加噪</h3>
+<p>单步为 \(\hat x=f_\theta(T\epsilon,T)\)。多步时先预测终点，然后按较低噪声尺度重新加噪，再预测终点：</p>
+<div class="formula">$$\hat x\leftarrow f_\theta\!\left(\hat x+\sqrt{\tau^2-\sigma_{\min}^2}\,\epsilon,\tau\right),\qquad \tau\ \text{逐次降低}.$$
+</div>
+<p><span class="src">CM Alg. 1</span> 这不是普通 DDIM 逐段积分；每次前向都预测数据端。重新加噪允许修正初次输出，带来质量—计算量取舍，也能支持编辑与逆问题。原论文选择多步噪声尺度时用生成质量搜索，不能假定训练用离散网格的等距子集就是最优推理时间表<span class="src">CM §3 Sampling</span>。</p>
+
+<h3 id="c-ict">3.4 iCT 与 ECT：稳定自举，再利用已有扩散模型</h3>
+<p>iCT 指出 CT 的目标参数 EMA 会在细时间间隔的极限中引入问题，改为 \(\theta^-=\mathrm{sg}(\theta)\)；同时用 Pseudo-Huber 距离替换 LPIPS、采用 lognormal 噪声采样与逐阶段加密网格<span class="src">iCT §3、Tab. 1</span>。移除的是<b>一致性损失的 EMA target</b>，不等于禁止为最终采样维护参数 EMA。它避免把“EMA 总有帮助”当作所有自举目标的通用结论。</p>
+<p>ECT 从预训练扩散模型出发，把较松的终点约束逐渐收紧到一致性条件：起初较大时间间隔的目标接近去噪训练，之后逐渐缩短间隔。这是扩散预训练 + consistency tuning，不需要在线教师 score 来生成 CD 邻居<span class="src">ECT §3.2–3.3</span>。论文的快速实验在单张 A100 上调优一小时得到两步 CIFAR-10 FID 2.73，<b>该时间不包括已有扩散模型的预训练</b><span class="src">ECT 摘要、§4.1</span>。</p>
+
+<h3 id="lcm">3.5 LCM：latent、guidance 条件与跳步监督</h3>
+<p>高分辨率文生图不能只把像素 CM 放大。LCM 用冻结 VAE 将图像 \(x_0\) 编码为 latent \(z_0\)，在 Stable Diffusion 的 VP 路径 \(z_t=\alpha_t z_0+\sigma_t\epsilon\) 上蒸馏。沿用教师的 ε 或 v 参数化得到数据预测，再用 c_skip / c_out 包装成一致性函数；学生从教师权重初始化<span class="src">LCM §4.1、Eq. (9)、App. D</span>。VAE 与文本编码器不随一致性目标训练。</p>
+<p>LCM 用 \(f_\theta(z_t,t,c,w)\) 直接预测 guided ODE 的终点，把 guidance 强度也编码进学生。为避免混淆，本页统一使用 \(s_w=s_u+w(s_c-s_u)\)；LCM 论文记作 \((1+\omega)s_c-\omega s_u\)，两者关系为 \(w=1+\omega\)（代数换算）。训练时教师仍有条件与无条件分支，学生推理则只需自身的一次前向<span class="src">LCM §4.2、Eq. (12)–(17)、§5.1</span>。</p>
+<p>直接监督相邻的细网格时，两个预测本就很近，监督信号弱。LCM 用 skipping-step 扩大训练时间跨度，主实验跳过 k=20 个离散间隔；这表示训练邻居的跨度，不是推理要做二十步<span class="src">LCM §4.3</span>。更大跳跃也会放大求解器误差，需要同时选择教师求解器。其局部更新可写为：</p>
+<div class="formula">$$\hat z_s=z_t+(1+\omega)\Psi_\phi(z_t,t,s,c)-\omega\Psi_\phi(z_t,t,s,\varnothing),\qquad
+\mathcal L_\mathrm{LCD}=\mathbb E\,d\!\left(f_\theta(z_t,t,c,w),\mathrm{sg}(f_{\theta^-}(\hat z_s,s,c,w))\right).$$</div>
+<p><span class="src">LCM Eq. (16)–(17)，w=1+ω 重写</span> 这里 Ψ 表示教师求解器的<b>位移增量</b>。它不是最终端点，也不意味着任意非线性多步求解器的两个完整解可被精确线性组合为 guided ODE 解；论文在此使用数值近似。</p>
+
+<h3 id="c-lcm-lora">3.6 LCM-LoRA：把加速能力装成可迁移的参数增量</h3>
+<p>LCM-LoRA 保留预训练矩阵 \(W_0\)，只学习低秩增量 \(\Delta W=BA\)，仍用 latent consistency distillation。训练好后把这份“加速增量”加到同一基座的微调模型，或与风格 LoRA 组合，省去逐个定制模型重新蒸馏的成本<span class="src">LCM-LoRA §3.1–3.2、Eq. (1)</span>。</p>
+<p>“training-free”描述的是<b>已有加速模块向定制模型的应用</b>，模块本身仍要蒸馏训练。原版 LCM 支持 guidance 条件化，而 LoRA 报告 Fig. 2 的模型是在固定 \(\omega=7.5\) 下蒸馏，并展示四步采样；部署时不能默认两者拥有同样的强度条件接口<span class="src">LCM-LoRA Fig. 2</span>。不同基座、微调幅度与适配器组合的泛化是实验结论，不是所有权重相加都成立的保证。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量与前向接口</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 接口</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>CM 高 / 低噪声状态</td><td>[B, C, H, W]</td><td>t 为噪声尺度，σ 改变数值，不改变形状</td></tr>
+    <tr><td>在线 / target 的终点预测</td><td>[B, C, H, W]</td><td>与输入同形状；不输出时间序列</td></tr>
+    <tr><td>LCM latent</td><td>[B, C_z, H_z, W_z]</td><td>先由冻结 VAE 编码；采样结束再解码<span class="src">LCM §4.1</span></td></tr>
+    <tr><td>LCM 条件</td><td>文本嵌入 c、时间 t、guidance 嵌入 w</td><td>guidance 输入不是额外的无条件学生分支<span class="src">LCM §4.2</span></td></tr>
+    <tr><td>CD 的局部求解器</td><td>Euler 或 Heun</td><td>教师成本按实际评价次数计算；推理不调用教师<span class="src">CM §4</span></td></tr>
+    <tr><td>LCM-LoRA</td><td>W₀ [d, k]；B [d, r]；A [r, k]</td><td>W₀ 冻结，A/B 可训练；合并权重后维度不变<span class="src">LCM-LoRA §3.1</span></td></tr>
+  </tbody>
+</table></div>
+<p>除明确引用的接口外，上表形状按计算图推导；不以特定 VAE 的压缩率代表所有基座。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 原始 CD / CT 损失与代码差异</h2>
+<div class="formula">$$\mathcal L_\mathrm{CD}=\mathbb E\!\left[\lambda(\sigma_l)\,d\!\left(f_\theta(x_h,\sigma_h),\mathrm{sg}(f_{\theta^-}(\hat x_l,\sigma_l))\right)\right],\qquad
+\hat x_l=x_h+(\sigma_l-\sigma_h)(-\sigma_h s_\mathrm{real}(x_h,\sigma_h)).$$</div>
+<p><span class="src">CM Eq. (6)–(7)，此处展示 Euler 邻居</span> 低噪声状态的估计必须停梯度；在线学生与 target 输出在同一数据表示空间比较。\(\lambda\) 是损失权重，与 guidance 系数无关。</p>
+<div class="formula">$$\mathcal L_\mathrm{CT}=\mathbb E\!\left[\lambda(\sigma_l)\,d\!\left(f_\theta(x_0+\sigma_h\epsilon,\sigma_h),\mathrm{sg}(f_{\theta^-}(x_0+\sigma_l\epsilon,\sigma_l))\right)\right],\qquad
+\theta^-\leftarrow\mu\theta^-+(1-\mu)\theta.$$</div>
+<p><span class="src">CM Eq. (8)、Alg. 3</span> 这是原始 CT，不能把 iCT 的无 EMA target 更新又写进同一算法。两端若用独立噪声，局部关联会被破坏；这不是“噪声只要各自服从高斯即可”。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码</span>
+  LCM 原论文的训练范围为 ω∈[2,14]、EMA µ=0.999943<span class="src">LCM §5.1</span>。核对的官方 <code>LCM_Training_Script/consistency_distillation/train_lcm_distill_sd_wds.py</code> 默认 <code>w_min=5.0</code>、<code>w_max=15.0</code>、<code>ema_decay=0.95</code>；其参数帮助称采用 Imagen 约定，但实际目标仍写 <code>cond + w * (cond - uncond)</code><span class="src">官方脚本 <code>parse_args</code>、训练步骤 20.4.11（2026-10-13 核对）</span>。这是帮助文字与实现的内部不一致。复现这份脚本时按实际表达式理解其 w，不能仅按帮助文字把论文系数平移；默认参数也不是原论文实验配置。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">consistency.py（原始 CM Alg. 1–3；LCM 的 VP 与 CFG 邻居另按 Eq. (17) 构造）</div>
+<pre><code class="lang-py">def f(model, x, sigma):
+    return c_skip(sigma) * x + c_out(sigma) * model(x, sigma)
+
+target.load_state_dict(online.state_dict())
+for step, x0 in enumerate(data_loader):
+    low, high = adjacent_noise_levels(grid_for(step))
+    eps = randn_like(x0)
+    x_high = x0 + high * eps
+    with no_grad():
+        if mode == "CD":
+            x_low = local_teacher_ode(x_high, high, low)  # 冻结 score；Euler / Heun
+        else:                                           # 原始 CT
+            x_low = x0 + low * eps                       # 同一份噪声
+        endpoint_target = f(target, x_low, low)
+    endpoint_pred = f(online, x_high, high)
+    loss = time_weight(low) * distance(endpoint_pred, endpoint_target)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    with no_grad():
+        ema_update(target, online, mu_for(step))
+# iCT：上面的 target 改为 stop-gradient 在线参数，不用此目标 EMA
+
+def consistency_sample(model, descending_scales):
+    x = f(model, sigma_max * randn_sample(), sigma_max)
+    for sigma in descending_scales:
+        noise = sqrt(sigma**2 - sigma_min**2) * randn_like(x)
+        x = f(model, x + noise, sigma)
+    return x
+
+# LCM 使用 latent、VP 加噪与 guidance 条件，并在结尾 VAE decode
+# LCM 的跳步跨度属于训练局部邻居，不是此处采样循环的次数</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参与复现范围</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>论文设定 / 选择</th><th>作用</th></tr></thead>
+  <tbody>
+    <tr><td>原 CM 噪声范围</td><td>σ_min=0.002，T=80<span class="src">CM §2</span></td><td>近数据端截止与近高斯先验；不是 VP 的归一化时间</td></tr>
+    <tr><td>原 CD</td><td>教师 ODE 求解器、距离 d、目标 EMA<span class="src">CM §4、§6.1</span></td><td>局部误差、感知偏好和目标稳定性必须一起比较</td></tr>
+    <tr><td>iCT</td><td>无目标 EMA、Pseudo-Huber、lognormal 噪声与网格课程<span class="src">iCT Tab. 1</span></td><td>自举目标的偏差与训练效率</td></tr>
+    <tr><td>LCM 基座</td><td>512 分辨率：SD-V2.1-Base / ε；768：SD-V2.1 / v<span class="src">LCM §5.1</span></td><td>参数化必须与基座一致</td></tr>
+    <tr><td>LCM 主训练</td><td>100K 更新；batch 72 / 16；lr 8e-6；µ=0.999943<span class="src">LCM §5.1，按上述分辨率顺序</span></td><td>完整论文实验预算，不能等同于快速收敛演示的时间</td></tr>
+    <tr><td>LCM 监督跨度 / guidance</td><td>DDIM solver；k=20；ω∈[2,14]<span class="src">LCM §5.1</span></td><td>局部强监督；统一为本 track 的 w 时范围是 [3,15]（换算）</td></tr>
+    <tr><td>LCM-LoRA</td><td>固定教师 ω=7.5 的展示模型<span class="src">LCM-LoRA Fig. 2</span></td><td>不能与可调 guidance 条件化的原版 LCM 接口混用</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果：原始一致性与 latent 迁移</h2>
+<p>原 CM 的无条件 CIFAR-10 对照。PD 与 CD 蒸馏同一个 EDM 教师，表中 PD 是作者重做的基线；不是 PD 原论文的对应数值<span class="src">CM §6.2、Tab. 1</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">NFE</th><th class="num">FID</th></tr></thead>
+  <tbody>
+    <tr><td>PD（CM 作者对照）</td><td class="num">1</td><td class="num">8.34<span class="src">CM Tab. 1</span></td></tr>
+    <tr><td>PD（CM 作者对照）</td><td class="num">2</td><td class="num">5.58<span class="src">CM Tab. 1</span></td></tr>
+    <tr class="hl"><td>CD</td><td class="num">1</td><td class="num">3.55<span class="src">CM Tab. 1</span></td></tr>
+    <tr class="hl"><td>CD</td><td class="num">2</td><td class="num">2.93<span class="src">CM Tab. 1</span></td></tr>
+    <tr class="hl"><td>CT（从数据直接训练）</td><td class="num">1</td><td class="num">8.70<span class="src">CM Tab. 1</span></td></tr>
+    <tr class="hl"><td>CT（从数据直接训练）</td><td class="num">2</td><td class="num">5.83<span class="src">CM Tab. 1</span></td></tr>
+  </tbody>
+</table></div>
+<p>后续 iCT 不依赖教师，CIFAR-10 的单步 / 两步 FID 提高到 2.51 / 2.24，ImageNet 64×64 为 3.25 / 2.77<span class="src">iCT 摘要</span>。这是新的架构与训练配方，不能把改善全部归因于移除 EMA 这一个改动。</p>
+<p>LCM 的 LAION-Aesthetics-6+ 文生图评估：512×512、四步采样、论文 ω=8；生成 30K 图像，来自 10K 提示词、每词三张，CLIP 用 ViT-g/14。Guided-Distill 是 LCM 作者在相同资源预算下的复现，作者明确承认并非该方法原论文的最佳预算<span class="src">LCM §5.1、Tab. 1</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法（同为四步采样）</th><th class="num">FID ↓</th><th class="num">CLIP ↑</th><th>推理 CFG</th></tr></thead>
+  <tbody>
+    <tr><td>DDIM</td><td class="num">22.38</td><td class="num">25.89</td><td>教师双分支<span class="src">LCM Tab. 1、§5.1</span></td></tr>
+    <tr><td>DPM-Solver++</td><td class="num">18.43</td><td class="num">26.64</td><td>教师双分支<span class="src">LCM Tab. 1、§5.1</span></td></tr>
+    <tr><td>Guided-Distill（复现）</td><td class="num">15.12</td><td class="num">27.25</td><td>已蒸馏进网络<span class="src">LCM Tab. 1</span></td></tr>
+    <tr class="hl"><td>LCM</td><td class="num">11.10</td><td class="num">28.69</td><td>已蒸馏进学生<span class="src">LCM Tab. 1、§5.1</span></td></tr>
+  </tbody>
+</table></div>
+<p>LCM 的单步 FID 为 35.36，两步为 13.31，说明 latent 与 guidance 迁移后仍以少步比单步稳健<span class="src">LCM Tab. 1</span>。这个协议不是 COCO；CLIP 列的缩放也不能与 <a href="02-trajectory-distillation.html#results">InstaFlow</a> 的小数列直接比较。LCM-LoRA 报告以适配器组合和样例展示为主，本页不补造未报告的统一 FID。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>从轨迹回归到共同终点</h4><ul><li>局部教师即可传递全程生成能力；CT 进一步不依赖 score 教师。</li><li>LCM 把恒等边界、latent 与 guidance 条件组合成文生图少步接口。</li></ul></div>
+  <div class="now"><h4>留下的训练与质量问题</h4><ul><li><a href="08-scm.html">sCM</a>继续处理连续时间目标的稳定性与扩展。</li><li><a href="13-rcm.html">rCM</a>继续探索大模型与视频的递归一致性训练。</li><li><a href="04-adversarial-distillation.html">ADD</a>与<a href="05-dmd.html">DMD</a>用分布级监督改善一步细节。</li></ul></div>
+</div>
+<p>迁到视频时，冻结 VAE 的 latent 多了时间维，还要保持运动与外观的一致性。<a href="07-video-consistency.html">VideoLCM / AnimateLCM / T2V-Turbo</a>分别追踪 latent 蒸馏、图像与视频一致性解耦、奖励后训练；它们继承的是 CM / LCM 的训练思想，而不是简单复用一份图像检查点就完成视频生成。</p>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q5"><span class="qid">Q5</span>只让两个噪声尺度的输出相同够不够？CD 与 CT 的训练对有哪些区别？</h3>
+  <div class="ans"><p class="short">不够，常数输出也满足相同，必须用数据端恒等边界锚住答案。CD 用教师 ODE 的局部邻居，CT 用同一数据、同一噪声的两个加噪状态；后者是局部估计器，不能叫精确同轨迹点。</p><ul><li>目标 CM 与冻结扩散教师是两个不同的网络角色。</li><li>CT 可从数据直接训练，但目标更新、间隔与损失仍需稳定设计。</li><li>iCT 移除目标 EMA 的结论属于 CT 配方，不自动覆盖原始 CD。</li></ul><p class="cite">依据：CM §3–5、Alg. 2–3、Thm. 2；iCT §3.2。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q6"><span class="qid">Q6</span>LCM 的 latent、guidance 条件与 skipping-step 各解决什么，LCM-LoRA 为什么还要训练？</h3>
+  <div class="ans"><p class="short">latent 降低高分辨率建模成本；guidance 条件化让学生吸收双分支教师的引导；跳步扩大训练邻居的时间跨度，增强监督。LCM-LoRA 训练一份低秩加速增量，再将它应用到兼容的定制模型。</p><ul><li>跳步跨度属于教师训练监督，不能当推理步数。</li><li>guidance 系数先统一约定；代码帮助、表达式与默认配置需要核对。</li><li>无需为每个定制模型额外训练，不代表加速模块本身无需蒸馏。</li></ul><p class="cite">依据：LCM §4.1–4.3、§5.1；LCM-LoRA §3.1–3.2、Fig. 2；官方训练脚本。</p></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Song, Dhariwal, Chen, Sutskever. <i>Consistency Models.</i> ICML 2023. <a href="https://arxiv.org/abs/2303.01469">arXiv:2303.01469</a> · <a href="https://github.com/openai/consistency_models">官方代码</a></li>
+  <li>Song, Dhariwal. <i>Improved Techniques for Training Consistency Models.</i> ICLR 2024. <a href="https://arxiv.org/abs/2310.14189">arXiv:2310.14189</a></li>
+  <li>Geng, Pokle, Luo, Lin, Kolter. <i>Consistency Models Made Easy.</i> ICLR 2025. <a href="https://arxiv.org/abs/2406.14548">arXiv:2406.14548</a> · <a href="https://github.com/locuslab/ect">代码</a></li>
+  <li>Luo, Tan, Huang, Li, Zhao. <i>Latent Consistency Models: Synthesizing High-Resolution Images with Few-step Inference.</i> 2023 preprint. <a href="https://arxiv.org/abs/2310.04378">arXiv:2310.04378</a> · <a href="https://github.com/luosiallen/latent-consistency-model">官方代码</a> · <a href="https://github.com/luosiallen/latent-consistency-model/blob/main/LCM_Training_Script/consistency_distillation/train_lcm_distill_sd_wds.py">核对的训练脚本</a></li>
+  <li>Luo et al. <i>LCM-LoRA: A Universal Stable-Diffusion Acceleration Module.</i> 2023 Technical Report. <a href="https://arxiv.org/abs/2311.05556">arXiv:2311.05556</a> · <a href="https://github.com/luosiallen/latent-consistency-model">官方代码</a></li>
+  <li>Karras et al. <i>Elucidating the Design Space of Diffusion-Based Generative Models.</i> NeurIPS 2022. <a href="https://arxiv.org/abs/2206.00364">arXiv:2206.00364</a></li>
+  <li>原始训练、后续 CT 改进与 LCM 结果分开记录；来源由 <code>SOURCES.md</code> 汇总。</li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <code>SOURCES.md</code></footer>
+</body>
+</html>
+

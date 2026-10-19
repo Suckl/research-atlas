@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dream 7B 与 DiffuLLaMA：把 AR 权重改造成扩散模型</title>
+<meta name="description" content="AR→扩散的转换配方：注意力掩码退火、shift 操作、无时间嵌入，Dream 7B 从 Qwen2.5-7B 初始化并加入上下文自适应的 token 级噪声重排（CART）；转换成本如何记账，残留哪些 AR 偏置。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="dream">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：既然 AR 模型已经训好了</h2>
+<p><a href="06-llada.html">LLaDA</a> 证明了从零训练的路线可行，但代价是 2.3T token、0.13M H800 GPU 小时；SMDM 还给出“同验证损失约需 16 倍计算”的估计。另一方面，开源社区已经花巨资训好了大量 AR 模型。<b>DiffuLLaMA</b>（2024-10）的问题是：能否只做一段继续预训练，就把 AR 权重变成扩散模型？难点在于两者有两处结构性不匹配——AR 用因果掩码、位置 \(i\) 的输出预测第 \(i+1\) 个 token；掩码扩散用双向注意力、在被掩位置原地预测。<span class="src">DiffuLLaMA §1；LLaDA §2.2；SMDM §3</span></p>
+<p><b>Dream 7B</b> 把这条路线推到 7B 的实用水平：从 Qwen2.5-7B 初始化，继续预训练 580B token，加上一个按上下文给每个被掩 token 重新定权的技巧（CART）。它最早在 2025-04-02 以博客发布、04-05 放出权重，技术报告直到 2025-08-21 才上 arXiv（报告首页仍写 April 2, 2025）。<span class="src">Dream 官方博客；官方 README News；arXiv 2508.15487v1</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  不改网络形状、不加时间嵌入，只做三件事：把因果掩码换成全双向（可选地逐步退火），<b>保留 AR 的“错位一格”预测</b>（位置 \(i-1\) 的输出负责预测 \(x_i\)），再用掩码扩散目标继续训练。Dream 再把序列级的 \(1/t\) 权重换成按“附近有多少已知 token”计算的 token 级权重。
+</div>
+<p>记号同本 track：\(x_0\)、\(x_t\)（\(t=1\) 全掩）、\([\mathrm{M}]\)、\(p_{\theta}(x_0^{i}\mid x_t)\)、prompt \(c\)、步数 \(N\)。DiffuLLaMA 用离散时间 \(T\) 与 \(\alpha_t\)（未被掩概率）推导，取 \(\alpha_t=1-t\)，与本页一致；Dream 用 \(N\) 表示序列长度，本页改记为 \(L\)。<span class="src">DiffuLLaMA §2–3；Dream §3</span></p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：Dream 的一步继续预训练</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络（AR 权重来源）</span><span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>[M] token</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="Dream 训练一步：AR 权重初始化双向 Transformer，掩码画布输入，logits 右移一位后在被掩位置计算由 CART 加权的交叉熵；右上为注意力掩码从因果到全双向">
+    <g class="data" data-part="canvas" data-step="2">
+      <rect class="box" x="20" y="24" width="400" height="116" rx="10"/>
+      <text class="t-c t-b" x="220" y="46">x_0 → x_t：t ~ U(0,1)，独立掩码</text>
+      <text class="t-sm" x="40" y="77">x_0</text>
+      <rect class="tk data" x="80" y="60" width="24" height="24"/><rect class="tk data" x="110" y="60" width="24" height="24"/><rect class="tk data" x="140" y="60" width="24" height="24"/><rect class="tk data" x="170" y="60" width="24" height="24"/><rect class="tk data" x="200" y="60" width="24" height="24"/><rect class="tk data" x="230" y="60" width="24" height="24"/><rect class="tk data" x="260" y="60" width="24" height="24"/><rect class="tk data" x="290" y="60" width="24" height="24"/>
+      <text class="t-sm" x="40" y="109">x_t</text>
+      <rect class="tk data" x="80" y="92" width="24" height="24"/><rect class="tk mask" x="110" y="92" width="24" height="24"/><rect class="tk data" x="140" y="92" width="24" height="24"/><rect class="tk mask" x="170" y="92" width="24" height="24"/><rect class="tk mask" x="200" y="92" width="24" height="24"/><rect class="tk data" x="230" y="92" width="24" height="24"/><rect class="tk mask" x="260" y="92" width="24" height="24"/><rect class="tk data" x="290" y="92" width="24" height="24"/>
+      <text class="t-xs" x="330" y="76">干净序列</text><text class="t-xs" x="330" y="108">掩码后</text>
+      <text class="t-c t-xs" x="220" y="132">SFT 时 prompt 不加噪，只掩 response</text>
+    </g>
+    <g class="tgt" data-part="init" data-step="1">
+      <rect class="box frozen" x="460" y="24" width="220" height="116" rx="10"/>
+      <text class="t-c t-b" x="570" y="50">AR 权重（来源）</text>
+      <text class="t-c t-sm" x="570" y="76">Dream ← Qwen2.5-7B</text>
+      <text class="t-c t-sm" x="570" y="98">DiffuLLaMA ← LLaMA-2-7B</text>
+      <text class="t-c t-xs" x="570" y="124">拷贝一次，之后不再参与</text>
+    </g>
+    <g data-part="attn" data-step="3">
+      <rect class="box" x="720" y="24" width="220" height="116" rx="10"/>
+      <text class="t-c t-b" x="830" y="46">注意力：因果 → 全双向</text>
+      <rect class="tk enc" x="748" y="56" width="8" height="8"/><rect class="tk off" x="757" y="56" width="8" height="8"/><rect class="tk off" x="766" y="56" width="8" height="8"/><rect class="tk enc" x="775" y="56" width="8" height="8"/><rect class="tk off" x="784" y="56" width="8" height="8"/><rect class="tk off" x="793" y="56" width="8" height="8"/>
+      <rect class="tk enc" x="748" y="65" width="8" height="8"/><rect class="tk enc" x="757" y="65" width="8" height="8"/><rect class="tk enc" x="766" y="65" width="8" height="8"/><rect class="tk off" x="775" y="65" width="8" height="8"/><rect class="tk off" x="784" y="65" width="8" height="8"/><rect class="tk enc" x="793" y="65" width="8" height="8"/>
+      <rect class="tk enc" x="748" y="74" width="8" height="8"/><rect class="tk enc" x="757" y="74" width="8" height="8"/><rect class="tk enc" x="766" y="74" width="8" height="8"/><rect class="tk off" x="775" y="74" width="8" height="8"/><rect class="tk enc" x="784" y="74" width="8" height="8"/><rect class="tk off" x="793" y="74" width="8" height="8"/>
+      <rect class="tk enc" x="748" y="83" width="8" height="8"/><rect class="tk enc" x="757" y="83" width="8" height="8"/><rect class="tk enc" x="766" y="83" width="8" height="8"/><rect class="tk enc" x="775" y="83" width="8" height="8"/><rect class="tk off" x="784" y="83" width="8" height="8"/><rect class="tk enc" x="793" y="83" width="8" height="8"/>
+      <rect class="tk enc" x="748" y="92" width="8" height="8"/><rect class="tk enc" x="757" y="92" width="8" height="8"/><rect class="tk enc" x="766" y="92" width="8" height="8"/><rect class="tk enc" x="775" y="92" width="8" height="8"/><rect class="tk enc" x="784" y="92" width="8" height="8"/><rect class="tk off" x="793" y="92" width="8" height="8"/>
+      <rect class="tk enc" x="748" y="101" width="8" height="8"/><rect class="tk enc" x="757" y="101" width="8" height="8"/><rect class="tk enc" x="766" y="101" width="8" height="8"/><rect class="tk enc" x="775" y="101" width="8" height="8"/><rect class="tk enc" x="784" y="101" width="8" height="8"/><rect class="tk enc" x="793" y="101" width="8" height="8"/>
+      <text class="t-c t-xs" x="775" y="128">因果 ∪ 随机打开</text>
+      <text class="t-xs" x="814" y="70">DiffuGPT：</text><text class="t-xs" x="814" y="84">1 万步退火</text>
+      <text class="t-xs" x="814" y="102">7B / Dream：</text><text class="t-xs" x="814" y="116">直接全双向</text>
+    </g>
+    <path class="edge tgt" d="M570,140 V172" data-step="1"/>
+    <text class="t-xs" x="578" y="160" data-step="1">初始化</text>
+    <path class="edge" d="M230,140 V236 H296" data-step="3"/>
+    <path class="edge" d="M830,140 V236 H664" data-step="3"/>
+    <g class="enc" data-part="denoiser" data-step="3">
+      <rect class="box" x="300" y="176" width="360" height="120" rx="10"/>
+      <text class="t-c t-b" x="480" y="202">Transformer（Qwen2.5 / LLaMA 结构）</text>
+      <text class="t-c t-sm" x="480" y="226">全双向 · 无时间嵌入 · 形状不变</text>
+      <text class="t-c t-sm" x="480" y="248">Dream 7B：28 层，GQA 4 个 KV 头</text>
+      <text class="t-c t-xs" x="480" y="272">输出每个位置的隐状态 h_1 … h_L</text>
+    </g>
+    <path class="edge idx" d="M60,140 V332" data-step="5"/>
+    <text class="t-xs" x="68" y="250" data-step="5">掩码位置</text>
+    <path class="edge enc" d="M640,296 V316 H815 V332" data-step="4"/>
+    <g data-part="cart" data-step="5">
+      <rect class="box" x="20" y="336" width="250" height="120" rx="10"/>
+      <text class="t-c t-b" x="145" y="358">CART 逐 token 权重</text>
+      <text class="t-c t-sm" x="145" y="382">w_n = ½ Σ 未掩 j · Geo(p, |n−j|−1)</text>
+      <text class="t-c t-sm" x="145" y="404">附近已知 token 多 → 权重大</text>
+      <text class="t-c t-xs" x="145" y="426">替代序列级的 1/t（Dream）</text>
+      <text class="t-c t-xs" x="145" y="444">开源 SFT 配置 cart_p = 0.1</text>
+    </g>
+    <path class="edge" d="M270,396 H341" data-step="5"/>
+    <g class="loss" data-part="loss" data-step="6">
+      <rect class="box" x="345" y="336" width="270" height="120" rx="10"/>
+      <text class="t-c t-b" x="480" y="360">加权交叉熵</text>
+      <text class="t-c t-sm" x="480" y="384">只在 [M] 位置、对齐右移后的目标</text>
+      <text class="t-c t-sm" x="480" y="406">DiffuLLaMA：权重 1/t</text>
+      <text class="t-c t-sm" x="480" y="426">Dream：权重 = CART</text>
+      <text class="t-c t-xs" x="480" y="446">更新全部参数，学习率需谨慎</text>
+    </g>
+    <path class="edge grad" d="M480,336 V300" data-step="6"/>
+    <path class="edge" d="M690,396 H619" data-step="4"/>
+    <g data-part="shift" data-step="4">
+      <rect class="box" x="690" y="336" width="250" height="120" rx="10"/>
+      <text class="t-c t-b" x="815" y="358">logits 右移一位</text>
+      <text class="t-xs" x="706" y="383">h</text><text class="t-xs" x="706" y="417">x</text>
+      <rect class="tk enc" x="724" y="370" width="18" height="18"/><rect class="tk enc" x="764" y="370" width="18" height="18"/><rect class="tk enc" x="804" y="370" width="18" height="18"/><rect class="tk enc" x="844" y="370" width="18" height="18"/>
+      <rect class="tk data" x="724" y="404" width="18" height="18"/><rect class="tk data" x="764" y="404" width="18" height="18"/><rect class="tk data" x="804" y="404" width="18" height="18"/><rect class="tk data" x="844" y="404" width="18" height="18"/>
+      <path class="edge enc no-head" d="M733,388 L773,404 M773,388 L813,404 M813,388 L853,404"/>
+      <text class="t-c t-xs" x="815" y="444">h_(i−1) 预测 x_i，首位复制</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="canvas"><h4>掩码画布</h4><p>与 LLaDA 相同：每条序列抽一个 \(t\)，每个 token 独立以概率 \(t\) 换成 \([\mathrm{M}]\)。Dream 的 mask id 是 151666，DiffuLLaMA 没有扩词表，而是挑一个低频的已有 token（id 811）当 \([\mathrm{M}]\)。<span class="src">Dream <code>config.json</code>；DiffuLLaMA App. B.2</span>Dream 训练代码对 SFT 的 |EOS| 补齐有一个可选处理（<code>treat_eos_as_one</code>）：补齐段要么整体被掩、要么整体保留。<span class="src">官方 <code>src/diffllm/gen_utils.py</code> <code>q_sample</code></span></p></div>
+    <div data-note="init"><h4>AR 权重只是起点</h4><p>Dream 7B 的配置与 Qwen2.5-7B 相同，直接载入其权重；DiffuLLaMA 载入 LLaMA-2-7B，DiffuGPT 载入 GPT-2。初始化后 AR 模型不再出现（不是教师，也不做蒸馏），图中用冻结色表示“来源”。Dream 在 1B 规模用 LLaMA3.2-1B 对比从零训练：200B token 内 AR 初始化的损失始终更低，但开头也有一段因“因果 → 全注意力”而升高的损失。<span class="src">Dream §4.1、§4.3、§5.4、Fig. 4</span></p></div>
+    <div data-note="attn"><h4>注意力掩码退火</h4><p>DiffuLLaMA 提出逐步去掉因果掩码。官方 DiffuGPT 实现：掩码 = 下三角 ∪ 以概率 \(\rho\) 独立打开的上三角元素，\(\rho=\min(1,(\text{step}+1)/\text{anneal\_steps})\)，anneal_steps = 1 万。7B 为了用 FlashAttention-2 直接全双向；Dream 论文与博客都没有提到退火。<span class="src">DiffuLLaMA §3.3、§4.1、App. B.2；官方 <code>ddm/trainer.py</code> <code>get_anneal_attn_mask</code></span></p></div>
+    <div data-note="denoiser"><h4>网络不变</h4><p>Dream 7B：隐藏维 3584、28 层、28 个注意力头、4 个 KV 头、FFN 18,944、词表 152,064、RoPE θ = 1e6。<span class="src">Dream-v0-Base-7B <code>config.json</code></span>没有时间嵌入——DiffuLLaMA 的理由是 AR 模型本来就没有这层，且 \(t\) 可从掩码个数隐式推断。<span class="src">DiffuLLaMA §3.3</span></p></div>
+    <div data-note="shift"><h4>shift：保留 AR 的错位预测</h4><p>AR 训练让位置 \(i\) 的隐状态编码“下一个 token”。若改成原地预测，输出层与表征错位，模型难以适应。于是位置 \(i-1\) 的 logits 负责预测 \(x_i\)；官方 Dream 代码写成 <code>cat([logits[:, :1], logits[:, :-1]])</code>，第一个位置复制自身。DiffuLLaMA 采样时还要把序列右移、在前面补一个起始 token。<span class="src">DiffuLLaMA §3.3–3.4、Alg. 2；Dream §4.1；官方 <code>generation_utils.py</code></span></p></div>
+    <div data-note="cart"><h4>CART：按上下文重定噪声</h4><p>同一个 \(t\) 下，紧挨着已知 token 的 \([\mathrm{M}]\) 比周围全是 \([\mathrm{M}]\) 的位置更容易猜。CART 用几何分布衡量每个已知 token 对被掩位置 \(n\) 的贡献，越近贡献越大，再求和作为该位置的权重。<span class="src">Dream §4.2 Eq. 4–5</span>官方代码以 \([L,L]\) 矩阵 \(W_{nj}=\tfrac12 p(1-p)^{|n-j|-1}\)（对角为 0）实现，权重 = 未掩指示向量乘 \(W\)。<span class="src">官方 <code>fsdp_sft_trainer.py</code> <code>context_adaptive_reweight</code></span></p></div>
+    <div data-note="loss"><h4>加权交叉熵</h4><p>只在被掩位置、对右移后的目标计算交叉熵。DiffuLLaMA 用标准的 \(1/t\)；Dream 用 CART 权重取代 \(1/t\)（代码中二选一）。论文强调学习率：太高会冲掉初始权重里的左到右知识，太低又学不会扩散。<span class="src">DiffuLLaMA Eq. 7；Dream §4.2、§5.4</span></p></div>
+    <div data-step-note="1"><h4>① 载入 AR 权重</h4><p>形状完全一致，直接拷贝。</p></div>
+    <div data-step-note="2"><h4>② 构造 x_t</h4><p>抽 \(t\)，独立掩码。</p></div>
+    <div data-step-note="3"><h4>③ 双向前向</h4><p>注意力为全双向（DiffuGPT 训练早期为退火掩码）。</p></div>
+    <div data-step-note="4"><h4>④ 右移 logits</h4><p>位置 \(i-1\) 的输出对齐目标 \(x_i\)。</p></div>
+    <div data-step-note="5"><h4>⑤ 计算权重</h4><p>Dream：由掩码位置算 CART；DiffuLLaMA：\(1/t\)。</p></div>
+    <div data-step-note="6"><h4>⑥ 损失与反传</h4><p>被掩位置的加权交叉熵，更新全部参数。</p></div>
+  </div>
+  <figcaption>图 1　AR→扩散继续预训练的一步。<span class="src">依据 DiffuLLaMA §3、Alg. 1；Dream §4；官方 Dream <code>fsdp_sft_trainer.py</code>、DiffuGPT <code>ddm/trainer.py</code>。</span></figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-gap">3.1 AR 与掩码扩散差在哪：两个目标的对照</h3>
+<p>DiffuLLaMA 把两者写成同一形式：掩码扩散是“带 \(1/t\) 权重、只在被掩位置计算”的交叉熵，网络看见带噪的整段序列；AR 是“所有位置、看见干净前缀、目标右移一格”的交叉熵。AR 也可以看成一种特殊扩散：前向过程从右往左确定性地逐个掩掉 token，反向就是逐个从左到右生成。<span class="src">DiffuLLaMA §3.2、Eq. 7–8</span>于是转换只需处理两件事：注意力从因果到双向、预测目标的位置对齐。</p>
+<h3 id="c-anneal">3.2 注意力掩码退火</h3>
+<p>在 GPT-2 上微调 GSM8K-symbolic 的消融里，去掉退火损失很小（GPT2-M：49.7 → 47.2），去掉 shift 损失很大（49.7 → 34.5）；训练终点的 ELBO 也是 0.015 / 0.019 / 0.028。<span class="src">DiffuLLaMA Tab. 3、Tab. 5</span>因此 7B 直接用全双向注意力，以便使用 FlashAttention-2——退火需要逐元素的任意掩码矩阵，FlashAttention-2 只原生支持因果或全注意力（后半句为推断）。<span class="src">DiffuLLaMA §4.1、§4.5</span></p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码：退火怎么“退”</span>论文写“每步从右侧采样一定量的上下文，并逐步增加直到全注意力”；官方 DiffuGPT 代码不是按“右侧连续一段”打开，而是对整个上三角<b>逐元素</b>以概率 \(\rho\) 打开（Bernoulli），\(\rho\) 随步数线性升到 1。两者都让模型逐渐看到未来，但前者保持连续的上下文窗口、后者是随机稀疏的。<span class="src">DiffuLLaMA §3.3；官方 <code>LLaMA-Factory/src/llamafactory/train/ddm/trainer.py</code></span></div>
+<h3 id="c-shift">3.3 shift：为什么不能省</h3>
+<p>预训练 AR 的 LM head 读的是“预测下一个 token”的表征。若直接让位置 \(i\) 预测自己的原 token，相当于要求网络整体换一种表征约定，初始权重的价值大打折扣。保留错位后，扩散训练只需让网络学会“在双向上下文里预测下一个位置被掩掉的 token”，与 AR 的输出约定一致。Dream 的图示把这称作“最大程度的结构对齐”。<span class="src">DiffuLLaMA §3.3；Dream §4.1、Fig. 2</span>副作用：位置 \(i\) 的预测由位置 \(i-1\) 的隐状态给出，而后者本身可能就是 \([\mathrm{M}]\)；第一个位置没有左邻，代码直接复制它自己的 logits。</p>
+<h3 id="c-cart">3.4 CART：上下文自适应的 token 级噪声重排</h3>
+<p>标准训练对整条序列用同一个 \(t\) 和同一个权重 \(1/t\)。Dream 认为学习发生在 token 级，每个被掩 token 实际面对的“噪声”取决于它附近的已知上下文，于是把权重改成 \(w(t,x_t,n)\)（§5）。\(p\) 越小，已知 token 对远处的贡献越均匀；\(p\) 越大，只有近邻有贡献。<span class="src">Dream §4.2</span>论文没有给出 7B 预训练用的 \(p\)；开源的 SFT 脚本用 <code>time_reweighting=cart</code>、默认 <code>cart_p=0.1</code>（而函数内默认值是 0.8）。<span class="src">官方 <code>sft_trainer.yaml</code>、<code>run_sft_tulu3.sh</code>、<code>fsdp_sft_trainer.py</code></span><span class="unverified">Dream 预训练阶段的 cart_p 未公开</span></p>
+<h3 id="c-init">3.5 AR 初始化与学习率</h3>
+<p>Dream 先在 1B 规模做设计选择，确认了 AR 初始化（Qwen2.5、LLaMA3 均试过）和 CART 两个组件，再训 7B；7B 预训练 580B token，数据来自 Dolma v1.7、OpenCoder、DCLM-Baseline，全部开源数据；博客称训练平稳、没有不可恢复的 loss spike。<span class="src">Dream 博客 Training；Dream §4.3</span>学习率是关键：太高会迅速冲掉左到右的知识，使初始化失去意义；太低又阻碍扩散训练。<span class="src">Dream §5.4</span>DiffuLLaMA 7B 用恒定 2e-5，GPT-2 版用 3e-4 余弦。<span class="src">DiffuLLaMA App. B.2</span></p>
+<h3 id="diffullama">3.6 DiffuLLaMA：转换配方的源头</h3>
+<p>DiffuGPT：在 FineWeb 中随机取 30B token，对 GPT-2 small / medium 继续训练（多 epoch，有效 token 超过 100B），8 张 A100-80G；DiffuLLaMA：从 SlimPajama 与 Starcoder 按 7:3 采样 65B token，对 LLaMA-2-7B 继续训练，上下文 2048，16 个 4×GH200 节点，每卡 batch 60、梯度累积 4。<span class="src">DiffuLLaMA §4.1、App. B.1–B.2</span>数据选择刻意贴近原 AR 的预训练分布，以减少分布漂移（GPT-2 ↔ OpenWebText 近似的 FineWeb；LLaMA-2 ↔ TinyLlama 式配比）。<span class="src">DiffuLLaMA App. B.1</span></p>
+<p>能力上，DiffuLLaMA 能做少样本上下文学习（MAWPS 零样本 9.7 → 4-shot 31.3），自洽投票再升到 33.1；但在 TriviaQA（18.5 vs LLaMA2 45.4）等知识类任务上掉得厉害，作者归因于 65B token 不足以保住原模型的知识。<span class="src">DiffuLLaMA Tab. 1、Tab. 2、§4.3</span>同期对照：只在同一语料上对 GPT-2 继续做 AR 训练没有提升，说明 DiffuGPT 的收益不是“多看了数据”。<span class="src">DiffuLLaMA App. C.4、Tab. 9</span></p>
+<div class="callout code-note"><span class="callout-title">论文内部不一致：DiffuLLaMA 的 token 数</span>§4.1 一处写“随机采样 65B token”，同段又写“train DiffuLLaMA on 60B tokens”；App. B.1、B.2 都是 65B。摘要的“少于 200B token”是对所有模型的上界。本页取 65B。<span class="src">DiffuLLaMA §4.1、App. B.1–B.2、摘要</span></div>
+<h3 id="c-cost">3.7 成本：转换 vs 从零</h3>
+<p>扩散阶段的 token：DiffuLLaMA 65B，Dream 580B，LLaDA 2.3T，iLLaDA 12T。<span class="src">各论文</span>Dream 说自己“只用了 LLaDA 1/4 的训练数据”，但这只计扩散阶段；Qwen2.5 的 18T 预训练已经发生，iLLaDA 的对比表就把 Dream 记为“18T + 0.6T”。<span class="src">Dream §5.2；iLLaDA Tab. 2</span>所以准确说法是：<b>在已有 AR 模型的前提下</b>，得到一个同级扩散模型的边际成本低一到两个数量级；若把 AR 预训练算进去，转换路线的总计算并不低。Dream 未公开训练硬件与时长。<span class="unverified">Dream 7B 的 GPU 小时未核实</span></p>
+<h3 id="c-arbias">3.8 残留了哪些 AR 偏置</h3>
+<ul>
+  <li><b>结构上</b>：shift 让每个位置的输出仍然“看左邻、报下一个”，这是 AR 的输出约定，只是注意力变成了双向。<span class="src">Dream §4.1</span></li>
+  <li><b>有意保留的知识</b>：Dream 的学习率调节目标正是“不要冲掉左到右知识”，作者认为它能加速任意顺序能力的学习。<span class="src">Dream §5.4</span></li>
+  <li><b>解码顺序</b>：DiffuCoder 用 local / global AR-ness 度量解码顺序，发现两类 dLLM 都偏向左到右，而由 AR 转换的模型（数学任务上的 Dream、代码上的 DiffuCoder）比从零训练的 LLaDA 更“AR”；提高采样温度会让顺序更随机。<span class="src">DiffuCoder §4.2–4.3、Fig. 3、Fig. 5</span>Dream 自己的 README 也提示纯随机顺序（<code>alg="origin"</code>）在部分任务上会掉分。<span class="src">Dream 官方 README</span></li>
+  <li><b>但并不妨碍规划类任务</b>：同协议下 Dream 的 Sudoku 81.0、Countdown 16.0，高于 LLaDA 的 46.0、13.2 与 Qwen2.5 的 21.0、6.2。<span class="src">Dream Tab. 1</span></li>
+</ul>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>DiffuLLaMA（7B）</th><th>Dream 7B</th><th>同规模 AR（参照：其初始化模型）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>掩码扩散 ELBO，权重 \(1/t\)，目标右移一格 <span class="src">Eq. 7、Alg. 1</span></td><td>掩码扩散 + CART token 级权重，目标右移一格 <span class="src">Eq. 4–5</span></td><td>下一 token 交叉熵（LLaMA-2 / Qwen2.5）</td></tr>
+    <tr><td>注意力与 KV cache</td><td>全双向（7B 未退火），无 cache <span class="src">§4.1</span></td><td>全双向，GQA 4 KV 头沿用 Qwen2.5，无现成 cache <span class="src">config.json</span></td><td>因果 + 精确 KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>选择题按损失打分；生成默认 \(T=32\) 步，长度视任务而定 <span class="src">§4.2</span></td><td>可调：每步 <code>max_new_tokens/steps</code> 个；README 示例 512 / 512，即 TPF = 1 <span class="src">README</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>无需重排即可填空：HumanEval 单行填空 15.5 vs LLaMA2 仅前缀 1.7 <span class="src">Tab. 1</span></td><td>规划：Sudoku 81.0 vs Qwen2.5 21.0；任意位置补全 <span class="src">Tab. 1、§5.5.3</span></td><td>精确似然、流式、成熟服务栈</td></tr>
+    <tr><td>代价与失效情形</td><td>知识类任务大幅退化（TriviaQA 18.5 vs 45.4）；零样本 CoT 弱 <span class="src">Tab. 1–2</span></td><td>仍弱于 Qwen2.5（MMLU 69.5 vs 71.9、MBPP 56.2 vs 63.6）；上下文 2048；随机顺序解码掉分 <span class="src">Tab. 1、README</span></td><td>一步一 token；填空需 FIM 训练</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、权重与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>输入 \(x_t\)</td><td>\([B_{\text{batch}},L]\)</td><td>Dream 上下文（输入 + 输出）2048 <span class="src">README</span></td></tr>
+    <tr><td>隐状态</td><td>\([B_{\text{batch}},L,3584]\)</td><td>28 层，28 头，KV 头 4 <span class="src">config.json</span></td></tr>
+    <tr><td>logits（右移后）</td><td>\([B_{\text{batch}},L,152064]\)</td><td>第 \(i\) 行来自位置 \(i-1\)；第 0 行复制自身</td></tr>
+    <tr><td>CART 矩阵</td><td>\([L,L]\)</td><td>\(W_{nj}=\tfrac12p(1-p)^{|n-j|-1}\)，对角 0；权重 \(=(1-m)W\)，被掩位才保留</td></tr>
+    <tr><td>退火掩码（DiffuGPT）</td><td>\([L,L]\)</td><td>下三角 ∪ Bernoulli(\(\rho\)) 上三角</td></tr>
+    <tr><td>DiffuLLaMA 每步 token</td><td>\(60\times64\times4\times2048\approx3.1\times10^{7}\)</td><td>每卡 60 条 × 64 卡 × 累积 4（推算）<span class="src">App. B.2</span></td></tr>
+    <tr><td>生成（Dream）</td><td>\(N\) 次全序列前向</td><td>每步定稿 <code>max_new_tokens / steps</code> 个 <span class="src">README</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p>DiffuLLaMA 的扩散损失（对每条序列抽一个 \(t\)）与 AR 损失并排写，差别一目了然：<span class="src">DiffuLLaMA Eq. 7–8</span></p>
+<div class="formula">$$\mathcal{L}_t=\frac{1}{t}\,\mathbb{E}_{q(x_t\mid x_0)}\Big[-\sum_{n=1}^{L}\mathbf{1}\big[x_t^{n}=[\mathrm{M}]\big]\log f_{\theta}(x_t)_{n}[x_0^{n}]\Big],\qquad \mathcal{L}_{\mathrm{AR}}=-\sum_{n=1}^{L}\log f_{\theta}(x_0^{1:n-1})_{n-1}[x_0^{n}].$$</div>
+<p>带 shift 实现时，扩散一侧的“第 \(n\) 个输出”实际取自位置 \(n-1\)。Dream 把 \(1/t\) 换成逐 token 的 \(w\)：<span class="src">Dream Eq. 4–5</span></p>
+<div class="formula">$$\mathcal{L}(\theta)=-\mathbb{E}_{x_0,\,t,\,x_t}\sum_{n=1}^{L}\mathbf{1}\big[x_t^{n}=[\mathrm{M}]\big]\,w(t,x_t,n)\log p_{\theta}(x_0^{n}\mid x_t),\qquad w(t,x_t,n)=\frac12\sum_{j=1}^{L}\mathbf{1}\big[x_t^{j}\neq[\mathrm{M}]\big]\,p(1-p)^{|n-j|-1}.$$</div>
+<p>\(w\) 只通过“哪些位置被掩”依赖 \(t\)；两侧几何级数之和都不超过 1，所以 \(w\le 1\)。</p>
+<div class="callout code-note"><span class="callout-title">CART 之后还是 ELBO 吗</span>Dream 称 Eq. 3（权重 \(1/t\)）是 ELBO 的等价改写，并把 CART 描述为“\(w(t)\) 的推广”。但 \(1/t\) 来自前向过程的推导，而 CART 的权重有上界 1、与 \(1/t\) 不成比例，按本页推断<b>它不再是负对数似然的上界</b>，而是一个重加权的去噪目标；因此 Dream 的训练损失不能直接当作似然或与 ELBO 类数字比较。论文没有讨论这一点。<span class="src">Dream §3.2、§4.2；推断</span>另外，官方 SFT 代码在 <code>original</code>（\(1/t\)）、<code>linear</code>、<code>cart</code> 三种权重间切换，开源脚本选的是 <code>cart</code>。<span class="src">官方 <code>fsdp_sft_trainer.py</code>、<code>run_sft_tulu3.sh</code></span></div>
+<p>似然评测：DiffuLLaMA 对选择题计算每个选项的扩散损失（按 token 平均）取最小者，离散步数 \(T\) 会影响结果（HellaSwag：\(T=32\) 时 58.7，\(T=8\) 时 47.1）。<span class="src">DiffuLLaMA App. B.3、Tab. 11</span>Dream 的选择题评测基于 lm-evaluation-harness 的似然任务脚本。<span class="src">Dream README Evaluation</span><span class="unverified">Dream 似然估计的 MC 次数未核实</span></p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">ar_to_diffusion.py（按 Dream fsdp_sft_trainer.py、generation_utils.py 与 DiffuGPT ddm/trainer.py 简化）</div>
+<pre><code class="lang-py">def anneal_mask(L, step, anneal_steps=10_000):          # DiffuGPT；7B 与 Dream 直接全 1
+    rho = min(1.0, (step + 1) / anneal_steps)
+    return tril(ones(L, L)) | (rand(L, L) &lt; rho)
+
+def cart_weight(masked, p=0.1):                          # masked: [B, L] bool
+    d = abs(arange(L)[:, None] - arange(L)[None, :])
+    W = 0.5 * p * (1 - p) ** (d - 1); W[d == 0] = 0       # [L, L]
+    return ((~masked).float() @ W) * masked              # 只在被掩位置有值
+
+def train_step(model, x0, step, prompt_len=None, mode="cart"):
+    t = rand(B)                                          # 每条序列一个 t
+    masked = rand(B, L) &lt; t[:, None]
+    if prompt_len is not None:
+        masked[:, :prompt_len] = False                   # SFT：prompt 不加噪
+    xt = where(masked, MASK_ID, x0)
+    attn = ones(L, L) if mode != "diffugpt" else anneal_mask(L, step)
+    logits = model(xt, attn_mask=attn)                   # 全双向，无时间输入
+    logits = cat([logits[:, :1], logits[:, :-1]], dim=1) # shift：位置 i-1 预测 x_i
+    ce = cross_entropy(logits, x0, reduction="none") * masked
+    w = cart_weight(masked) if mode == "cart" else 1.0 / t[:, None]
+    return (ce * w).sum() / masked.sum()                 # 按被掩 token 数平均
+
+def diffusion_generate(model, c, L_new=512, N=512, eps=1e-3, alg="entropy"):
+    x = cat([c, full(L_new, MASK_ID)])
+    ts = linspace(1, eps, N + 1)
+    for i in range(N):
+        logits = model(x)
+        logits = cat([logits[:, :1], logits[:, :-1]], dim=1)   # 推理同样右移
+        m = (x == MASK_ID)
+        conf, x0 = score(logits[m], alg)                 # maskgit_plus / topk_margin / entropy
+        k = int(m.sum() * (1 - ts[i + 1] / ts[i])) if i &lt; N - 1 else m.sum()
+        top = topk(conf, k)                              # alg="origin" 则按概率随机转移
+        x[m][top] = x0[top]
+    return x[len(c):]</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>DiffuGPT（S / M）</th><th>DiffuLLaMA 7B</th><th>Dream 7B</th></tr></thead>
+  <tbody>
+    <tr><td>初始化</td><td>GPT-2 small / medium</td><td>LLaMA-2-7B</td><td>Qwen2.5-7B</td></tr>
+    <tr><td>扩散阶段数据</td><td>FineWeb 30B 独特 token，有效 &gt;100B <span class="src">App. B.1</span></td><td>SlimPajama : Starcoder = 7 : 3，65B <span class="src">App. B.1</span></td><td>Dolma v1.7 + OpenCoder + DCLM，580B <span class="src">§4.3</span></td></tr>
+    <tr><td>上下文</td><td>512 / 1024 <span class="src">Tab. 4</span></td><td>2048 <span class="src">§4.1</span></td><td>2048 <span class="src">README</span></td></tr>
+    <tr><td>注意力</td><td>1 万步退火 <span class="src">App. B.2</span></td><td>直接全双向 <span class="src">§4.1</span></td><td>全双向（未提退火）</td></tr>
+    <tr><td>学习率 / batch</td><td>3e-4 余弦，2K warmup；全局 batch 256 / 1280 <span class="src">App. B.2</span></td><td>恒定 2e-5；每卡 60 × 64 卡 × 累积 4 <span class="src">App. B.2</span></td><td><span class="unverified">未公开</span></td></tr>
+    <tr><td>硬件</td><td>8 × A100-80G</td><td>16 节点 × 4 GH200</td><td><span class="unverified">未公开</span></td></tr>
+    <tr><td>[M] token</td><td>S：id 10541（已有词）；M：新增 50257</td><td>id 811（已有词）</td><td>id 151666 <span class="src">config.json</span></td></tr>
+    <tr><td>权重</td><td>\(1/t\)</td><td>\(1/t\)</td><td>CART <span class="src">§4.2</span></td></tr>
+    <tr><td>SFT</td><td>—</td><td>GSM8K 用 LoRA（rank 8）<span class="src">App. B.3</span></td><td>Tulu 3 + SmolLM2 共 1.8M 对，3 epoch <span class="src">§5.3</span>；开源脚本 lr 2e-6、cart</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>Dream Base，同协议重测</b>（* 四列均由 Dream 作者评测；括号为 shot 数）。注意这里 LLaDA 的数字与 LLaDA 原文不同（如 BBH 47.4 vs 49.7），是协议差异所致。<span class="src">Dream Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>基准</th><th class="num">Dream 7B</th><th class="num">LLaDA 8B</th><th class="num">Qwen2.5 7B</th><th class="num">LLaMA3 8B</th></tr></thead>
+  <tbody>
+    <tr><td>训练 token</td><td class="num">0.6T（扩散阶段）</td><td class="num">2.3T</td><td class="num">18T</td><td class="num">15T</td></tr>
+    <tr><td>MMLU (5)</td><td class="num">69.5</td><td class="num">65.9</td><td class="num">71.9</td><td class="num">63.5</td></tr>
+    <tr><td>ARC-C (0)</td><td class="num">59.8</td><td class="num">47.5</td><td class="num">51.5</td><td class="num">53.6</td></tr>
+    <tr><td>GSM8K (8)</td><td class="num">77.2</td><td class="num">70.9</td><td class="num">78.9</td><td class="num">55.3</td></tr>
+    <tr><td>MATH (4)</td><td class="num">39.6</td><td class="num">30.7</td><td class="num">41.1</td><td class="num">18.0</td></tr>
+    <tr><td>HumanEval (0)</td><td class="num">57.9</td><td class="num">32.9</td><td class="num">56.7</td><td class="num">35.4</td></tr>
+    <tr><td>MBPP (4)</td><td class="num">56.2</td><td class="num">39.0</td><td class="num">63.6</td><td class="num">49.2</td></tr>
+    <tr class="hl"><td>Sudoku (8)</td><td class="num">81.0</td><td class="num">46.0</td><td class="num">21.0</td><td class="num">0.0</td></tr>
+    <tr class="hl"><td>Countdown (8)</td><td class="num">16.0</td><td class="num">13.2</td><td class="num">6.2</td><td class="num">3.7</td></tr>
+  </tbody>
+</table></div>
+<p><b>Dream-Instruct</b>（仅 SFT，1.8M 对）：MMLU 67.0、GSM8K 81.0、MATH 39.2、HumanEval 55.5、MBPP 58.8、IFEval 62.5；同表 Qwen2.5 7B Instruct（SFT + RL）为 76.6、91.6、75.5、84.8、79.2、74.7。表中 LLaDA Instruct 一列（GSM8K 78.6、MATH 26.6、HumanEval 47.6）同样与 LLaDA 原文不同。<span class="src">Dream Tab. 2；LLaDA Tab. 2、Tab. 8</span></p>
+<p><b>DiffuLLaMA</b>（零样本，GSM8K 为微调）：<span class="src">DiffuLLaMA Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">TriviaQA</th><th class="num">Lambada</th><th class="num">HellaSwag</th><th class="num">GSM8K*</th><th class="num">代码填空</th></tr></thead>
+  <tbody>
+    <tr><td>GPT2-M（AR，355M）</td><td class="num">6.7</td><td class="num">37.7</td><td class="num">38.3</td><td class="num">45.6</td><td class="num">(2.6)</td></tr>
+    <tr><td>DiffuGPT-M（355M）</td><td class="num">3.8</td><td class="num">30.3</td><td class="num">37.2</td><td class="num">61.8</td><td class="num">2.9</td></tr>
+    <tr><td>LLaMA2（AR，7B）</td><td class="num">45.4</td><td class="num">68.8</td><td class="num">74.9</td><td class="num">58.6</td><td class="num">(1.7)</td></tr>
+    <tr class="hl"><td>DiffuLLaMA（7B）</td><td class="num">18.5</td><td class="num">53.9</td><td class="num">58.7</td><td class="num">63.1</td><td class="num">15.5</td></tr>
+  </tbody>
+</table></div>
+<p>括号表示 AR 只给前缀（不支持填空）。速度：batch 1、FlashAttention-2、无条件生成、\(T=256\)，生成 1024 / 2048 token 时 DiffuLLaMA 13.3 / 23.5 s，LLaMA2 17.5 / 35.7 s；512 token 时反而慢（12.5 vs 9.2 s）。<span class="src">DiffuLLaMA §4.5、Tab. 10</span><span class="unverified">该对比中 LLaMA2 是否启用 KV cache 未写明</span>Dream 在 Countdown 上 5–20 步时速度与质量同时优于 Qwen2.5，但图中没有给出硬件与 batch。<span class="src">Dream §5.5.2、Fig. 7</span></p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>解决了什么</h4><ul>
+    <li>证明 AR 权重可以“几乎不改结构”地转成掩码扩散模型，成本从 <a href="06-llada.html">LLaDA</a> 的 2.3T token 降到 65B–580B。</li>
+    <li>Dream 7B 成为最常用的开源 dLLM 底座之一：<a href="14-kv-cache.html">Fast-dLLM</a>、<a href="15-learned-parallel.html">CDLM</a>、<a href="18-code.html">Dream-Coder</a>、<a href="19-multimodal.html">LaViDa</a> 都以它为起点或对照。</li>
+  </ul></div>
+  <div class="now"><h4>留下的问题 → 下一步</h4><ul>
+    <li>全序列双向仍没有精确 KV cache、画布仍定长：<a href="12-ar-to-block.html">SDAR / Fast-dLLM v2 / WeDLM</a> 改为转成块扩散，只用约 1B token 级别的数据（见该页）。</li>
+    <li>AR 偏置是资产还是包袱：<a href="18-code.html">DiffuCoder</a> 量化 AR-ness，<a href="16-order-limits.html">第 16 页</a>讨论任意顺序的代价；规模上 <a href="09-llada2.html">LLaDA2.0</a> 用同一思路转到 100B。</li>
+    <li>“转换比从零便宜”只在不计 AR 预训练时成立；从零路线的 <a href="06-llada.html#illada">iLLaDA</a> 在 12T 后 Base 平均反超 Dream。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q13"><span class="qid">Q13</span>把 AR 权重改造成扩散模型时，“注意力掩码退火”和“shift”各自弥合哪一种不匹配？为什么 DiffuLLaMA 7B 可以省掉退火，却不能省掉 shift？</h3>
+  <div class="ans"><p class="short">退火处理的是<b>注意力模式</b>的不匹配：AR 只见过左侧上下文，突然全开会让表征分布突变，所以逐步打开未来位置。shift 处理的是<b>输出约定</b>的不匹配：AR 的位置 \(i\) 表征服务于预测 \(x_{i+1}\)，若改成原地预测，整个 LM head 与表征都要重学。GPT-2 上的消融显示前者影响小（49.7 → 47.2）、后者影响大（49.7 → 34.5），所以 7B 为用 FlashAttention-2 直接全双向，而 shift 一直保留，Dream 也照搬。</p>
+    <ul><li>Dream 1B 实验里 AR 初始化在开头同样出现“因果 → 全注意力”的损失升高，但始终低于从零训练——不退火的代价是暂时的。</li>
+    <li>官方退火实现是逐元素随机打开上三角，与论文“从右侧取一段上下文”的描述不同。</li>
+    <li>shift 让每个位置仍按“左邻报下一个”工作，这是转换模型保留 AR 结构偏置的一个来源。</li></ul>
+    <p class="cite">依据：DiffuLLaMA §3.3、§4.1、Tab. 3、Tab. 5；Dream §4.1、Fig. 4；官方 ddm/trainer.py。</p>
+  </div>
+  <h3 id="q14"><span class="qid">Q14</span>Dream 声称只用了 LLaDA 约 1/4 的训练 token 就更强——这笔账该怎么记？转换后的模型残留了哪些 AR 偏置，怎样检测？</h3>
+  <div class="ans"><p class="short">0.6T 只是扩散阶段的继续预训练；Qwen2.5 本身已用 18T token 预训练，iLLaDA 的对比表就记为“18T + 0.6T”。所以结论应是“已有强 AR 模型时，转换的边际成本远低于从零训练”，而不是扩散更省数据。残留偏置包括：shift 保留的错位输出约定；刻意用小学习率保住的左到右知识；以及更偏左到右的解码顺序。</p>
+    <ul><li>检测方法：用 DiffuCoder 的 local / global AR-ness 统计解码顺序（它报告 Dream 比 LLaDA 更 AR）；比较随机顺序与置信度顺序解码的分差；看反转、填空、规划类任务（Dream 的 Sudoku 81.0 说明偏置并未抹去规划优势）。</li>
+    <li>公平的成本比较应同时给出“含 AR 预训练的总计算”和“扩散阶段计算”，并注明数据是否同源。</li>
+    <li>Dream 训练用 CART 权重，其损失不是 ELBO，不能拿训练损失与从零模型的似然直接比（本页推断）。</li></ul>
+    <p class="cite">依据：Dream §5.2、§5.4；iLLaDA Tab. 2；DiffuCoder §4.2、Fig. 3；Dream README。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Ye, Xie, Zheng, Gao, Wu, Jiang, Li, Kong. <i>Dream 7B: Diffusion Large Language Models.</i> 技术报告，arXiv v1（2025-08-21；博客 2025-04-02）。<a href="https://arxiv.org/abs/2508.15487">论文</a> · <a href="https://hkunlp.github.io/blog/2025/dream/">博客</a> · <a href="https://github.com/HKUNLP/Dream">代码</a> · <a href="https://huggingface.co/Dream-org/Dream-v0-Base-7B">Base 权重</a> · <a href="https://huggingface.co/Dream-org/Dream-v0-Instruct-7B">Instruct 权重</a>。</li>
+  <li>Gong, Agarwal, Zhang, Ye, Zheng, Li, An, Zhao, Bi, Han, Peng, Kong. <i>Scaling Diffusion Language Models via Adaptation from Autoregressive Models.</i> ICLR 2025。<a href="https://arxiv.org/abs/2410.17891">论文</a> · <a href="https://github.com/HKUNLP/DiffuLLaMA">代码与权重</a>。</li>
+  <li>Gong et al. <i>DiffuCoder: Understanding and Improving Masked Diffusion Models for Code Generation.</i> 2025。<a href="https://arxiv.org/abs/2506.20639">论文</a>（AR-ness 度量；见 <a href="18-code.html">第 18 页</a>）。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

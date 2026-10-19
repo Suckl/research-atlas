@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RL 训练系统</title>
+<meta name="description" content="LLM 强化学习后训练的系统问题：HybridFlow（verl）的单控制器 + 多控制器混合编程模型与 3D-HybridEngine 重分片；AReaL 的完全异步 RL、陈旧度控制与解耦 PPO。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="rl-systems">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：RL 后训练是“推理 + 训练”的混合负载</h2>
+<p>PPO / GRPO 类算法的一步迭代包含三类完全不同的计算：<b>生成</b>（actor 自回归解码，带宽受限、需要推理引擎）、<b>准备</b>（critic 估值、参考模型 logprob、奖励模型或规则 / 沙箱打分，都是一次前向）、<b>训练</b>（actor 与 critic 的反向与优化器更新，需要 FSDP / Megatron 式的训练并行）。每个节点本身就是一个分布式程序，节点之间要在不同的并行布局之间搬运数据和权重。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  HybridFlow（verl）解决“怎么编排”：用单控制器写数据流、多控制器跑每个模型，并让 actor 的同一份权重在训练布局与生成布局之间零冗余切换。AReaL 解决“怎么不空等”：生成与训练彻底解耦为两条流水线，代价是样本会落后于最新策略若干个版本，用陈旧度上限与解耦 PPO 目标来控制。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 数据流与两种时间组织方式</h2>
+<div class="legend">
+  <span><i class="sw data"></i>控制器</span><span><i class="sw pred"></i>生成（推理引擎）</span><span><i class="sw act"></i>准备（前向打分）</span>
+  <span><i class="sw enc"></i>训练</span><span><i class="sw loss"></i>空转 / 问题</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 500" role="img" aria-label="RL 训练数据流与同步 / 异步时间线">
+    <rect class="panel" x="10" y="8" width="940" height="222" rx="12"/>
+    <g class="data" data-part="controller" data-step="1">
+      <rect class="box" x="350" y="22" width="260" height="44" rx="10"/>
+      <text class="t-c t-b" x="480" y="38">单控制器（Ray driver 上的一个进程）</text>
+      <text class="t-c t-xs" x="480" y="56">写成普通的串行程序：生成 → 准备 → 训练</text>
+    </g>
+    <path class="edge idx" d="M400,66 C300,80 170,84 150,104" data-step="1"/>
+    <path class="edge idx" d="M480,66 V104" data-step="1"/>
+    <path class="edge idx" d="M560,66 C660,80 780,84 800,104" data-step="1"/>
+    <g class="pred" data-part="gen" data-step="2">
+      <rect class="box" x="30" y="108" width="240" height="70" rx="10"/>
+      <text class="t-c t-b" x="150" y="128">① 生成：actor rollout</text>
+      <text class="t-c t-xs" x="150" y="148">推理引擎（vLLM / SGLang）</text>
+      <text class="t-c t-xs" x="150" y="164">生成布局：TP<tspan font-size="8" dy="2">g</tspan><tspan dy="-2"> × PP</tspan><tspan font-size="8" dy="2">g</tspan><tspan dy="-2"> × DP</tspan><tspan font-size="8" dy="2">g</tspan></text>
+    </g>
+    <path class="edge" d="M270,143 H316" data-step="3"/>
+    <g class="act" data-part="prep" data-step="3">
+      <rect class="box" x="320" y="108" width="320" height="70" rx="10"/>
+      <text class="t-c t-b" x="480" y="128">② 准备：一次前向</text>
+      <text class="t-c t-xs" x="480" y="148">critic 估值 · 参考模型 logprob · 奖励模型 / 规则 / 沙箱</text>
+      <text class="t-c t-xs" x="480" y="164">各自独立的并行布局，可共置也可分开放</text>
+    </g>
+    <path class="edge" d="M640,143 H686" data-step="4"/>
+    <g class="enc" data-part="train" data-step="4">
+      <rect class="box" x="690" y="108" width="240" height="70" rx="10"/>
+      <text class="t-c t-b" x="810" y="128">③ 训练：actor + critic</text>
+      <text class="t-c t-xs" x="810" y="148">FSDP / Megatron</text>
+      <text class="t-c t-xs" x="810" y="164">训练布局：TP × PP × DP</text>
+    </g>
+    <g data-part="hybrid" data-step="5">
+      <path class="edge enc" d="M810,178 C810,214 150,214 150,182"/>
+      <text class="t-c t-xs" x="480" y="200">3D-HybridEngine：同一份 actor 权重，训练布局 → 生成布局重分片（只在微 DP 组内 all-gather，零冗余）</text>
+    </g>
+    <text class="t-xs" x="30" y="222">每个节点内部是多控制器（SPMD）：每张卡跑自己的进程，控制器只在节点之间搬数据，调度开销小</text>
+    <!-- timelines -->
+    <rect class="panel" x="10" y="240" width="940" height="252" rx="12"/>
+    <g data-part="sync" data-step="6">
+      <text class="t-lg" x="24" y="262">同步 RL：生成与训练交替（同一批卡）</text>
+      <text class="t-r t-xs" x="120" y="285">卡 0</text><text class="t-r t-xs" x="120" y="303">卡 1</text><text class="t-r t-xs" x="120" y="321">卡 2</text><text class="t-r t-xs" x="120" y="339">卡 3</text>
+      <rect class="tk pred" x="130" y="277" width="120" height="14"/><rect class="tk mask" x="250" y="277" width="170" height="14"/>
+      <rect class="tk pred" x="130" y="295" width="290" height="14"/>
+      <rect class="tk pred" x="130" y="313" width="70" height="14"/><rect class="tk mask" x="200" y="313" width="220" height="14"/>
+      <rect class="tk pred" x="130" y="331" width="180" height="14"/><rect class="tk mask" x="310" y="331" width="110" height="14"/>
+      <rect class="tk enc" x="420" y="277" width="120" height="68"/>
+      <text class="t-c t-xs" x="480" y="311" style="fill:var(--surface)">训练</text>
+      <rect class="tk pred" x="540" y="277" width="90" height="14"/><rect class="tk mask" x="630" y="277" width="200" height="14"/>
+      <rect class="tk pred" x="540" y="295" width="150" height="14"/><rect class="tk mask" x="690" y="295" width="140" height="14"/>
+      <rect class="tk pred" x="540" y="313" width="290" height="14"/>
+      <rect class="tk pred" x="540" y="331" width="60" height="14"/><rect class="tk mask" x="600" y="331" width="230" height="14"/>
+      <rect class="tk enc" x="830" y="277" width="100" height="68"/>
+      <text class="t-xs" x="130" y="360" style="fill:var(--c-loss)">阴影 = 已生成完、等批内最长的那条；大规模时每卡 decode batch 变小，算术强度更低</text>
+    </g>
+    <g data-part="async" data-step="7">
+      <text class="t-lg" x="24" y="388">异步 RL（AReaL）：rollout 卡与训练卡各自满负荷</text>
+      <text class="t-r t-xs" x="120" y="411">rollout</text><text class="t-r t-xs" x="120" y="429">rollout</text><text class="t-r t-xs" x="120" y="455">训练</text>
+      <rect class="tk pred" x="130" y="403" width="800" height="14"/>
+      <rect class="tk pred" x="130" y="421" width="800" height="14"/>
+      <rect class="tk enc" x="130" y="447" width="190" height="16"/><rect class="tk enc" x="324" y="447" width="190" height="16"/><rect class="tk enc" x="518" y="447" width="190" height="16"/><rect class="tk enc" x="712" y="447" width="190" height="16"/>
+      <path class="edge enc" d="M320,445 V420" /><path class="edge enc" d="M514,445 V420"/><path class="edge enc" d="M708,445 V420"/>
+      <text class="t-xs" x="130" y="482">训练每完成一步就推送新权重：rollout 中断、丢弃旧 KV、用新权重重算后继续解码（可中断 rollout）</text>
+    </g>
+    <g data-part="staleness" data-step="8">
+      <rect class="note-bg" x="700" y="372" width="236" height="24" rx="6"/>
+      <text class="t-c t-xs" x="818" y="384">陈旧度 ≤ η：样本最多落后 η 个策略版本</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="controller"><h4>单控制器</h4><p>RL 算法本身是一段串行逻辑：生成一批、算优势、更新若干步。HybridFlow 让研究者用一个控制器进程把它写成普通程序；每个模型类（actor、critic、reference、reward）暴露 <code>generate_sequences</code>、<code>compute_values</code>、<code>update_actor</code> 之类的原语。论文称 PPO 约 8 行、Safe-RLHF 再加 5 行。</p></div>
+    <div data-note="gen"><h4>生成</h4><p>生成是 RL 步里最耗时、且不能与其他模型并行的阶段（下一步依赖它的输出）。它适合推理引擎的并行布局：较小的 TP、大的 DP，KV cache 优先。论文的经验：多给 actor 分卡来缩短生成延迟最划算。</p></div>
+    <div data-note="prep"><h4>准备</h4><p>critic、参考模型、奖励模型各做一次前向，彼此独立。它们可以与 actor 共置在同一批卡上（分时复用），也可以放在单独的资源池里并行执行。verl 用 ResourcePool 抽象表达放置：同池即共置。</p></div>
+    <div data-note="train"><h4>训练</h4><p>actor 与 critic 的更新用训练并行（FSDP 或 Megatron 的 TP × PP × DP）。节点之间的数据传递由 <code>@register</code> 声明的传输协议（如 <code>3D_PROTO</code>、<code>ONE_TO_ALL</code>）完成：控制器按协议收集上游输出、按下游布局切分分发。</p></div>
+    <div data-note="hybrid"><h4>3D-HybridEngine</h4><p>actor 既要训练又要生成，两种负载的最佳并行布局不同。训练用 p × t × d，生成用 p<sub>g</sub> × t<sub>g</sub> × d<sub>g</sub> × d（同一批卡，d<sub>g</sub> = p·t / (p<sub>g</sub>·t<sub>g</sub>)）。HybridFlow 按固定秩间隔组建生成的 TP / PP 组，使切换时只需在“微 DP 组”内 all-gather，不保留第二份权重：冗余显存为 0，通信量 (t·p − t<sub>g</sub>·p<sub>g</sub>)/(t<sub>g</sub>·p<sub>g</sub>·t·p)·M。</p></div>
+    <div data-note="sync"><h4>同步的代价</h4><p>一批里的输出长度差异极大（推理模型尤甚），全体必须等最长的那条生成完才能训练；生成被摊到所有卡上后，每卡的 decode batch 变小，处在带宽受限区，加卡也提不了吞吐。AReaL 论文把这列为同步系统的两个根本问题。</p></div>
+    <div data-note="async"><h4>完全异步</h4><p>rollout worker 一直生成，训练 worker 从回放缓冲区取满一个 batch 就训练（每个样本只用一次）。训练完成一步，控制器触发权重更新：正在生成的序列被中断，旧权重算出的 KV 被丢弃、用新权重重算后继续解码。于是同一条轨迹的前后部分可能来自不同版本的策略。</p></div>
+    <div data-note="staleness"><h4>陈旧度控制</h4><p>η = 一个训练 batch 中允许的最大策略版本差。控制器只在 ⌊(N<sub>r</sub> − 1)/B⌋ ≤ i + η 时继续派发生成请求（i 为当前版本，N<sub>r</sub> 为已生成轨迹数，B 为训练 batch）。η = 0 退化为同步 RL。论文的设置：代码 η = 4、数学 η = 8。</p></div>
+    <div data-step-note="1"><h4>① 控制器</h4><p>串行地编排三类节点。</p></div>
+    <div data-step-note="2"><h4>② 生成</h4><p>推理引擎布局下的 rollout。</p></div>
+    <div data-step-note="3"><h4>③ 准备</h4><p>critic / ref / reward 前向。</p></div>
+    <div data-step-note="4"><h4>④ 训练</h4><p>FSDP / Megatron 布局下更新。</p></div>
+    <div data-step-note="5"><h4>⑤ 权重重分片</h4><p>训练布局 → 生成布局，零冗余。</p></div>
+    <div data-step-note="6"><h4>⑥ 同步时间线</h4><p>等最长输出，GPU 空转。</p></div>
+    <div data-step-note="7"><h4>⑦ 异步时间线</h4><p>两条流水线各自满负荷，权重随时推送。</p></div>
+    <div data-step-note="8"><h4>⑧ 陈旧度</h4><p>用 η 限制 off-policy 的程度。</p></div>
+  </div>
+  <figcaption>图 1　上：HybridFlow 的 RL 数据流与 3D-HybridEngine；下：同步与异步（AReaL）的 GPU 时间线（示意）。依据 HybridFlow §2–5、AReaL §3–5。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-hybrid">3.1 混合编程模型：为什么不全用单控制器或全用多控制器</h3>
+<div class="diff">
+  <div><h4>单控制器（如早期 Ray 程序）</h4><p>一个中心进程调度所有算子，写起来像串行代码、容易改算法；但 LLM 的每个算子要发给成百上千张卡，中心调度开销巨大。</p></div>
+  <div><h4>多控制器（SPMD，如 Megatron / DeepSpeed）</h4><p>每张卡运行同一份程序，没有中心瓶颈；但 RL 的多个模型、多种布局、彼此之间的数据依赖全要硬编码进每个进程，改算法就要改分布式代码。</p></div>
+</div>
+<p>HybridFlow 取两者之长：<b>节点之间</b>（模型与模型）用单控制器表达数据流；<b>节点内部</b>（一个模型的分布式计算）用多控制器执行。控制器只负责发起调用和按协议重分发数据，不介入每个算子。</p>
+
+<h3 id="c-placement">3.2 放置：共置、独立还是拆分</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>放置方式</th><th>代表</th><th>特点</th><th>论文发现何时更优</th></tr></thead>
+  <tbody>
+    <tr><td>全部共置（colocate）</td><td>DeepSpeed-Chat</td><td>所有模型分时共用全部卡</td><td>小集群（16–64 卡）</td></tr>
+    <tr><td>各自独立（standalone）</td><td>OpenRLHF</td><td>每个模型独占一组卡</td><td>13B 模型、128 卡</td></tr>
+    <tr><td>两两拆分（split）</td><td>NeMo-Aligner</td><td>actor + ref 一组，critic + reward 一组</td><td>34B 模型、更大规模</td></tr>
+  </tbody>
+</table></div>
+<p>PPO 的 4 个模型共有 15 种放置（Bell 数），verl 的自动映射算法枚举放置与每组的卡数，用模拟器估算每种并行策略的耗时，取最优。<span class="src">HybridFlow §6、§8.3</span></p>
+
+<h3 id="c-areal">3.3 AReaL：完全异步与解耦 PPO</h3>
+<p>异步之后，生成样本的“行为策略” π<sub>behav</sub> 可能比当前参数落后多个版本，甚至一条轨迹前后来自不同版本。直接套用 PPO 的裁剪比值会把信赖域中心放在一个过时的策略上。AReaL 把两个角色拆开：</p>
+<div class="formula">$$J(\theta)=\mathbb E\Big[\sum_t \frac{\pi_{\text{prox}}(a_t|s_t)}{\pi_{\text{behav}}(a_t|s_t)}\,\min\big(u_t(\theta)\hat A_t,\ \mathrm{clip}(u_t(\theta),1-\epsilon,1+\epsilon)\hat A_t\big)\Big],\qquad u_t(\theta)=\frac{\pi_\theta(a_t|s_t)}{\pi_{\text{prox}}(a_t|s_t)}$$</div>
+<p>π<sub>prox</sub> 是信赖域中心（实现上取每次更新前的参数），π<sub>behav</sub> 只出现在重要性权重里修正采样分布的偏差。这与 <a href="13-batch-invariance.html">训推不一致</a>页里 TIS 的思路相通：凡是“样本不是从当前训练器分布里采的”，都需要一个显式的重要性修正。</p>
+
+<h3 id="c-landscape">3.4 之后的系统</h3>
+<p>verl、AReaL、OpenRLHF、slime 等框架已成为开源 RL 后训练的主流选择，推理端几乎都接 vLLM 或 SGLang。到 2026 年，智能体 RL 把 rollout 变成“多轮工具调用 + 沙箱执行”，单条轨迹可达百万 token：Kimi K3 报告专门描述了带持久 rollout 与沙箱状态的百万 token 智能体 RL 基础设施，以及给 RL 用的外部 KV cache 池。<span class="src">Kimi K3 报告摘要、§5</span></p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">hybridflow_ppo.py（单控制器视角）</div>
+<pre><code class="lang-py">for prompts in dataloader:                          # 控制器进程里的串行逻辑
+    batch = actor.generate_sequences(prompts)        # 内部：权重重分片到生成布局，调推理引擎
+    batch = critic.compute_values(batch)             # 各模型内部是 SPMD 执行
+    batch = reference.compute_log_prob(batch)
+    batch = reward.compute_reward(batch)
+    batch = compute_advantage(batch, gamma, lam)     # 控制器本地的轻量计算
+    critic.update_critic(batch)
+    actor.update_actor(batch)                        # 训练布局下更新</code></pre>
+<div class="code-title">areal_controller.py（异步 + 陈旧度控制）</div>
+<pre><code class="lang-py">def rollout_loop():
+    while True:
+        if (n_generated - 1) // B > policy_version + eta:   # 陈旧度超限：暂停派发
+            wait(); continue
+        traj = rollout_worker.generate(next_prompt())       # 可被权重更新中断
+        buffer.put(reward_service.score(traj), version=traj.versions)
+        n_generated += 1
+
+def train_loop():
+    global policy_version
+    while True:
+        batch = buffer.take(B)                     # 每个样本只用一次
+        trainer.ppo_update(batch, decoupled=True)  # π_prox = 更新前参数，π_behav 来自样本
+        policy_version += 1
+        rollout_workers.update_weights(trainer.weights())   # 中断生成、丢弃旧 KV、重算</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">5. 关键结果</h2>
+<ul>
+  <li><b>HybridFlow</b>：在 PPO / ReMax / Safe-RLHF 与 7B–70B 模型上，吞吐比 DeepSpeed-Chat、OpenRLHF、NeMo-Aligner 高 1.53–20.57×；PPO 平均提升分别为 3.67×、3.25×、12.52×。训练 ↔ 生成的切换开销最多降低 71.2%（对 DeepSpeed-Chat）与 89.1%（对 OpenRLHF）。测试平台为 16 台 × 8 A100-80GB。<span class="src">HybridFlow 摘要、§8.1–8.2</span></li>
+  <li><b>AReaL</b>：在 1.5B–32B 的推理模型上，同卡数下训练时间最多缩短 2.77×（1.5B：41.0 h → 14.8 h），线性扩展到 512 张 H800；摘要写 2.77×，引言写吞吐 2.57×，口径不同。<span class="src">AReaL 摘要、§7、Tab. 1</span></li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="questions">6. 简答题</h2>
+<div class="qa">
+  <h3 id="q43"><span class="qid">Q43</span>同步 RL 训练的 GPU 空转从何而来？异步 RL 如何控制样本陈旧度并修正 off-policy？</h3>
+  <div class="ans">
+    <p class="short">同步 RL 里生成与训练交替进行：一批轨迹的长度差异很大，必须等最长的那条生成完才能训练，先完成的卡只能等；训练时生成引擎又闲着。而且生成被摊到所有卡上，每卡 decode batch 变小、处于带宽受限区，加卡不加速。异步 RL（AReaL）把 rollout 卡与训练卡分开，各自满负荷：训练每走一步就推送新权重，正在生成的序列被中断、用新权重重算 KV 后继续。</p>
+    <ul>
+      <li><b>陈旧度</b>：限制训练 batch 中样本与当前策略的最大版本差 η；超出就暂停派发新生成。η = 0 即同步 RL。</li>
+      <li><b>off-policy 修正</b>：解耦 PPO——信赖域中心用 π<sub>prox</sub>（更新前参数），行为策略 π<sub>behav</sub> 只出现在重要性权重 π<sub>prox</sub>/π<sub>behav</sub> 中。</li>
+      <li>即使是“同步”系统，推理引擎与训练引擎的数值差异也会让样本隐式 off-policy，修正思路相同（TIS，见 <a href="13-batch-invariance.html#q28">Q28</a>）。</li>
+    </ul>
+    <p class="cite">依据：AReaL 摘要、§3.2、§4.1、§5.1–5.2。</p>
+  </div>
+  <h3 id="q44"><span class="qid">Q44</span>训练和生成共用一份 actor 权重时，如何在两种并行布局之间切换而不浪费显存？</h3>
+  <div class="ans">
+    <p class="short">训练偏好较大的 TP × PP（切模型、省显存），生成偏好较小的 TP、较大的 DP（每个副本独立解码、KV 优先）。HybridFlow 的 3D-HybridEngine 让两种布局共享同一批卡和同一份权重：生成组按固定秩间隔从训练组中划出，切换时只需在“微 DP 组”内 all-gather 权重分片，生成结束再丢弃，不常驻第二份副本。</p>
+    <ul>
+      <li>约束：N<sub>a</sub> = p·t·d = p<sub>g</sub>·t<sub>g</sub>·d<sub>g</sub>·d，其中 d<sub>g</sub> = p·t/(p<sub>g</sub>·t<sub>g</sub>)。</li>
+      <li>对比：DeepSpeed-Chat 式切换需要全量 all-gather，冗余显存 1/(t·p·d)·M、通信 (tpd−1)/(tpd)·M；HybridFlow 冗余为 0、通信 (tp − t<sub>g</sub>p<sub>g</sub>)/(t<sub>g</sub>p<sub>g</sub>tp)·M。</li>
+      <li>实测切换时间平均降 55.2%，70B 时最多降 89.1%（78.2 s）。</li>
+      <li>另一种选择是生成与训练完全分离（各自一份权重、通过网络推送），这正是异步 RL 的做法——用更多显存换时间上的解耦。</li>
+    </ul>
+    <p class="cite">依据：HybridFlow §5、Tab. 2、§8.4。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Sheng et al. <i>HybridFlow: A Flexible and Efficient RLHF Framework.</i> EuroSys 2025. <a href="https://arxiv.org/abs/2409.19256">arXiv:2409.19256</a> · <a href="https://github.com/volcengine/verl">verl</a></li>
+  <li>Fu et al. <i>AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning.</i> 2025. <a href="https://arxiv.org/abs/2505.24298">arXiv:2505.24298</a></li>
+  <li>Kimi Team. <i>Kimi K3: Open Frontier Intelligence.</i> 2026. <a href="https://arxiv.org/abs/2607.24653">arXiv:2607.24653</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

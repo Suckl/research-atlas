@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>离散流匹配与 Edit Flows</title>
+<meta name="description" content="离散流匹配：概率路径、CTMC 概率速度、调度器与 corrector 采样；Edit Flows：在序列空间上用插入、删除、替换编辑摆脱定长画布，以辅助对齐过程使训练可解；代码与文本上的结果与测量条件。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="dfm">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：把“去噪”换成“输运”</h2>
+<p><a href="03-mdlm.html">MDLM / MD4</a> 从“定义一个加噪过程、再学它的逆过程”出发。Meta FAIR 的离散流匹配（Discrete Flow Matching，DFM）换了一个起点：先规定一条从源分布到数据分布的<b>概率路径</b>，再找一个让样本沿这条路径流动的连续时间马尔可夫链（CTMC）。这样做的收益是设计空间变大——源可以是全 \([\mathrm{M}]\)、均匀噪声或二者混合，源与数据可以任意耦合，调度器与 corrector 有统一的公式——而掩码扩散只是其中一个点。<span class="src">DFM §1–2</span></p>
+<p>一年后，同组的 Edit Flows 把 CTMC 从“定长序列上逐 token 替换”推广到“变长序列上的插入、删除、替换”，第一次在流匹配框架内原生地解决了<b>画布长度必须预先给定</b>的问题。<span class="src">Edit Flows §1、§3</span></p>
+<div class="callout warn">
+  <span class="callout-title">时间方向与本站相反</span>
+  DFM 与 Edit Flows 都用 \(t=0\) 表示源（噪声 / 全 [M] / 空序列）、\(t=1\) 表示数据，数据写作 \(x_1\)，调度器 \(\kappa_t\) 从 0 增到 1。本页公式保留原文方向；换算到本站记号时 \(t_{\text{本站}}=1-t_{\text{DFM}}\)，\(\kappa_t\) 对应 MDLM 的 \(\alpha_{1-t}\)，干净序列 \(x_1\) 对应 \(x_0\)。
+</div>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  DFM：每个 token 在一小步 \(h\) 内以概率 \(h\,u_t\) 跳到别的值，\(u_t\) 由“去噪器预测的数据分布减去当前状态”乘以调度器系数给出——和连续流匹配的速度场同形。Edit Flows：跳转不再是“改第 \(i\) 个位置的值”，而是“在某处插入 / 删除 / 替换一个 token”，用一条看不见的对齐序列把训练化成逐位置问题。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：一步 CTMC 采样（DFM）与一步编辑（Edit Flows）</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 输入</span><span><i class="sw mask"></i>[M] 掩码 token</span>
+  <span><i class="sw enc"></i>去噪 / 速率网络（可训练）；实心 enc 方块 = 本步新写入的 token</span>
+  <span><i class="sw loss"></i>损失</span><span>白框：确定性运算</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 420" role="img" aria-label="上半：DFM 由去噪器得到概率速度，叠加 corrector 后每个 token 独立跳转；下半：Edit Flows 输出插入、删除、替换速率并同时执行编辑，训练时与对齐序列比较">
+    <text class="t-sm" x="20" y="18">上：离散流匹配（掩码源，时间 0 → 1 = 源 → 数据）</text>
+    <g class="data" data-part="xt" data-step="1">
+      <rect class="box" x="20" y="34" width="190" height="100" rx="10"/>
+      <text class="t-c t-b" x="115" y="56">当前画布 X_t</text>
+      <rect class="tk data" x="44" y="72" width="22" height="22"/><rect class="tk mask" x="70" y="72" width="22" height="22"/><rect class="tk mask" x="96" y="72" width="22" height="22"/><rect class="tk data" x="122" y="72" width="22" height="22"/><rect class="tk mask" x="148" y="72" width="22" height="22"/><rect class="tk data" x="174" y="72" width="22" height="22"/>
+      <text class="t-c t-sm" x="115" y="116">约 κ_t 比例已揭示</text>
+    </g>
+    <path class="edge" d="M210,84 H241" data-step="2"/>
+    <g class="enc" data-part="denoiser" data-step="2">
+      <rect class="box" x="245" y="34" width="170" height="100" rx="10"/>
+      <text class="t-c t-b" x="330" y="60">去噪网络</text>
+      <text class="t-c t-sm" x="330" y="86">p₁|ₜ(x | X_t)</text>
+      <text class="t-c t-sm" x="330" y="108">掩码源下与 t 无关</text>
+    </g>
+    <path class="edge enc" d="M415,84 H446" data-step="3"/>
+    <g data-part="velocity" data-step="3">
+      <rect class="box" x="450" y="34" width="210" height="100" rx="10"/>
+      <text class="t-c t-b" x="555" y="58">概率速度 u_t</text>
+      <text class="t-c t-sm" x="555" y="82">κ'_t/(1−κ_t)·(p₁|ₜ − δ)</text>
+      <text class="t-c t-sm" x="555" y="104">调度 κ_t = t²（文本）</text>
+    </g>
+    <g data-part="corrector" data-step="3">
+      <rect class="box" x="450" y="150" width="210" height="56" rx="10"/>
+      <text class="t-c t-b" x="555" y="170">corrector：重新掩码</text>
+      <text class="t-c t-sm" x="555" y="192">α_t − β_t = 1，β_t 份后退</text>
+    </g>
+    <path class="edge" d="M660,84 H726" data-step="4"/>
+    <path class="edge" d="M660,178 H695 V110 H726" data-step="4"/>
+    <g class="data" data-part="step" data-step="4">
+      <rect class="box" x="730" y="34" width="210" height="100" rx="10"/>
+      <text class="t-c t-b" x="835" y="56">下一画布 X_t+h</text>
+      <rect class="tk data" x="759" y="72" width="22" height="22"/><rect class="tk enc" x="785" y="72" width="22" height="22"/><rect class="tk mask" x="811" y="72" width="22" height="22"/><rect class="tk mask" x="837" y="72" width="22" height="22"/><rect class="tk enc" x="863" y="72" width="22" height="22"/><rect class="tk data" x="889" y="72" width="22" height="22"/>
+      <text class="t-c t-sm" x="835" y="116">每个 token 独立跳转</text>
+    </g>
+    <text class="t-sm" x="20" y="236">下：Edit Flows（序列空间上的插入 / 删除 / 替换）</text>
+    <g class="data" data-part="ef-in" data-step="5">
+      <rect class="box" x="20" y="250" width="190" height="100" rx="10"/>
+      <text class="t-c t-b" x="115" y="272">x_t（变长，无 [M]）</text>
+      <rect class="tk data" x="63" y="290" width="22" height="22"/><rect class="tk data" x="89" y="290" width="22" height="22"/><rect class="tk data" x="115" y="290" width="22" height="22"/><rect class="tk data" x="141" y="290" width="22" height="22"/>
+      <text class="t-c t-sm" x="115" y="332">长度 n(x_t) 随 t 变化</text>
+    </g>
+    <path class="edge" d="M210,300 H241" data-step="5"/>
+    <g class="enc" data-part="ef-model" data-step="5">
+      <rect class="box" x="245" y="250" width="210" height="100" rx="10"/>
+      <text class="t-c t-b" x="350" y="274">Edit Flow 网络</text>
+      <text class="t-c t-sm" x="350" y="298">每位置 λ_ins · λ_del · λ_sub</text>
+      <text class="t-c t-sm" x="350" y="320">Q_ins、Q_sub：新 token 分布</text>
+    </g>
+    <path class="edge enc" d="M455,300 H486" data-step="6"/>
+    <g class="data" data-part="ef-apply" data-step="6">
+      <rect class="box" x="490" y="250" width="210" height="100" rx="10"/>
+      <text class="t-c t-b" x="595" y="272">同时执行编辑</text>
+      <rect class="tk data" x="532" y="290" width="22" height="22"/><rect class="tk enc" x="558" y="290" width="22" height="22"/><rect class="tk data" x="584" y="290" width="22" height="22"/><rect class="tk data" x="610" y="290" width="22" height="22"/><rect class="tk enc" x="636" y="290" width="22" height="22"/>
+      <text class="t-c t-sm" x="595" y="332">各以概率 h·λ 触发</text>
+    </g>
+    <path class="edge loss" d="M350,350 V378 H837 V354" data-step="7"/>
+    <text class="t-sm" x="470" y="394" data-step="7">训练时：模型速率 vs 对齐给出的剩余编辑</text>
+    <g class="loss" data-part="align" data-step="7">
+      <rect class="box" x="735" y="250" width="205" height="100" rx="10"/>
+      <text class="t-c t-b" x="837" y="272">训练：对齐 z₀↔z₁</text>
+      <text class="t-c t-sm" x="837" y="296">空位 ε 标出插 / 删 / 替</text>
+      <text class="t-c t-sm" x="837" y="318">Bregman 损失（式 23）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="xt"><h4>掩码源的画布</h4><p>源 \(p=\delta_{[\mathrm{M}]}\)；条件路径 \(p_t(x^i\mid x_0,x_1)=(1-\kappa_t)\delta_{x_0}+\kappa_t\delta_{x_1}\)，即每个位置以 \(\kappa_t\) 的概率已经是数据 token。C-coupling 下，随机长度的前缀在源里就保持揭示，用于条件生成。<span class="src">DFM §2.2–2.3、Eq. 4–5、9；App. B</span></p></div>
+    <div data-note="denoiser"><h4>只学一个后验</h4><p>网络输出“去噪器” \(p_{1|t}(x^i\mid X_t)\)，即给定当前画布、第 \(i\) 位数据 token 的分布。掩码源下它与 \(t\) 无关（Prop. 3.1），于是画布没变就不必重算，无 corrector 时 NFE 不超过 token 数 \(N\)。DiT 骨干：150M 为 12 层 / 768，1.7B 为 48 层 / 1536。<span class="src">DFM §2.4、Prop. 3.1、App. B、G.1</span></p></div>
+    <div data-note="velocity"><h4>与连续流匹配同形</h4><p>\(u_t^i(x^i,X_t)=\frac{\dot\kappa_t}{1-\kappa_t}\big[p_{1|t}(x^i\mid X_t)-\delta_{X_t}(x^i)\big]\)，与连续情形的 \(\frac{\dot\kappa_t}{1-\kappa_t}(\hat x_{1|t}-X_t)\) 形式相同。文本模型用 \(\kappa_t=t^2\)（三次多项式族 \(a=0,b=2\) 的消融最优）。<span class="src">DFM Eq. 24、Tab. 1、App. D</span></p></div>
+    <div data-note="corrector"><h4>可证明正确的“回改”</h4><p>把前向速度与反向速度组合：\(\bar u_t=\alpha_t\hat u_t-\beta_t\check u_t\)。\(\alpha_t-\beta_t=1\) 时每步“前进 \(1+\beta_t\)、后退 \(\beta_t\)”，后退即把已揭示 token 重新变回 \([\mathrm{M}]\)；完美后验下仍生成 \(p_t\)。只用于 1.7B 模型，\(\alpha_t=1+\alpha\,t^{0.25}(1-t)^{0.25}\)。<span class="src">DFM Eq. 26–27、Thm. 2.4、App. D</span></p></div>
+    <div data-note="step"><h4>一步更新</h4><p>每个位置独立采样 \(X^i_{t+h}\sim\delta_{X^i_t}+h\,\bar u^i_t\)。为保证这是合法分布，步长取 \(\min\{h,(1-\kappa_t)/\dot\kappa_t\}\)（带 corrector 时另有公式）。同一步多位置独立采样，因子分解误差依旧存在。<span class="src">DFM Eq. 12、Alg. 1、App. B Eq. 30–31</span></p></div>
+    <div data-note="ef-in"><h4>状态空间是所有长度 ≤ N 的序列</h4><p>默认源是空序列 \(\delta_{\emptyset}\)，于是生成主要靠插入；另一变体从 100 个按经验分布抽的 token 出发，对齐时删 50、替 50。模型输入里没有 \([\mathrm{M}]\) 也没有填充 token，位置全是相对的。<span class="src">Edit Flows §3.1、§5</span></p></div>
+    <div data-note="ef-model"><h4>三类速率与两类分布</h4><p>插入、删除、替换在位置 \(i\) 的总速率 \(\lambda_{t,i}\ge0\)，插入 / 替换时新 token 取自 \(Q_{t,i}\)。只允许替换就退化成 DFM 的逐 token 路径；只允许在最右端插入就是 AR。骨干为 Llama 结构（280M / 1.3B），全注意力，外加一个编码 \(t\) 的 token。<span class="src">Edit Flows Eq. 13–16、§3.1、§5</span></p></div>
+    <div data-note="ef-apply"><h4>一阶近似下同时编辑</h4><p>每个位置独立决定是否插入（概率 \(h\lambda^{\mathrm{ins}}\)）、是否删除或替换，再一次性执行。精确模拟（Gillespie）不可行。代码任务上 Edit Flow 用 5000–10000 个采样步，Mask DFM 基线用 1000 步。<span class="src">Edit Flows App. C、Tab. 5</span></p></div>
+    <div data-note="align"><h4>辅助对齐过程</h4><p>把 \(x_0,x_1\) 对齐成等长序列 \(z_0,z_1\)（空位记 \(\varepsilon\)，不进词表）：\(\varepsilon\to a\) 是插入，\(a\to\varepsilon\) 是删除，\(a\to b\) 是替换。在 \(z\) 空间用逐位置混合路径（\(\kappa_t=t^3\)），去掉空位得到 \(x_t\)。Thm. 3.1 保证对 \(z\) 求边缘后得到的正是 \(x\) 空间的速率。<span class="src">Edit Flows §3.2、Thm. 3.1、Eq. 19–23</span></p></div>
+    <div data-step-note="1"><h4>① 当前画布</h4><p>DFM 方向：\(t\) 从 0 走向 1，揭示比例约为 \(\kappa_t\)。</p></div>
+    <div data-step-note="2"><h4>② 一次前向得到去噪器</h4><p>每个位置一个词表分布 \(p_{1|t}\)。</p></div>
+    <div data-step-note="3"><h4>③ 组装速度</h4><p>前向速度把 [M] 推向预测分布；corrector 的反向分量以速率 \(\beta_t\dot\kappa_t/\kappa_t\) 把已揭示 token 打回 [M]。</p></div>
+    <div data-step-note="4"><h4>④ 逐 token 独立跳转</h4><p>新写入（实心）与被重新掩码的位置同时出现；无 corrector 时与 MDLM 祖先采样等价。</p></div>
+    <div data-step-note="5"><h4>⑤ Edit Flows：变长输入</h4><p>同一网络读入当前（任意长度的）序列，在每个位置输出三类速率和插入 / 替换分布。</p></div>
+    <div data-step-note="6"><h4>⑥ 同时编辑</h4><p>本例 4 个 token 插入 1 个、替换 1 个，长度变为 5。</p></div>
+    <div data-step-note="7"><h4>⑦ 训练信号</h4><p>采一条对齐 \(z_0,z_1\) 与 \(z_t\)，损失 = 所有输出速率之和 − 剩余编辑对应速率的对数（加权）。模型从未看见 \(z\)，自己学会推断对齐。</p></div>
+  </div>
+  <figcaption>图 1　上：DFM 的一步采样（掩码源、去噪器参数化 + corrector）；下：Edit Flows 的一步编辑与训练信号。依据 DFM §2.3–2.4、Alg. 1、App. B、D；Edit Flows §3、App. C。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-path">3.1 概率路径、源与耦合</h3>
+<p>DFM 的边缘路径是条件路径对耦合 \(\pi(x_0,x_1)\) 的混合，条件路径按位置分解，每个位置是若干分布的凸组合 \(\sum_j\kappa_t^{i,j}w^j(x^i\mid x_0,x_1)\)。两种常用实例：<span class="src">DFM Eq. 7–10</span></p>
+<ul>
+  <li>Eq. 9（两项）：\((1-\kappa_t)\delta_{x_0}+\kappa_t\delta_{x_1}\)。源取全 \([\mathrm{M}]\) 时即掩码扩散；源取均匀分布时即均匀态扩散。</li>
+  <li>Eq. 10（三项）：在中途混入均匀噪声 \(\kappa^2_t p_{\mathrm{u}}\)，两端为 0。150M 实验里它的生成困惑度略好于 Eq. 9（见 §8）。</li>
+</ul>
+<p>耦合有两种：U-coupling（源与数据独立）与 C-coupling（源本身就保留一段数据前缀，Eq. 5）。后者让模型训练时就见到“前缀已知”的状态，1.7B 条件生成上略好。App. B 给出前缀的取法：长度 \(N_0\sim U(0,N)\)，采样时每步把条件位置改回给定 token。<span class="src">DFM Eq. 4–5、App. B、Tab. 3</span>（App. B 这段写作 “unconditional coupling (U-coupling), see (5)”，而式 (5) 定义的是 C-coupling，措辞自相矛盾。）</p>
+<h3 id="c-velocity">3.2 概率速度：采样公式与 NFE 上界</h3>
+<p>DFM 沿用 Campbell et al. 的 CTMC 视角，但把“速率矩阵”换成按位置的<b>概率速度</b> \(u_t^i(\cdot,X_t)\)：每个位置独立地按 \(\delta_{X_t^i}+h u_t^i\) 采样。它必须满足“和为 0、非对角非负”；条件速度对后验求边缘即得边缘速度（Thm. 2.2），用离散散度写出的连续性方程证明它确实生成 \(p_t\)。对 Eq. 9 路径，去噪器参数化与噪声预测参数化给出的速度与连续流匹配逐字对应（Tab. 1）。<span class="src">DFM §2.4、Eq. 12–25、Tab. 1</span></p>
+<p>两个实用推论：① 掩码源下去噪器与时间无关，所以训练好的模型可以在采样时换调度器而不必重训（App. B 的调度器变换公式）；② 无 corrector 时 NFE 至多为 \(N\)。<span class="src">DFM Prop. 3.1、App. B</span></p>
+<h3 id="c-corrector">3.3 corrector 与 MaskGIT 的区别</h3>
+<p>反向时间速度 \(\check u_t=\frac{\dot\kappa_t}{\kappa_t}[\delta_{z}-p_{0|t}]\)；源独立且 i.i.d. 时 \(p_{0|t}\) 可以直接换成源分布本身（Eq. 27），不需要再学一个网络。把前向与反向速度相加得到 corrector：\(\alpha_t-\beta_t=1\) 时是“带回退的采样”，\(\alpha_t=\beta_t\) 时在固定 \(t\) 反复迭代会收敛到 \(p_t\)（Thm. 2.4）。对掩码源，回退就是<b>把已揭示 token 重新掩码</b>——这是对 MDLM“揭示即定稿”的第一种原则性放松。<span class="src">DFM Eq. 25–27、Thm. 2.4</span></p>
+<p>作者把 MaskGIT 看作同一框架下的特例，差别只在采样：MaskGIT 按置信度排序揭示，DFM 按概率独立揭示。在 CIFAR-10 上 MaskGIT 式排序只在很低 NFE 时更好，NFE 增大后反而变差，作者归因于置信度排序引入的偏差；DFM 在 1024 NFE 达到 FID 3.63。后来 LLaDA 等大模型普遍采用的“低置信度重掩码”恰好是这种排序思路，二者的取舍见 <a href="16-order-limits.html">第 16 页</a>。<span class="src">DFM §3、§4.2、Fig. 3</span></p>
+<h3 id="c-train">3.4 训练损失：交叉熵，而不是 ELBO</h3>
+<p>DFM 只学去噪器时，损失就是对所有位置的交叉熵 \(-\sum_i\mathbb{E}\log p_{1|t}(X_1^i\mid X_t)\)，\(t\) 均匀采样、<b>不乘时间权重</b>。它的极小点是正确的后验（Prop. 2.5），但它不是似然界——MDLM 在相关工作里正是以此区分二者。所以 DFM 论文只报生成困惑度与下游指标，不报验证困惑度。Edit Flows 进一步把“交叉熵 / ELBO”统一看作 Bregman 散度族的成员。<span class="src">DFM Eq. 28、Prop. 2.5、§4.1；MDLM §6；Edit Flows §2.2</span></p>
+<h3 id="edit-flows">3.5 Edit Flows：在序列空间上流动</h3>
+<p><b>为什么定长是个问题。</b>逐 token 路径（含掩码构造）只能在固定的 \(N\) 个位置上改值：要么预设生成长度，要么训练时大量填充，模型会过度自信地预测填充 token，只好靠半自回归采样绕开（LLaDA 的做法）。DFM 自己的代码实验也显示：给出真实长度（oracle length）时 HumanEval Pass@1 从 6.7 升到 11.6。<span class="src">Edit Flows §2.2；DFM Tab. 4</span></p>
+<p><b>编辑 CTMC。</b>状态是长度 \(0\ldots N\) 的所有序列；速率只在相差一次编辑的序列之间非零：\(\mathrm{ins}(x,i,a)\) 在第 \(i\) 个 token 右侧插入 \(a\)，\(\mathrm{del}(x,i)\)，\(\mathrm{sub}(x,i,a)\)。三类结果互斥，因此可分别参数化为 \(\lambda^{\mathrm{ins}}_{t,i}Q^{\mathrm{ins}}_{t,i}(a)\)、\(\lambda^{\mathrm{del}}_{t,i}\)、\(\lambda^{\mathrm{sub}}_{t,i}Q^{\mathrm{sub}}_{t,i}(a)\)，对角项就是三者总和取负，速率条件自动满足。<span class="src">Edit Flows Eq. 10–16</span></p>
+<p><b>训练为何难、如何绕开。</b>给定 \(x_0,x_1\)，把一个序列变成另一个的编辑路径有无穷多种，直接写条件速率不可解。作者证明了一个更一般的定理：若在扩展空间 \((x,z)\) 上有生成 \(p_t(x,z)\) 的速率，那么对 \(z\) 的后验求平均就得到生成 \(p_t(x)\) 的速率，而且用任意 Bregman 散度训练时，在扩展空间上算的梯度与在 \(x\) 空间上算的相同（Thm. 3.1）。取 \(z\) 为带空位 \(\varepsilon\) 的对齐序列，\(z\) 空间里就是普通的逐位置混合路径。对齐可以随机填充，也可以用最小编辑距离；有趣的是，即使用最差的对齐（先全删再全插）训练，模型生成时也会偏好编辑更少的配对——类似连续流匹配里的动能最小化。<span class="src">Edit Flows Thm. 3.1、§3.2、App. F</span></p>
+<p><b>附加技巧。</b>局部化传播路径（某处发生编辑会带动邻近编辑，使 \(x_t\) 保持局部连贯，长代码上 MBPP Pass@1 相对提升 48%）；对 \(\lambda\) 与 \(Q\) 分别做 CFG；学一组反向速率做 corrector。训练效率上，Edit Flows 不为缺失 token 花计算，同样 50 万步、batch 4096 下“吞入”约 6T token，AR 与 Mask DFM 约 2T。<span class="src">Edit Flows §3.3、App. C.1、App. E</span></p>
+<h3 id="c-flexmdm">3.6 另一条变长路线：FlexMDM（时间线）</h3>
+<p><a href="https://arxiv.org/abs/2509.01025">FlexMDM</a>（Harvard / Kempner / MSR / MIT，arXiv v1 2025-08-31，ICLR 2026）基于随机插值框架：先插入 \([\mathrm{M}]\)、再去掩码，额外学一个“期望插入数”。与 Edit Flows 相比，它保留 \([\mathrm{M}]\) 与掩码扩散的任意顺序推理，并能从现成 MDM 微调得到——摘要称 16 张 H100 三天把 LLaDA-8B 改成 FlexMDM，GSM8K 58% → 67%、代码填空 52% → 65%（作者自报）。作者在附录逐项对比了 Edit Flows。<span class="src">FlexMDM 摘要、§1</span></p>
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>DFM</th><th>Edit Flows</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>所有位置上对 \(p_{1|t}\) 的交叉熵，\(t\) 均匀、无时间权重，不是似然界。<span class="src">Eq. 28</span></td><td>扩展空间上的 Bregman 散度：速率总和 − 剩余编辑速率的加权对数。<span class="src">Eq. 23</span></td><td>下一 token 交叉熵（精确 NLL）</td></tr>
+    <tr><td>注意力与 KV cache</td><td>双向 DiT，无 KV cache；作者承认 AR 因 KV cache 吞吐更高，缓存留作未来工作。<span class="src">App. F</span></td><td>全自注意力 + 一个 \(t\) token；FlexAttention 打包变长批次，无填充；无 KV cache。<span class="src">§5</span></td><td>因果注意力 + KV cache</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>1.7B 代码 / 条件生成用 256 或 512 NFE；无 corrector 时 NFE ≤ \(N\)；有 corrector 时已定 token 还可能被重掩码。<span class="src">Tab. 3、App. B、F</span></td><td>代码评测 5000–10000 采样步（Mask DFM 1000 步），每步各编辑以 \(h\lambda\) 触发，TPF 远小于 1。<span class="src">Tab. 5</span></td><td>1</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>多段填空（给定段长）；原则性的回改（corrector）；150M 上非双精度采样的生成困惑度低于 AR。<span class="src">App. C、Thm. 2.4、Tab. 2</span></td><td>任意位置插入 / 删除，原生变长；图像描述上 CIDEr 高于 AR（MS-COCO 108.1 vs 95.5）。<span class="src">Tab. 1</span></td><td>— （只能在右端插入，即 Edit Flows 的特例）</td></tr>
+    <tr><td>代价与失效情形</td><td>需要预设长度（oracle 长度使 Pass@1 6.7 → 11.6）；fp64 采样下生成困惑度优势消失；代码 Pass@1 6.7 vs AR 14.3。<span class="src">Tab. 4–5</span></td><td>采样步数多、采样超参逐模型在 HumanEval 上随机搜索；文本与代码仍落后同算力 AR（HumanEval 12.8–14.0 vs 17.0）。<span class="src">Tab. 3、Tab. 5</span></td><td>严格顺序，每 token 一次前向</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、编辑与张量形状</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 设置</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>DFM 画布 \(X_t\)</td><td>[B, N] int</td><td>1.7B 文本 / 代码模型的 \(N\) 论文未写明 <span class="unverified">未核实</span>；CIFAR-10 实验 \(N=32\times32\times3\)、\(d=256\)。<span class="src">DFM §4.2</span></td></tr>
+    <tr><td>DFM 去噪器输出</td><td>[B, N, d]</td><td>\(d\) = 词表大小；1.7B 用 tiktoken 分词器，150M 用 GPT-2 分词器。<span class="src">DFM App. G.1</span></td></tr>
+    <tr><td>DFM 速度 \(\bar u_t\)</td><td>[B, N, d]</td><td>由去噪器与调度器解析得到，不额外学习；corrector 的反向分量对掩码源只作用于已揭示位置。</td></tr>
+    <tr><td>Edit Flows 输入 \(x_t\)</td><td>[\(\sum_b n_b\)] 打包</td><td>最大长度 1024；FlexAttention 按样本分块，无填充 token。<span class="src">Edit Flows §5</span></td></tr>
+    <tr><td>对齐 \(z_0,z_1,z_t\)</td><td>[\(N_z\)]，含 \(\varepsilon\)</td><td>只在训练时构造；去掉 \(\varepsilon\) 得 \(x_t\)，模型看不到 \(z\)。<span class="src">Edit Flows §3.2</span></td></tr>
+    <tr><td>Edit Flows 每位置输出</td><td>3 个速率 + 2 × [M_vocab]</td><td>\(\lambda^{\mathrm{ins}},\lambda^{\mathrm{del}},\lambda^{\mathrm{sub}}\) 与 \(Q^{\mathrm{ins}},Q^{\mathrm{sub}}\)，词表 32k。<span class="src">Eq. 13–15、Tab. 4</span></td></tr>
+    <tr><td>条件标记</td><td>[n, 64]（1.3B）</td><td>一个“是否属于条件前缀”的嵌入，280M 为 32 维；前缀比例取 \(c^3\)，\(c\sim U[0,1]\)，10% 丢弃以支持 CFG。<span class="src">Edit Flows App. E、Tab. 4</span></td></tr>
+  </tbody>
+</table></div>
+<p>计算量的差别在于“谁占位置”：DFM 与 MDLM 每步对整张定长画布做双向注意力；Edit Flows 每步只处理当前已存在的 token，序列在生成初期很短（默认从空序列开始），因此单步更便宜，但步数多得多。论文没有报告两者的墙钟时间对比 <span class="unverified">未报告</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与似然</h2>
+<p><b>DFM</b>（Eq. 9 路径、只学去噪器）：</p>
+<div class="formula">$$\mathcal{L}_{\mathrm{DFM}}(\theta)=-\sum_{i=1}^{N}\mathbb{E}_{t\sim U[0,1],\,(X_0,X_1)\sim\pi,\,X_t\sim p_t(\cdot\mid X_0,X_1)}\log p_{1|t}(X_1^i\mid X_t;\theta),\qquad u_t^i=\frac{\dot\kappa_t}{1-\kappa_t}\big[p_{1|t}(\cdot\mid X_t)-\delta_{X_t^i}\big].$$</div>
+<p>与 MDLM 对照：掩码源 + Eq. 9 下两者网络、输入分布与最优解都相同，区别只在 \(t\) 的权重——MDLM 乘 \(-\alpha_t'/(1-\alpha_t)\) 得到似然界，DFM 不乘。前者能报困惑度，后者把各 \(t\) 等权，接近 2026 年 Beyond-Masked 发现“训练更省算力”的那种低方差损失（见 <a href="05-uniform.html#uniform-scaling">第 5 页</a>）。</p>
+<p><b>Edit Flows</b>（Eq. 23，\(x(z_t,i,z_1^i)\) 表示把 \(z_t\) 第 \(i\) 位换成 \(z_1^i\) 后去空位得到的序列）：</p>
+<div class="formula">$$\mathcal{L}_{\mathrm{EF}}(\theta)=\mathbb{E}_{t,\,(z_0,z_1)\sim\pi,\,z_t}\Big[\sum_{x\neq x_t}u_t^{\theta}(x\mid x_t)-\sum_{i=1}^{N}\mathbf{1}[z_1^i\neq z_t^i]\,\frac{\dot\kappa_t}{1-\kappa_t}\log u_t^{\theta}\big(x(z_t,i,z_1^i)\mid x_t\big)\Big].$$</div>
+<p>第一项压低所有输出速率，第二项抬高“把 \(x_t\) 推向 \(x_1\)”的那些编辑的速率。它是 Bregman 散度的蒙特卡洛估计，不是似然界；文本基准（HellaSwag 等）的打分用的是对 ELBO 的噪声估计，作者在局限中明确指出这一点。<span class="src">Edit Flows §3.2、App. B.1、§6</span></p>
+<div class="callout code-note">
+  <span class="callout-title">论文内部的不一致与测量陷阱</span>
+  <ul>
+    <li><b>DFM 的生成困惑度优势依赖低精度采样。</b>主表 Tab. 2（150M，OWT，1024 NFE）里 DFM 的 Llama-2 生成困惑度 22.5 优于 AR 的 31.4；App. G.1 改用 fp64 类别采样重测（Tab. 5），DFM 变为 50.1、熵从 7.2 升到 8.0，SEDD、Campbell 也都在 51–56 左右，全部差于 AR。这正是 Zheng et al.（2409.02908）指出的“低精度类别采样降低有效温度”。主表的具体采样精度论文没有写明（推断为非双精度）。比较生成困惑度必须同时看熵与采样精度。<span class="src">DFM Tab. 2、Tab. 5、App. G.1</span></li>
+    <li>DFM App. G.1 写“big models batch 4096、1.3M 步，<b>big</b> models batch 512、400k 步”，第二处应为 small，但哪一组对应哪种规模需读者推断；App. C 把代码模型称为 1.5B，正文为 1.7B；App. D 写 \(\kappa_1=0\)（应为 1）。<span class="src">DFM App. C、D、G.1</span></li>
+    <li><b>Edit Flows 的“同算力”不是“同数据”。</b>AR 与 Mask DFM 约 2T token，Edit Flows 约 6T；Mask DFM 基线训练时填充到 1024。代码基准的采样超参对每个模型在 HumanEval 上随机搜索（pass@1 200 次），再换随机种子重测；Edit Flow 用 10000 步、Mask DFM 用 1000 步。<span class="src">Edit Flows App. E、Tab. 5</span></li>
+    <li>DFM App. F 的延迟对比（单张 A100、batch 1、HumanEval：256 NFE 约 2.5× 快于 AR，19.97 s vs 50.94 s；512 NFE 持平）<span class="unverified">未说明 AR 是否启用 KV cache 与所用推理引擎</span>。</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">dfm_sample.py（掩码源、Eq. 9 路径、去噪器 + corrector；DFM 时间方向 0 → 1）</div>
+<pre><code class="lang-py">kappa  = lambda t: t ** 2                      # text scheduler (App. D: cubic family, a=0, b=2)
+dkappa = lambda t: 2 * t
+
+@torch.no_grad()
+def dfm_sample(model, N, n_steps, alpha_fn):
+    x, t, h = torch.full((N,), MASK), 0.0, 1.0 / n_steps
+    while t &lt; 1.0 - 1e-9:
+        p1 = model(x).softmax(-1)              # p_{1|t}(.|x): time-independent for a mask source
+        k, dk = kappa(t), dkappa(t)
+        a = alpha_fn(t); b = a - 1.0           # corrector: alpha_t - beta_t = 1
+        fwd = a * dk / (1 - k)                 # rate [M] -> data token
+        bwd = b * dk / max(k, 1e-9)            # rate data token -> [M]   (Eq. 27, mask source)
+        h_t = min(h, 1.0 / (fwd + bwd), 1.0 - t)   # safe step keeps probabilities valid (Eq. 31)
+        m = x == MASK
+        reveal = m &amp; (torch.rand(N) &lt; h_t * fwd)
+        remask = ~m &amp; (torch.rand(N) &lt; h_t * bwd)
+        x = torch.where(reveal, torch.multinomial(p1, 1).squeeze(-1), x)
+        x = torch.where(remask, MASK, x)       # every position decides independently
+        t += h_t
+    return x</code></pre>
+<div class="code-title">edit_flow_loss.py（Eq. 23 的单样本版本；默认源为空序列）</div>
+<pre><code class="lang-py">def edit_flow_loss(x1, model, eps_id=-1):
+    z0, z1 = align(x0=[], x1=x1)               # empty source: z0 is all blanks -> insert-only alignment
+    t = random.random(); k, dk = t ** 3, 3 * t ** 2
+    zt = [b if random.random() &lt; k else a for a, b in zip(z0, z1)]
+    xt = [tok for tok in zt if tok != eps_id]  # strip blanks: the model never sees z
+    lam, Q = model(xt, t)                      # lam: [n, 3] (ins, del, sub); Q: [n, 2, vocab]
+    loss = lam.sum()                           # total outgoing rate of the CTMC
+    for i in range(len(zt)):
+        if zt[i] != z1[i]:                     # an edit still needed between z_t and z_1
+            op, pos, tok = edit_at(zt, i, z1[i])   # map aligned index -> (ins|del|sub, x-position, token)
+            loss -= dk / (1 - k) * torch.log(rate(lam, Q, op, pos, tok))
+    return loss</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>DFM</th><th>Edit Flows</th></tr></thead>
+  <tbody>
+    <tr><td>规模与骨干</td><td>150M DiT（12 层、12 头、768）；1.7B DiT（48 层、24 头、1536）；RoPE θ=10000<span class="src">App. G.1</span></td><td>Llama 结构 280M（宽 1024、12 层、16 头）/ 1.3B（宽 2048、16 层、32 头），KV 头均为 8<span class="src">Tab. 4</span></td></tr>
+    <tr><td>数据</td><td>150M：OWT；1.7B：Llama-2 数据配比（文本）/ CodeLlama 配比（代码）<span class="src">App. G.1</span></td><td>MS-COCO、3M 图文对（图像描述）；DCLM-baseline 1.0（文本）；CodeLlama 配比（代码）<span class="src">§5</span></td></tr>
+    <tr><td>调度器</td><td>\(\kappa_t=t^2\)；corrector \(\alpha_t=1+\alpha t^{0.25}(1-t)^{0.25}\)，\(\alpha\in\{10,15,20\}\) 中扫描；温度 \(\tau_t=\tau(1-t)^2\)<span class="src">App. D</span></td><td>\(\kappa_t=t^3\)（Edit Flows 与 Mask DFM 基线相同）<span class="src">§5</span></td></tr>
+    <tr><td>优化</td><td>Adam β=(0.9, 0.999)，峰值 lr 3e-4，预热 2500 步，dropout 0.1；batch 4096 × 1.3M 步与 512 × 400k 步<span class="src">App. G.1（规模对应见 code-note）</span></td><td>AdamW β=(0.9, 0.95)，lr 3e-4，预热 2000 步，余弦；batch 4096 × 500k 步；16×8 H100<span class="src">Tab. 4、App. E</span></td></tr>
+    <tr><td>采样（代码基准）</td><td>256 / 512 NFE（表中两档）<span class="src">Tab. 3</span></td><td>Pass@1：10000 步、CFG 0.5、温度 0.8、top-p 0.5；Mask DFM：1000 步、CFG 1.5、top-k 2<span class="src">Tab. 5</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>DFM 150M 无条件生成（OWT，1024 NFE，不用温度与 corrector）</b>：同一批模型在两种采样精度下的 Llama-2 生成困惑度与熵。<span class="src">DFM Tab. 2、Tab. 5</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">Gen PPL（主表）</th><th class="num">熵（主表）</th><th class="num">Gen PPL（fp64）</th><th class="num">熵（fp64）</th></tr></thead>
+  <tbody>
+    <tr><td>数据本身</td><td class="num">7.0</td><td class="num">7.7</td><td class="num">7.0</td><td class="num">7.7</td></tr>
+    <tr><td>AR（1024 步）</td><td class="num">31.4</td><td class="num">7.1</td><td class="num">31.4</td><td class="num">7.1</td></tr>
+    <tr><td>SEDD（Lou et al.）</td><td class="num">27.2</td><td class="num">7.6</td><td class="num">56.1</td><td class="num">8.1</td></tr>
+    <tr><td>Campbell et al.（\(\kappa_t=t\)）</td><td class="num">28.7</td><td class="num">7.6</td><td class="num">50.9</td><td class="num">8.0</td></tr>
+    <tr class="hl"><td>DFM，Eq. 9 路径</td><td class="num">22.5</td><td class="num">7.2</td><td class="num">50.1</td><td class="num">8.0</td></tr>
+    <tr class="hl"><td>DFM，Eq. 10 路径（混入均匀噪声）</td><td class="num">22.3</td><td class="num">7.1</td><td class="num">50.0</td><td class="num">8.0</td></tr>
+  </tbody>
+</table></div>
+<p><b>DFM 1.7B</b>：条件生成（OWT 前 1000 条样本的前缀，512 NFE）Llama-3 生成困惑度 U-coupling 10.3、C-coupling 9.7，同规模 AR 22.3、Llama-3 8B 7.3；但 DFM 的熵 6.7 低于 AR 的 7.2。代码（HumanEval / MBPP 1-shot Pass@1）：DFM 6.7 / 6.7，oracle 长度 11.6 / 13.1，同数据 AR 14.3 / 17.0。<span class="src">DFM Tab. 3、Tab. 4</span>1.7B 的条件生成是否使用 corrector 与温度、采样精度如何，表中未逐行注明 <span class="unverified">未核实</span>。</p>
+<p><b>Edit Flows（1.3B，CodeLlama 配比，同算力；†为作者自行实现）</b>：<span class="src">Edit Flows Tab. 3</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">HumanEval P@1</th><th class="num">P@10</th><th class="num">HumanEval+ P@1</th><th class="num">MBPP P@1</th><th class="num">P@10</th></tr></thead>
+  <tbody>
+    <tr><td>Llama3 AR†</td><td class="num">17.0</td><td class="num">34.7</td><td class="num">14.0</td><td class="num">25.6</td><td class="num">45.4</td></tr>
+    <tr><td>Mask DFM†</td><td class="num">9.1</td><td class="num">17.6</td><td class="num">7.9</td><td class="num">6.2</td><td class="num">25.0</td></tr>
+    <tr><td>均匀源 + Edit Flow</td><td class="num">9.7</td><td class="num">24.3</td><td class="num">9.7</td><td class="num">9.4</td><td class="num">33.4</td></tr>
+    <tr class="hl"><td>Edit Flow</td><td class="num">12.8</td><td class="num">24.3</td><td class="num">10.4</td><td class="num">10.0</td><td class="num">36.4</td></tr>
+    <tr class="hl"><td>Localized Edit Flow</td><td class="num">14.0</td><td class="num">22.6</td><td class="num">10.4</td><td class="num">14.8</td><td class="num">34.0</td></tr>
+  </tbody>
+</table></div>
+<p>“相对 Mask DFM 提升 138%”指 MBPP Pass@1 的 14.8 vs 6.2；与 AR 比仍差 10 个点以上。文本（1.3B，DCLM，零样本）：HellaSwag AR 49.5 / Mask DFM 38.3 / Edit Flow 49.0，ARC-E 71.0 / 55.4 / 63.1，WinoGrande 62.1 / 52.3 / 53.6；每个基准的 CFG 在 6 档中取最好。图像描述（280M）：MS-COCO CIDEr AR 95.5、Mask DFM 95.6、Edit Flow 108.1。<span class="src">Edit Flows Tab. 1–2、Tab. 6、§5</span></p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul>
+    <li><a href="03-mdlm.html">MDLM / MD4</a>：只有掩码一种前向过程；揭示即定稿；画布定长。</li>
+    <li>Campbell et al.（Discrete Flows）：CTMC 视角，但只有 \(\kappa_t=t\) 的线性路径。</li>
+    <li>变长：Levenshtein Transformer、DiffusER 等靠模仿学习，不保证采样分布正确。</li>
+  </ul></div>
+  <div class="now"><h4>之后 → 留下的问题</h4><ul>
+    <li>概率路径 + 速度的写法被 <a href="10-industrial.html">DiffusionGemma</a> 直接采用：均匀源、Gat et al. 的离散 Euler 步（报告 §2.1）。</li>
+    <li>均匀源本身的训练与少步采样：<a href="05-uniform.html">Duo</a>。</li>
+    <li>回改：corrector → <a href="09-llada2.html#llada21">LLaDA 2.1 的 T2T 编辑</a>；变长：Edit Flows / FlexMDM，以及 <a href="11-block-diffusion.html">块扩散</a>的“块间自回归”这条更务实的路线。</li>
+    <li>仍缺 KV cache 与真正的少步：Edit Flows 用上万步，DFM 的速度优势只在 batch 1、低 NFE 时出现。</li>
+  </ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q7"><span class="qid">Q7</span>离散流匹配把掩码扩散改写成“概率路径 + CTMC 概率速度”，这种写法比 ELBO 视角多给了什么，又丢了什么？</h3>
+  <div class="ans"><p class="short">多给了一个统一的设计空间：任意源（掩码、均匀、混合）、任意耦合（含前缀条件的 C-coupling）、任意调度器，且速度公式与连续流匹配同形，可在采样时换调度器、加 corrector（可证明仍生成正确分布，并能把已揭示 token 重新掩码）。丢掉的是似然：DFM 用不加时间权重的交叉熵，不是 NLL 上界，只能报生成困惑度——而后者对采样精度极其敏感。</p>
+    <ul><li>掩码源 + 线性路径下，DFM 与 MDLM 的网络、最优解相同，区别仅在 \(t\) 的权重。</li>
+    <li>调度器选择（\(\kappa_t=t^2\)）和 corrector 调度对文本质量影响显著（App. D 消融）。</li>
+    <li>fp64 重测后 DFM 的生成困惑度从 22.5 变为 50.1，优于 AR 的结论不再成立。</li></ul>
+    <p class="cite">依据：DFM §2.3–2.4、§3、Thm. 2.4、Prop. 2.5、App. B、D、G.1；MDLM §6。</p>
+  </div>
+  <h3 id="q8"><span class="qid">Q8</span>Edit Flows 如何在不枚举编辑路径的情况下训练插入 / 删除 / 替换速率？它解决变长的方式与 FlexMDM、半自回归块采样有何不同，代价是什么？</h3>
+  <div class="ans"><p class="short">它引入一条训练时才有的对齐序列 \(z\)（空位 \(\varepsilon\) 标出插、删、替），在 \(z\) 空间用普通的逐位置混合路径；Thm. 3.1 保证对 \(z\) 求后验平均后得到的就是序列空间的正确速率，且 Bregman 损失的梯度不变，于是模型只需看 \(x_t\)、自己学会推断对齐。与 FlexMDM（插入 [M] 再去掩码，保留任意顺序、可从 LLaDA 微调）和半自回归（按块向右延伸、长度由块数决定）相比，Edit Flows 完全不用 [M] 与填充，位置全是相对的，还能删除。代价是采样步数极多（代码 5000–10000 步）、超参需逐模型搜索，且在文本与代码上仍落后同算力 AR。</p>
+    <ul><li>“同算力”下 Edit Flows 因无填充多吃了约 3× token（6T vs 2T），比较 Mask DFM 时要计入。</li>
+    <li>局部化路径主要帮长序列（MBPP Pass@1 10.0 → 14.8）。</li>
+    <li>DFM 自己的数据显示定长的代价不小：oracle 长度使 HumanEval Pass@1 6.7 → 11.6。</li></ul>
+    <p class="cite">依据：Edit Flows §3.2–3.3、Thm. 3.1、Tab. 3、Tab. 5、App. E；FlexMDM 摘要；DFM Tab. 4。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Gat, Remez, Shaul, Kreuk, Chen, Synnaeve, Adi, Lipman. <i>Discrete Flow Matching.</i> NeurIPS 2024（Spotlight）；本页读 arXiv v2。<a href="https://arxiv.org/abs/2407.15595">论文</a> · <a href="https://github.com/facebookresearch/flow_matching">flow_matching 库（含离散实现，非论文 1.7B 权重）</a>。</li>
+  <li>Havasi, Karrer, Gat, Chen. <i>Edit Flows: Flow Matching with Edit Operations.</i> NeurIPS 2025（论文集版本题为 “…Variable Length Discrete Flow Matching with Sequence-Level Edit Operations”）；本页读 arXiv v3。<a href="https://arxiv.org/abs/2506.09018">论文</a>。未找到官方代码。</li>
+  <li>Kim et al. <i>Any-Order Flexible Length Masked Diffusion (FlexMDM).</i> ICLR 2026。<a href="https://arxiv.org/abs/2509.01025">论文</a>。</li>
+  <li>Campbell et al. <i>Generative Flows on Discrete State-Spaces.</i> ICML 2024（DFM 的直接前身）。<a href="https://arxiv.org/abs/2402.04997">论文</a>。</li>
+  <li>Zheng et al. <i>Masked Diffusion Models are Secretly Time-Agnostic Masked Models and Exploit Inaccurate Categorical Sampling.</i> ICLR 2025（fp32 采样问题）。<a href="https://arxiv.org/abs/2409.02908">论文</a>。</li>
+  <li>Lipman et al. <i>Flow Matching Guide and Code.</i> <a href="https://arxiv.org/abs/2412.06264">论文</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

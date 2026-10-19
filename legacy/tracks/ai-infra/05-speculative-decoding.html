@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投机解码拆解</title>
+<meta name="description" content="投机解码（Leviathan et al. ICML 2023；Chen et al. 2023）：草稿-验证流程、修正拒绝采样与残差分布的证明、收益公式、适用场景与 KV cache 回滚。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/specdec.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="speculative-decoding">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：解码时 GPU 在等内存，不在算</h2>
+<p><a href="00-inference-basics.html#roofline">前文</a>算过：batch 为 1 的 decode，每读 2 字节权重只做 2 FLOP，算术强度 ≈ 1，而 H100 的脊点约 300。换句话说，目标模型一步前向处理 1 个 token 和处理 8 个 token<b>耗时几乎一样</b>——都是把权重搬一遍。投机解码的想法：既然验证 γ 个 token 的代价 ≈ 生成 1 个，那就让一个便宜的草稿模型先猜 γ 个，大模型一次验证。</p>
+<p>难点不在“猜”，而在<b>保证输出分布和大模型自己采样完全一致</b>（而不是“差不多”）。两篇论文（Google 的 Leviathan et al. 与 DeepMind 的 Chen et al.，几乎同时）给出的答案是同一套“修正拒绝采样”。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  小模型提议、大模型批改。批改规则设计成：按 min(1, p/q) 接受、被拒绝时从“p 比 q 多出来的那部分”补采——这样无论草稿多差，最终每个 token 都严格服从 p；草稿越好，一步接受的 token 越多。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 一步投机解码</h2>
+<div class="legend">
+  <span><i class="sw act"></i>草稿模型 M_q</span><span><i class="sw enc"></i>目标模型 M_p</span><span><i class="sw loss"></i>接受 / 拒绝</span><span><i class="sw reg"></i>残差分布</span><span><i class="sw data"></i>token 序列</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="投机解码一步">
+    <!-- prefix -->
+    <g data-part="prefix" data-step="1">
+      <text class="t-b" x="20" y="34">已确认前缀</text>
+      <g transform="translate(20,46)"><rect class="tk data" x="0" y="0" width="26" height="26"/><rect class="tk data" x="30" y="0" width="26" height="26"/><rect class="tk data" x="60" y="0" width="26" height="26"/><rect class="tk data" x="90" y="0" width="26" height="26"/><text class="t-xs" x="124" y="14">x₁ … xₜ</text></g>
+    </g>
+    <!-- draft -->
+    <g class="act" data-part="draft" data-step="1">
+      <rect class="box" x="20" y="100" width="300" height="70" rx="10"/>
+      <text class="t-c t-b" x="170" y="124">草稿模型 M_q：自回归跑 γ 步</text>
+      <text class="t-c t-sm" x="170" y="144">得到 x̃₁ ~ q₁, …, x̃_γ ~ q_γ 和各步分布 q_i</text>
+      <text class="t-c t-xs" x="170" y="160">每步便宜（c = T_q / T_p ≪ 1）</text>
+    </g>
+    <path class="edge" d="M80,72 V96" data-step="1"/>
+    <g data-part="draft-tokens" data-step="1">
+      <g transform="translate(340,118)"><rect class="tk act" x="0" y="0" width="26" height="26"/><rect class="tk act" x="30" y="0" width="26" height="26"/><rect class="tk act" x="60" y="0" width="26" height="26"/><rect class="tk act" x="90" y="0" width="26" height="26"/><rect class="tk act" x="120" y="0" width="26" height="26"/><text class="t-xs" x="154" y="14">γ = 5 个草稿 token</text></g>
+    </g>
+    <path class="edge act" d="M320,135 H336" data-step="1"/>
+    <!-- target -->
+    <g class="enc" data-part="target" data-step="2">
+      <rect class="box" x="20" y="200" width="560" height="70" rx="10"/>
+      <text class="t-c t-b" x="300" y="224">目标模型 M_p：一次前向，输入前缀 + γ 个草稿</text>
+      <text class="t-c t-sm" x="300" y="244">并行得到 γ+1 个位置的分布 p₁, …, p_γ, p_{γ+1}</text>
+      <text class="t-c t-xs" x="300" y="260">耗时 ≈ 单 token 解码（带宽受限）</text>
+    </g>
+    <path class="edge" d="M170,170 V196" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="2"/>
+    <path class="edge" d="M400,144 C400,180 320,180 300,196" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="2"/>
+    <!-- verify -->
+    <g class="loss" data-part="verify" data-step="3">
+      <rect class="box" x="20" y="300" width="560" height="90" rx="10"/>
+      <text class="t-c t-b" x="300" y="322">从左到右逐个验证</text>
+      <text class="t-c t-sm" x="300" y="342">r ~ U(0,1)；若 r &lt; min(1, p_i(x̃_i) / q_i(x̃_i)) 接受 x̃_i，继续下一个</text>
+      <text class="t-c t-sm" x="300" y="360">否则：拒绝 x̃_i 及其后全部草稿，停止</text>
+      <text class="t-c t-xs" x="300" y="378">第一个被拒绝的位置 n（若全接受，n = γ+1）</text>
+    </g>
+    <path class="edge" d="M300,270 V296" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="3"/>
+    <!-- residual -->
+    <g class="reg" data-part="residual" data-step="4">
+      <rect class="box" x="620" y="200" width="320" height="110" rx="10"/>
+      <text class="t-c t-b" x="780" y="224">位置 n 的补采</text>
+      <text class="t-c t-sm" x="780" y="246">被拒：x_n ~ norm(max(0, p_n − q_n))</text>
+      <text class="t-c t-sm" x="780" y="264">全接受：x_{γ+1} ~ p_{γ+1}</text>
+      <text class="t-c t-xs" x="780" y="284">残差分布 = p 比 q 多出的部分，归一化</text>
+      <text class="t-c t-xs" x="780" y="300">保证：接受 + 补采 的混合恰好等于 p</text>
+    </g>
+    <path class="edge" d="M580,345 C600,345 600,255 616,255" style="stroke:var(--c-loss);marker-end:url(#ah-loss)" data-step="4"/>
+    <!-- output -->
+    <g data-part="output" data-step="5">
+      <rect class="box" x="620" y="340" width="320" height="50" rx="10"/>
+      <text class="t-c t-b" x="780" y="360">本步产出 n 个 token（1 ≤ n ≤ γ+1）</text>
+      <text class="t-c t-xs" x="780" y="380">前 n−1 个来自草稿，第 n 个来自 p 或残差</text>
+    </g>
+    <path class="edge" d="M780,310 V336" style="stroke:var(--c-reg);marker-end:url(#ah-reg)" data-step="5"/>
+    <!-- kv note -->
+    <g data-part="kv" data-step="5">
+      <rect class="note-bg" x="20" y="410" width="560" height="46" rx="8"/>
+      <text class="t-sm" x="30" y="428" style="font-weight:650">KV cache：</text>
+      <text class="t-sm" x="110" y="428">γ 个草稿位置的 KV 在验证前向中已写入；接受 n−1 个后把序列长度设为 t+n，</text>
+      <text class="t-sm" x="30" y="446">被拒绝位置的 KV 槽位下一步被覆盖——无需拷贝回滚（分页 KV 下尤其直接）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prefix"><h4>已确认前缀</h4><p>到目前为止所有被接受的 token。两个模型都以它为条件；它的 KV 在两个模型的 cache 里都已存在。</p></div>
+    <div data-note="draft"><h4>草稿模型</h4><p>任何能给出分布 q 的便宜模型：小模型（论文用 T5-small 给 T5-XXL 打草稿；Chen et al. 用 4B 给 Chinchilla 70B）、n-gram、EAGLE 这类从目标模型隐状态出发的轻量头、模型自带的 MTP 头。要求是<b>便宜</b>（c 小）且<b>像</b>（α 高）。</p></div>
+    <div data-note="draft-tokens"><h4>γ 个草稿 token</h4><p>自回归地采样 γ 个，同时保留每一步的完整分布 q_i（验证时要用）。γ 是超参：论文翻译任务用 7、摘要用 5；Chen et al. 用 K = 4。</p></div>
+    <div data-note="target"><h4>目标模型一次前向</h4><p>把前缀 + γ 个草稿一起输入，causal mask 下并行得到 γ+1 个位置的分布 p_i。这是整个方法的“免费午餐”：在带宽受限区，γ+1 个 token 的前向与 1 个的耗时相近。注意 p_{γ+1} 是“假如全部接受，下一个 token 的分布”——所以每步至少产出 1 个 token，最多 γ+1 个。</p></div>
+    <div data-note="verify"><h4>逐个验证</h4><p>对第 i 个草稿 token，以概率 min(1, p_i(x̃)/q_i(x̃)) 接受。直觉：如果 q 在这个 token 上<b>低估</b>了 p（p ≥ q），草稿“猜得保守”，照单全收；如果 q <b>高估</b>了（p &lt; q），就按 p/q 的比例打折。一旦拒绝，后面的草稿因为条件已变，全部作废。</p></div>
+    <div data-note="residual"><h4>残差分布</h4><p>被拒绝的位置不能简单地“从 p 重采一个”——那会让 p ≥ q 的 token 被多算一次。正确做法是从 norm(max(0, p − q)) 采：它恰好是“接受步骤没覆盖到的那部分概率质量”。见 <a href="#objective">§4 的证明</a>。全部接受时直接从 p_{γ+1} 采即可。</p></div>
+    <div data-note="output"><h4>本步产出</h4><p>n 个 token：n−1 个来自草稿，1 个来自补采。期望值 (1−α^(γ+1))/(1−α)，α 为逐 token 接受率。</p></div>
+    <div data-note="kv"><h4>KV cache</h4><p>两个模型的 KV 都要维护。目标模型：验证前向已把 γ 个草稿位置的 KV 写入，接受 n−1 个后只需把“有效长度”设为 t+n（第 n 个位置若来自残差采样，其 KV 在下一步前向时计算）。草稿模型：同理回退到 t+n，必要时用目标模型确认的 token 重新前向一步。</p></div>
+    <div data-step-note="1"><h4>① 打草稿</h4><p>草稿模型自回归生成 γ 个 token，记录各步分布 q。</p></div>
+    <div data-step-note="2"><h4>② 并行验证前向</h4><p>目标模型一次前向，得到 γ+1 个位置的分布 p。</p></div>
+    <div data-step-note="3"><h4>③ 逐个接受 / 拒绝</h4><p>按 min(1, p/q) 接受，遇到第一个拒绝即停。</p></div>
+    <div data-step-note="4"><h4>④ 补采一个</h4><p>被拒位置从残差分布采；全接受则从 p_{γ+1} 采。</p></div>
+    <div data-step-note="5"><h4>⑤ 产出并更新 KV</h4><p>本步得到 1 … γ+1 个 token；KV 有效长度前移，拒绝位置的槽位等待覆盖。</p></div>
+  </div>
+  <figcaption>图 1　一步投机解码。依据 Leviathan et al. Algorithm 1 与 Chen et al. Algorithm 2。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 收益公式</h2>
+<p>设逐 token 接受率 \(\alpha = \mathbb E_{x\sim q}[\min(1, p(x)/q(x))] = \sum_x \min(p(x), q(x))\)（Leviathan 等证明它等于 \(1 - D_{LK}(p,q)\)，一个与总变差距离相关的散度）。假设各位置接受独立同分布，一步期望产出：</p>
+<div class="formula">$$\mathbb E[\#\text{tokens}] = \frac{1-\alpha^{\gamma+1}}{1-\alpha}\ \xrightarrow{\gamma\to\infty}\ \frac{1}{1-\alpha}$$</div>
+<p>设草稿一步耗时 / 目标一步耗时 = c，则一步投机的耗时 ≈ (γc + 1) 个目标步，理论加速比：</p>
+<div class="formula">$$\text{speedup} \approx \frac{1-\alpha^{\gamma+1}}{(1-\alpha)(\gamma c + 1)}$$</div>
+<div data-widget="specdec"></div>
+<p>论文实测（T5-XXL 11B，TPU-v4，batch 1）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>任务</th><th>温度</th><th>草稿</th><th class="num">α</th><th class="num">γ</th><th class="num">加速</th></tr></thead>
+  <tbody>
+    <tr><td>WMT En→De 翻译</td><td>0</td><td>T5-small</td><td class="num">0.75</td><td class="num">7</td><td class="num">3.4×</td></tr>
+    <tr><td>WMT En→De 翻译</td><td>1</td><td>T5-small</td><td class="num">0.62</td><td class="num">7</td><td class="num">2.6×</td></tr>
+    <tr><td>CNN/DM 摘要</td><td>0</td><td>T5-small</td><td class="num">0.65</td><td class="num">5</td><td class="num">3.1×</td></tr>
+    <tr><td>CNN/DM 摘要</td><td>1</td><td>T5-small</td><td class="num">0.53</td><td class="num">5</td><td class="num">2.3×</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">α 随草稿变大而升（翻译 temp 0：small 0.75 / base 0.80 / large 0.82），随温度升高而降。Chen et al.（Chinchilla 70B + 4B 草稿，K = 4，batch 1，16 TPU v4）：XSum 1.92×（nucleus）/ 2.01×（greedy），HumanEval 2.46×。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">4. 为什么“接受 + 残差补采”恰好等于 p</h2>
+<p>固定某个位置，草稿 x ~ q。最终输出 y 的分布由两部分组成：</p>
+<div class="formula">$$P(y) = \underbrace{q(y)\min\!\Big(1, \frac{p(y)}{q(y)}\Big)}_{\text{接受 } x = y} + \underbrace{\Big(1 - \sum_x q(x)\min\!\big(1, \tfrac{p(x)}{q(x)}\big)\Big)}_{\text{被拒的概率 } 1-\alpha}\cdot \underbrace{\frac{\max(0, p(y)-q(y))}{\sum_{x}\max(0, p(x)-q(x))}}_{\text{残差分布}}$$</div>
+<p>第一项 \(= \min(q(y), p(y))\)。被拒概率 \(1-\alpha = 1 - \sum_x\min(p,q) = \sum_x \max(0, p(x)-q(x))\)（因为 \(\sum p = \sum q = 1\)），正好与残差分布的分母相消，第二项 \(= \max(0, p(y)-q(y))\)。于是</p>
+<div class="formula">$$P(y) = \min(p(y), q(y)) + \max(0, p(y)-q(y)) = p(y)\quad\checkmark$$</div>
+<p>这解释了<b>为什么必须是残差分布</b>：接受步骤只覆盖了 min(p, q) 这部分质量，p 比 q 多出的那部分（q 低估的 token）只能靠补采补回来；若补采直接用 p，q 高估的 token 会被重复计入，分布就不再是 p。注意上式对任意 q 成立——草稿模型再差也不影响正确性，只影响 α。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">5. 伪代码</h2>
+<div class="code-title">speculative_step.py</div>
+<pre><code class="lang-py">def speculative_step(prefix, M_p, M_q, gamma):
+    # 1) 草稿：自回归 γ 步，保留每步分布
+    drafts, qs = [], []
+    for i in range(gamma):
+        q_i = M_q.next_dist(prefix + drafts)          # 便宜
+        x_i = sample(q_i); drafts.append(x_i); qs.append(q_i)
+
+    # 2) 目标模型一次前向：γ+1 个位置的分布
+    ps = M_p.next_dists(prefix + drafts)              # 长度 γ+1，耗时 ≈ 单步
+
+    # 3) 逐个验证
+    accepted = []
+    for i in range(gamma):
+        x = drafts[i]
+        if random() < min(1.0, ps[i][x] / qs[i][x]):
+            accepted.append(x)
+        else:
+            residual = clip(ps[i] - qs[i], min=0)
+            accepted.append(sample(residual / residual.sum()))   # 残差补采
+            return accepted                              # 后面的草稿作废
+    accepted.append(sample(ps[gamma]))                   # 全接受：免费多拿一个
+    return accepted</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="variants">6. 后来的变体（概览）</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>草稿从哪来</th><th>特点</th></tr></thead>
+  <tbody>
+    <tr><td>独立小模型（本文）</td><td>同词表的小模型</td><td>通用；要额外训练 / 部署一个模型，两份 KV</td></tr>
+    <tr><td>n-gram / 提示查找</td><td>从上下文中匹配</td><td>零成本；对摘要、代码补全等“复述型”任务有效</td></tr>
+    <tr><td>Medusa</td><td>目标模型上加多个预测头</td><td>一次前向出多个候选，树状验证</td></tr>
+    <tr><td>EAGLE / EAGLE-3</td><td>用目标模型的隐状态做轻量自回归头</td><td>α 高（特征层比 token 层更可预测），当前主流</td></tr>
+    <tr><td>MTP（DeepSeek-V3）</td><td>训练时就带的多 token 预测模块</td><td>模型自带草稿，V3 报告第 2 个 token 接受率 85–90%</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="questions">7. 简答题</h2>
+<div class="qa">
+  <h3 id="q8"><span class="qid">Q8</span>投机解码的草稿被拒绝后，KV cache 需要怎样“回退”？分页 KV 下为什么不需要搬数据？</h3>
+  <div class="ans">
+    <p class="short">把“有效长度”指针退回到最后一个被接受的位置即可，不需要搬数据：验证前向已经把 γ 个草稿位置的 KV 写进了 cache，被拒绝位置的槽位在下一步被新 token 的 KV 覆盖。</p>
+    <ul>
+      <li><b>目标模型</b>：验证时序列长度临时为 t+γ；接受 n−1 个草稿 + 补采 1 个后，长度设为 t+n。位置 t+n 的 token 来自残差采样，它的 KV 尚未计算，会在下一步前向（作为“新输入 token”）时写入；位置 &gt; t+n 的旧 KV 作废但无需清除。</li>
+      <li><b>草稿模型</b>：同样退回到 t+n−1 并用目标模型确认的第 n 个 token 前向一步，使两边 cache 同步。</li>
+      <li><b>分页 KV（vLLM / SGLang）</b>：块表不变；若多分配的块整块空出则归还；块按 token 槽位寻址，“覆盖”即回滚。见 <a href="03-vllm.html#q8">vLLM 页 Q8</a>。</li>
+      <li><b>树状草稿（Medusa / EAGLE 的多分支）</b>：多条候选共享前缀但占不同槽位，接受某条路径后需要把该路径的 KV 压缩到连续位置（或用块稀疏掩码避免搬动，FlashInfer 的做法）。</li>
+    </ul>
+    <p class="cite">依据：算法本身（Leviathan Algorithm 1）；vLLM / SGLang 的实现思路。</p>
+  </div>  <h3 id="q9"><span class="qid">Q9</span>投机解码的加速来自哪里？为什么说它是用算力换延迟？</h3>
+  <div class="ans">
+    <p class="short">来源是 decode 阶段的<b>算力闲置</b>：小 batch 解码是带宽受限的，目标模型一次前向验证 γ+1 个 token 的耗时与生成 1 个几乎相同，于是把“多次串行的目标模型前向”换成“一次并行验证 + 几次便宜的草稿前向”。</p>
+    <ul>
+      <li>目标模型的前向次数从“每 token 一次”降到“每 (1−α^(γ+1))/(1−α) 个 token 一次”；α = 0.75、γ = 7 时每步期望约 3.6 个 token。</li>
+      <li>代价是总算术量上升（草稿 + 被拒绝的验证都是浪费的 FLOPs），所以它是<b>用算力换延迟</b>，不是减少计算。</li>
+      <li>输出分布严格不变（修正拒绝采样），所以收益不以质量换取。</li>
+    </ul>
+    <p class="cite">依据：Leviathan et al. §1、§3.2（期望 token 数）、§3.4（c 与加速比）。</p>
+  </div>
+  <h3 id="q10"><span class="qid">Q10</span>论文报告的加速比是在什么条件下测得的？在高并发服务中还成立吗？</h3>
+  <div class="ans">
+    <p class="short">论文的加速比是 <b>batch size = 1 的单请求延迟</b>（wall-time）加速，在带宽受限、有闲置算力的设置下测得：Leviathan 用单 TPU-v4 跑 T5-XXL 11B，Chen 用 16 TPU v4 跑 Chinchilla 70B。它不是吞吐指标。</p>
+    <ul>
+      <li>论文明确说方法“对没有额外计算资源的配置没有帮助”；被拒绝的草稿是浪费的算术量。</li>
+      <li>在高并发服务里 batch 已经把算力用满，投机解码每步多验证的 token 会直接增加每步耗时，<b>吞吐可能不升反降</b>；vLLM 文档也把它定位为“中低 QPS、带宽受限负载”的延迟优化，高 QPS 收益标为“中等”。</li>
+      <li>加速比依赖 α（任务、温度、草稿质量）与 c（草稿相对开销），同一方法在不同任务上差异很大（翻译 3.4× vs 摘要 temp 1 的 2.3×）。</li>
+    </ul>
+    <p class="cite">依据：Leviathan et al. §4（实验设置、Table 2）、§5；Chen et al. §3 与 Table 1；vLLM speculative decoding 文档。</p>
+  </div>
+  <h3 id="q11"><span class="qid">Q11</span>接受率 α 由什么决定？哪些任务受益最多？</h3>
+  <div class="ans">
+    <p class="short">任务无关（对任何自回归采样都保持分布），但<b>收益</b>取决于草稿和目标在该任务上的分布有多接近（α）：确定性强、可预测的生成受益最大。</p>
+    <ul>
+      <li>论文实验：翻译（WMT En-De）α 0.75–0.82、摘要（CNN/DM）0.65–0.74；贪心解码比温度 1 更高。Chen et al. 在 HumanEval（代码）上 2.46× 高于 XSum 的 1.92×，他们推测代码有大量常见子序列、被切成较短 token。</li>
+      <li>一般规律：代码补全、翻译、格式化输出、含大量复述（摘要、RAG 回答引用原文）的任务 α 高；开放式创作、高温度采样 α 低。</li>
+      <li>QA 类任务并不特殊：答案可预测的部分（引用上下文）加速明显，自由发挥的部分收益小。n-gram 类草稿正是利用了“输出复述输入”这一点。</li>
+    </ul>
+    <p class="cite">依据：Leviathan et al. Table 1（各任务 α）；Chen et al. §3.2。</p>
+  </div>
+  <h3 id="q12"><span class="qid">Q12</span>草稿被拒绝后为什么必须从残差分布 norm(max(0, p−q)) 补采？证明最终输出严格服从 p。</h3>
+  <div class="ans">
+    <p class="short">因为接受步骤只能覆盖 min(p, q) 这部分概率质量；p 比 q 多出的部分（q 低估的 token）只有从残差分布 norm(max(0, p−q)) 补采才能恰好补齐，使总分布等于 p。</p>
+    <ul>
+      <li>流程：草稿 x ~ q → 以 min(1, p(x)/q(x)) 接受。<b>被拒绝</b>时：丢弃 x 及其后所有草稿，从残差分布采一个 token 作为本位置的输出，本步结束。全部接受时从 p_{γ+1} 采一个额外 token。</li>
+      <li>为什么不能“被拒后从 p 重采”：q 高估的 token 在接受步骤已按 p/q 的比例保留了 p(x) 的质量，再从 p 采会重复计入它们，最终分布 ≠ p。残差分布正好只包含 q 低估的 token。</li>
+      <li>证明见 <a href="#objective">§4</a>：P(y) = min(p, q) + max(0, p−q) = p。对任意 q 成立，草稿质量只影响 α。</li>
+      <li>贪心（温度 0）是特例：p 是 one-hot，接受当且仅当草稿等于 argmax，残差分布也是 one-hot——退化为“逐 token 比对”。</li>
+    </ul>
+    <p class="cite">依据：Leviathan et al. §3.1、Appendix A.1 定理 1；Chen et al. §2.2、Theorem 1。</p>
+  </div>
+
+</div>
+
+<div class="callout info next-read">
+  <span class="callout-title">后续节点</span>
+  草稿模型的主流做法已转向目标模型上的草稿头：见 <a href="17-eagle.html">EAGLE 1 / 2 / 3</a>（特征层起草、动态草稿树、训练时测试）。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Leviathan, Kalman, Matias. <i>Fast Inference from Transformers via Speculative Decoding.</i> ICML 2023. <a href="https://arxiv.org/abs/2211.17192">arXiv:2211.17192</a></li>
+  <li>Chen, Borgeaud, Irving, Lespiau, Sifre, Jumper. <i>Accelerating Large Language Model Decoding with Speculative Sampling.</i> 2023. <a href="https://arxiv.org/abs/2302.01318">arXiv:2302.01318</a></li>
+  <li>Li et al. <i>EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty.</i> ICML 2024.</li>
+  <li>vLLM 文档：Speculative Decoding。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

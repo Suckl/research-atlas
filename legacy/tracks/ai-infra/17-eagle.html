@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EAGLE 投机解码</title>
+<meta name="description" content="EAGLE 1 / 2 / 3：在目标模型的特征层起草的投机解码——特征不确定性与后移 token、动态草稿树、多层特征融合与训练时测试，以及在推理引擎中随 batch 变化的收益。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/specdec.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="eagle">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：草稿模型从哪来</h2>
+<p><a href="05-speculative-decoding.html">投机解码</a>的收益取决于两件事：草稿被接受的比例 α 有多高、起草本身有多便宜。经典做法用同族的小模型当草稿，但小模型要单独训练 / 对齐、额外占显存，且对很多模型根本没有合适的小兄弟。Medusa 在目标模型顶上加几个解码头，各自预测第 +1、+2、+3… 个 token，但这些头彼此独立，第 +2 个头不知道第 +1 个头猜了什么，接受率随位置迅速下降。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  EAGLE 让草稿头“站在目标模型的肩膀上”：直接读目标模型 LM head 之前的特征，用一个单层 Transformer 在<b>特征层</b>自回归地往前推，再复用目标模型的 LM head 出 token。特征序列比 token 序列规律得多，所以一个很小的头就能猜得很准。EAGLE-2 让草稿树按置信度动态生长；EAGLE-3 去掉特征回归、融合多层特征，并在训练时就模拟多步起草，接受长度随训练数据继续增长。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 草稿头的结构（EAGLE-3 版本，标出 EAGLE-1 的差异）</h2>
+<div class="legend">
+  <span><i class="sw tgt"></i>目标模型（冻结）</span><span><i class="sw enc"></i>特征融合</span><span><i class="sw act"></i>token 嵌入</span>
+  <span><i class="sw pred"></i>草稿头（可训练）</span><span><i class="sw loss"></i>验证</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="EAGLE 草稿头架构">
+    <g class="tgt" data-part="target" data-step="1">
+      <text class="t-sm" x="30" y="34">目标模型（对已接受前缀做一次前向）</text>
+      <rect class="box" x="30" y="48" width="200" height="38" rx="8"/><text class="t-c" x="130" y="67">嵌入 + 前若干层</text>
+      <rect class="box" x="30" y="94" width="200" height="38" rx="8"/><text class="t-c" x="130" y="113">低层特征 l</text>
+      <rect class="box" x="30" y="140" width="200" height="38" rx="8"/><text class="t-c" x="130" y="159">中层特征 m</text>
+      <rect class="box" x="30" y="186" width="200" height="38" rx="8"/><text class="t-c" x="130" y="205">高层特征 h（LM head 前）</text>
+      <rect class="box" x="30" y="232" width="200" height="38" rx="8"/><text class="t-c" x="130" y="251">LM head → x<tspan font-size="9" dy="3">t+1</tspan></text>
+    </g>
+    <path class="edge enc" d="M230,113 C275,113 280,158 316,158" data-step="2"/>
+    <path class="edge enc" d="M230,159 C270,159 280,165 316,165" data-step="2"/>
+    <path class="edge enc" d="M230,205 C275,205 280,172 316,172" data-step="2"/>
+    <g class="enc" data-part="fuse" data-step="2">
+      <rect class="box" x="320" y="134" width="190" height="62" rx="10"/>
+      <text class="t-c t-b" x="415" y="156">拼接 [l ; m ; h]（3k 维）</text>
+      <text class="t-c t-sm" x="415" y="178">全连接 3k → k，得 g<tspan font-size="9" dy="3">t</tspan></text>
+    </g>
+    <path class="edge sg" d="M230,212 C300,230 470,120 560,182" data-step="2" style="stroke:var(--c-tgt)"/>
+    <text class="t-xs" x="262" y="104" data-step="2">EAGLE-1：只用 h（虚线），并要求草稿头回归下一位置的 h</text>
+    <path class="edge act" d="M230,251 C280,251 280,262 316,262" data-step="2"/>
+    <g class="act" data-part="tokemb" data-step="2">
+      <rect class="box" x="320" y="236" width="190" height="52" rx="10"/>
+      <text class="t-c t-b" x="415" y="255">嵌入 e(x<tspan font-size="9" dy="3">t+1</tspan><tspan dy="-3">)</tspan></text>
+      <text class="t-c t-xs" x="415" y="275">后移一位：已采样出的 token</text>
+    </g>
+    <path class="edge enc" d="M510,165 C530,165 535,200 556,200" data-step="3"/>
+    <path class="edge act" d="M510,262 C530,262 535,232 556,232" data-step="3"/>
+    <g class="pred" data-part="draft" data-step="3">
+      <rect class="box" x="560" y="170" width="170" height="86" rx="10"/>
+      <text class="t-c t-b" x="645" y="196">草稿头</text>
+      <text class="t-c t-sm" x="645" y="216">1 层 Transformer 解码层</text>
+      <text class="t-c t-xs" x="645" y="236">输入 [g ; e] → 特征 a<tspan font-size="8" dy="3">t+1</tspan></text>
+    </g>
+    <g data-part="loop" data-step="5">
+      <path class="edge pred" d="M700,170 C700,118 600,118 600,166"/>
+      <text class="t-c t-xs" x="650" y="108">第 2、3… 步：没有目标特征可用，</text>
+      <text class="t-c t-xs" x="650" y="122">用自己的输出 a 代替 g（训练时测试）</text>
+    </g>
+    <path class="edge pred" d="M730,213 H766" data-step="4"/>
+    <g class="tgt" data-part="lmhead" data-step="4">
+      <rect class="box" x="770" y="186" width="170" height="54" rx="10"/>
+      <text class="t-c t-b" x="855" y="206">LM head</text>
+      <text class="t-c t-xs" x="855" y="226">复用目标模型的，冻结</text>
+    </g>
+    <path class="edge" d="M855,240 V318" data-step="6"/>
+    <text class="t-xs" x="862" y="282" data-step="6">草稿 token 及置信度</text>
+    <!-- tree -->
+    <g data-part="tree" data-step="6">
+      <rect class="panel" x="20" y="322" width="600" height="138" rx="12"/>
+      <text class="t-sm" x="34" y="342" style="fill:var(--text);font-weight:650">EAGLE-2：按置信度动态生长草稿树（每层扩展累计置信度最高的节点）</text>
+      <g class="data"><rect class="box" x="40" y="380" width="70" height="30" rx="6"/></g><text class="t-c t-sm" x="75" y="395" style="fill:var(--text)">“The”</text>
+      <path class="edge" d="M110,395 C140,395 140,370 170,370"/><path class="edge" d="M110,395 C140,395 140,422 170,422"/>
+      <g class="pred"><rect class="box" x="174" y="356" width="100" height="28" rx="6"/></g><text class="t-c t-xs" x="224" y="370" style="fill:var(--text)">cat 0.62</text>
+      <g class="pred"><rect class="box" x="174" y="408" width="100" height="28" rx="6"/></g><text class="t-c t-xs" x="224" y="422" style="fill:var(--text)">dog 0.25</text>
+      <path class="edge" d="M274,370 C300,370 300,356 326,356"/><path class="edge" d="M274,370 C300,370 300,388 326,388"/>
+      <g class="pred"><rect class="box" x="330" y="342" width="110" height="28" rx="6"/></g><text class="t-c t-xs" x="385" y="356" style="fill:var(--text)">sat 0.62×0.7</text>
+      <g class="pred"><rect class="box" x="330" y="374" width="110" height="28" rx="6"/></g><text class="t-c t-xs" x="385" y="388" style="fill:var(--text)">is 0.62×0.2</text>
+      <rect class="tk mask" x="330" y="410" width="110" height="26" rx="6"/><text class="t-c t-xs" x="385" y="423">dog→… 累计低，不扩展</text>
+      <path class="edge" d="M440,356 H470"/>
+      <g class="pred"><rect class="box" x="474" y="342" width="120" height="28" rx="6"/></g><text class="t-c t-xs" x="534" y="356" style="fill:var(--text)">on 0.62×0.7×0.8</text>
+    </g>
+    <path class="edge loss" d="M620,392 H646" data-step="7"/>
+    <g class="loss" data-part="verify" data-step="7">
+      <rect class="box" x="650" y="322" width="290" height="138" rx="12"/>
+      <text class="t-c t-b" x="795" y="346">目标模型一次前向验证整棵树</text>
+      <text class="t-c t-xs" x="795" y="370">树注意力掩码：每个节点只看自己的祖先</text>
+      <text class="t-c t-xs" x="795" y="390">按投机采样规则逐层接受 / 拒绝</text>
+      <text class="t-c t-xs" x="795" y="410">接受最长正确路径 + 1 个修正 token</text>
+      <text class="t-c t-xs" x="795" y="430">新特征 l, m, h 顺带算出 → 下一轮起草</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="target"><h4>目标模型</h4><p>每轮验证时，目标模型本来就要对已接受的前缀做一次前向，各层特征是现成的副产品，草稿头读它们几乎不增加开销。EAGLE-1 只读 LM head 之前的顶层特征 h；EAGLE-3 再读一个低层、一个中层特征。</p></div>
+    <div data-note="fuse"><h4>多层特征融合（EAGLE-3）</h4><p>顶层特征 h 高度特化于“预测下一个 token”，对预测更远的 token 信息不足。EAGLE-3 把低、中、高三层特征拼成 3k 维，经全连接层降回 k 维得到 g。这样草稿头拿到的信息更丰富，不再受限于“必须复现顶层特征”。</p></div>
+    <div data-note="tokemb"><h4>后移一位的 token</h4><p>EAGLE-1 的关键观察：只给特征 h<sub>t</sub> 不够，因为下一个 token 是<b>采样</b>出来的——同一个 h<sub>t</sub> 可能接着 “am” 也可能接着 “always”，后续特征完全不同。把已采样的 x<sub>t+1</sub> 的嵌入一起喂进去，消除这种不确定性，草稿头就能确定地预测下一位置的特征。</p></div>
+    <div data-note="draft"><h4>草稿头</h4><p>只有一层 Transformer 解码层（外加融合用的全连接层），参数量是目标模型的很小一部分。它对特征序列做自回归：输入 [g ; e]，输出下一位置的特征 a。EAGLE-1 用特征回归损失 + token 交叉熵训练；EAGLE-3 去掉特征回归，只用 token 损失。</p></div>
+    <div data-note="loop"><h4>训练时测试（training-time test）</h4><p>起草第 2 步时，目标模型还没算过这个位置，没有真正的 g 可用，草稿头只能吃自己上一步的输出 a。若训练时总是喂真实特征（teacher forcing），推理时输入分布就不同，误差逐步累积。EAGLE-3 在训练时就模拟多步起草：后续步骤的输入换成草稿头自己的输出，并配合相应的注意力掩码。</p></div>
+    <div data-note="lmhead"><h4>复用 LM head</h4><p>草稿特征经目标模型自己的 LM head 变成 token 分布。LM head 冻结、共享，不额外占显存；草稿与目标的词表天然一致。</p></div>
+    <div data-note="tree"><h4>动态草稿树（EAGLE-2）</h4><p>EAGLE-1 用固定形状的草稿树。EAGLE-2 发现草稿头的置信度很好地近似了接受率，于是每层只扩展“路径累计置信度”最高的若干节点，最后按累计值重排、选出要送去验证的 token。容易的上下文树长得深，难的上下文树长得宽。</p></div>
+    <div data-note="verify"><h4>并行验证</h4><p>整棵树的 token 拼成一个序列，用树形注意力掩码（每个节点只能看到自己的祖先）交给目标模型做一次前向。按投机采样的接受规则逐层判断，保证输出分布与目标模型完全一致；被接受路径之后再补一个由目标模型给出的 token。</p></div>
+    <div data-step-note="1"><h4>① 目标模型前向</h4><p>对已接受的前缀做前向，得到各层特征与下一个 token。</p></div>
+    <div data-step-note="2"><h4>② 准备草稿输入</h4><p>多层特征融合为 g（EAGLE-1 只用 h），配上后移一位的 token 嵌入。</p></div>
+    <div data-step-note="3"><h4>③ 草稿头前向</h4><p>单层解码层输出下一位置的特征 a。</p></div>
+    <div data-step-note="4"><h4>④ LM head</h4><p>a 经冻结的 LM head 得到草稿 token 分布。</p></div>
+    <div data-step-note="5"><h4>⑤ 自回归起草</h4><p>后续步骤用自己的 a 代替 g（训练时也这样模拟）。</p></div>
+    <div data-step-note="6"><h4>⑥ 生长草稿树</h4><p>按累计置信度扩展、剪枝。</p></div>
+    <div data-step-note="7"><h4>⑦ 验证</h4><p>目标模型一次前向验证整棵树，接受最长正确路径。</p></div>
+  </div>
+  <figcaption>图 1　EAGLE-3 草稿头与 EAGLE-2 动态草稿树（树上的数字为示意的置信度）。依据 EAGLE、EAGLE-2、EAGLE-3 论文。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 三代演进</h2>
+<h3 id="c-eagle1">3.1 EAGLE-1：在特征层起草</h3>
+<p>两个观察：① 特征（LM head 之前的隐状态）序列比 token 序列更规律，回归它比直接预测 token 容易；② 采样带来的不确定性会让“下一位置的特征”有歧义，必须把已采样的 token 一起告诉草稿头。于是草稿头的输入是“特征序列 + 后移一位的 token 序列”，输出下一位置的特征，再借目标模型的 LM head 得到 token。训练用特征回归损失加 token 分类损失，数据是固定数据集上目标模型的前向特征，不需要目标模型重新生成。</p>
+
+<h3 id="c-eagle2">3.2 EAGLE-2：动态草稿树</h3>
+<p>固定形状的草稿树隐含了一个假设：接受率只取决于 token 在树中的位置。EAGLE-2 指出它其实强烈依赖上下文，而草稿头自己的置信度就是接受率的良好近似。于是起草分两步：<b>扩展</b>——每层选累计置信度（路径上置信度之积）最高的 top-k 个节点继续生长；<b>重排</b>——起草结束后，在所有节点里按累计值选出要验证的 top-m 个 token。整个过程不需要额外训练。</p>
+
+<h3 id="c-eagle3">3.3 EAGLE-3：训练时测试与数据缩放</h3>
+<p>作者发现给 EAGLE 加训练数据收益很有限，原因是特征回归这个约束：草稿头被迫复现顶层特征，表达能力被限制。EAGLE-3 做了两件事：</p>
+<div class="diff">
+  <div><h4>去掉特征预测，直接预测 token</h4><p>不再要求输出接近目标模型的 h。但这样第 2 步以后的输入（草稿头自己的输出 a）就和第 1 步的输入（融合特征 g）分布不同了——于是需要“训练时测试”：训练时就把多步起草展开，让草稿头学会吃自己的输出。</p></div>
+  <div><h4>融合低 / 中 / 高三层特征</h4><p>不再只用顶层特征，拼接三层后经全连接降维。论文的实验显示：在新架构下，草稿训练数据越多，加速比按比例继续提升（原版 EAGLE 则很快饱和）。</p></div>
+</div>
+<p>2026-05，vLLM 博客发布了 EAGLE 3.1（EAGLE 团队、vLLM 与 TorchSpec 合作），在 3 的基础上增加若干结构改动 <span class="unverified">（具体改动来自二手文档：输入归一化、后置归一化的隐状态反馈、MLA 结构的草稿变体等，未逐项核对）</span>。同年的 SpecForge（arXiv 2603.18567）是 SGLang 团队开源的草稿模型训练框架，专门用于训练 EAGLE-3 类草稿头。</p>
+
+<h3 id="c-serving">3.4 放进推理引擎之后</h3>
+<p>论文报告的加速比都在 batch = 1 下测得。在线服务里 batch 往往很大，此时 decode 本身已不再严重带宽受限，验证草稿树多出的 token 要实打实地占用算力。EAGLE-3 论文在 SGLang 上（H100，LLaMA-3.1-8B，MT-Bench）测得：EAGLE（第一代）在 batch 24 时已降到 0.93×（比不用还慢），而 EAGLE-3 在 batch 64 时仍有 1.38×。实践中的常见做法：小 batch 用较深 / 较宽的树，batch 变大时缩小草稿数量，超过某个 batch 直接关闭——下面的演示可以感受“接受率 α、草稿长度 γ、草稿成本 c”与加速比的关系。</p>
+<div data-widget="specdec"></div>
+<p>相关落地：DeepSeek-V3 的 MTP 模块本身就是一个可用作草稿的预测头；Kimi K3 把 MTP 层微调成 EAGLE-3 式草稿模型，融合第 1、第 4 和最后一个 Attention Residuals 块的特征 <span class="src">Kimi K3 报告 §4.1.4</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">eagle3_draft.py（一次起草 + 验证，简化为链而非树）</div>
+<pre><code class="lang-py">def eagle3_round(target, draft, prefix, gamma=6):
+    feats, x_next = target.forward_with_layers(prefix)   # 目标模型前向，得到 l, m, h 与下一个 token
+    g = draft.fc(cat(feats.low[-1], feats.mid[-1], feats.high[-1]))   # 3k → k
+    inp, tok, drafts = g, x_next, []
+    for _ in range(gamma):
+        a = draft.layer(cat(inp, embed(tok)))             # 单层解码层（带 KV cache）
+        tok = sample(target.lm_head(a))                   # 复用冻结的 LM head
+        drafts.append(tok)
+        inp = a                                           # 后续步骤吃自己的输出（训练时也这样展开）
+    accepted = target.verify(prefix + [x_next], drafts)   # 一次前向 + 投机采样接受规则
+    return prefix + [x_next] + accepted</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">5. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>MT-bench，温度 0</th><th>EAGLE-2 接受长度 τ</th><th>EAGLE-3 τ</th><th>EAGLE-3 加速比</th></tr></thead>
+  <tbody>
+    <tr><td>Vicuna 13B</td><td>4.83</td><td>6.65</td><td>5.58×（EAGLE-2 为 4.26×）</td></tr>
+    <tr><td>LLaMA-Instruct 3.1 8B</td><td>4.05</td><td>6.13</td><td>4.40×</td></tr>
+    <tr><td>LLaMA-Instruct 3.3 70B</td><td>3.67</td><td>5.63</td><td>4.11×</td></tr>
+  </tbody>
+</table></div>
+<ul>
+  <li>最高加速 6.47×（Vicuna 13B，HumanEval，温度 0，τ = 7.54）；摘要称约为 EAGLE-2 的 1.4×，正文 §4.1 写 20%–40% 的提升。<span class="src">EAGLE-3 Tab. 1、摘要、§4.1</span></li>
+  <li>SGLang（H100）batch 64 吞吐 1.38×。<span class="src">EAGLE-3 Tab. 3</span></li>
+</ul>
+
+<!-- ================================================================== -->
+<h2 id="questions">6. 简答题</h2>
+<div class="qa">
+  <h3 id="q34"><span class="qid">Q34</span>EAGLE 为什么在特征层而不是 token 层起草？EAGLE-3 为什么又放弃了特征回归？</h3>
+  <div class="ans">
+    <p class="short">目标模型的顶层特征序列比 token 序列规律得多，一个单层 Transformer 就能较准确地往前推；起草完再借目标模型自己的 LM head 出 token，词表一致、无需额外小模型。为消除采样带来的歧义，EAGLE 把已采样的 token（后移一位）与特征一起输入。EAGLE-3 发现“必须复现顶层特征”这个约束限制了草稿头的表达能力，加数据也提升有限；去掉特征回归、直接预测 token，并融合低 / 中 / 高三层特征后，加速比随训练数据持续增长。</p>
+    <ul>
+      <li>去掉特征回归的副作用：第 2 步以后的输入是草稿头自己的输出，分布与第 1 步不同 → 用“训练时测试”在训练阶段展开多步起草来对齐。</li>
+      <li>对比 Medusa：多个独立头并行猜 +1、+2…，彼此不知道对方的猜测；EAGLE 是自回归的，每步都条件于前面草稿。</li>
+      <li>EAGLE-2 的动态树与训练无关，可直接套在 EAGLE-1 / 3 的草稿头上。</li>
+    </ul>
+    <p class="cite">依据：EAGLE §3；EAGLE-2 §3；EAGLE-3 §3 与 Fig. 1。</p>
+  </div>
+  <h3 id="q35"><span class="qid">Q35</span>投机解码的收益为什么随 batch 增大而下降？在线服务中如何决定是否开启、草稿多长？</h3>
+  <div class="ans">
+    <p class="short">投机解码本质是“用闲置算力换延迟”：batch 小时 decode 带宽受限，验证 γ 个草稿 token 与验证 1 个耗时几乎相同，所以多接受的 token 都是净赚。batch 变大后 decode 的算术强度上升、逐渐变成算力受限，验证树里被拒绝的 token 白白消耗算力；同时一批里各请求接受长度不同，进一步摊薄收益。</p>
+    <ul>
+      <li>论文数字：SGLang 上 EAGLE 在 batch 24 已降到 0.93×，EAGLE-3 在 batch 64 仍有 1.38×——草稿越准，可开启的 batch 范围越大。</li>
+      <li>策略：按当前 batch / 负载动态调草稿长度与树宽（小 batch 深而宽、大 batch 浅或关闭）；高接受率场景（代码、结构化输出、重复上下文）更值得开。</li>
+      <li>与 PD 分离结合时，投机解码只发生在 decode 池，草稿头的显存与算力也算在 decode 实例上。</li>
+    </ul>
+    <p class="cite">依据：EAGLE-3 Tab. 3（SGLang 吞吐）；投机解码原论文的加速比公式（见 <a href="05-speculative-decoding.html">投机解码页</a>）。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Li, Wei, Zhang, Zhang. <i>EAGLE: Speculative Sampling Requires Rethinking Feature Uncertainty.</i> ICML 2024. <a href="https://arxiv.org/abs/2401.15077">arXiv:2401.15077</a></li>
+  <li>Li, Wei, Zhang, Zhang. <i>EAGLE-2: Faster Inference of Language Models with Dynamic Draft Trees.</i> 2024. <a href="https://arxiv.org/abs/2406.16858">arXiv:2406.16858</a></li>
+  <li>Li, Wei, Zhang, Zhang. <i>EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test.</i> 2025. <a href="https://arxiv.org/abs/2503.01840">arXiv:2503.01840</a></li>
+  <li>Cai et al. <i>Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads.</i> 2024. <a href="https://arxiv.org/abs/2401.10774">arXiv:2401.10774</a></li>
+  <li>Li et al. <i>SpecForge: A Flexible and Efficient Open-Source Training Framework for Speculative Decoding.</i> 2026. <a href="https://arxiv.org/abs/2603.18567">arXiv:2603.18567</a></li>
+  <li>vLLM 博客. <i>EAGLE 3.1.</i> 2026-05. <a href="https://vllm.ai/blog/2026-05-26-eagle-3-1">链接</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

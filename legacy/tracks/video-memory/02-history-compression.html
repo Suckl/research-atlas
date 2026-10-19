@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FramePack / TinyHistory：历史压缩</title>
+<meta name="description" content="FramePack 的重要性 patch 预算与抗漂移采样，TinyHistory 的任意历史查询预训练、生成适配与直接对照。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+
+<style>body[data-node="framepack"] .src {white-space:normal;overflow-wrap:anywhere}</style>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="video-memory" data-node="framepack">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 历史越来越长，下一段却很短</h2>
+<p>自回归视频生成每次只生成下一小段，却可能需要远处的旧人物、房间布局或道具。把全部历史原样拼进 DiT，token 数随视频增长；只留近期窗口则直接删除早期证据。FramePack 的选择是给重要历史更多 token、给其余历史更粗的表示；TinyHistory 的选择是先学会从短嵌入中查询任意历史位置，再把这套表示用于生成。<span class="src">FramePack v3 §1、§3；TinyHistory v6 §1、§3</span></p>
+<div class="callout insight"><span class="callout-title">一句话理解</span>FramePack 设计“每条历史占多少 token”；TinyHistory 训练“有限 token 应保住什么”。二者都压缩历史证据，尚未把证据维护成可覆写的世界状态。</div>
+<p>遗忘与漂移也要分开：更强历史依赖能减少不一致，却可能把自生成错误一路传播。压缩结构解决读取预算；抗漂移采样和历史表示训练解决误差传播。它们不是同一个开关。<span class="src">FramePack §1、§4</span></p>
+<div class="callout code-note"><span class="callout-title">论文版本</span>
+  TinyHistory 的首版题名为 <i>Pretraining Frame Preservation in Autoregressive Video Memory Compression</i>（PFP），首发 2025-12；v6 在 2026-06 改为当前题名。首版突出任意帧重建 / 保真预训练，v6 强调随机查询覆盖与内容一致性两阶段训练。本页机制与生成分数以 v6 为准，不把首版重建指标拼进当前结果表。<span class="src">arXiv 2512.23851 submission history、v1 §3–4、v6 §3–4</span>
+</div>
+
+<h2 id="architecture">2. 一步生成的压缩、读取与再写入</h2>
+<p>沿用视频时间 \(t\)、flow 时间 \(\tau\)、当前 latent \(x_t\)、近期窗口 \(H_t\)、动作 \(a_t\)、文本 \(c_t\)、位姿 \(p_t\)、记忆 \(M_t\)、查询 \(q_t\)、读出 \(r_t\)。这里 \(M_t\) 是历史 latent / embedding，不是地图；主实验以文本条件为主，不引入必需的 pose / action 查询。</p>
+<div class="formula">$$r_t=\mathrm{Pack}(M_t;\mathrm{importance})\ \text{或}\ \phi(M_t),\quad x_{t+1}\sim G(H_t,r_t,c_t),\quad M_{t+1}=\mathrm{Append}(M_t,x_{t+1})$$</div>
+<div class="legend">
+  <span><i class="sw data"></i>历史 / 新段 latent / 噪声</span><span><i class="sw enc"></i>生成器主干</span>
+  <span><i class="sw tgt"></i>冻结 VAE</span><span><i class="sw pred"></i>patchifier / 历史编码器</span>
+  <span><i class="sw reg"></i>历史与压缩记忆</span><span><i class="sw act"></i>文本 / 端点计划</span><span><i class="sw loss"></i>训练损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas"><svg class="dg" viewBox="0 0 960 370" role="img" aria-label="FramePack 与 TinyHistory 历史压缩读取及更新对照">
+    <g data-part="history" data-step="1"><rect class="box reg" x="20" y="130" width="150" height="80" rx="8"/>
+      <text class="t-c t-b" x="95" y="161">历史 Mₜ</text><text class="t-c t-sm" x="95" y="187">GT 训练 / 生成推理</text></g>
+    <path class="edge reg" d="M170,155 H195 V90 H220" data-step="2"/>
+    <g data-part="pack" data-step="2"><rect class="box pred" x="220" y="55" width="190" height="70" rx="8"/>
+      <text class="t-c t-b" x="315" y="84">FramePack</text><text class="t-c t-sm" x="315" y="108">重要性 → 多档 patch</text></g>
+    <path class="edge pred" d="M410,90 H435 V150 H460" data-step="3"/>
+    <path class="edge reg" d="M170,185 H195 V250 H220" data-step="2"/>
+    <g data-part="tiny" data-step="2"><rect class="box pred" x="220" y="215" width="190" height="70" rx="8"/>
+      <text class="t-c t-b" x="315" y="244">TinyHistory φ</text><text class="t-c t-sm" x="315" y="268">LR + HR 残差支路</text></g>
+    <path class="edge pred" d="M410,250 H435 V190 H460" data-step="3"/>
+    <g data-part="tokens" data-step="3"><rect class="box reg" x="460" y="130" width="180" height="80" rx="8"/>
+      <text class="t-c t-b" x="550" y="161">历史读出 rₜ</text><text class="t-c t-sm" x="550" y="187">压缩 token / embedding</text></g>
+    <path class="edge reg" d="M640,170 H690" data-step="3"/>
+    <g data-part="generator" data-step="4"><rect class="box enc" x="690" y="130" width="100" height="80" rx="8"/>
+      <text class="t-c t-b" x="740" y="162">DiT</text><text class="t-c t-sm" x="740" y="188">τ 去噪</text></g>
+    <path class="edge enc" d="M790,170 H830" data-step="4"/>
+    <g data-part="output" data-step="4"><rect class="box data" x="830" y="130" width="110" height="80" rx="8"/>
+      <text class="t-c t-b" x="885" y="162">新段 xₜ₊₁</text><text class="t-c t-sm" x="885" y="188">clean 生成</text></g>
+    <g data-part="endpoints" data-step="4"><rect class="box act" x="680" y="30" width="240" height="65" rx="8"/>
+      <text class="t-c t-b" x="800" y="56">文本 / 端点计划</text><text class="t-c t-sm" x="800" y="79">双向 / inverted 非在线因果</text></g>
+    <path class="edge act" d="M740,95 V130" data-step="4"/>
+    <path class="edge enc" d="M885,210 V265" data-step="5"/>
+    <g data-part="write" data-step="5"><rect class="box reg" x="690" y="265" width="230" height="65" rx="8"/>
+      <text class="t-c t-b" x="805" y="291">追加 / 增量编码</text><text class="t-c t-sm" x="805" y="316">写回完成的生成段</text></g>
+    <path class="edge reg" d="M805,330 V350 H95 V210" data-step="5"/>
+    <g data-part="tail" data-step="6"><rect class="box reg" x="460" y="265" width="180" height="65" rx="8"/>
+      <text class="t-c t-b" x="550" y="291">预算 / tail</text><text class="t-c t-sm" x="550" y="316">删除 / 池化 / 保留</text></g>
+    <path class="edge reg" d="M690,297 H640" data-step="6"/>
+    <text class="t-sm" x="250" y="337">下一轮重新 pack；或追加新 embedding</text>
+  </svg></div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="history"><h4>历史是什么</h4><p>FramePack 使用 VAE latent；TinyHistory 可在 DiT hidden manifold 中保存编码特征。训练来自真实视频，推理不断写入自生成历史。</p></div>
+    <div data-note="pack"><h4>变量 patchify kernel</h4><p>按时间邻近、估计下一段的特征相似性或混合重要性排序，给不同历史组不同 kernel；粗压缩不保留原始细节。<span class="src">FramePack §3</span></p></div>
+    <div data-note="tiny"><h4>双支路保真嵌入</h4><p>低分辨率支路复用 VAE、patchifier 与 DiT 输入投影；原分辨率支路补残差；相加发生在 hidden channels。<span class="src">TinyHistory v6 §3.1、Fig. 2</span></p></div>
+    <div data-note="tokens"><h4>固定 pack 与增长 embedding</h4><p>FramePack pack 预算可设上限；TinyHistory 在固定压缩率下的完整历史 embedding 随时长增长。两者都需另计历史存储。</p></div>
+    <div data-note="generator"><h4>读取就是生成条件</h4><p>压缩历史与目标 noisy latent 条件化 DiT；没有单独按坐标检索墙状态的接口。</p></div>
+    <div data-note="output"><h4>clean 不等于真值</h4><p>新段完成去噪后写回；写错的物体或人物仍是 clean latent，可能继续影响后续。</p></div>
+    <div data-note="endpoints"><h4>抗漂移的边界</h4><p>先建立终点、再填空或倒序靠近用户首帧，改变了采样依赖图；它不等于在线接收未来动作后的因果生成。<span class="src">FramePack §4.1</span></p></div>
+    <div data-note="write"><h4>追加不等于状态覆盖</h4><p>TinyHistory 可增量编码新段并拼接；FramePack 将新段接入下一次 pack。旧状态可能仍存在于历史，没有地图式删除语义。</p></div>
+    <div data-note="tail"><h4>淘汰选项</h4><p>FramePack 讨论删除 tail、逐帧追加最小 token、全部 tail 池化；TinyHistory 基本推理保留全部压缩历史，没有相同的固定容量尾部淘汰。<span class="src">FramePack §3.1；TinyHistory §3.4</span></p></div>
+    <div data-step-note="1"><h4>① 准备历史</h4><p>记录 latent / embedding 的来源和视频时间；近期 overlap 如有则另计。</p></div>
+    <div data-step-note="2"><h4>② 压缩写入表示</h4><p>选择多档 patch，或使用预训练后适配的历史编码器；图中两条支路是两种方法，不是串联。</p></div>
+    <div data-step-note="3"><h4>③ 读取压缩历史</h4><p>历史 token 作为 DiT 条件；FramePack 需匹配 kernel 尺度的 RoPE，TinyHistory 对齐 hidden features。</p></div>
+    <div data-step-note="4"><h4>④ 去噪当前目标</h4><p>生成一段 clean latent；FramePack 可用预计划端点调整视频时间中的生成顺序。</p></div>
+    <div data-step-note="5"><h4>⑤ 写回新段</h4><p>追加生成段；TinyHistory 允许增量计算对应 embedding，减少重新编码。</p></div>
+    <div data-step-note="6"><h4>⑥ 处理预算</h4><p>FramePack 选择 tail 策略；TinyHistory 继续拼接历史，固定压缩率不自动保证固定总 context。</p></div>
+  </div>
+  <figcaption>一轮生成的比较图；FramePack 的端点采样是可选设计，TinyHistory 主机制不要求未来端点。<span class="src">FramePack Fig. 1–2、§3–4；TinyHistory v6 Fig. 1–2、§3</span></figcaption>
+</figure>
+
+<h2 id="components">3. 从手工分配到可学习保真</h2>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>FramePack</th><th>TinyHistory（v6）</th></tr></thead><tbody>
+  <tr><td>存什么（内容与粒度）</td><td>历史 VAE latent，经多档时空 patch 得到压缩 token；可选历史离散化</td><td>双支路历史 embedding，输出在 DiT hidden channels；完整时间覆盖的有损表示</td></tr>
+  <tr><td>何时写（GT / generated；clean / noisy）</td><td>训练用数据历史，可重加噪或量化；推理追加已生成 clean 段，再做 pack</td><td>Stage I 随机查询位置保持 clean，其余历史 noise-as-mask；Stage II 用完整 noise-free GT 历史；推理追加 clean 自生成段</td></tr>
+  <tr><td>如何寻址</td><td>时间重要性；可用估计下一段的特征相似性 / 混合排序；下采样 RoPE phases</td><td>Stage I 任意时间位置查询作监督；推理主要由生成器 attention 解释全部 embedding，无显式 pose Top-k bank</td></tr>
+  <tr><td>如何读</td><td>不同 kernel 的投影 token 条件化 DiT；端点 / 非连续时间需 RoPE 支持</td><td>LR + HR 特征在输入投影后相加，作为 DiT context；可选额外 cross-attention / KV 缓存</td></tr>
+  <tr><td>何时淘汰或覆盖</td><td>远期降分辨率；tail 可删除 / 逐帧最小追加 / 全局池化。追加 tail 选项仍增长 token</td><td>基础推理增量拼接全部压缩历史；没有规定坐标覆写或同样的固定上限淘汰</td></tr>
+  </tbody></table></div>
+<p><span class="src">FramePack v3 §3、§4、§5.1；TinyHistory v6 §3、§4.6</span></p>
+<h3 id="c-framepack">3.1 FramePack：importance 是预算排序</h3>
+<p>设 \(T\) 个历史 latent 帧、\(S\) 个目标帧，每个未压缩帧含 \(L_f\) 个 token。按重要性从高到低排列 \(F_i\)，为其分配 \(L_f/\lambda^i\)，其中 \(\lambda&gt;1\)。重要性最简单来自时间邻近；也可按当前目标估计的特征相似性排序，再用时间项平滑排序跳变。<span class="src">FramePack §3.1–3.2、式 (1)–(5)</span></p>
+<div class="formula">$$L_T=S L_f+L_f\sum_{i=0}^{T-1}\lambda^{-i}=S L_f+L_f\frac{1-\lambda^{-T}}{1-\lambda^{-1}},\qquad \lim_{T\to\infty}L_T=L_f\left(S+\frac{\lambda}{\lambda-1}\right)$$</div>
+<p>有限上限来自几何级数，不是任意长历史的无损编码。实际 patch 至少得形成一个 token；尾部必须采用额外策略，理论分数 token 不能无限缩小。<span class="src">FramePack §3.1 Tail options</span></p>
+<p>压缩不是统一 resize：三维 patch kernel \((p_f,p_h,p_w)\) 在时间、空间上划分历史，kernel 的乘积决定 token 缩减，同样 token 数可以用不同空间 / 时间取舍实现。不同档位使用独立投影参数；超大档先池化再使用最大投影。RoPE phases 也按对应 kernel 平均池化对齐。<span class="src">FramePack §3.1</span></p>
+<div class="callout code-note"><span class="callout-title">论文内部的单位</span>v3 §3.1 在极限式文字中省去了 \(L_f\)，但其式 (2) 明确包含 \(L_f\)。本页按式 (2) 保留该因子，避免把“帧等价长度”误写成 token 数。tail 逐帧追加模式也不能引用固定上限作为无限长保证。<span class="src">FramePack v3 §3.1，式 (2) 与 Tail options</span></div>
+<h3 id="c-antidrift">3.2 抗漂移采样：改变依赖图</h3>
+<ul>
+  <li><b>双向端点：</b>先建立开头和结尾，再填中间；目标同时受两侧锚点约束，减少单向错误链。论文特别讨论重复或运动幅度较小的情况。<span class="src">FramePack §4.1、Fig. 2(b)</span></li>
+  <li><b>Inverted I2V：</b>首帧是用户给的可靠图像，尾端是生成的；倒序生成逐步靠近可靠首帧，改变误差传播方向。<span class="src">FramePack §4.1、Fig. 2(c)</span></li>
+  <li><b>多端点：</b>先按 prompts 规划稀疏端点，再填间隔。端点链仍可能漂移；生成顺序与播放顺序不同。<span class="src">FramePack §4.1、Fig. 2(d)</span></li>
+  <li><b>历史离散化：</b>将 latent 映到 K-means codebook 并还原为量化 latent，减少训练真值与推理生成历史的差异；同时牺牲细节。<span class="src">FramePack §4.2、Fig. 2(e)</span></li>
+</ul>
+<p>这些设计改善作者的画质漂移测试；在线交互时不能等待未知未来动作，更不能把预计划终点视作已经记住的过去。因果 streaming 与端点填空应分开比较。</p>
+<h3 id="tinyhistory">3.3 TinyHistory：先学任意位置的保真查询</h3>
+<p>首版 PFP 把压缩质量直接变成“能否恢复任意历史帧”的预训练目标，而不只靠下一段生成的间接梯度。v6 保留这一路线，但把任务明确为随机帧查询覆盖，然后在生成训练中重用表示；“fidelity-preserving”意为努力保留感知细节，不是可逆或无损保证。<span class="src">PFP v1 §3.1、§4.2；TinyHistory v6 §3.2–3.3</span></p>
+<p>LR 支路对低分辨率、低帧率输入复用基座 VAE、patchifier 与第一层投影；HR 支路用轻量卷积、SiLU 和 attention 编码原分辨率残差。二者在 DiT 输入投影之后相加，绕过仅靠 VAE latent 通道表达的瓶颈。输出是 DiT 隐层特征，不是把所有像素保存在几条 VAE 通道里。<span class="src">TinyHistory v6 §3.1、Fig. 2</span></p>
+<p><b>Stage I：</b>随机选历史时间位置 \(\Omega\)，保留所选帧 clean，其他历史以噪声遮蔽；让 DiT 从压缩表示中生成所选帧。只查询固定末尾会鼓励编码器将容量全花在末尾；随机位置使全历史具有被监督机会。<span class="src">TinyHistory v6 §3.2</span></p>
+<p><b>Stage II：</b>输入完整且无噪声的历史，训练生成下一段；编码器与带新 LoRA 的 DiT 共同适配，编码器并不冻结。学习目标从帧查询转向内容、衣着、对象和人物一致性。<span class="src">TinyHistory v6 §3.3</span></p>
+<p><b>推理：</b>新生成段追加到历史；作者说明近乎全卷积的编码器允许新段独立编码并拼接，减少全历史重算。这是增量计算优势，不是固定总存储或随机访问地图。<span class="src">TinyHistory v6 §3.4</span></p>
+<h3 id="c-kept">3.4 保留的是什么，丢掉的是什么？</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>设计</th><th>优先保留</th><th>不能由结构推出</th></tr></thead><tbody>
+  <tr><td>FramePack 时间重要性</td><td>近期运动和相机连续性；远期低频外观</td><td>古老小字、一次性道具事件；任意位置精确还原</td></tr>
+  <tr><td>FramePack 特征 / 混合排序</td><td>对当前预测更相似的旧证据</td><td>相似帧一定是最新状态；旧墙已失效</td></tr>
+  <tr><td>TinyHistory 学习嵌入</td><td>训练分布中重要的历史内容与身份细节</td><td>有限维度无损；没有被观测的变化；长期动作逻辑保证</td></tr>
+  </tbody></table></div>
+<p>表中局限是由输入和有损编码作出的机制推断；作者的生成指标支持实测一致性改善，尚不替代更新后回访测试。<span class="src">FramePack §3；TinyHistory §3、§4.5；本文推断</span></p>
+
+<h2 id="shapes">4. token 形状与两种预算</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状 / 长度</th><th>含义与出处</th></tr></thead><tbody>
+  <tr><td>统一 latent 历史</td><td>[B, T, h, w, dᵥ]</td><td>T 是历史 latent 帧；不等于像素视频帧率。<span class="src">FramePack §3；TinyHistory §3</span></td></tr>
+  <tr><td>FramePack 历史组</td><td>[B, Tᵢ, h, w, dᵥ] → [B, Nᵢ, d]</td><td>Nᵢ ≈ (Tᵢ/p_f)(h/p_h)(w/p_w)，示意，边界取整依实现。<span class="src">由 FramePack §3.1 kernel 定义推算</span></td></tr>
+  <tr><td>FramePack 示例 pack</td><td>f16k4 + f2k2 + f1k1；g9</td><td>历史 16 / 2 / 1 latent 帧对应 kernel (4,8,8) / (2,4,4) / (1,2,2)；新段 9 latent 帧。<span class="src">FramePack §5.1</span></td></tr>
+  <tr><td>TinyHistory LR / HR</td><td>同形 [B, Nₕ, d] 相加</td><td>LR 提供 DiT manifold 对齐，HR 补细节残差。<span class="src">TinyHistory §3.1、Fig. 2</span></td></tr>
+  <tr><td>TinyHistory 输出通道</td><td>DiT hidden dimension，例如 3072 / 5120</td><td>不是 VAE 的 4 / 16 / 64 通道表示。<span class="src">TinyHistory §3.1</span></td></tr>
+  <tr><td>固定率完整历史</td><td>Nₕ(t) ≈ R × 历史秒数</td><td>R 是 CTX/s；固定率下随时间增长。<span class="src">TinyHistory §3.4、§4.4，本文推算</span></td></tr>
+  </tbody></table></div>
+<p>TinyHistory Tab. 1 在 Wan 2.1、480p 上把 FramePack 写为全历史 <b>2340 token†</b>，TinyHistory 写为 <b>195 或 780 token/s</b>。† 表示整个历史的预算，不是每秒；所以不能直接用两列数相除宣称“整个系统省多少倍”。还需计基座权重、目标段、编码器、KV、原始历史与长度。<span class="src">TinyHistory v6 §4.3–4.4、Tab. 1</span></p>
+
+<h2 id="objective">5. 查询覆盖与下一段生成</h2>
+<p>为避免与视频时间混淆，原文的 diffusion timestep 在此写作 \(\tau\)。flow 约定为 \(x^\tau=(1-\tau)x^0+\tau\epsilon\)，\(\tau=0\) 是 clean，\(\tau=1\) 是噪声，目标速度是 \(\epsilon-x^0\)。<span class="src">TinyHistory v6 式 (1)–(2)</span></p>
+<div class="formula">$$\mathcal L_{\mathrm I}=\mathbb E\left\|\epsilon-H_{[\Omega]}-v_\theta\left(H_{[\Omega]}^\tau,\tau,c,\phi(\mathrm{mask}(H,\Omega))\right)\right\|_2^2$$</div>
+<p>所选历史帧作为生成目标，随机时间位置承担覆盖监督；非查询位置的 history noise-as-mask 与目标自身的扩散噪声是两件事。Stage I 的这个查询不代表推理时拥有“输入任意时间戳就无损取帧”的保证。<span class="src">TinyHistory v6 §3.2、式 (3)–(4)</span></p>
+<div class="formula">$$\mathcal L_{\mathrm{II}}=\mathbb E\left\|\epsilon-x_{t+1}-v_\theta\left(x_{t+1}^\tau,\tau,c_t,\phi(M_t)\right)\right\|_2^2$$</div>
+<p>Stage II 的历史完整、noise-free，编码器仍可训练；后续内容一致性的梯度会适配其特征。FramePack 的 pack 也在生成微调中学习输入投影，但并不具有相同的任意帧查询预训练。<span class="src">TinyHistory v6 §3.3；FramePack §3.1、§5.2</span></p>
+<div class="formula">$$Q(F)_p=\arg\min_k\|F_p-\Omega_k\|_2,\qquad F\mapsto\Omega_{Q(F)}$$</div>
+<p>这是 FramePack 可选的历史离散化，\(\Omega_k\) 在此表示 codebook 向量，与 TinyHistory 的查询集合 \(\Omega\) 不同。它降低表示敏感度以抑制历史分布差异；细节与时间依赖也可能被削弱。<span class="src">FramePack §4.2、式 (6)</span></p>
+
+<h2 id="pseudocode">6. 两种读写循环</h2>
+<div class="code-title">compressed_history.py（按论文机制整理；不代表具体代码 API）</div>
+<pre><code class="lang-py"># TinyHistory Stage I: queries are training supervision
+for H_gt, text in videos:
+    Omega = random_history_indices(H_gt)
+    H_masked = keep_clean_else_noise(H_gt, Omega)
+    target = H_gt[Omega]
+    r = phi(H_masked)                        # LR + HR after projection
+    loss = flow_loss(DiT, target, r, text)
+    update(phi, DiT_lora, loss)
+
+# Stage II: complete, clean GT history -> next segment
+for H_gt, next_gt, text in continuation_pairs:
+    r = phi(H_gt)
+    loss = flow_loss(DiT, next_gt, r, text)
+    update(phi, new_DiT_lora, loss)           # phi is NOT frozen
+
+history = encode_initial_video(initial_video)
+embedding = phi(history) if mode == "tinyhistory" else None
+for section, text in generation_schedule:
+    if mode == "framepack":
+        order = rank_importance(history, section)   # time / feature / hybrid
+        groups, tail = allocate_patch_kernels(order)
+        r = patchify_and_align_rope(groups, tail_policy(tail))
+    else:
+        r = embedding                       # all compressed history
+    x_clean = denoise_new_section(r, text, section)
+    history = append_at_video_time(history, section, x_clean)
+    if mode == "tinyhistory":
+        embedding = concatenate(embedding, phi(x_clean))
+    # FramePack re-packs next iteration; no map-style state overwrite
+    output_at_video_time(section, x_clean)
+# Bidirectional/inverted schedule plans endpoints BEFORE gap filling;
+# strict online streaming must instead use a causal schedule.</code></pre>
+
+<h2 id="hyperparams">7. 关键配置与解释</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>设置</th><th>为什么影响记忆</th></tr></thead><tbody>
+  <tr><td>FramePack kernel 档位</td><td>(2,4,4)、(4,8,8)、(8,16,16)；更大档先池化</td><td>独立投影避免不同压缩率共享困难。<span class="src">FramePack §3.1</span></td></tr>
+  <tr><td>FramePack tail</td><td>td 删除 / ta 逐帧追加 / tc 全局压缩</td><td>ta 的总 token 不严格固定；td 真正丢历史。<span class="src">FramePack §3.1、§5.1</span></td></tr>
+  <tr><td>FramePack 主表协议</td><td>HunyuanVideo；长视频 30 s、短视频 5 s；start / end 各取 15%</td><td>漂移分测首尾质量差，非具体回访召回。<span class="src">FramePack §5.2–5.3</span></td></tr>
+  <tr><td>TinyHistory 压缩率</td><td>H × W × T：4×4×2 或 2×2×2</td><td>latent 上附加压缩率；空间 / 时间不能调换解释。<span class="src">TinyHistory §4.1、Tab. 1</span></td></tr>
+  <tr><td>TinyHistory 编码器</td><td>64 → 128 → 256 → 512，末端投影到 DiT hidden；LoRA rank 128</td><td>联合适配，而非预训练后锁死。<span class="src">TinyHistory §4.1</span></td></tr>
+  <tr><td>TinyHistory 主表协议</td><td>Wan 2.1 14B、480p；同基座 / 数据实现各 baseline</td><td>FramePack 分数来自 TinyHistory 的受控实现，不是 FramePack 原始主表。<span class="src">TinyHistory §4.1、§4.3</span></td></tr>
+  </tbody></table></div>
+<p>没有在此拼接各论文最小显存、最快吞吐与最高质量；这些量涉及不同卸载策略、训练 / 推理与 checkpoint。当前 TinyHistory 官方页面提供结果，<span class="unverified">未核验可复现当前 v6 全训练配方的公开代码</span>，因此伪代码只作机制说明。</p>
+
+<h2 id="results">8. 保真、内容一致性与漂移分别看</h2>
+<h3 id="c-results-tiny">同 Wan 基座：TinyHistory 直接对照 FramePack</h3>
+<p>下表来自 TinyHistory v6 Tab. 1：同 Wan 2.1 / 480p 设置。Char、Scene、Obj 为 VLM 条件评分；FaceID 是 ArcFace 与首帧相似性超过阈值的帧比例；分数越高越好。CTX 的单位单列。<span class="src">TinyHistory §4.1–4.4、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法 / context 预算</th><th>Char↑</th><th>Scene↑</th><th>Obj↑</th><th>FaceID↑</th><th>ELO↑</th></tr></thead><tbody>
+  <tr><td>Sliding Window · 6240 token/s<br><span class="src">TinyHistory Tab. 1</span></td><td>46.65</td><td>57.02</td><td>48.52</td><td>57.87</td><td>1090</td></tr>
+  <tr><td>FramePack · 2340 token（全历史）<br><span class="src">TinyHistory Tab. 1</span></td><td>57.92</td><td>76.04</td><td>67.09</td><td>62.01</td><td>1182</td></tr>
+  <tr class="hl"><td>TinyHistory 4×4×2 · 195 token/s<br><span class="src">TinyHistory Tab. 1</span></td><td>80.19</td><td>72.21</td><td>74.38</td><td>70.71</td><td>1262</td></tr>
+  <tr class="hl"><td>TinyHistory 2×2×2 · 780 token/s<br><span class="src">TinyHistory Tab. 1</span></td><td>85.90</td><td>87.11</td><td>85.45</td><td>73.05</td><td>1332</td></tr>
+  </tbody></table></div>
+<p>较高压缩的 TinyHistory 在 Scene 上低于 FramePack，说明“学到嵌入”不代表所有任务都赢。VLM 先做可见性 / 存在 gate，再取通过样本的子问题均分；没有 gate 覆盖率不能将条件均分当全样本可靠性。FaceID 不验证衣着或事件的合法更新，ELO 也不隔离记忆机制。<span class="src">TinyHistory §4.2、Tab. 1；本文评测解释</span></p>
+<h3 id="c-ablation">为什么要预训练，还要联合适配？</h3>
+<p>同 4×4×2、195 token/s；各消融使用 Wan 2.1，训练 100k 步。<span class="src">TinyHistory v6 Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>配置</th><th>Char↑</th><th>FaceID↑</th><th>解释</th></tr></thead><tbody>
+  <tr><td>Without Stage I<br><span class="src">TinyHistory Tab. 2</span></td><td>52.64</td><td>58.38</td><td>只做下一段生成不足以学好压缩查询</td></tr>
+  <tr><td>Frozen Encoder<br><span class="src">TinyHistory Tab. 2</span></td><td>61.42</td><td>61.82</td><td>帧查询预训练还需适配生成内容</td></tr>
+  <tr class="hl"><td>完整两阶段<br><span class="src">TinyHistory Tab. 2</span></td><td>80.19</td><td>70.71</td><td>预训练初始化与可训练编码器共同贡献</td></tr>
+  </tbody></table></div>
+<h3 id="c-results-pack">FramePack 自身消融：漂移指标不是回访指标</h3>
+<p>同 HunyuanVideo 主表，以下均用 f16k4 / f2k2 / f1k1 历史分组与 g9 目标长度；inverted 额外引入首帧锚并改变采样顺序，输入条件并不完全相同。\(\Delta_{\mathrm{drift}}^M=|M(V_{\mathrm{start}})-M(V_{\mathrm{end}})|\)，首尾各取 15% 帧。<span class="src">FramePack v3 §5.1、§5.3、式 (7)、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>配置</th><th>ΔClarity↓</th><th>ΔMotion↓</th><th>Dynamic↑</th><th>ELO↑</th></tr></thead><tbody>
+  <tr><td>td_f16k4f2k2f1k1_g9<br><span class="src">FramePack Tab. 1</span></td><td>3.18%</td><td>3.42%</td><td>92.97%</td><td>1074</td></tr>
+  <tr class="hl"><td>f1k1_x_g9_f1k1f2k2f16k4_td（inverted）<br><span class="src">FramePack Tab. 1</span></td><td>2.35%</td><td>1.95%</td><td>88.76%</td><td>1228</td></tr>
+  <tr class="hl"><td>td_f16k4f2k2f1k1_g9+D（离散历史）<br><span class="src">FramePack Tab. 1</span></td><td>2.30%</td><td>2.49%</td><td>91.39%</td><td>1222</td></tr>
+  </tbody></table></div>
+<p>首尾质量差变小支持抗漂移；较低运动幅度也可能降低难度，所以联看 Dynamic。两端同样差也会得到小 Δ；这些分数不证明曾经删除的墙在回访时仍为空，更不宜与上面的 Wan 内容一致性表比较 ELO。<span class="src">FramePack §5.3；本文指标边界</span></p>
+
+<h2 id="evolution">9. 压多少，还要问给谁压</h2>
+<div class="diff">
+  <div class="was"><h4>历史压缩带来的改变</h4><ul><li>FramePack 用分层 patch 控制活动 context，并独立调整采样顺序以抑制漂移。</li><li>TinyHistory 用随机位置预训练与生成适配提高压缩历史的内容保真。</li></ul></div>
+  <div class="now"><h4>还剩的设计问题</h4><ul><li><a href="09-context-as-memory.html#worldpack">WorldPack</a>：从时间重要性转向目标 pose / FoV 相关性，给相关视角更多压缩预算。<span class="src">WorldPack §4.2</span></li><li><a href="03-lct-moc.html#moc">MoC</a>：压缩之外，还可选择当前 query 应读哪些 chunk。</li><li><a href="08-worldmem.html">WorldMem / VRAG</a> 与 <a href="11-dynamic-memory.html">动态记忆</a>：旧证据的新鲜度和状态更新依然需要专门机制。</li></ul></div>
+</div>
+<p>TinyHistory 对 FramePack 是直接 baseline 比较与范式发展，不能据此认定沿用了其 checkpoint；WorldPack 的 pose-aware 分配也不等于 FramePack 原方法本来就用 GT pose。回到 <a href="01-foundations.html#c-benchmarks">基础页评测索引</a>，检查各方法是否真正测了离窗回访与合法状态改变。</p>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q3"><span class="qid">Q3</span>为什么 FramePack 能固定 context，而不能保证无限历史都可精确恢复？</h3>
+  <div class="ans"><p class="short">重要性越低的历史用越大的 patch，token 预算形成收敛级数，但这是有损压缩。实际 token 不可无限细分，tail 仍需删除、池化或追加；原始历史与索引存储也须另计。</p><ul><li>固定 pack 长度限制的是活跃生成上下文。</li><li>空间与时间 kernel 的分配决定丢哪些细节。</li><li>抗漂移端点采样改变误差链，没有恢复被压掉的原始信息。</li></ul><p class="cite">依据：FramePack §3.1–3.2、§4.1。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q4"><span class="qid">Q4</span>TinyHistory 为什么先训练随机历史查询，还要让编码器参与生成微调？</h3>
+  <div class="ans"><p class="short">随机历史查询使不同时间位置都获得保真监督，减少只记末尾的捷径；生成微调再将这些特征适配到人物、场景和对象一致性。预训练后冻结编码器会阻止这种任务适配。</p><ul><li>LR 支路对齐基座特征，HR 残差补细节。</li><li>完整 embedding 固定压缩率仍随时长增长，与 FramePack 全历史固定 pack 不同。</li><li>生成分数的改善并不证明离屏变化或动作后果正确。</li></ul><p class="cite">依据：TinyHistory v6 §3.1–3.4、Tab. 1–2；PFP v1 §3。</p></div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zhang, Cai, Li, Wetzstein, Agrawala. <i>Frame Context Packing and Drift Prevention in Next-Frame-Prediction Video Diffusion Models.</i> NeurIPS 2025. <a href="https://arxiv.org/abs/2504.12626">arXiv:2504.12626</a> · <a href="https://arxiv.org/html/2504.12626v3">本页 v3</a> · <a href="https://github.com/lllyasviel/FramePack">官方代码</a> · <a href="https://proceedings.neurips.cc/paper_files/paper/2025/hash/2bde8fef08f7ebe42b584266cbcfc909-Abstract-Conference.html">官方 proceedings</a>。</li>
+  <li>Zhang, Cai, Li, Zeng, Lu, Rao, Han, Wetzstein, Agrawala. <i>TinyHistory: Lightweight Video History Embeddings via Two-Stage Context Learning.</i> <a href="https://arxiv.org/abs/2512.23851">arXiv:2512.23851</a> · <a href="https://arxiv.org/html/2512.23851v6">本页 v6</a> · <a href="https://lllyasviel.github.io/TinyHistory_gitpage/">官方结果页</a>。<span class="unverified">录用 venue 未从官方来源核验</span>。</li>
+  <li>同一论文首版：<i>Pretraining Frame Preservation in Autoregressive Video Memory Compression.</i> <a href="https://arxiv.org/html/2512.23851v1">PFP v1</a>；仅用于说明保真预训练动机与版本变化。</li>
+  <li><i>WorldPack: Dynamic Frame Compression for Long-context Video World Modeling.</i> <a href="https://arxiv.org/abs/2512.02473">arXiv:2512.02473</a>；详见 <a href="09-context-as-memory.html#worldpack">本轨道拆解</a>。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方资料为准，出处见各节引用与轨道来源表。</footer>
+</body>
+</html>

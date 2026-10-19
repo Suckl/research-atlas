@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShotStream 与 CausalCine：多镜头流式记忆</title>
+<meta name="description" content="ShotStream 的 global/local 双缓存和镜头内外 self-forcing，对照 CausalCine 的 top-k 内容路由、Block-Relative RoPE 与活动读取预算。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="video-memory" data-node="shotstream">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：流式生成需要知道什么时候继续，什么时候切镜头</h2>
+<p>持续生成同一场景可以依靠近期 KV 延续动作。多镜头叙事还要求模型接受新 prompt、切换视角、引入新人，并在旧人物再次出现时取回相关证据。旧镜头的最后一帧有助于连续运动，却可能妨碍真正的 cut；只保留开场锚点，又不能保证找到后来才出场的人物。</p>
+<p><b>ShotStream</b>将任务变成由历史条件驱动的 next-shot generation：global cache 管跨镜头，local cache 管当前镜头，再用镜头 RoPE offset 区分二者。<b>CausalCine</b>把远程读取变成每层内容路由，选 top-\(k\) 历史帧，并在读取时重新分配 Block-Relative RoPE。它在原论文中直接以 ShotStream 为自回归 baseline。<span class="src">ShotStream §4；CausalCine §3.3、§4</span></p>
+<div class="callout insight">
+  <span class="callout-title">缓存、寻址与训练必须配套</span>
+  缓存回答“历史能否留下”，路由回答“当前该读哪段”，位置编码回答“取回的旧内容放在哪个注意力地址”，自生成训练回答“读到带错误的历史后如何继续”。这几个环节共同影响结果，不能用一个 FPS 或一致性分数互相替代。
+</div>
+<p>统一记号：视频 chunk 时间为 \(t\)，去噪 / flow 时间为 \(\tau\)，当前 latent 为 \(x_t\)，近期上下文为 \(H_t\)，文本为 \(c_t\)，记忆为 \(M_t\)，查询为 \(q_t\)，读出为 \(r_t\)。镜头编号记为 \(s\)；\(a_t\)、\(p_t\) 分别保留给动作与相机位姿，本页方法主要通过文本控制，不要求独立的动作 / pose 流。</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\qquad x_{t+1}\sim G(H_t,r_t,c_t),\qquad M_{t+1}=\mathrm{Write}(M_t,x_{t+1}).$$</div>
+<p>ShotStream 在镜头边界重采历史并重建 global KV，镜头内部持续写 local；CausalCine 持续保存历史 KV，每个当前 chunk 从中挑选活动读取集合。这是两种不同的 \(\mathrm{Read}/\mathrm{Write}\) 实例。<span class="src">ShotStream §4.2、Supp. §9；CausalCine §3.3</span></p>
+
+<h2 id="architecture">2. 全局架构：镜头双缓存与内容路由</h2>
+<div class="legend">
+  <span><i class="sw data"></i>latent / 噪声 / 索引</span><span><i class="sw enc"></i>生成器可训练部分</span>
+  <span><i class="sw tgt"></i>冻结 VAE / 教师</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>镜头文本 / 脚本</span><span><i class="sw loss"></i>训练损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 640" role="img" aria-label="ShotStream 一次 chunk 生成、镜头边界更新，以及 CausalCine 历史 KV 路由与重寻址">
+    <text class="t-b" x="20" y="26">ShotStream：global 保跨镜头，local 保当前镜头</text>
+    <g class="act" data-part="prompt" data-step="1">
+      <rect class="box" x="20" y="60" width="150" height="70" rx="8"/>
+      <text class="t-c t-b" x="95" y="86">流式镜头文本</text>
+      <text class="t-c t-sm" x="95" y="112">global + shot caption</text>
+    </g>
+    <g class="reg" data-part="global" data-step="1 2 5">
+      <rect class="box" x="215" y="60" width="215" height="70" rx="8"/>
+      <text class="t-c t-b" x="322" y="86">global context KV</text>
+      <text class="t-c t-sm" x="322" y="112">稀疏历史镜头帧</text>
+    </g>
+    <g class="reg" data-part="local" data-step="2 4 5">
+      <rect class="box" x="215" y="190" width="215" height="70" rx="8"/>
+      <text class="t-c t-b" x="322" y="215">local context KV</text>
+      <text class="t-c t-sm" x="322" y="242">当前镜头的近期 chunk</text>
+    </g>
+    <path class="edge reg" d="M430,95 H460 V138 H485" data-step="2"/>
+    <path class="edge reg" d="M430,225 H460 V163 H485" data-step="2"/>
+    <g class="data" data-part="rope" data-step="2">
+      <rect class="box" x="485" y="115" width="150" height="70" rx="8"/>
+      <text class="t-c t-b" x="560" y="139">RoPE offset</text>
+      <text class="t-c t-sm" x="560" y="165">镜头边界产生跳变</text>
+    </g>
+    <path class="edge" d="M635,150 H685" data-step="3"/>
+    <path class="edge act" d="M95,130 V155 H190 V45 H760 V115" data-step="3"/>
+    <g class="enc" data-part="student" data-step="3">
+      <rect class="box" x="685" y="115" width="150" height="70" rx="8"/>
+      <text class="t-c t-b" x="760" y="139">因果 DiT</text>
+      <text class="t-c t-sm" x="760" y="165">当前噪声 → chunk</text>
+    </g>
+    <path class="edge enc" d="M760,185 V230" data-step="3"/>
+    <g class="data" data-step="3 4">
+      <rect class="box" x="685" y="230" width="150" height="60" rx="8"/>
+      <text class="t-c t-b" x="760" y="251">生成完成</text>
+      <text class="t-c t-sm" x="760" y="276">clean latent</text>
+    </g>
+    <path class="edge reg" d="M685,260 H590 V225 H430" data-step="4"/>
+    <text class="t-sm" x="486" y="212" data-step="4">更新 local KV</text>
+    <g class="data" data-part="boundary" data-step="5">
+      <rect class="box" x="20" y="315" width="410" height="70" rx="8"/>
+      <text class="t-c t-b" x="225" y="339">镜头边界：重采历史 / 清空局部</text>
+      <text class="t-c t-sm" x="225" y="366">global 重建；local 为新镜头重新开始</text>
+    </g>
+    <path class="edge" d="M760,290 V350 H430" data-step="5"/>
+    <text class="t-sm" x="490" y="335" data-step="5">镜头结束时</text>
+    <path class="edge reg" d="M175,315 V95 H215" data-step="5"/>
+    <path class="edge idx" d="M322,315 V260" data-step="5"/>
+    <text class="t-sm" x="40" y="223" data-step="5">从已生成镜头重采</text>
+    <text class="t-b" x="20" y="438">CausalCine：保存历史，按当前内容限制读取</text>
+    <g class="reg" data-part="causal-archive" data-step="6 7">
+      <rect class="box" x="20" y="475" width="250" height="80" rx="8"/>
+      <text class="t-c t-b" x="145" y="500">历史 KV + 帧描述符</text>
+      <text class="t-c t-sm" x="145" y="530">K 不预旋转；历史随生成增长</text>
+    </g>
+    <path class="edge reg" d="M270,515 H345" data-step="6"/>
+    <g class="data" data-part="causal-router" data-step="6">
+      <rect class="box" x="345" y="475" width="260" height="80" rx="8"/>
+      <text class="t-c t-b" x="475" y="500">Q·mean(K) → top-k</text>
+      <text class="t-c t-sm" x="475" y="530">加 local；读取后重设 RoPE 地址</text>
+    </g>
+    <path class="edge idx" d="M475,447 V475" data-step="6"/>
+    <text class="t-sm" x="496" y="454" data-step="6">当前 chunk query</text>
+    <path class="edge reg" d="M605,515 H685" data-step="6"/>
+    <g class="enc" data-step="6 7">
+      <rect class="box" x="685" y="475" width="150" height="80" rx="8"/>
+      <text class="t-c t-b" x="760" y="500">因果 self-attn</text>
+      <text class="t-c t-sm" x="760" y="530">只读选定历史</text>
+    </g>
+    <path class="edge enc" d="M835,515 H865" data-step="7"/>
+    <g class="data" data-step="7">
+      <rect class="box" x="865" y="485" width="75" height="60" rx="8"/>
+      <text class="t-c t-b" x="902" y="515">新 chunk</text>
+    </g>
+    <path class="edge reg" d="M902,545 V600 H145 V555" data-step="7"/>
+    <text class="t-sm" x="372" y="586" data-step="7">clean-context KV 与 mean-pooled K 写回历史</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="prompt"><h4>新文本是在线控制</h4><p>用户可以追加下一镜头文本，已有视频无需重生成。镜头级 caption 与历史帧自己的 caption 要正确绑定，不能把新镜头描述统一施加给全部历史。<span class="src">ShotStream §4.1；CausalCine §3.2</span></p></div>
+    <div data-note="global"><h4>global 不是完整历史</h4><p>ShotStream 按历史镜头数分配稀疏条件帧，余量给最近镜头。global KV 保存活动的稀疏条件；不能把它画成保存全部旧帧的无限 KV。<span class="src">ShotStream §4.1–4.2</span></p></div>
+    <div data-note="local"><h4>local 负责当前镜头</h4><p>当前镜头逐 chunk 生成并更新局部 KV；镜头结束后重置 local，使下一镜头能够按新文本重新构图。<span class="src">ShotStream §4.2、Supp. §9</span></p></div>
+    <div data-note="rope"><h4>位置跳变表示 cut</h4><p>ShotStream 用视频位置与镜头偏移共同决定旋转角，显式区分历史镜头和当前镜头。它不等同于 CausalCine 在检索后按活动集合重新编号。<span class="src">ShotStream §4.2；CausalCine §3.3</span></p></div>
+    <div data-note="student"><h4>因果生成器读两种历史</h4><p>当前 chunk 内可以联合建模，但只读过去缓存。训练先用 GT 跨镜头历史建立 next-shot 能力，再以自生成历史训练跨镜头 rollout。<span class="src">ShotStream §4.2</span></p></div>
+    <div data-note="boundary"><h4>边界改变读写周期</h4><p>镜头内 local 高频更新；镜头边界 global 重新采样和更新，local 清空。固定活动缓存没有说明所有可供重采样的原始历史如何驻留与淘汰。<span class="src">ShotStream §4.2、Supp. §9；存储范围为机制推导</span></p></div>
+    <div data-note="causal-archive"><h4>历史档案与活动窗口分开</h4><p>CausalCine 保存每层历史 K/V 和每帧平均 K 描述符。K 保持未旋转；每次检索后才按新地址旋转。top-k 限制进入注意力的历史，不限制完整档案长度。<span class="src">CausalCine §3.3，Eq. 6–9</span></p></div>
+    <div data-note="causal-router"><h4>路由无需新参数</h4><p>当前 chunk 的 Q 做空间 / 时间平均，与窗外帧描述符点积，跨头聚合。每层作内容选择，同一 chunk 内各帧共享决定；top-k 不可微，但 Q/K 来自可训练骨干。<span class="src">CausalCine §3.3</span></p></div>
+    <div data-step-note="1"><h4>① 准备镜头条件</h4><p>收到当前镜头文本，从已经生成的历史镜头取稀疏 global 条件。</p></div>
+    <div data-step-note="2"><h4>② 区分两种缓存</h4><p>历史 global 与当前镜头 local 一起参与读取，用 RoPE offset 标示镜头边界。</p></div>
+    <div data-step-note="3"><h4>③ 当前 chunk 去噪</h4><p>因果生成器从噪声生成新 latent，文本约束当前镜头内容。</p></div>
+    <div data-step-note="4"><h4>④ 当前镜头局部写入</h4><p>完成 chunk 后更新 local KV，为下一个 chunk 提供连续运动条件。</p></div>
+    <div data-step-note="5"><h4>⑤ 新镜头重新组织历史</h4><p>global 从旧镜头重采样，local 重置；下一镜头继续流式生成。</p></div>
+    <div data-step-note="6"><h4>⑥ 对照：按内容读取</h4><p>CausalCine 选择 top-k 窗外帧，加入 local 和 current，按紧凑块位置施加 RoPE。</p></div>
+    <div data-step-note="7"><h4>⑦ 对照：继续积累历史</h4><p>新 chunk 的 clean-context KV 与描述符写回历史。活动读取受限，完整 archive 仍增长。</p></div>
+  </div>
+  <figcaption>图 1　推理时的一步读取 / 写入，以及镜头边界操作。上下是不同方法，不共享同一生成器权重。依据 ShotStream §4.1–4.2 / Supp. §9 与 CausalCine §3.3；图中未画训练教师。</figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解：先划分历史，再解决读取地址</h2>
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>ShotStream</th><th>CausalCine</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>global：旧镜头稀疏条件帧的 KV；local：当前镜头近期 chunk KV。<span class="src">§4.2</span></td><td>历史逐帧、逐层未旋转 K/V，以及每帧 mean-pooled K 描述符。<span class="src">§3.3，Eq. 6–9</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>训练首阶段 global 来自 GT，local 来自当前自生成；后阶段和推理两者均自生成。镜头内写完成 chunk，边界更新 global。<span class="src">§4.2、Supp. §9</span></td><td>TF 阶段从真实视频 clean context 学 KV 可见性；self-forced 蒸馏 / 推理从生成完成的 chunk 更新历史，查询来自当前 noisy chunk。<span class="src">§3.2–3.4</span></td></tr>
+    <tr><td>如何寻址</td><td>按历史 shot 分配条件帧预算；caption 绑定视觉内容；镜头编号决定 RoPE offset。<span class="src">§4.1–4.2</span></td><td>当前 chunk 的平均 Q 与每帧平均 K 做跨头点积，选窗外 top-k；不是 entity ID 或 camera pose 查询。<span class="src">§3.3</span></td></tr>
+    <tr><td>如何读</td><td>当前因果 self-attention 读 global + local，原生 DiT 不新增独立记忆网络。<span class="src">§4.1–4.2</span></td><td>选定历史 + local + current 在 compact Block-Relative RoPE 下做 self-attention；text cross-attention 仍按 shot 路由。<span class="src">§3.2–3.3</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>local 容量有限，镜头边界重置；global 重新采样覆盖。完整源历史的存储 / 淘汰协议不能由活动 KV 上限推定。<span class="src">§4.2、§5.1、Supp. §9</span></td><td>窗外帧退出 local 但仍可被历史路由选中；top-k 仅控制活动读集合。正文没有固定总 archive 淘汰保证。<span class="src">§3.3</span></td></tr>
+  </tbody>
+</table></div>
+<h3 id="c-shot-cache">3.1 ShotStream：稀疏历史不是固定开场 sink</h3>
+<p>给定历史镜头数 \(S_{\mathrm{hist}}\) 和条件预算 \(f_{\mathrm{ctx}}\)，每个旧镜头分配 \(\lfloor f_{\mathrm{ctx}}/S_{\mathrm{hist}}\rfloor\) 帧，余数留给最新镜头。历史条件帧保留自身 shot caption 与 global caption，目标帧读取自己的 shot caption；这样人物与背景证据不会被当前镜头文本错误重标。<span class="src">ShotStream §4.1</span></p>
+<p>镜头内需要连续，镜头间需要可切换。ShotStream 对镜头 \(s\) 中位置 \(u\) 的 temporal rotation 写为 \(\Theta_{u,s}=\phi u+s\theta\)：\(\phi\) 是时间频率，\(\theta\) 是镜头跳变偏移。这里是论文标量形式的重写，不把它解释成查询后的检索重编号。<span class="src">ShotStream §4.2</span></p>
+<h3 id="causalcine">3.2 CausalCine：内容路由替代位置优先读取</h3>
+<p><a href="https://arxiv.org/html/2605.12496">CausalCine</a>的 Content-Aware Memory Routing（CAMR）在每个 self-attention 层工作。设历史帧 \(f\) 的空间 token 数为 \(P\)，chunk 包含 \(L\) 个 latent frames；每头保留平均 key 描述符 \(d_f\)，当前查询 \(q_t\) 对 chunk 的时空 token 平均。<span class="src">CausalCine §3.3，Eq. 6–8</span></p>
+<div class="formula">$$d_f=\frac1P\sum_{p=1}^{P}K_{f,p},\qquad q_t=\frac1{LP}\sum_{u,p}Q_{t,u,p},\qquad s_{t,f}=\sum_{h,d}q_{t,h,d}d_{f,h,d}.$$</div>
+<p>从 local window 外挑 top-\(k\) 帧，与最近 \(W\) 个 chunks 和当前 chunk 合并。路由本身无新参数，top-k 不可微；它依赖训练后的 Q/K 表征，不能把“parameter-free”误读成“无需训练生成器”。同一 chunk 内各帧共享选择，但不同层可以得到不同历史帧。<span class="src">CausalCine §3.3</span></p>
+<h3 id="c-block-rope">3.3 Block-Relative RoPE：读出时换地址</h3>
+<p>旧帧原始位置可能远超训练范围。CausalCine 在 cache 里保留未旋转 K，选中后才把 memory、local、current 依次分配紧凑的时间位置。空间位置仍由原有 RoPE 处理；以下只写 temporal indices。<span class="src">CausalCine §3.3，Eq. 9</span></p>
+<div class="formula">$$[0,k-1]_{\mathrm{memory}}\;\Vert\;[k,k+WL-1]_{\mathrm{local}}\;\Vert\;[k+WL,k+(W+1)L-1]_{\mathrm{current}}.$$</div>
+<p>同一个旧 key 在不同查询中可能被分到不同块位置，故不能写入时一次性预旋转。此机制修复读地址范围，不恢复已删的内容，也不建立显式事件状态。<span class="src">CausalCine §3.3；能力区分为机制推导</span></p>
+
+<h2 id="shapes">4. 活动读取预算与历史档案增长</h2>
+<p>省略 batch 和 layer；\(P\) 为每帧空间 token 数，\(n_h,d_h\) 为头数 / 头维，\(F\) 为已保存历史 latent frames。以下形状取自论文或由其预算公式推导，不能解释成全系统显存实测。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>方法 / 对象</th><th>形状 / 上限</th><th>边界</th></tr></thead>
+  <tbody>
+    <tr><td>ShotStream global / local</td><td>2 / 7 chunks；每 chunk 3 latent frames</td><td>分别为活动历史条件和当前镜头 KV；不含重采样所需全部源帧。<span class="src">§5.1</span></td></tr>
+    <tr><td>ShotStream teacher 条件</td><td>\([B,f_{\mathrm{ctx}},P,d]\)；\(f_{\mathrm{ctx}}=6\)</td><td>与目标 token 按时间维拼接；clean context 不加目标噪声。<span class="src">§4.1</span></td></tr>
+    <tr><td>CausalCine：历史 K 或 V</td><td>\([F,P,n_h,d_h]\)</td><td>\(F\) 随生成增加；各层另存自己的 KV。<span class="src">§3.3，Eq. 6</span></td></tr>
+    <tr><td>CausalCine：帧描述符</td><td>\([F,n_h,d_h]\)</td><td>比整帧 KV 紧凑，但仍随 \(F\) 增长；查询要对窗外描述符打分。<span class="src">Eq. 6–7</span></td></tr>
+    <tr><td>CausalCine：活动帧跨度</td><td>\(k+(W+1)L=5+4\cdot3=17\)</td><td>memory 5 帧 + local 9 帧 + current 3 帧；训练范围 61 latent frames。<span class="src">§3.3，Eq. 9</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout insight"><span class="callout-title">“bounded attention”限定了哪一层？</span>CausalCine 每次最多把固定数量的历史帧放进生成注意力，但全历史 KV、描述符数量，以及对所有候选打分的工作并未由 top-k 变成常量。固定活动集合与固定总存储是不同承诺。<span class="src">CausalCine §3.3，Eq. 6–9；复杂度结论为形状推导</span></div>
+<p><span class="unverified">本页未逐行核验官方实现的 archive 在 GPU / CPU 间迁移与淘汰策略；ShotStream 的完整历史源帧驻留协议也未核验</span>。不补造“无限历史下总显存恒定”或精确缓存 GB 数。</p>
+
+<h2 id="objective">5. 训练目标：让读到的历史接近推理条件</h2>
+<h3 id="c-self-forcing">5.1 ShotStream：先镜头内，再镜头间 self-forcing</h3>
+<p>先从 T2V 模型微调双向 next-shot teacher，只优化 DiT 的时空 self-attention；历史条件是稀疏 clean 帧。再用 teacher ODE 轨迹初始化因果学生，以 DMD 蒸馏。<a href="../few-step/12-self-forcing.html">Self Forcing 的蒸馏原理</a>已有单独页面，本页只问它怎样改变缓存内容的训练分布。<span class="src">ShotStream §4.1–4.2、Supp. §9</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>阶段</th><th>global 跨镜头历史</th><th>local 镜头内历史</th><th>记忆角度</th></tr></thead>
+  <tbody>
+    <tr><td>Intra-shot self-forcing</td><td>GT 历史镜头稀疏帧</td><td>学生自身生成的前序 chunks</td><td>先学在可靠远程条件下稳定生成当前镜头。<span class="src">§4.2</span></td></tr>
+    <tr><td>Inter-shot self-forcing</td><td>学生已生成的历史镜头</td><td>学生自身生成的当前镜头前序 chunks</td><td>按镜头展开，更新 global / 重置 local，DMD 只作用于新镜头。<span class="src">§4.2、Supp. §9</span></td></tr>
+  </tbody>
+</table></div>
+<p>首阶段虽然已经 self-forcing，但 global 仍是 GT；只做首阶段不能称跨镜头历史完全对齐推理。<a href="05-streaming-kv.html">流式 KV 页</a>讨论一般滚动缓存，这里增加的是 shot 边界的不同读写周期。</p>
+<h3 id="c-causal-training">5.2 CausalCine：先学长多镜头因果结构，再压缩步数</h3>
+<p>真实视频的 clean 与 noisy chunks 打包为 \(2N\) 段并行 teacher forcing。noisy chunk 只读前序 clean 历史和自身 noisy token，禁止未来泄漏；每段文本仅路由到所属镜头。CAMR 在训练和推理采用相同规则，源侧 clean KV 与 noisy query 是不同噪声条件。<span class="src">CausalCine §3.2–3.3，Eq. 4–5</span></p>
+<div class="formula">$$x_t^{\tau}=(1-\sigma_{\tau})x_t+\sigma_{\tau}\epsilon,\qquad \mathcal L_{\mathrm{FM}}=\mathbb E\left\|v_{\theta}(x_t^{\tau},\tau,c_t)-(\epsilon-x_t)\right\|^2.$$</div>
+<p>\(\sigma_{\tau}=0\) 表示 clean，\(\sigma_{\tau}=1\) 表示 noise。先训练 full-step causal model，再做因果 ODE 初始化和 self-forced DMD，使用推理 KV 与路由生成训练样本；fake denoiser 的中间特征接 GAN head，约束长 rollout 的构图和运动漂移。<span class="src">CausalCine §3.1–3.4，Eq. 1–2 / 10–11</span></p>
+<p>没有独立检索标签或显式故事状态 loss；生成任务学习 Q/K，再由不可微 top-k 选择记忆。训练数据、模型规模、因果调优和蒸馏都贡献主表性能，只有同配置记忆消融更接近隔离读取机制。</p>
+
+<h2 id="pseudocode">6. 伪代码：边界重置与逐块路由</h2>
+<p>两条循环分别展示各论文推理机制。CausalCine 的 routing 在每层、每次去噪 forward 内执行；chunk 共享不表示整个视频只计算一次。<span class="src">ShotStream §4.2、Supp. §9；CausalCine §3.3</span></p>
+<div class="code-title">multi_shot_memory.py · 概念重写</div>
+<pre><code class="lang-py"># ShotStream: shot boundary rebuilds global context and resets local KV.
+generated_shots = []
+for shot_prompt in user_shot_stream:
+    frames = dynamic_sample(generated_shots, context_budget)
+    global_kv = encode_context(frames, their_own_captions=True)
+    local_kv = empty_cache()
+    shot = []
+    for _ in requested_chunks(shot_prompt):
+        z = sample_noise()
+        for tau in few_step_schedule:
+            z = solver_step(z, tau, shot_prompt,
+                            global_kv, local_kv,
+                            positions=shot_offset_rope())
+        local_kv.append_clean_context(z)
+        local_kv.keep_recent(local_budget)
+        shot.append(z)
+    generated_shots.append(shot)
+
+# CausalCine: top-k constrains reads, not the historical archive.
+archive = per_layer_unrotated_kv()
+for chunk_prompt in streaming_shot_chunks:
+    z = sample_noise()
+    for tau in few_step_schedule:
+        for layer in dit_layers:
+            Q, current_K, current_V = layer.project_current(z, tau)
+            q = mean_over_chunk_and_space(Q)
+            local, distant = archive[layer].split_local(W_chunks)
+            scores = head_aggregated_dot(q, distant.mean_keys)
+            selected = distant.topk_frames(scores, k_frames)
+            K, V = concat(selected, local, current_K, current_V)
+            Q, K = apply_block_relative_rope(Q, K)
+            z = layer.attend_and_continue(z, Q, K, V, chunk_prompt)
+        z = solver_step_from_dit_output(z, tau)
+    clean_kv = clean_context_forward(z, chunk_prompt)
+    archive.append(clean_kv, descriptors=spatial_mean(clean_kv.K))
+    emit_decoded_chunk(z)  # archive length continues to grow</code></pre>
+<p>代码省略 batch、层内 FFN 和分布式执行；ShotStream 的 teacher 条件编码与学生 KV 的具体实现应以官方代码为准。它不主张两方法复用相同 checkpoint。</p>
+
+<h2 id="hyperparams">7. 关键配置：相同吞吐数字不代表相同成本</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>ShotStream</th><th>CausalCine</th></tr></thead>
+  <tbody>
+    <tr><td>基座 / 分辨率</td><td>Wan2.1-T2V-1.3B；832×480。<span class="src">§5.1</span></td><td>Wan2.1-T2V-14B；832×480。<span class="src">§4</span></td></tr>
+    <tr><td>学生采样</td><td>4 步；chunk 3 latent frames。<span class="src">§4.2、§5.1</span></td><td>4 步；chunk 3 latent frames。<span class="src">§3.2、§4</span></td></tr>
+    <tr><td>活动历史</td><td>global 2 chunks + local 7 chunks。<span class="src">§5.1</span></td><td>local W=3 chunks；窗外 k=5 帧。<span class="src">§3.3</span></td></tr>
+    <tr><td>多镜头训练数据</td><td>内部 320K 视频。<span class="src">§5.1、Supp. §9</span></td><td>100K 长多镜头视频。<span class="src">§4</span></td></tr>
+    <tr><td>作者报告推理吞吐</td><td>15.95 FPS，单 H200。<span class="src">Tab. 1、§5</span></td><td>16 FPS，8×H200 分布式。<span class="src">App. D；官方项目</span></td></tr>
+  </tbody>
+</table></div>
+<p>两篇论文的输出分辨率相同，骨干规模与硬件预算明显不同；不能据接近的 FPS 判定 CAMR 比双缓存更省算力。ShotStream 官方仓库还说明公开实现使用内部数据训练的模型，demo prompt 存在分布差异。<span class="src">两论文配置；ShotStream 官方 README</span></p>
+
+<h2 id="results">8. 关键结果：主比较、记忆消融和失败分开读</h2>
+<h3 id="r-shotstream">8.1 ShotStream 的跨镜头缓存与训练消融</h3>
+<p>ShotStream 用 100 个多镜头 prompts 评测，先用 TransNetV2 定位 shot；跨镜头主体 / 背景从 keyframe 检测、分割后取 DINOv2 特征。下表来自该论文自己的协议，与 CausalCine 后面的主表不是同一评测集。<span class="src">ShotStream §5.1、Tab. 1 / 4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法 / 消融</th><th class="num">跨镜头 Subject ↑</th><th class="num">跨镜头 Background ↑</th><th class="num">Semantic ↑</th></tr></thead>
+  <tbody>
+    <tr><td>LongLive <span class="src">Tab. 1</span></td><td class="num">0.594</td><td class="num">0.565</td><td class="num">0.722</td></tr>
+    <tr><td>双 cache 无区分 indicator <span class="src">Tab. 4</span></td><td class="num">0.507</td><td class="num">0.465</td><td class="num">0.728</td></tr>
+    <tr><td>仅首阶段训练 <span class="src">Tab. 4</span></td><td class="num">0.604</td><td class="num">0.622</td><td class="num">0.758</td></tr>
+    <tr class="hl"><td>完整 ShotStream <span class="src">Tab. 1 / 4</span></td><td class="num">0.654</td><td class="num">0.645</td><td class="num">0.762</td></tr>
+  </tbody>
+</table></div>
+<p>无 indicator 仍保留双缓存，因而该消融支持<b>区分缓存地址</b>的贡献；首阶段对照支持跨镜头自生成历史训练的贡献。ViCLIP Semantic 与分割后的 DINOv2 相似度分别反映语义 / 外观一致，不能单独证明道具状态或动作后果。<span class="src">ShotStream §5.1 / §5.3</span></p>
+<h3 id="r-causal-main">8.2 CausalCine 直接对照 ShotStream</h3>
+<p>CausalCine 的 AR 主比较在相同 prompts、分辨率和长度下生成；表中选 ShotStream、MemFlow 与本方法。这里的 Subject / Background 是<b>镜头内</b>指标，Tab. 1 未列跨镜头角色一致性。SCA 检查切镜头数量和位置，不是故事正确率。<span class="src">CausalCine §4、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">Text Align. ↑</th><th class="num">Subject ↑</th><th class="num">Background ↑</th><th class="num">SCA ↑</th></tr></thead>
+  <tbody>
+    <tr><td>MemFlow <span class="src">Tab. 1</span></td><td class="num">0.1587</td><td class="num">0.9293</td><td class="num">0.9483</td><td class="num">0.5092</td></tr>
+    <tr><td>ShotStream <span class="src">Tab. 1</span></td><td class="num">0.1753</td><td class="num">0.9617</td><td class="num">0.9670</td><td class="num">0.9647</td></tr>
+    <tr class="hl"><td>CausalCine <span class="src">Tab. 1</span></td><td class="num">0.1980</td><td class="num">0.9717</td><td class="num">0.9675</td><td class="num">0.9732</td></tr>
+  </tbody>
+</table></div>
+<p>模型规模、原生多镜头数据与训练路径仍不同，主表不能把全部差距归因于 CAMR。与双向模型的对照另用 15 秒设定，不能将该表跨镜头数值混入 AR 主比较。<span class="src">CausalCine §4、Tab. 2</span></p>
+<h3 id="r-causal-memory">8.3 离开 / 再现的独立记忆消融</h3>
+<p>为了专测记忆，CausalCine 另外构建 100 个强调主体在镜头间消失、再现的 prompts。以下来自 Tab. 3 的 Memory 组；不是前面的 AR 主评测。<span class="src">CausalCine §4.1，Memory Design</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>记忆变体</th><th class="num">Inter-Shot Consistency ↑</th><th class="num">Text Align. ↑</th><th class="num">SCA ↑</th></tr></thead>
+  <tbody>
+    <tr><td>无长期 memory <span class="src">Tab. 3</span></td><td class="num">0.5832</td><td class="num">0.2181</td><td class="num">0.9772</td></tr>
+    <tr><td>first-frame sink <span class="src">Tab. 3</span></td><td class="num">0.6106</td><td class="num">0.2285</td><td class="num">0.9618</td></tr>
+    <tr class="hl"><td>content routing <span class="src">Tab. 3</span></td><td class="num">0.7530</td><td class="num">0.2394</td><td class="num">0.9745</td></tr>
+  </tbody>
+</table></div>
+<p>当再现人物不在开场帧时，固定 sink 不是充分证据；按内容选择历史更有针对性。该对照支持作者的回归一致性主张，但还没有给出任意历史事件的检索准确率，或每次选帧是否被生成器正确采纳的独立度量。<span class="src">CausalCine §4.1、Fig. 6；测量范围分析</span></p>
+<div class="callout code-note">
+  <span class="callout-title">已展示的失败：回忆外观不等于持续物理状态</span>
+  CausalCine App. D / Fig. S3 展示咖啡制作跨镜头失败：场景、杯子和拉花主题仍可辨认，奶流、壶的位置、手姿和泡沫图案却不能组成连续动作。作者明确没有结构化保存小物体、接触几何和进行中的物理交互。这是具体样例的证据，不宜扩成所有叙事均不正确的结论。
+</div>
+<p>评测仍依赖 cut detection、人物匹配 / 分割和特征编码器。要判断人物真实离开后是否返回，应另记录挑战触发覆盖、返回可辨认率与条件一致性；高静态相似或切镜头成功本身不能证明长期状态记忆。</p>
+
+<h2 id="evolution">9. 承上启下：流式历史开始拥有读取策略</h2>
+<div class="diff">
+  <div class="was"><h4>从滚动 KV 到镜头双缓存</h4><ul><li><a href="05-streaming-kv.html">滚动缓存</a>处理近期连续性；<a href="../few-step/12-self-forcing.html">Self Forcing</a>处理自生成历史的训练差异。</li><li>ShotStream 把跨镜头 / 镜头内缓存和自生成训练分开，再接合。</li></ul></div>
+  <div class="now"><h4>内容路由与位置重寻址</h4><ul><li>CausalCine 直接对照 ShotStream，改按内容选择远程帧；这是 baseline 关系，不声称沿用 ShotStream 权重。</li><li><a href="17-entity-slots.html">前页</a>讨论人物 ID / slots；本页没有显式人物地址，依靠 Q/K 内容关系。</li></ul></div>
+</div>
+<p>作为轨道末页，这里回到<a href="01-foundations.html">基础问题</a>：留下历史、找到相关证据、让生成器采用、正确覆盖过时状态，是需要分别验证的能力。内容路由的回归成绩是进展；它不会自动产生物体所有权、动作后果和离屏动态的状态机。</p>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q35"><span class="qid">Q35</span>为什么 ShotStream 既要分 global / local cache，又要分镜头内 / 镜头间 self-forcing？</h3>
+  <div class="ans"><p class="short">缓存分工处理不同历史尺度，训练分阶段处理不同来源的历史错误。local 支持当前镜头连续性，global 支持旧镜头外观；先在 GT global 下学镜头内自生成，再让 global 也来自学生，以接近真正跨镜头推理。</p><ul><li>镜头边界重采 global、清空 local，避免把新镜头强制当成旧镜头延伸。</li><li>RoPE offset 区分旧镜头条件与当前镜头位置，消除混合读取的地址歧义。</li><li>只做首阶段，global 仍是 GT，不能称全部历史都已对齐推理。</li></ul><p class="cite">依据：ShotStream §4.1–4.2、Tab. 4、Supp. §9。</p></div>
+</div>
+<div class="qa">
+  <h3 id="q36"><span class="qid">Q36</span>CausalCine 每次只读 top-k 历史帧，是否意味着总记忆不增长，并已解决故事状态正确性？</h3>
+  <div class="ans"><p class="short">两者都不能推出。top-k 限制活动注意力，完整历史 KV / 描述符仍增长；Block-Relative RoPE 修复位置范围。专用消失 / 再现消融支持角色外观召回，持续物理状态仍有明确失败例子。</p><ul><li>候选帧要保存并按 Q/K 相似度打分，archive 存储和路由成本需另算。</li><li>未旋转 K 在检索后重定址；同一旧帧的读取位置可随当前查询改变。</li><li>切镜头 SCA、身份相似和动作状态正确是不同指标，咖啡制作失败说明它们可分离。</li></ul><p class="cite">依据：CausalCine §3.3、Tab. 3（Memory）、App. D / Fig. S3。</p></div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Yawen Luo et al. <i>ShotStream: Streaming Multi-Shot Video Generation for Interactive Storytelling</i>. ECCV 2026（官方项目 / 仓库标注）。<a href="https://arxiv.org/abs/2603.25746">arXiv</a> · <a href="https://arxiv.org/html/2603.25746">全文与补充材料</a> · <a href="https://github.com/KlingAIResearch/ShotStream">官方代码</a> · <a href="https://luo0207.github.io/ShotStream/">项目</a>。</li>
+  <li>Yihao Meng et al. <i>CausalCine: Real-Time Autoregressive Generation for Multi-Shot Video Narratives</i>. NeurIPS 2026（官方项目标注）。<a href="https://arxiv.org/abs/2605.12496">arXiv</a> · <a href="https://arxiv.org/html/2605.12496">全文与附录</a> · <a href="https://yihao-meng.github.io/CausalCine/">项目</a>；<span class="unverified">本次未找到官方公开代码链接</span>。</li>
+  <li><i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion</i>. <a href="https://arxiv.org/abs/2506.08009">论文</a> · <a href="../few-step/12-self-forcing.html">本图谱蒸馏拆解</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见<a href="#references">参考</a>。</footer>
+</body>
+</html>

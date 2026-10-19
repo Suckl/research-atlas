@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGLang / RadixAttention 精读</title>
+<meta name="description" content="SGLang 论文（NeurIPS 2024）的逐节精读：什么是 LM 程序，RadixAttention 如何用基数树在请求之间自动复用 KV 缓存、怎样淘汰与调度，压缩有限状态机如何一次解码多个 token，API 投机执行，以及实验结果的条件与后续发展。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="sglang">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · NeurIPS 2024</div>
+  <h1>SGLang：高效执行结构化的语言模型程序</h1>
+  <p class="en-title">SGLang: Efficient Execution of Structured Language Model Programs</p>
+  <div class="paper-authors">Lianmin Zheng<sup>2,*</sup>, Liangsheng Yin<sup>3</sup>, Zhiqiang Xie<sup>1</sup>, Chuyue Sun<sup>1</sup>, Jeff Huang<sup>4</sup>, Cody Hao Yu<sup>5</sup>, Shiyi Cao<sup>2</sup>, Christos Kozyrakis<sup>1</sup>, Ion Stoica<sup>2</sup>, Joseph E. Gonzalez<sup>2</sup>, Clark Barrett<sup>1</sup>, Ying Sheng<sup>1,*</sup></div>
+  <div class="paper-affil"><sup>1</sup>Stanford University　<sup>2</sup>UC Berkeley　<sup>3</sup>Shanghai Jiao Tong University　<sup>4</sup>Texas A&amp;M University　<sup>5</sup>Independent Researcher（独立研究者）　<sup>*</sup>共同一作（论文脚注 “Equal contribution”）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">arXiv 2312.07104 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/724be4472168f31ba1c9ac630f15dec8-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2024 ↗</a>
+    <a class="pill" href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">Code: sgl-project/sglang ↗</a>
+    <a class="pill" href="https://lmsys.org/blog/2024-01-17-sglang/" target="_blank" rel="noopener">博客：RadixAttention（2024-01）↗</a>
+    <a class="pill" href="https://lmsys.org/blog/2024-02-05-compressed-fsm/" target="_blank" rel="noopener">博客：压缩有限状态机（2024-02）↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/04-sglang.html">结构拆解：架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>37.3k</b><span>GitHub star（sgl-project/sglang，截至 2026-10-19）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文的许可证不允许转载原图，所以页面上的图都是本站自己画的示意图，并在旁边给出对应原图的链接。标“推算”的数字是本站根据论文数据算出来的；标“本站读数”的数字是本站从原文矢量图里量出来的近似值，论文正文并没有写出这些数。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>2023 年前后，人们使用大模型的方式发生了变化。最早的用法是“一问一答”：用户发一段话，模型回一段话。后来越来越多的应用变成了一段<b>程序</b>：程序里会多次调用模型，前一次的输出决定下一次问什么；有时把同一个问题拆成几路并行去问，再把结果合起来；还经常要求模型的输出严格符合某种格式（比如 JSON），好让后面的代码直接读取。few-shot 评测、多轮对话、思维树搜索、会调用工具的 agent，都属于这一类。论文把它们统称为<b>语言模型程序</b>（LM 程序）。</p>
+<p>这类程序在当时的推理系统上跑得很浪费。推理引擎（包括 <a href="vllm.html">vLLM</a>）只看到一个个独立的请求，并不知道它们来自同一个程序、开头有大段内容完全相同。一个请求结束后，它的 KV 缓存就被丢掉；下一个请求哪怕开头一模一样，也要从头再算一遍。要求输出符合格式时，系统每一步只能解码一个 token，哪怕接下来的十几个字符是格式规定死的、根本没得选。</p>
+<p>SGLang 从两头解决这个问题。前端是一门嵌在 Python 里的小语言，提供 <code>gen</code>、<code>select</code>、<code>fork</code>、<code>join</code> 等原语，让程序的结构（哪里分叉、哪些调用开头相同、哪里要求格式）能被系统看见。后端运行时做了三项优化：</p>
+<ul>
+  <li><b>RadixAttention</b>：请求结束后不丢弃 KV 缓存，而是把所有请求的 KV 缓存放进一棵<b>基数树</b>，当成一个按“最近最少使用”（LRU）淘汰的缓存来管理。新请求到来时，自动在树上找出最长的已缓存前缀并直接复用；等待队列按“能复用的前缀越长越先跑”来排序，提高命中率。</li>
+  <li><b>压缩有限状态机</b>：把格式约束（正则表达式）里唯一确定的一段字符合并成一步，解码到那里时一次性填进去，不再逐个 token 地生成。</li>
+  <li><b>API 投机执行</b>：对只能通过 API 调用的模型（如 GPT-4），让一次调用多生成一点，用多出来的内容填上程序里后面的空，省掉后续调用。</li>
+</ul>
+<p>论文报告，在 Llama-7B 等开源模型上，和 vLLM、Guidance、LMQL 相比，吞吐量最高提高到 6.4 倍、延迟最多降低到原来的 1/3.7；部署在 Chatbot Arena 一个月，两个模型上的前缀缓存命中率分别为 52.4% 和 74.1%。这些数字背后的条件很重要，§6 会逐项拆开。</p>
+<p><b>关于版本。</b>这篇论文的 arXiv 第一版（2023-12-12）题为 “Efficiently Programming Large Language Models using SGLang”，当时报告最高 5 倍加速，还没有压缩有限状态机；第二版（2024-06-06）改成现在的标题，加入了压缩有限状态机、多模态和更多实验，也就是 NeurIPS 2024 发表的版本。本页按第二版讲。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>什么是 LM 程序？它和普通的聊天请求，在推理系统眼里有什么不同？</li>
+  <li>为什么开头相同的两个请求可以共用 KV 缓存？vLLM 已经做到了哪一步，还差什么？</li>
+  <li>基数树是什么样的数据结构？怎么用它在所有请求之间自动找出可以复用的前缀？</li>
+  <li>显存不够时先淘汰谁？等待中的请求按什么顺序执行，命中率最高？为什么？</li>
+  <li>约束解码为什么慢？压缩有限状态机怎么做到一次解码多个 token，又引入了什么新问题？</li>
+  <li>“最高 6.4 倍”是在什么条件下测出来的？什么情况下几乎没有加速？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：大模型的用法从“聊天”变成了“编程”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者为什么说，大模型的使用方式正在从聊天变成编程？这种变化给推理系统带来了什么样的低效？作者把问题归结为两个挑战：写这类程序很麻烦，跑这类程序很浪费。这一节交代这两个挑战从哪里来，以及 SGLang 的整体结构。</div>
+
+<div class="note-pre"><b>先补一点背景：什么是 LM 程序。</b>
+<p>把“调用一次大模型”看成一次函数调用。只调用一次的应用（单轮聊天）就像只有一行代码的程序；而很多实用的做法要调用很多次，调用之间还有逻辑。几个常见的例子：</p>
+<ul>
+  <li><b>few-shot 提示</b>：在问题前面放几个“题目 + 答案”的示例，让模型照着格式回答。用 MMLU 这类题库做评测时，成千上万道题前面放的都是同一组示例。</li>
+  <li><b>自洽采样</b>（self-consistency）：对同一个问题采样多个答案，再投票选出最常见的那个。</li>
+  <li><b>多轮对话</b>：每一轮都把之前全部的对话历史连同新问题一起发给模型。</li>
+  <li><b>思维树</b>（tree-of-thought）：把解题过程当作一棵搜索树，在每个节点让模型提出几种下一步，评估之后选出有希望的继续展开。</li>
+  <li><b>agent</b>：比如 ReAct，模型交替地“思考—调用工具—看结果”，每一步都把之前的整条轨迹带上。</li>
+  <li><b>结构化输出</b>：要求模型输出符合某个 JSON schema 的对象，后面的代码才能直接读取字段。</li>
+</ul>
+<p>论文总结了这类程序的两个共同特点。第一，它们包含<b>多次模型调用，中间穿插着控制流</b>（条件判断、循环、并行分支），这是完成复杂任务、提高质量所需要的。第二，它们的<b>输入和输出是结构化的</b>（可能有图片等多种输入，输出要符合固定格式），这样一个 LM 程序才能和别的程序拼接，嵌进已有的软件系统。论文借用了 LMQL、DSPy 等工作里的说法，把这类程序叫 “Language Model Programs”。</p>
+</div>
+
+<p>作者指出了两个挑战。<b>第一个挑战是写起来麻烦。</b>模型的输出是不确定的，所以写这样的程序需要大量拼接字符串、反复调整提示词、解析格式不稳定的输出、处理图片等多种输入，还要自己写并行逻辑。即使是一个很简单的程序，代码也会变得难读（§2 有一个具体的例子）。</p>
+<p><b>第二个、也是更重要的挑战是跑起来浪费</b>，浪费在重复的计算和重复占用的显存上。当时最好的推理引擎（vLLM、TGI、TensorRT-LLM）在优化延迟和吞吐量时，并不了解上层的负载长什么样。这让它们足够通用、足够稳健，但对任何一种具体的负载都留下了明显的浪费。论文举了两个例子：</p>
+<ul>
+  <li><b>KV 缓存没有被复用。</b>KV 缓存是模型推理时为每个 token 存下的中间结果（§3 会讲清楚）。在批量执行 LM 程序时，大量调用的开头是相同的，它们的 KV 缓存本可以共用；但当时的系统缺少有效的机制，只能一遍遍重算，既浪费计算，也浪费显存。</li>
+  <li><b>约束解码一次只走一个 token。</b>要求输出符合正则表达式描述的格式（比如 JSON 模式）时，经常有好几个 token 其实是格式规定死的、可以一次填进去；但现有系统仍然每次只解码一个 token。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：在程序看来是一场三轮对话，在当时的推理引擎看来是三个互不相识的请求</div>
+  <div class="dia-row"><span class="lbl">第 1 轮请求</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3">系统提示</span><span class="dia-seg cmp" style="flex:1">问 1</span></div></div>
+  <div class="dia-row"><span class="lbl">第 2 轮请求</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">系统提示</span><span class="dia-seg kv" style="flex:1">问 1</span><span class="dia-seg kv" style="flex:2">答 1</span><span class="dia-seg cmp" style="flex:1">问 2</span></div></div>
+  <div class="dia-row"><span class="lbl">第 3 轮请求</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">系统提示</span><span class="dia-seg kv" style="flex:1">问 1</span><span class="dia-seg kv" style="flex:2">答 1</span><span class="dia-seg kv" style="flex:1">问 2</span><span class="dia-seg kv" style="flex:2">答 2</span><span class="dia-seg cmp" style="flex:1">问 3</span></div></div>
+  <div class="dia-note">绿色是这一轮新增的内容；蓝色是上一轮已经算过一遍 KV 缓存的内容。上一轮请求一结束，引擎就把它的 KV 缓存释放了，所以这一轮又把蓝色部分从头算一遍。对话轮数越多，重复的部分越长。本站示意图。</div>
+</div>
+
+<p>为了解决这两个挑战，作者提出了 <b>SGLang</b>（Structured Generation Language，结构化生成语言）。它的核心想法是：<b>系统性地利用 LM 程序里“多次调用”的结构来加速执行</b>。SGLang 由两部分组成，前端语言负责让程序好写，后端运行时负责让程序跑得快；两者可以配合使用，也可以各自单独使用。</p>
+<div class="dia">
+  <div class="dia-title">示意图：SGLang 的整体结构</div>
+  <div class="dia-flow"><span class="dia-box enc">SGLang 程序<small>Python 里的 gen / select / fork / join 等原语（§2）</small></span><span class="dia-arrow">→</span><span class="dia-box reg">解释器<small>把原语变成对后端的调用，管理并行与同步</small></span><span class="dia-arrow">→</span></div>
+  <div class="dia-flow"><span class="dia-box act">SGLang Runtime（开源模型）<small>RadixAttention（§3）、压缩有限状态机（§4）</small></span><span class="dia-arrow">或</span><span class="dia-box pred">API 模型（OpenAI 等）<small>API 投机执行（§5）</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2312.07104#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。SGLang Runtime 在论文里简称 SRT。</div>
+</div>
+<p>前端是一门嵌在 Python 里的领域专用语言，提供生成类原语（<code>extend</code>、<code>gen</code>、<code>select</code>）和并行控制原语（<code>fork</code>、<code>join</code>），可以和 Python 自带的控制流、库函数混着用。论文为它实现了解释器和编译器：解释器把每个提示当作一条“流”，把原语异步地提交上去执行；编译器把程序追踪成计算图，以便做更多优化。</p>
+<p>运行时部分有三项新技术，分别是前面提到的 RadixAttention、压缩有限状态机和 API 投机执行。用 SGLang，作者实现了 agent 控制、逻辑推理、few-shot 评测、JSON 解码、检索增强生成流水线、多轮对话和多模态处理等应用，在 Llama-7B/70B、Mixtral-8x7B、LLaVA-v1.5-7B（图像）和 LLaVA-NeXT-34B（视频）上，用 NVIDIA A10G 和 A100 做了测试，和 Guidance、vLLM、LMQL 相比，吞吐量最高提高到 6.4 倍。</p>
+<div class="note-warn"><b>读的时候容易混淆的一点：</b>“SGLang” 这个名字在论文里指整个系统（前端语言 + 运行时），在后来的开源社区里则主要指它的推理服务引擎。论文的端到端实验比较的是“整个系统”：SGLang 一侧既有运行时的优化，也有前端提供的程序结构信息（比如 <code>fork</code> 的提示、程序内并行）；而 vLLM 一侧只通过类似 OpenAI 的补全接口接收一个个独立的请求。所以实验里的加速，一部分来自更好的运行时，一部分来自“让运行时知道程序长什么样”。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 编程模型：用几个原语把程序结构告诉系统</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>SGLang 的前端语言长什么样？它提供了哪些原语？为什么说这些原语不只是“写起来方便”，还能让运行时看见程序的结构、从而做优化？程序具体是怎么被执行的？它和 LMQL、Guidance、DSPy 这些同类工具有什么不同？</div>
+
+<h4 id="n-2-1">2.1 一个完整的例子：给一篇看图作文打分</h4>
+<div class="note-pre"><b>先补一点背景：branch-solve-merge。</b>
+<p>这是一种提示技巧：把一个复杂的任务拆成几个子任务（branch），分别让模型去做（solve），最后把各自的结果合起来（merge）。用它让模型当评委时，可以分别从几个维度打分，再综合成总评，比让模型一次性给出总评更稳定。</p>
+</div>
+<p>论文用一个“多维度作文评委”贯穿全节：输入一张图片和一篇描写这张图的作文，让模型给出评价和等级。程序的流程是这样的：</p>
+<ol>
+  <li>把图片和作文追加到提示里。SGLang 里，提示状态是一个变量 <code>s</code>，用 <code>+=</code> 往后面追加字符串或原语。</li>
+  <li>问模型“作文和图片有关吗”，用 <code>select</code> 让模型在 “yes” 和 “no” 里选概率更高的一个，结果存进 <code>s["related"]</code>。如果是 “no”，用普通的 Python <code>if</code> 直接返回。</li>
+  <li>用 <code>fork</code> 把当前的提示复制成三份，分别从清晰度、原创性、论据三个维度评价。每一份用 <code>gen</code> 生成一段评价，遇到 “END” 停下。这三路是并行执行的。</li>
+  <li>把三段评价拼在一起，接着用 <code>gen</code> 生成一段总结（遇到句号停）和一个等级。</li>
+  <li>最后要求模型按 JSON 返回结果，用 <code>gen</code> 的 <code>regex</code> 参数规定格式：<code>\{"summary": "[\w\d\s]+\.", "grade": "[ABCD][+-]?"\}</code>，即一个 summary 字段（以句号结尾的文字）和一个 grade 字段（A 到 D，可以带 + 或 −）。</li>
+</ol>
+<p>下面是本站根据原文图 2 改写的简化版（省略了部分提示词，变量名有改动），用来看清原语的用法：</p>
+<pre><code><span class="tok-k">@function</span>
+<span class="tok-k">def</span> <span class="tok-f">judge</span>(s, image_path, essay):
+    s += system(<span class="tok-s">"评价一篇看图作文。"</span>)
+    s += user(image(image_path) + <span class="tok-s">"作文："</span> + essay)
+    s += user(<span class="tok-s">"作文和图片有关吗？"</span>)
+    s += assistant(select(<span class="tok-s">"related"</span>, choices=[<span class="tok-s">"yes"</span>, <span class="tok-s">"no"</span>]))  <span class="tok-c"># 在选项里选概率最高的</span>
+    <span class="tok-k">if</span> s[<span class="tok-s">"related"</span>] == <span class="tok-s">"no"</span>:                                 <span class="tok-c"># 普通的 Python 控制流</span>
+        <span class="tok-k">return</span>
+    branches = s.fork(<span class="tok-n">3</span>)                                     <span class="tok-c"># 复制 3 份，共享已有的前缀</span>
+    <span class="tok-k">for</span> f, dim <span class="tok-k">in</span> zip(branches, [<span class="tok-s">"清晰度"</span>, <span class="tok-s">"原创性"</span>, <span class="tok-s">"论据"</span>]):
+        f += user(<span class="tok-s">"从"</span> + dim + <span class="tok-s">"评价，以 END 结尾。"</span>)
+        f += assistant(gen(<span class="tok-s">"judgment"</span>, stop=<span class="tok-s">"END"</span>))          <span class="tok-c"># 三路并行生成</span>
+    merged = <span class="tok-s">"\n"</span>.join(f[<span class="tok-s">"judgment"</span>] <span class="tok-k">for</span> f <span class="tok-k">in</span> branches)     <span class="tok-c"># 读结果时才等待</span>
+    s += assistant(merged + <span class="tok-s">"总结："</span> + gen(<span class="tok-s">"summary"</span>, stop=<span class="tok-s">"."</span>)
+                   + <span class="tok-s">"等级："</span> + gen(<span class="tok-s">"grade"</span>))
+    s += user(<span class="tok-s">"按 JSON 格式返回。"</span>)
+    s += assistant(gen(<span class="tok-s">"output"</span>, regex=SCHEMA))            <span class="tok-c"># 输出受正则约束</span></code></pre>
+<p>论文说，用类似 OpenAI API 的接口实现同样的程序，代码行数是 SGLang 版本的 2.1 倍，多出来的主要是手工拼接字符串和手工管理并行。</p>
+<div class="dia">
+  <div class="dia-title">示意图：作文评委程序的执行流程，以及每一步能用上的运行时优化</div>
+  <div class="dia-flow"><span class="dia-box enc">系统提示 + 图片 + 作文<small>后面所有调用共同的前缀</small></span><span class="dia-arrow">→</span><span class="dia-box">select：有关吗？<small>两个选项共享前缀</small></span><span class="dia-arrow">→ 无关则返回</span></div>
+  <div class="dia-flow"><span class="dia-arrow">fork ×3 →</span><span class="dia-box act">清晰度 gen</span><span class="dia-box act">原创性 gen</span><span class="dia-box act">论据 gen</span><span class="dia-arrow">→ join</span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box pred">gen 总结 + gen 等级<small>两次相邻调用：API 模型上可以投机执行（§5）</small></span><span class="dia-arrow">→</span><span class="dia-box reg">gen 输出 JSON（regex）<small>固定的键名一步跳过（§4）</small></span></div>
+  <div class="dia-note">三路分支共享 fork 之前的全部内容，它们的 KV 缓存只需要算一次（§3）；三路之间没有依赖，可以并行跑。本站示意图，对应 <a href="https://arxiv.org/html/2312.07104#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>（原图是代码截图并标注了三处优化机会）。</div>
+</div>
+
+<h4 id="n-2-2">2.2 原语一览：每个原语都在向系统透露一点结构</h4>
+<p>SGLang 的原语分三类：管理提示状态的、调用模型生成的、控制并行的。它们都能和 Python 的语法、库混用。下表列出每个原语做什么，以及运行时能从中得到什么信息（后者是本站的归纳）：</p>
+<div class="table-wrap"><table>
+  <tr><th>原语</th><th>作用</th><th>运行时从中知道了什么</th></tr>
+  <tr><td><code>gen(name, …)</code></td><td>调用模型生成一段文字，存进名为 <code>name</code> 的变量；可以用 <code>stop</code> 设停止条件，用 <code>regex</code> 约束格式</td><td>哪些输出有格式约束（压缩有限状态机，§4）</td></tr>
+  <tr><td><code>select(name, choices)</code></td><td>让模型在给定的几个选项里选概率最高的一个</td><td>几个选项共享同一个前缀</td></tr>
+  <tr><td><code>+=</code> / <code>extend</code></td><td>往提示末尾追加字符串或原语</td><td>提示是一段一段往后长的，前面的部分会被后面的调用反复用到</td></tr>
+  <tr><td><code>s[name]</code></td><td>取出某次生成的结果</td><td>这里是同步点，只有读结果时才需要等待</td></tr>
+  <tr><td><code>fork</code> / <code>join</code></td><td>把提示状态复制成多份并行执行 / 再合并回来</td><td>分叉之前的内容是几条分支共享的前缀（§3 的“前端提示”）</td></tr>
+  <tr><td><code>image</code> / <code>video</code></td><td>输入图片、视频</td><td>同一张图片的 KV 缓存可以复用（以图片的哈希作为键，§6）</td></tr>
+</table></div>
+
+<h4 id="n-2-3">2.3 执行方式：解释器把提示当成一条异步的流</h4>
+<div class="note-pre"><b>先补一点背景：异步执行与“流”。</b>
+<p>在 GPU 编程里，CPU 程序调用一个 GPU 内核时并不会等它算完，而是把它放进一个“流”（stream）的队列里就立刻返回，继续执行后面的 CPU 代码；同一条流里的操作按提交顺序执行，不同的流之间可以并行。只有当 CPU 真正需要读取 GPU 的计算结果时，才会停下来等待。这样 CPU 和 GPU 都不会白白空等。</p>
+</div>
+<p>SGLang 的解释器借用了同样的思路。每个提示状态被当作一条<b>异步的流</b>，<code>extend</code>、<code>gen</code>、<code>select</code> 这些原语被提交到流上就立刻返回，Python 代码继续往下跑，不用等模型生成完。每条流由后台线程里的一个“流执行器”负责依次执行。只有当程序读取生成结果（比如 <code>s["related"]</code>）时，才会阻塞到结果就绪，从而保证同步正确。<code>fork</code> 出来的每一份提示是一条独立的流，所以三路评价会被自动并行地提交给后端，这叫<b>程序内并行</b>。</p>
+<p>另一种执行方式是把程序编译成计算图，交给图执行器运行，这样可以做更多优化（附录 D，见本页 <a href="#n-9">§9</a>）。论文的实验默认用解释器。后端方面，开源模型跑在 SGLang 自己的运行时 SRT 上，也支持 OpenAI、Anthropic 等 API 模型。</p>
+
+<h4 id="n-2-4">2.4 和同类工具的比较</h4>
+<p>论文把“给大模型写程序”的工具分成两类。<b>高层的</b>，如 LangChain、DSPy，会提供预先写好或自动生成的提示词，比如 DSPy 能自动优化提示。<b>低层的</b>，如 LMQL、Guidance 和 SGLang，一般不改动用户的提示词，而是让用户直接操作提示和原语。高层语言可以编译成低层语言，比如 DSPy 程序可以用 SGLang 作为后端执行（§6 的 DSPy RAG 实验就是这么做的）。</p>
+<div class="table-wrap"><table>
+  <tr><th>系统</th><th>语法</th><th>原语</th><th>运行时后端</th></tr>
+  <tr><td>LMQL</td><td>自定义语法</td><td>extend, gen, select</td><td>HF Transformers、llama.cpp、OpenAI</td></tr>
+  <tr><td>Guidance</td><td>Python</td><td>extend, gen, select, image</td><td>HF Transformers、llama.cpp、OpenAI</td></tr>
+  <tr><td>SGLang</td><td>Python</td><td>extend, gen, select, image, video, fork, join</td><td>SGLang Runtime（SRT）、OpenAI</td></tr>
+</table></div>
+<p class="w-note">据原文表 1 整理。</p>
+<p>和 LMQL、Guidance 相比，SGLang 的重点在<b>运行时效率</b>：它带着一个和前端一起设计的运行时，因此可以做后面几节的新优化。这一节最后，论文回到作文评委的例子，指出其中有三处运行时优化的机会：KV 缓存复用、快速的约束解码、API 投机执行，分别对应 §3、§4、§5。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>SGLang 的“语言”其实是一个 Python 库，没有发明新语法；论文里“语言”“原语”指的是这组库函数和它们的执行语义。</li>
+  <li>运行时的大部分优化并不要求用户使用前端语言。论文说前端总是把<b>完整的提示</b>发给运行时，由运行时自己做前缀匹配和复用；所以普通的 OpenAI 风格请求同样能享受 RadixAttention。但“前端提示”、程序内并行和 API 投机执行需要前端配合。</li>
+  <li>“代码行数少到 1/2.1” 只是这一个例子的数字，不是系统性的测量。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 RadixAttention：把所有请求的 KV 缓存放进一棵基数树</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LM 程序的多次调用之间、不同程序实例之间，有大量相同的开头。怎样让运行时<b>自动</b>发现这些相同的开头并复用它们的 KV 缓存，而不需要用户手工配置？缓存会占显存，显存不够时先扔掉谁？等待中的请求很多时，按什么顺序执行能让缓存发挥最大作用？这一节是全文的核心。</div>
+
+<h4 id="n-3-1">3.1 前缀相同，KV 缓存就相同</h4>
+<div class="note-pre"><b>先补一点背景：KV 缓存，以及它为什么能按前缀复用。</b>
+<p>模型每处理一个 token，都会在每一层算出它的 key 和 value 两个向量；后面的 token 做注意力时，要读前面所有 token 的 key 和 value。为了不重复计算，推理系统把它们存在显存里，这就是 <b>KV 缓存</b>。处理用户输入的阶段叫 <b>prefill</b>（所有输入 token 一次并行算完），之后逐个生成 token 的阶段叫 <b>decode</b>。更详细的介绍见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>。</p>
+<p>这里只需要一个关键事实：在只能看前文的注意力（因果注意力）里，第 \(i\) 个 token 在每一层的 key 和 value，只取决于第 1 到第 \(i\) 个 token，和后面是什么无关。所以，只要两段输入<b>从第一个 token 开始逐个相同</b>，它们这段公共开头（前缀）的 KV 缓存就一模一样，算一次就够了。反过来，哪怕只有第一个 token 不同，后面即使字面完全相同，KV 缓存也不一样，不能共用，因为从第二层开始，每个 token 的输入已经混进了不同的上文。</p>
+</div>
+<p>复用前缀的 KV 缓存能省下两样东西。一是<b>计算</b>：命中的部分不用再 prefill，第一个输出 token 来得更快。二是<b>显存</b>：公共前缀只存一份，同样的显存能同时放下更多请求，批就能开得更大，吞吐量随之提高（批越大吞吐越高的原因见 <a href="vllm.html#n-1">vLLM 精读 §1</a>）。</p>
+<p>用论文实验里的配置估算一下有多少可省。Llama-2-7B 有 32 层，隐藏维度 4096，用 FP16 存储，每个 token 的 KV 缓存是：</p>
+<div class="formula">$$\underbrace{2}_{\text{key 和 value}}\times\underbrace{32}_{\text{层数}}\times\underbrace{4096}_{\text{隐藏维度}}\times\underbrace{2\ \text{字节}}_{\text{FP16}}=512\ \text{KB / token}$$</div>
+<p>论文的主实验用的是 24 GB 显存的 A10G。7B 模型的参数约 13.5 GB（约 67 亿参数 × 2 字节），剩下给 KV 缓存的大约 10 GB，也就是大约 2 万个 token（推算，没有扣除计算时的临时显存）。假设一组 few-shot 示例有 1,000 个 token（示意值），每道题都各存一份示例的 KV，20 道题就把显存占满了；共享之后，这 1,000 个 token 只存一份，显存几乎全部留给各题自己的部分。</p>
+
+<p><b>vLLM 已经做到了哪一步。</b>这个想法 vLLM 已经部分用上了（见 <a href="vllm.html#n-4-4">vLLM 精读 §4.4</a>）。vLLM 把 KV 缓存切成固定大小的块，用块表记录每个序列用了哪些物理块，并给每个块记一个引用计数。于是<b>同一个请求内部</b>的多个序列可以共享块：并行采样时几个候选共用输入部分的块，束搜索时候选之间共用已经生成的前缀，要改写时再复制一份（写时复制）。跨请求的共享，vLLM 论文只讨论了一种情况：服务方<b>事先指定</b>一段固定的前缀（比如系统提示），预先算好它的 KV 块，让新请求直接指向这些块。</p>
+<p><b>还差什么。</b>LM 程序里的共享比这复杂得多。第一，共享常常发生在<b>不同的请求之间，而且事先不知道</b>：多轮对话的第二轮请求要等第一轮结束后才发来，而按当时的做法，第一轮请求一结束，它的 KV 缓存就释放了。第二，共享的结构是<b>多层的、动态的</b>：同一个系统提示下面有几组不同的 few-shot 示例，每组示例下面又有不同的问题；思维树更是一边搜索一边长出新分支。手工配置覆盖不了这些情况。论文的判断是：已有系统要么需要手工配置，要么只能处理少数几种共享模式（比如动态的树状结构就处理不了），所以大多数系统实际上为每个请求重算 KV 缓存。</p>
+<div class="dia">
+  <div class="dia-title">示意图：LM 程序里四种常见的 KV 共享模式</div>
+  <div class="dia-row"><span class="lbl">(a) few-shot</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">few-shot 示例</span><span class="dia-seg oth" style="flex:1">问题 1</span><span class="dia-seg cmp" style="flex:1">答 1</span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg kv" style="flex:4">few-shot 示例</span><span class="dia-seg oth" style="flex:1">问题 2</span><span class="dia-seg cmp" style="flex:1">答 2</span></div></div>
+  <div class="dia-row"><span class="lbl">(b) 自洽采样</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">提示 + 问题</span><span class="dia-seg cmp" style="flex:2">采样答案 1</span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg kv" style="flex:4">提示 + 问题</span><span class="dia-seg cmp" style="flex:2">采样答案 2</span></div></div>
+  <div class="dia-row"><span class="lbl">(c) 多轮对话</span><div class="dia-track"><span class="dia-seg kv" style="flex:2">第 1 轮问答</span><span class="dia-seg oth" style="flex:1">第 2 轮问</span><span class="dia-seg cmp" style="flex:1">第 2 轮答</span><span class="dia-seg" style="flex:2"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg kv" style="flex:2">第 1 轮问答</span><span class="dia-seg kv" style="flex:2">第 2 轮问答</span><span class="dia-seg oth" style="flex:1">第 3 轮问</span><span class="dia-seg cmp" style="flex:1">第 3 轮答</span></div></div>
+  <div class="dia-row"><span class="lbl">(d) 思维树</span><div class="dia-track"><span class="dia-seg kv" style="flex:2">问题</span><span class="dia-seg kv" style="flex:2">搜索历史</span><span class="dia-seg cmp" style="flex:1">分支 1</span><span class="dia-seg" style="flex:1"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg kv" style="flex:2">问题</span><span class="dia-seg kv" style="flex:2">搜索历史</span><span class="dia-seg kv" style="flex:1">分支 1</span><span class="dia-seg cmp" style="flex:1">分支 1.1</span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg kv" style="flex:2">问题</span><span class="dia-seg kv" style="flex:2">搜索历史</span><span class="dia-seg cmp" style="flex:1">分支 2</span><span class="dia-seg" style="flex:1"></span></div></div>
+  <div class="dia-note">蓝色 = 可以和别的调用共享的提示；灰色 = 只属于这一次调用的提示；绿色 = 模型输出。(a)(b) 只有“一层”共享；(c)(d) 的共享关系随时间不断增长、层层嵌套，靠事先手工指定无法覆盖。本站示意图，对应 <a href="https://arxiv.org/html/2312.07104#A1.F9" target="_blank" rel="noopener">原文附录图 9 ↗</a>。</div>
+</div>
+<p>RadixAttention 的思路是：<b>请求结束后不丢弃它的 KV 缓存</b>，把输入和生成结果的 KV 缓存都留在一棵基数树里，让后来的请求在树上查找、复用；显存不够时再按 LRU 淘汰。论文强调它和连续批处理、PagedAttention、张量并行都兼容，而且在完全没有命中时，额外的显存和时间开销可以忽略。</p>
+
+<h4 id="n-3-2">3.2 基数树：从字典树讲起</h4>
+<div class="note-pre"><b>先补一点背景：字典树与基数树。</b>
+<p><b>字典树</b>（trie，也叫前缀树）是一种按前缀组织数据的树。从根出发，每条边上写着一个元素（比如一个字母），从根走到某个节点，沿途的边连起来就是一个前缀。存 “tea”“ten”“to” 三个词时，三个词共用从根出发的 “t” 边；“tea” 和 “ten” 再共用 “e” 边，到这里才分开。查一个词时，从根开始一个字母一个字母地往下走，走的步数等于词的长度，和树里存了多少个词无关。</p>
+<p>字典树的缺点是浪费：如果一长串元素中间没有任何分叉，也要为每个元素建一个节点，形成一条长长的单链。<b>基数树</b>（radix tree）就是把这种没有分叉的单链压缩成一条边，边上直接写一整段元素。它表达的前缀关系和字典树完全一样，只是节点少得多，论文称之为字典树的一种省空间的替代。往基数树里插入新序列时，如果它和某条边只匹配了一半，就把这条边从匹配结束的位置<b>拆成两段</b>，中间新增一个节点作为分叉点。</p>
+</div>
+<p>RadixAttention 用基数树维护一个映射：<b>键是 token 序列，值是这些 token 的 KV 缓存</b>。下面用一个小例子把插入、匹配、拆分、淘汰走一遍。为了画得下，图里每个方块代表一段 token（比如 Sys 是系统提示，Ex1、Ex2 是两个 few-shot 示例，Q 是问题，A 是模型的回答）；真实系统里，匹配是逐个 token 进行的。</p>
+<div class="dia">
+  <div class="dia-title">示意图：基数树如何随请求插入、拆分和淘汰</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="基数树插入、拆分与淘汰的四个阶段">
+    <line x1="240" y1="8" x2="240" y2="292" class="frame"/>
+    <line x1="480" y1="8" x2="480" y2="292" class="frame"/>
+    <line x1="720" y1="8" x2="720" y2="292" class="frame"/>
+    <!-- panel 1 -->
+    <text x="120" y="18" class="t-c t-sm t-b">① 请求 A 结束后</text>
+    <line x1="120" y1="53" x2="120" y2="223" class="edge no-head"/>
+    <g class="act"><rect class="box" x="58" y="128" width="124" height="20" rx="4"/></g>
+    <text x="120" y="138" class="t-c t-mono">Sys Ex1 Ex2 Q1 A1</text>
+    <circle cx="120" cy="46" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="132" y="46" class="t-xs">根</text>
+    <circle cx="120" cy="230" r="7" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.5"/>
+    <text x="120" y="258" class="t-c t-xs">A 的输入和输出整段挂成一条边</text>
+    <text x="120" y="274" class="t-c t-xs">请求结束时不再丢弃</text>
+    <!-- panel 2 -->
+    <text x="360" y="18" class="t-c t-sm t-b">② 请求 B：匹配到一半，拆开</text>
+    <line x1="360" y1="53" x2="360" y2="113" class="edge no-head"/>
+    <line x1="355" y1="126" x2="304" y2="224" class="edge no-head"/>
+    <line x1="365" y1="126" x2="416" y2="224" class="edge no-head"/>
+    <g class="enc"><rect class="box" x="318" y="72" width="84" height="20" rx="4"/></g>
+    <text x="360" y="82" class="t-c t-mono">Sys Ex1 Ex2</text>
+    <rect class="box" x="300" y="166" width="40" height="20" rx="4"/>
+    <text x="320" y="176" class="t-c t-mono">Q1 A1</text>
+    <g class="act"><rect class="box" x="381" y="166" width="40" height="20" rx="4"/></g>
+    <text x="401" y="176" class="t-c t-mono">Q2 A2</text>
+    <circle cx="360" cy="46" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="372" y="46" class="t-xs">根</text>
+    <circle cx="360" cy="120" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="372" y="122" class="t-xs">拆出的分叉点</text>
+    <circle cx="300" cy="230" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="420" cy="230" r="7" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.5"/>
+    <text x="360" y="258" class="t-c t-xs">命中 Sys Ex1 Ex2，只需算 Q2</text>
+    <text x="360" y="274" class="t-c t-xs">Q1 A1 原样留在左边的分支上</text>
+    <!-- panel 3 -->
+    <text x="600" y="18" class="t-c t-sm t-b">③ 请求 C：只共享 Sys，再拆一次</text>
+    <line x1="600" y1="53" x2="600" y2="93" class="edge no-head"/>
+    <line x1="595" y1="106" x2="545" y2="159" class="edge no-head"/>
+    <line x1="605" y1="106" x2="663" y2="159" class="edge no-head"/>
+    <line x1="536" y1="171" x2="498" y2="234" class="edge no-head"/>
+    <line x1="544" y1="171" x2="587" y2="234" class="edge no-head"/>
+    <g class="enc"><rect class="box" x="580" y="63" width="40" height="20" rx="4"/></g>
+    <text x="600" y="73" class="t-c t-mono">Sys</text>
+    <rect class="box" x="541" y="122" width="58" height="20" rx="4"/>
+    <text x="570" y="132" class="t-c t-mono">Ex1 Ex2</text>
+    <g class="act"><rect class="box" x="613" y="122" width="40" height="20" rx="4"/></g>
+    <text x="633" y="132" class="t-c t-mono">Hi Yo</text>
+    <rect class="box" x="497" y="192" width="40" height="20" rx="4"/>
+    <text x="517" y="202" class="t-c t-mono">Q1 A1</text>
+    <rect class="box" x="545" y="192" width="40" height="20" rx="4"/>
+    <text x="565" y="202" class="t-c t-mono">Q2 A2</text>
+    <circle cx="600" cy="46" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="612" y="46" class="t-xs">根</text>
+    <circle cx="600" cy="100" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="540" cy="165" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="668" cy="165" r="7" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.5"/>
+    <circle cx="495" cy="240" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="590" cy="240" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="600" y="266" class="t-c t-xs">Sys 成了三条路径的公共祖先</text>
+    <text x="600" y="282" class="t-c t-xs">命中 Sys，只需算 Hi</text>
+    <!-- panel 4 -->
+    <text x="840" y="18" class="t-c t-sm t-b">④ 请求 D：新分支 + 淘汰</text>
+    <line x1="835" y1="52" x2="795" y2="94" class="edge no-head"/>
+    <line x1="845" y1="52" x2="902" y2="158" class="edge no-head"/>
+    <line x1="785" y1="106" x2="755" y2="159" class="edge no-head"/>
+    <line x1="795" y1="106" x2="833" y2="159" class="edge no-head"/>
+    <line x1="746" y1="171" x2="715" y2="234" class="edge no-head" style="stroke:var(--c-loss);stroke-dasharray:4 3"/>
+    <line x1="754" y1="171" x2="789" y2="234" class="edge no-head"/>
+    <rect class="box" x="795" y="63" width="40" height="20" rx="4"/>
+    <text x="815" y="73" class="t-c t-mono">Sys</text>
+    <g class="act"><rect class="box" x="840" y="95" width="66" height="20" rx="4"/></g>
+    <text x="873" y="105" class="t-c t-mono">Doc Q3 A3</text>
+    <rect class="box" x="739" y="122" width="54" height="20" rx="4"/>
+    <text x="766" y="132" class="t-c t-mono">Ex1 Ex2</text>
+    <rect class="box" x="796" y="122" width="40" height="20" rx="4"/>
+    <text x="816" y="132" class="t-c t-mono">Hi Yo</text>
+    <g class="loss"><rect class="box" x="711" y="192" width="40" height="20" rx="4" style="stroke-dasharray:4 3"/></g>
+    <text x="731" y="202" class="t-c t-mono">Q1 A1</text>
+    <rect class="box" x="752" y="192" width="40" height="20" rx="4"/>
+    <text x="772" y="202" class="t-c t-mono">Q2 A2</text>
+    <circle cx="840" cy="46" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="852" y="46" class="t-xs">根</text>
+    <circle cx="790" cy="100" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="905" cy="165" r="7" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.5"/>
+    <circle cx="750" cy="165" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="838" cy="165" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <circle cx="712" cy="240" r="7" style="fill:var(--c-loss-bg);stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 2"/>
+    <circle cx="792" cy="240" r="7" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/>
+    <text x="730" y="258" class="t-c t-xs" style="fill:var(--c-loss)">淘汰</text>
+    <text x="840" y="270" class="t-c t-xs">D 和已有内容没有公共前缀</text>
+    <text x="840" y="286" class="t-c t-xs">显存不够：淘汰最久没用的叶子</text>
+  </svg>
+  <div class="legend"><span><span class="sw act"></span>这一步新算出、插入树中</span><span><span class="sw enc"></span>这一步命中、直接复用</span><span><span class="sw" style="background:var(--surface);border-color:var(--border-strong)"></span>已缓存、这一步没用到</span><span><span class="sw loss"></span>被淘汰</span></div>
+  <div class="dia-note">本站示意图。论文自己的例子见 <a href="https://arxiv.org/html/2312.07104#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>，下面 3.3 节把它的九个时刻逐一讲解。</div>
+</div>
+<p>按图里的顺序走一遍：</p>
+<ol>
+  <li><b>① 请求 A 到来。</b>树是空的，什么也匹配不上，A 的输入全部要 prefill。A 生成完之后，它的输入和输出（Sys Ex1 Ex2 Q1 A1）<b>作为一整条边挂到根下面</b>，而不是被释放。因为中间没有分叉，基数树只用一条边、一个节点就存下了这一长串。</li>
+  <li><b>② 请求 B = Sys Ex1 Ex2 Q2。</b>从根开始逐段比较：Sys、Ex1、Ex2 都对上了，到第四段 Q2 和 Q1 不同，停下。于是把原来那条边从 Ex2 之后拆开：前半段 “Sys Ex1 Ex2” 成为一条边，末端是新拆出的分叉点；后半段 “Q1 A1” 挂在分叉点下面。B 命中的三段直接复用已有的 KV 缓存，只需要 prefill Q2；B 结束后，“Q2 A2” 也挂到分叉点下面。</li>
+  <li><b>③ 请求 C = Sys Hi。</b>这是一段新对话，只和前面共享系统提示。匹配完 Sys 后，下一段 Hi 和 Ex1 不同，“Sys Ex1 Ex2” 这条边再拆一次。现在 Sys 节点是三条路径共同的祖先，它的 KV 缓存被三类请求共用，却只存了一份。</li>
+  <li><b>④ 请求 D = Doc Q3。</b>第一个 token 就对不上，于是在根下面新开一个分支。假如这时显存不够了，就要淘汰一些已缓存的节点，图里选中的是最久没有被访问的叶子 “Q1 A1”。为什么只淘汰叶子，下一小节解释。</li>
+</ol>
+<p>匹配的代价很小：在每个节点上，只要看下一个 token 是什么就知道该走哪条边（今天的 SGLang 代码里，每个节点的子节点按“边上的第一个 token”建立索引），所以匹配一个请求的步数大致和它的长度成正比，和树里缓存了多少请求无关。</p>
+
+<h4 id="n-3-3">3.3 把基数树当作缓存：页大小为 1、引用计数与 LRU 淘汰</h4>
+<p><b>KV 存在哪里。</b>树本身（结构和索引）放在 CPU 内存里，维护开销可以忽略；KV 张量放在 GPU 显存中一个<b>分页的、不要求连续的</b>内存池里，<b>每页只放 1 个 token</b>。页大小取 1 的好处是，树可以在任意一个 token 处拆分，不会出现“一页里前一半属于这条边、后一半属于那条边”的麻烦。作为对比，vLLM 的块默认装 16 个 token（见 <a href="vllm.html#n-4-1">vLLM 精读 §4.1</a>），以块为单位共享时，只有整块都相同才能共享。</p>
+<p><b>缓存不占专门的地盘。</b>RadixAttention 没有为缓存预留一块固定大小的显存。缓存着的 token 和正在运行的请求<b>共用同一个内存池</b>，系统动态地在两者之间分配：等待的请求少时，空闲的显存拿来留住旧请求的 KV；等待的请求多到需要更大的批时，系统会把缓存全部淘汰，把显存让给正在运行的请求。换句话说，缓存用的是“反正闲着的”显存，不会因此缩小批的上限。</p>
+<p><b>正在用的不能删：引用计数。</b>在连续批处理下，任何时刻都有一批请求正在运行，它们正在读的那些节点绝不能被淘汰。所以每个节点记一个<b>引用计数</b>，表示有多少个正在运行的请求在用它；计数为 0 的节点才可以淘汰。一个请求要用某个节点时，它其实需要从根到这个节点的整条路径（缺了祖先，后面的 KV 就没有意义），所以今天的 SGLang 代码在“锁住”一个节点时，会沿着父节点一路把祖先的计数都加一。</p>
+<p><b>先淘汰最久没用的叶子：LRU。</b>显存不够时，系统淘汰<b>最近最少使用的叶子节点</b>。只淘汰叶子是有道理的：一个节点的 KV 缓存只有在它所有祖先的 KV 都还在时才有用，如果先删了祖先，子孙节点的缓存就成了占着显存却用不上的“孤儿”。从叶子开始删，被多条路径共享的祖先（比如系统提示）会一直留到它自己变成叶子、并且也成了最久没用的那个时才被删掉。今天的实现是：把所有可淘汰的叶子放进一个按最后访问时间排序的最小堆，每删掉一个叶子，就检查它的父节点是不是也变成了无人使用的叶子，是的话把父节点也放进堆里。</p>
+<p><b>前端提示。</b>执行 <code>fork</code> 时，解释器会先把分叉之前的共享前缀单独发给运行时，作为一个“提示”，确保这段前缀先被算出来、插入树中，然后再发出各个分支的请求。如果几个分支的请求同时到达，它们在树上都找不到这段前缀（还没算完），就会各自把它算一遍；先发提示就避免了这种重复。论文用它作为“前端和运行时协同设计”的例子。</p>
+<p>论文的图 3 用九个时刻展示了一棵树如何随两段对话、一批 few-shot 查询和一次自洽采样而变化。下表按原图的文字说明逐步整理：</p>
+<div class="table-wrap"><table>
+  <tr><th>时刻</th><th>到来的请求</th><th>树发生了什么</th></tr>
+  <tr><td>(1)</td><td>—</td><td>空树，只有根。</td></tr>
+  <tr><td>(2)</td><td>对话 1 的第一轮：系统提示 + 用户说 “Hello!”，模型答 “Hi!”</td><td>三段合成<b>一条边</b>挂在根下（节点 a）。</td></tr>
+  <tr><td>(3)</td><td>对话 1 的第二轮</td><td>在树上找到第一轮的全部内容，直接复用；新一轮的问答作为新节点接在后面。</td></tr>
+  <tr><td>(4)</td><td>对话 2 开始，系统提示相同</td><td>原来的节点 b 被拆成两段，系统提示成为两段对话的公共祖先。</td></tr>
+  <tr><td>(5)</td><td>对话 2 的第二轮，但显存不够</td><td>淘汰节点 c（对话 1 的第二轮，最久没用）；对话 2 的新一轮接在节点 d 后面。</td></tr>
+  <tr><td>(6)</td><td>一个 few-shot 查询，和已有内容毫无共同前缀</td><td>根下面新开一个分支（论文说“根节点被拆分”）。</td></tr>
+  <tr><td>(7)</td><td>一批 few-shot 查询，示例相同、问题不同</td><td>节点 e 被拆开，few-shot 示例成为公共前缀，各个问题成为它的子节点。</td></tr>
+  <tr><td>(8)</td><td>对话 1 又来一条消息</td><td>对话 2 的节点（g、h）最久没用，被全部淘汰；对话 1 继续往下长。</td></tr>
+  <tr><td>(9)</td><td>对节点 j 里的问题再采样几个答案（多半是自洽采样）</td><td>为腾出空间淘汰节点 i、k、l；新的答案作为 j 的子节点插入。</td></tr>
+</table></div>
+<p class="w-note">据 <a href="https://arxiv.org/html/2312.07104#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 的图注整理；节点字母沿用原图。</p>
+
+<h4 id="n-3-4">3.4 缓存感知调度：先跑能复用得多的请求</h4>
+<p>先定义衡量缓存效果的指标。论文把<b>缓存命中率</b>定义为：</p>
+<div class="formula">$$\text{缓存命中率}=\frac{\text{命中缓存的输入 token 数}}{\text{输入 token 总数}}$$</div>
+<p>等待队列里有很多请求时，<b>执行的先后顺序</b>会显著影响命中率。如果调度器在几组互不相关的请求之间来回切换，刚缓存好的前缀还没被复用就被挤掉了，接着又要重算，这叫缓存<b>颠簸</b>（thrashing）。看一个极端的例子：</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样六个请求，换个执行顺序，命中率天差地别</div>
+  <div class="dia-row"><span class="lbl">先来先服务</span><div class="cells"><span class="cell c">A1</span><span class="cell c">B1</span><span class="cell c">A2</span><span class="cell c">B2</span><span class="cell c">A3</span><span class="cell c">B3</span></div></div>
+  <div class="dia-out">每来一个请求，显存里留着的都是另一组的示例：示例部分一共算了 6 次，命中率 0。</div>
+  <div class="dia-row"><span class="lbl">最长前缀优先</span><div class="cells"><span class="cell c">A1</span><span class="cell a">A2</span><span class="cell a">A3</span><span class="cell c">B1</span><span class="cell a">B2</span><span class="cell a">B3</span></div></div>
+  <div class="dia-out">示例甲、乙各算 1 次，其余 4 个请求只需要算自己的问题，命中率约 63%（推算）。</div>
+  <div class="dia-note">A 组请求共用示例甲，B 组共用示例乙，按 A1 B1 A2 B2 A3 B3 的顺序到达。假设每组示例 1,000 个 token、每个问题 50 个 token，显存只够留住一组示例（都是示意值）。橙色 = 示例部分没有命中、要重算；蓝色 = 命中。命中率推算：输入共 6 × 1,050 = 6,300 个 token，最长前缀优先时只需算 2 × 1,000 + 6 × 50 = 2,300 个，命中率 = 1 − 2,300 ÷ 6,300 ≈ 63.5%。</div>
+</div>
+<p>论文的做法很直接：在批处理的场景下，不按先来先服务，而是<b>按每个请求能在树上匹配到的前缀长度排序，匹配越长越先执行</b>（longest-shared-prefix-first）。在对延迟更敏感的场景里，也可以只做有限度的重新排序，换取一部分命中率。</p>
+<p>原文附录的算法 1 给出了它和连续批处理结合时，每一轮调度的步骤：</p>
+<ol>
+  <li>取出等待队列里的所有请求，对每个请求在基数树上做前缀匹配，记下匹配到的节点和匹配长度。</li>
+  <li>按匹配长度排序。</li>
+  <li>计算可用空间 = 树里可淘汰的缓存大小 + 内存池里的空闲大小。按排好的顺序逐个检查请求：放得下就把它加入新批，并给它匹配到的节点加引用计数（“锁住”）。锁住之后这些节点不再可淘汰，可用空间相应减少。</li>
+  <li>把新批并入正在运行的批，为需要的新 token 分配显存；分配失败就先从树里淘汰一些节点，再分配。</li>
+  <li>运行一步。对已经结束的请求，减掉它们节点的引用计数，并把它们的完整内容（输入 + 输出）插入树中，留给后面的请求复用。</li>
+</ol>
+<div class="note-warn"><b>论文伪代码里的一处疏漏：</b>算法 1 在选请求时用 “请求大小 + current_size &lt; available_size” 判断放不放得下，但伪代码里 current_size 初始化为 0 之后再也没有被累加。按字面执行，判断时永远只看单个请求的大小。合理的理解是：每选中一个请求，都应该把它要新占用的大小累加进 current_size（本站的理解）。另外，“锁住节点后可用空间加上 delta” 这一步里的 delta 是负数，今天的 SGLang 代码里它就是被锁住的那些原本可淘汰的 token 数取负。</div>
+<p>为什么“最长前缀优先”是对的？论文给出了一个离线情况下的最优性定理。</p>
+<p><b>定理 3.1。</b>对一批（事先全部已知的）请求，只要缓存容量不小于最长请求的长度，<b>按请求基数树的深度优先（DFS）顺序处理</b>就能达到最优的缓存命中率；而“最长前缀优先”的顺序就等价于一种深度优先顺序。</p>
+<p>证明的思路分两步，用到的都是很朴素的观察：</p>
+<ul>
+  <li><b>先给出一个下界。</b>把这批请求全部插进一棵基数树 \(T\)。树上每条边 \(e\) 对应的那段 KV 缓存，至少要算一次，记它的大小为 \(|e|\)。所以总计算量 \(C\) 满足下面左边的不等式。命中率等于 1 减去“实际算了的”占“全部输入”的比例，所以 \(C\) 越小命中率越高：
+  <div class="formula">$$C\;\ge\;\sum_{e\in\mathrm{edges}(T)}|e|,\qquad \text{命中率}=1-\frac{C}{\sum_{r\in R}(\text{请求 } r \text{ 的输入 token 数})}$$</div></li>
+  <li><b>再说明深度优先能达到这个下界。</b>深度优先遍历时，一条边第一次被算出来之后，接下来处理的恰好是它下面的整棵子树；处理子树期间，这条边一直被命中，处理完就再也不会回来。缓存容量不小于最长请求的长度，意味着从根到任何叶子的一整条路径都放得下，所以这条边在它的子树处理完之前不会被 LRU 淘汰。于是每条边只算一次，\(C\) 恰好等于下界，命中率达到最优。</li>
+  <li><b>最后说明“最长前缀优先”就是深度优先。</b>用归纳法：假设刚处理完节点 \(y\)，从根到 \(y\) 的路径都在缓存里。还没处理的节点中，和这条路径的“最近公共祖先”越深，它和已缓存内容的共享前缀就越长；最长前缀优先会选中公共祖先最深的那个节点，这正是深度优先会选的下一个节点。</li>
+</ul>
+<p>拿上面示意图里的六个请求验证一下：树上有两条示例边（各 1,000 个 token）和六条问题边（各 50 个），边长之和是 2,300，所以最优命中率是 1 − 2,300 ÷ 6,300 ≈ 63.5%，正好是最长前缀优先达到的数（推算）。</p>
+<p>在线服务时，请求是陆续到达的，严格的深度优先顺序会被打乱。论文在附录 A.3 论证：每加入一批新请求，最长前缀优先仍会在“新长出来的那部分树”上近似地做深度优先。论文也在脚注里承认，实际计算和定理的证明并不完全一样，因为输出有多长事先不知道，可能导致 KV 缓存被淘汰后重算。</p>
+<div class="note-warn"><b>贪心调度的代价：饥饿。</b>最长前缀优先是贪心的。如果不断有能命中长前缀的新请求到来，一个和谁都不共享前缀的请求可能一直排不上，被“饿死”。论文明确承认这一点，把它和公平调度方法的结合留作未来工作。今天的 SGLang 默认用先来先服务，最长前缀匹配是一个可选的调度策略（见“后来怎么样了”）。</div>
+
+<h4 id="n-3-5">3.5 多张 GPU</h4>
+<p><b>张量并行。</b>张量并行把每一层的注意力头分给多张 GPU，每张 GPU 只存自己那部分头的 KV。由于所有 GPU 处理的是同一批请求、同样的 token，基数树上的操作在每张 GPU 上完全一样，所以每张 GPU 各自维护一份分片的 KV 缓存即可，不需要额外同步。这和 vLLM 让所有 GPU 共用一张块表是同一个道理（见 <a href="vllm.html#n-4-6">vLLM 精读 §4.6</a>）。</p>
+<p><b>数据并行</b>（附录 A.4）。多个完整的模型副本（worker）同时服务时，每个 worker 维护自己的一棵子树，前面的路由器维护一棵“元树”，记录各个前缀缓存在哪个 worker 上。一批新请求到达路由器时，先在元树上做前缀匹配，再按“亲和度”分发：一个请求和某个 worker 已缓存的内容、以及和同组其他请求共享的前缀越长，就越倾向于发给那个 worker。路由器和 worker 各自独立更新自己的树；worker 淘汰了缓存时，把淘汰事件写进一个队列，路由器在不忙的时候再处理，更新元树。这是一个弱一致的分布式缓存。论文用 4 个 worker 在 MMLU 上测试，吞吐量随 worker 数线性增长，命中率达到最优，额外开销很小。作者也指出，把请求集中到有缓存的 worker（数据局部性）和把请求均匀分散（并行效率）之间存在取舍，更好的策略留作未来工作；同期的 Preble 基于早期版本的 SGLang 研究了数据并行下的调度。</p>
+<div class="note-warn"><b>读这一节时容易误解的地方：</b>
+<ul>
+  <li><b>名字里有 Attention，但它不是一种新的注意力计算方法。</b>RadixAttention 是一套 KV 缓存的管理与调度方案。真正做注意力计算的仍是普通的内核（论文用的是 FlashInfer 和 Triton 写的内核），只要它们能从“每页一个 token”的非连续显存里读 KV 就行。</li>
+  <li><b>复用省的是 prefill 和显存，省不了 decode。</b>如果每个请求的输出很长、请求之间又几乎没有共享，那么大部分时间花在逐个生成 token 上，缓存帮不上忙。§6 的“多轮对话（长输出）”基本没有加速，原因就在这里。</li>
+  <li><b>复用是精确的。</b>RadixAttention 只复用逐 token 完全相同的前缀，算出来的结果和不复用时一样。相关工作里的 PromptCache 允许复用不在开头的片段，论文引用说它会让准确率最多下降 43%。</li>
+  <li><b>没有命中时几乎没有代价。</b>§6.3 测得，在完全没有复用机会的负载上，维护基数树的时间不到总时间的 0.3%，所以 SGLang 默认打开它。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2312.07104#A1" target="_blank" rel="noopener">附录 A ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 压缩有限状态机：格式里写死的部分一步跳过去</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LM 程序经常要求模型输出严格符合某种格式，比如 JSON schema。现有系统是怎么保证格式的？为什么这样做很慢？SGLang 怎么让解码在格式规定死的地方一次前进好几个 token？这样做又带来了哪些新问题？</div>
+
+<div class="note-pre"><b>先补一点背景：约束解码与有限状态机。</b>
+<p>语言模型每一步输出的是整个词表上的概率分布，任何 token 都有可能被采样到，所以模型只是“大概率”会按要求的格式输出，并不能保证。<b>约束解码</b>的做法是：在采样之前，把所有会破坏格式的 token 的概率直接设成 0（实现上是把它们的 logits 改成负无穷，称为 <b>logits 掩码</b>），这样采样出来的结果一定合法。</p>
+<p>怎么知道哪些 token 会破坏格式？常用的办法（论文引用的 Outlines 的做法）是把格式写成<b>正则表达式</b>，再把正则表达式转换成<b>有限状态机</b>（FSM）。有限状态机是一张有向图：节点叫“状态”，边上写着字符或字符串；从初始状态出发，每读入一段文字就沿着对应的边走到下一个状态，最后停在“终止状态”上，就说明整段文字符合格式。解码时，系统记住当前所在的状态，看从这个状态出发能走哪些边，只放行那些能让状态机继续走下去的 token。</p>
+<p>举个本站的例子：格式是 <code>"grade": "[ABCD]"</code>。一开始，状态机要求依次读入 <code>"</code>、<code>g</code>、<code>r</code>……这串固定字符，所以第一步只有和 <code>"grade"</code> 对得上的 token（比如 <code>"</code>、<code>"gr</code>）被放行，<code>"name</code> 这样的 token 被掩掉。走到字母那一步时，只有 A、B、C、D 开头的 token 被放行。</p>
+<p>难点在于：正则表达式和状态机是按<b>字符</b>定义的，模型却是按 <b>token</b> 输出的，一个 token 可能包含好几个字符，也可能横跨格式里的两个部分。字符和 token 之间没有一一对应，所以系统要预先算好“在每个状态下，词表里哪些 token 合法、读完之后会走到哪个状态”。这一步预处理不便宜，§6.3 会看到它对速度的影响。</p>
+</div>
+
+<p><b>问题在哪里。</b>现有系统都是一个 token 一个 token 地解码：每一步做一次完整的模型前向，算出概率，按当前状态掩掉非法的 token，采样一个，更新状态，再进入下一步。可是格式里经常有一长段是<b>写死的</b>。作文评委例子里，输出必须以 <code>{"summary": "</code> 开头，这 13 个字符里，每个位置都只有一种合法的字符，模型根本没得选。按 token 解码时，这段文字会被拆成 <code>{"</code>、<code>summary</code>、<code>":</code>、<code> "</code> 四个 token，于是系统要做四次完整的前向，只为了产出四个早已确定的 token。论文认为，现有系统之所以只能这样做，是因为有限状态机和执行模型的部分没有结合在一起，无法一次处理多个 token。</p>
+
+<p><b>怎么压缩。</b>SGLang 先按字符（而不是按 token）构造原始的有限状态机，再找出其中的“单一转移边”并合并。附录 B.1 给出了两个定义：</p>
+<ul>
+  <li><b>单一转移边</b>：一条边的起点只有这一个后继状态，并且这条边上只接受一个字符（或字符串）。也就是说，走到这条边的起点时，下一步没有任何选择。</li>
+  <li><b>压缩边</b>：如果边 \(e_1,\dots,e_k\) 都是单一转移边，就把它们和前面相邻的边 \(e_0\) 合并成一条边，边上的文字是 \(e_0,e_1,\dots,e_k\) 上文字的拼接。</li>
+</ul>
+<p>从按字符构造的状态机出发，反复把单一转移边并进它前面的边，直到不能再合并为止，就得到<b>压缩有限状态机</b>。这个方法适用于任何正则表达式。</p>
+<div class="dia">
+  <div class="dia-title">示意图：<code>{"summary": "</code> 这段写死的文字，在压缩前后的状态机里</div>
+  <svg class="dg" viewBox="0 0 960 200" role="img" aria-label="普通有限状态机与压缩有限状态机的对比">
+    <text x="10" y="14" class="t-sm t-b">(a) 普通有限状态机：每条边一个字符，13 条边、14 个状态，每个状态都只有一条出边</text>
+    <line x1="42" y1="62" x2="82" y2="62" class="edge"/><line x1="106" y1="62" x2="146" y2="62" class="edge"/><line x1="170" y1="62" x2="210" y2="62" class="edge"/><line x1="234" y1="62" x2="274" y2="62" class="edge"/><line x1="298" y1="62" x2="338" y2="62" class="edge"/><line x1="362" y1="62" x2="402" y2="62" class="edge"/><line x1="426" y1="62" x2="466" y2="62" class="edge"/><line x1="490" y1="62" x2="530" y2="62" class="edge"/><line x1="554" y1="62" x2="594" y2="62" class="edge"/><line x1="618" y1="62" x2="658" y2="62" class="edge"/><line x1="682" y1="62" x2="722" y2="62" class="edge"/><line x1="746" y1="62" x2="786" y2="62" class="edge"/><line x1="810" y1="62" x2="850" y2="62" class="edge"/>
+    <line x1="874" y1="62" x2="950" y2="62" class="edge" style="stroke-dasharray:5 4"/>
+    <text x="62" y="44" class="t-c t-mono">{</text><text x="126" y="44" class="t-c t-mono">"</text><text x="190" y="44" class="t-c t-mono">s</text><text x="254" y="44" class="t-c t-mono">u</text><text x="318" y="44" class="t-c t-mono">m</text><text x="382" y="44" class="t-c t-mono">m</text><text x="446" y="44" class="t-c t-mono">a</text><text x="510" y="44" class="t-c t-mono">r</text><text x="574" y="44" class="t-c t-mono">y</text><text x="638" y="44" class="t-c t-mono">"</text><text x="702" y="44" class="t-c t-mono">:</text><text x="766" y="44" class="t-c t-mono">空格</text><text x="830" y="44" class="t-c t-mono">"</text>
+    <text x="912" y="44" class="t-c t-xs">正文（有选择）</text>
+    <g class="data"><circle cx="30" cy="62" r="12" class="box"/><circle cx="94" cy="62" r="12" class="box"/><circle cx="158" cy="62" r="12" class="box"/><circle cx="222" cy="62" r="12" class="box"/><circle cx="286" cy="62" r="12" class="box"/><circle cx="350" cy="62" r="12" class="box"/><circle cx="414" cy="62" r="12" class="box"/><circle cx="478" cy="62" r="12" class="box"/><circle cx="542" cy="62" r="12" class="box"/><circle cx="606" cy="62" r="12" class="box"/><circle cx="670" cy="62" r="12" class="box"/><circle cx="734" cy="62" r="12" class="box"/><circle cx="798" cy="62" r="12" class="box"/><circle cx="862" cy="62" r="12" class="box"/></g>
+    <text x="30" y="62" class="t-c t-xs">0</text><text x="94" y="62" class="t-c t-xs">1</text><text x="158" y="62" class="t-c t-xs">2</text><text x="222" y="62" class="t-c t-xs">3</text><text x="286" y="62" class="t-c t-xs">4</text><text x="350" y="62" class="t-c t-xs">5</text><text x="414" y="62" class="t-c t-xs">6</text><text x="478" y="62" class="t-c t-xs">7</text><text x="542" y="62" class="t-c t-xs">8</text><text x="606" y="62" class="t-c t-xs">9</text><text x="670" y="62" class="t-c t-xs">10</text><text x="734" y="62" class="t-c t-xs">11</text><text x="798" y="62" class="t-c t-xs">12</text><text x="862" y="62" class="t-c t-xs">13</text>
+    <text x="10" y="112" class="t-sm t-b">(b) 压缩后：13 条单一转移边并成一条边，状态 0 直接连到状态 13</text>
+    <line x1="42" y1="160" x2="488" y2="160" class="edge enc"/>
+    <line x1="512" y1="160" x2="588" y2="160" class="edge" style="stroke-dasharray:5 4"/>
+    <g class="enc"><rect class="box" x="208" y="132" width="116" height="20" rx="4"/></g>
+    <text x="266" y="142" class="t-c t-mono">{"summary": "</text>
+    <text x="550" y="142" class="t-c t-xs">正文</text>
+    <g class="data"><circle cx="30" cy="160" r="12" class="box"/><circle cx="500" cy="160" r="12" class="box"/></g>
+    <text x="30" y="160" class="t-c t-xs">0</text><text x="500" y="160" class="t-c t-xs">13</text>
+    <text x="620" y="146" class="t-sm">走到状态 0 时，接下来的 13 个字符已经唯一确定：</text>
+    <text x="620" y="166" class="t-sm">整段直接追加到输出里（跳跃解码），</text>
+    <text x="620" y="186" class="t-sm">不再为它们一个一个地做前向。</text>
+  </svg>
+  <div class="dia-row"><span class="lbl">普通解码</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">前向 → <code>{"</code></span><span class="dia-seg cmp" style="flex:1">前向 → <code>summary</code></span><span class="dia-seg cmp" style="flex:1">前向 → <code>":</code></span><span class="dia-seg cmp" style="flex:1">前向 → <code>␣"</code></span></div></div>
+  <div class="dia-row"><span class="lbl">压缩后</span><div class="dia-track"><span class="dia-seg kv" style="flex:1">追加 4 个 token，一次前向</span><span class="dia-seg" style="flex:3"></span></div></div>
+  <div class="dia-note">普通解码在这段文字上要做 4 次模型前向，每次只得到一个早已确定的 token；压缩后这 4 个 token 一起追加，只需 1 次前向（像 prefill 一样并行处理这 4 个 token）。␣ 表示空格。本站示意图，对应 <a href="https://arxiv.org/html/2312.07104#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。</div>
+</div>
+
+<p><b>跳跃解码。</b>解码过程中，每生成一个 token，系统就拿这个 token 对应的字符串，在当前状态的出边里找以它开头的那条边，沿着走下去。如果走到的状态的出边是一条压缩过的长边，系统就能预知接下来好几轮会生成什么，于是把整段字符串一次性追加上去。附录 B.2 把这个过程叫 <b>Jump Forward</b>（向前跳），加速就发生在这里。被追加的多个 token 由模型在一次前向里并行处理，就像 prefill 处理用户输入一样，代价远小于逐个 decode。</p>
+<p>LMSYS 的博客补充了一个实现细节：跳跃时，SGLang 直接结束当前的请求，再把“原文 + 跳过的那段字符串”作为一个新请求放回队列。因为有 RadixAttention，新请求会在基数树上命中原来那部分的 KV 缓存，真正需要计算的只有新追加的那几个 token。这说明压缩有限状态机能这么简单地实现，靠的正是前一节的前缀缓存。博客里还有一个直观的例子：让模型按 JSON 填写哈利·波特的信息，学院字段只能是四个学院之一，模型一旦输出 “G”，后面的 “ryffindor” 就是唯一可能，可以直接跳过去。</p>
+<p>回到作文评委的完整格式 <code>\{"summary": "[\w\d\s]+\.", "grade": "[ABCD][+-]?"\}</code>，哪些部分能跳、哪些部分仍要逐个解码，可以这样分：</p>
+<div class="dia">
+  <div class="dia-title">示意图：一次受约束的 JSON 输出里，哪些部分可以跳过、哪些部分仍要逐个解码</div>
+  <div class="dia-row"><span class="lbl">输出顺序</span><div class="dia-track"><span class="dia-seg kv" style="flex:2.2">{"summary": " 跳</span><span class="dia-seg cmp" style="flex:5">总结正文：逐 token 解码</span><span class="dia-seg cmp" style="flex:0.7">.</span><span class="dia-seg kv" style="flex:2.4">", "grade": " 跳</span><span class="dia-seg cmp" style="flex:1">A–D</span><span class="dia-seg cmp" style="flex:1.2">+ / − / "</span><span class="dia-seg kv" style="flex:1">"} 跳</span></div></div>
+  <div class="dia-note">蓝色 = 状态机里没有选择、可以整段追加的部分；绿色 = 模型真正需要做选择、仍要逐 token 解码的部分。正文写多长、何时以句号结束，等级是哪个字母、要不要带正负号，都由模型决定；而句号之后的 <code>", "grade": "</code> 和最后的右括号是格式规定死的。本站示意图，分段方式是本站按正则表达式推出来的。</div>
+</div>
+
+<p><b>新问题一：跳过的文字怎么切成 token。</b>跳过去的是一段字符串，可后续解码需要的是 token。随便切会出问题：模型训练时见到的总是分词器的标准切法，如果把 <code>{"summary": "</code> 切成 <code>{"</code>、<code>summa</code>、<code>ry</code>、<code>":␣"</code> 这种模型几乎没见过的组合，后面 token 的概率分布就会被扭曲。附录 B.2 的办法是<b>重新分词</b>：把之前的全部文字连同跳过的字符串，用原始的分词器重新切一遍，得到 <code>{"</code>、<code>summary</code>、<code>":</code>、<code>␣"</code> 这种标准切法。论文说额外开销很小；LMSYS 博客给出的测量是约 4%。</p>
+<p><b>新问题二：概率被扭曲。</b>附录 B.3 讨论了一个还没解决的问题。假设等级字段不是 <code>[ABCD][+-]?</code>，而是四个词组 <code>Excellent|Above Average|Fair|Below Average</code>。模型并不知道有哪几个选项，它可能本想输出等级字母 “A”；状态机一看，以 A 开头的选项只有 “Above Average”，于是直接跳到 “Above Average”。结果，“Above Average” 被选中的概率实际上只是模型输出第一个 token “A” 的概率，和模型对这个完整选项的真实偏好不是一回事。要算出每个选项的准确概率，得把所有能拼出这个选项的 token 序列的概率加起来，这会让解码变复杂、变慢。一个折中办法是在提示里直接列出选项或正则表达式，让模型知道有哪些选择，但这并没有从根本上解决问题。（SGLang 的 <code>select</code> 原语走的是另一条路：它比较的是各个完整选项的概率，然后选最高的那个。）</p>
+<p><b>效果。</b>§6.3 的消融实验在 JSON 解码基准上测得，压缩有限状态机让吞吐量提高到 1.6 倍，因为它能一次解码多个 token。另一个结果同样重要：状态机的预处理必须对一批请求只做一次、反复使用；如果每个请求都重新预处理一遍，吞吐量会降到原来的 1/2.4。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li>只有格式里<b>写死的部分</b>能跳过，自由文本字段（比如 summary 的正文）照样逐个 token 解码。所以加速的幅度取决于固定部分在输出里占多大比例：键名多、值很短的 JSON 加速明显，值是长段文字的 JSON 加速有限。</li>
+  <li>正则表达式描述不了任意深度嵌套的结构（那需要上下文无关文法）。论文的方法限定在正则表达式能表达的格式上。</li>
+  <li>“JSON 模式提速 1.6 倍”是和关掉压缩有限状态机的 SGLang 比，不是和别的系统比。LMSYS 博客里和 Outlines + vLLM、Guidance + llama.cpp 的比较（延迟最多降一半、吞吐最高 2.5 倍）用的是另一套设置。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2312.07104#A2" target="_blank" rel="noopener">附录 B ↗</a> · <a href="https://lmsys.org/blog/2024-02-05-compressed-fsm/" target="_blank" rel="noopener">LMSYS 博客 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 API 投机执行：只能调 API 的模型怎么省钱</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>前两项优化都要改动模型的推理过程，所以只能用在自己部署的开源模型上。对于 GPT-4 这种只能通过 API 调用的黑盒模型，运行时既看不到 KV 缓存，也改不了解码过程。多次调用的程序在这种情况下还能怎么加速、怎么省钱？</div>
+<div class="note-pre"><b>先补一点背景：API 怎么收费。</b>
+<p>调用模型 API 时，每次请求都要把完整的提示发过去，服务方按输入 token 数和输出 token 数分别计费。一个程序如果连续调用三次、每次都带着同一段很长的上下文，这段上下文就要付三次钱，每次也都要等服务方重新处理一遍。</p>
+</div>
+<p>论文的例子是让模型描述一个角色，程序写成 <code>s += context + "name:" + gen("name", stop="\n") + "job:" + gen("job", stop="\n")</code>：先给一段上下文，然后让模型写名字（遇到换行停），再写职业（遇到换行停）。按字面执行，两个 <code>gen</code> 对应两次 API 调用，上下文的输入费付了两次。</p>
+<p><b>投机执行</b>的做法是：在第一次调用时<b>忽略停止条件</b>，让模型多生成一些 token。模型很可能顺着模板写下去，比如写出 “Alice（换行）job: engineer（换行）”。解释器把多出来的这部分留着，等程序执行到 <code>"job:" + gen("job")</code> 时，先检查多出来的文字是不是正好以 “job:” 开头：如果对得上，就直接把 “engineer” 当作 <code>job</code> 的结果，第二次调用就省掉了；对不上，再老老实实发起调用。这和 CPU 的“投机执行”是一个思路：先按最可能的情况往前做，猜对了白赚，猜错了丢掉重来。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两次调用 vs 投机执行后的一次调用</div>
+  <div class="dia-flow"><b style="width:72px">直接执行</b><span class="dia-box">调用 1<small>上下文 + "name:" → "Alice"</small></span><span class="dia-arrow">→</span><span class="dia-box">调用 2<small>上下文 + "name: Alice job:" → "engineer"</small></span><span class="dia-arrow">上下文计费 2 次</span></div>
+  <div class="dia-flow"><b style="width:72px">投机执行</b><span class="dia-box act">调用 1，不在换行处停<small>上下文 + "name:" → "Alice↵job: engineer↵…"</small></span><span class="dia-arrow">→</span><span class="dia-box reg">解释器对照模板<small>“job:” 对上了，取出 "engineer"</small></span><span class="dia-arrow">上下文计费 1 次</span></div>
+  <div class="dia-note">↵ 表示换行。本站示意图，例子来自原文 §5。</div>
+</div>
+<p><b>效果。</b>论文用 GPT-3.5 从维基百科页面里抽取三个字段。配合 few-shot 提示，模型按模板续写的准确率很高，投机执行把输入 token 的花费降到约三分之一：原来要调三次、上下文付三次钱，现在一次就够了。</p>
+<div class="note-warn"><b>读的时候要注意：</b>这个优化能不能奏效，取决于模型是否会乖乖按模板续写，论文说要靠“仔细的提示工程”（比如 few-shot 示例），但没有给出准确率的具体数字；猜错时多生成的输出 token 白白付费。它也只适用于“两个 gen 之间夹着固定文字”的连续调用。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实验：快多少，在什么条件下快</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>SGLang 比当时的系统快多少？“快”是怎么测的，吞吐量和延迟分别指什么？加速来自哪几项优化，在哪些负载上大、哪些负载上几乎没有？前面几节的设计（基数树、缓存感知调度、前端提示、压缩有限状态机）各自贡献了多少？</div>
+
+<h4 id="n-6-1">6.1 实验是怎么设计的</h4>
+<p><b>模型。</b>稠密模型 Llama-2（7B 到 70B），稀疏的混合专家模型 Mixtral-8x7B，多模态的 LLaVA 图像模型和视频模型，以及 API 模型 GPT-3.5。开源模型都用 FP16 精度。</p>
+<p><b>硬件。</b>大部分实验在 AWS EC2 G5 实例上做，GPU 是 24 GB 显存的 NVIDIA A10G：7B 模型用一张卡，更大的模型用多张卡做张量并行；另有部分实验用 80 GB 的 A100。附录 C 给出了每张图的具体配置：图 5、图 6、图 8(c) 是 Llama-7B 跑在 1 张 A10G 上；图 7 是 Mixtral-8x7B 跑在 8 张 A10G 上；附录图 12 是 Llama-70B 跑在 4 张 A100 上；表 2 的 LLaVA-v1.5-7B 用 1 张 A10G，LLaVA-NeXT-34B 用 1 张 A100。</p>
+<p><b>对照系统。</b>既有带自己语言和默认运行时的编程系统，也有只提供 OpenAI 风格补全接口的推理引擎。除非特别说明，所有会改变计算结果的优化都不打开，保证各个系统算出的结果相同。</p>
+<ul>
+  <li><b>Guidance</b> v0.1.8，后端是 llama.cpp。</li>
+  <li><b>vLLM</b> v0.2.5，用它默认的 API 服务。论文脚注说明：RadixAttention 已经被部分地作为一个可选的实验性功能并入了最新版的 vLLM，所以这里特意用了更早的版本来比较。</li>
+  <li><b>LMQL</b> v0.7.3，后端是 Hugging Face Transformers。</li>
+</ul>
+<p><b>负载。</b>下表列出每个基准在做什么，以及 SGLang 能在哪里省（第三列按 §6.2 的原文解释整理）：</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th>程序在做什么</th><th>SGLang 的加速来自哪里</th></tr>
+  <tr><td>MMLU（5-shot）</td><td>每道题前放 5 个示例，只解码 1 个 token 作答</td><td>5 个示例的 KV 缓存</td></tr>
+  <tr><td>HellaSwag（20-shot）</td><td>20 个示例 + 题目正文，用 <code>select</code> 在 4 个结尾里选概率最高的</td><td>示例 + 同一题目正文下的多个选项，两层共享</td></tr>
+  <tr><td>ReAct agent、生成式 agent</td><td>从原论文里抽出 agent 的调用轨迹并重放</td><td>agent 模板和之前各次调用的 KV 缓存</td></tr>
+  <tr><td>思维树（GSM-8K 数学题）</td><td>按搜索树的方式解题</td><td>程序内并行 + 尽量复用</td></tr>
+  <tr><td>思维骨架（写建议）</td><td>先写几条要点，再并行展开每一条</td><td>程序内并行 + 尽量复用</td></tr>
+  <tr><td>LLM 评委</td><td>用 branch-solve-merge 多维度评分</td><td>fork 之前的公共前缀 + 并行</td></tr>
+  <tr><td>JSON 解码</td><td>按正则表达式描述的 schema 输出</td><td>压缩有限状态机</td></tr>
+  <tr><td>多轮对话（短 / 长）</td><td>4 轮，每轮输入随机取 256–512 个 token；短输出 4–8 个 token，长输出 256–512 个</td><td>对话历史的 KV 缓存</td></tr>
+  <tr><td>DSPy RAG 流水线</td><td>DSPy 官方示例里的检索增强生成</td><td>公共的上下文示例</td></tr>
+</table></div>
+<div class="note-pre"><b>先补一点背景：吞吐量和延迟这两个数是分开测的。</b>
+<p><b>吞吐量</b>：一次提交足够多的程序实例，让系统满负荷运行，数每秒能完成多少个程序（programs per second）。这时加速来自两方面：请求之间共享前缀，省掉重复的 prefill；共享的 KV 只存一份，显存省出来，批能开得更大。<b>延迟</b>：每次只跑一个程序、不做批处理，对多个实例取平均。这时没有“别的请求”可以共享，加速来自程序内部的前缀复用（比如几次调用共用同一段上文）、程序内并行，以及更少的解码步数。所以同一个基准上，吞吐量和延迟的加速倍数可以很不一样。</p>
+</div>
+
+<h4 id="n-6-2">6.2 端到端结果</h4>
+<p><b>开源模型。</b>Llama-7B 上的结果画在原文图 5（吞吐量）和图 6（延迟）里。论文的总结是：SGLang 的吞吐量最高提高到 6.4 倍，延迟最多降低到 1/3.7，原因是 KV 缓存复用、程序内并行和更快的约束解码。原图把每个基准上各系统的数值都做了归一化，没有标出具体数字；下面这张图是本站从原文的矢量图里量出柱高、换算成相对 vLLM 的倍数之后重画的：</p>
+<div class="dia">
+  <div class="dia-title">简化图：Llama-7B（1 张 A10G）上 SGLang 相对 vLLM v0.2.5 的倍数（本站读数，对数刻度）</div>
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="各基准上 SGLang 相对 vLLM 的吞吐量与延迟倍数">
+    <rect x="190" y="6" width="14" height="10" style="fill:var(--c-enc)"/>
+    <text x="210" y="11" class="t-sm">吞吐量提高倍数（SGLang ÷ vLLM）</text>
+    <rect x="520" y="6" width="14" height="10" style="fill:var(--c-pred)"/>
+    <text x="540" y="11" class="t-sm">延迟降低倍数（vLLM ÷ SGLang）</text>
+    <line x1="330" y1="30" x2="330" y2="388" class="grid-ln"/><line x1="470" y1="30" x2="470" y2="388" class="grid-ln"/><line x1="610" y1="30" x2="610" y2="388" class="grid-ln"/><line x1="750" y1="30" x2="750" y2="388" class="grid-ln"/><line x1="890" y1="30" x2="890" y2="388" class="grid-ln"/>
+    <line x1="190" y1="30" x2="190" y2="388" class="axis"/>
+    <text x="190" y="402" class="t-c t-xs">1×</text><text x="330" y="402" class="t-c t-xs">2×</text><text x="470" y="402" class="t-c t-xs">4×</text><text x="610" y="402" class="t-c t-xs">8×</text><text x="750" y="402" class="t-c t-xs">16×</text><text x="890" y="402" class="t-c t-xs">32×</text>
+    <text x="540" y="420" class="t-c t-xs">对数刻度：每向右一格，倍数翻一番</text>
+    <text x="180" y="49" class="t-r">MMLU</text>
+    <rect x="190" y="36" width="379" height="12" style="fill:var(--c-enc)"/><rect x="190" y="50" width="142" height="12" style="fill:var(--c-pred)"/>
+    <text x="575" y="42" class="t-xs">6.5×</text><text x="338" y="56" class="t-xs">2.0×</text>
+    <text x="180" y="81" class="t-r">ReAct agent</text>
+    <rect x="190" y="68" width="325" height="12" style="fill:var(--c-enc)"/><rect x="190" y="82" width="48" height="12" style="fill:var(--c-pred)"/>
+    <text x="521" y="74" class="t-xs">5.0×</text><text x="244" y="88" class="t-xs">1.3×</text>
+    <text x="180" y="113" class="t-r">生成式 agent</text>
+    <rect x="190" y="100" width="19" height="12" style="fill:var(--c-enc)"/><rect x="190" y="114" width="19" height="12" style="fill:var(--c-pred)"/>
+    <text x="215" y="106" class="t-xs">1.1×</text><text x="215" y="120" class="t-xs">1.1×</text>
+    <text x="180" y="145" class="t-r">思维树</text>
+    <rect x="190" y="132" width="141" height="12" style="fill:var(--c-enc)"/><rect x="190" y="146" width="257" height="12" style="fill:var(--c-pred)"/>
+    <text x="337" y="138" class="t-xs">2.0×</text><text x="453" y="152" class="t-xs">3.6×</text>
+    <text x="180" y="177" class="t-r">思维骨架</text>
+    <rect x="190" y="164" width="204" height="12" style="fill:var(--c-enc)"/><rect x="190" y="178" width="241" height="12" style="fill:var(--c-pred)"/>
+    <text x="400" y="170" class="t-xs">2.8×</text><text x="437" y="184" class="t-xs">3.3×</text>
+    <text x="180" y="209" class="t-r">LLM 评委</text>
+    <rect x="190" y="196" width="178" height="12" style="fill:var(--c-enc)"/><rect x="190" y="210" width="252" height="12" style="fill:var(--c-pred)"/>
+    <text x="374" y="202" class="t-xs">2.4×</text><text x="448" y="216" class="t-xs">3.5×</text>
+    <text x="180" y="241" class="t-r">HellaSwag</text>
+    <rect x="190" y="228" width="689" height="12" style="fill:var(--c-enc)"/><rect x="190" y="242" width="403" height="12" style="fill:var(--c-pred)"/>
+    <text x="874" y="234" class="t-r t-xs" style="fill:var(--surface)">约 30×</text><text x="599" y="248" class="t-xs">7.3×</text>
+    <text x="180" y="273" class="t-r">JSON 解码</text>
+    <rect x="190" y="260" width="211" height="12" style="fill:var(--c-enc)"/><rect x="190" y="274" width="281" height="12" style="fill:var(--c-pred)"/>
+    <text x="407" y="266" class="t-xs">2.8×</text><text x="477" y="280" class="t-xs">4.0×</text>
+    <text x="180" y="305" class="t-r">多轮对话（短输出）</text>
+    <rect x="190" y="292" width="124" height="12" style="fill:var(--c-enc)"/><rect x="190" y="306" width="56" height="12" style="fill:var(--c-pred)"/>
+    <text x="320" y="298" class="t-xs">1.9×</text><text x="252" y="312" class="t-xs">1.3×</text>
+    <text x="180" y="337" class="t-r">多轮对话（长输出）</text>
+    <rect x="190" y="324" width="2" height="12" style="fill:var(--c-enc)"/><rect x="190" y="338" width="2" height="12" style="fill:var(--c-pred)"/>
+    <text x="198" y="330" class="t-xs">1.0×</text><text x="198" y="344" class="t-xs">0.99×（SGLang 略慢）</text>
+    <text x="180" y="369" class="t-r">DSPy RAG</text>
+    <rect x="190" y="356" width="330" height="12" style="fill:var(--c-enc)"/><rect x="190" y="370" width="81" height="12" style="fill:var(--c-pred)"/>
+    <text x="526" y="362" class="t-xs">5.1×</text><text x="277" y="376" class="t-xs">1.5×</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>每个基准两根柱子，蓝色是吞吐量提高的倍数，橙色是延迟降低的倍数；横轴是对数刻度，柱子越长 SGLang 的优势越大，长度接近 0 表示两者持平。数值是本站从 <a href="https://arxiv.org/html/2312.07104#S6.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 和 <a href="https://arxiv.org/html/2312.07104#S6.F6" target="_blank" rel="noopener">原文图 6 ↗</a> 的矢量数据中量出柱高后换算的，四舍五入到两位有效数字，论文正文没有给出这些逐项数字。原图还画了 Guidance 和 LMQL，这里只画 vLLM，因为它是唯一在全部 11 个基准上都有结果的对照系统。</div>
+</div>
+<p>结合论文对每个基准的解释，可以读出这样几条规律：</p>
+<ul>
+  <li><b>共享的前缀越长、输出越短，优势越大。</b>MMLU 每题只解码 1 个 token，时间几乎全花在 prefill 上，而 5 个示例的 KV 可以被所有题目复用，吞吐量约是 vLLM 的 6.5 倍。论文特别指出，RadixAttention 在这里对吞吐和延迟都有好处：共享 KV 省下的显存让批更大，提高最大吞吐；少算的 prefill 让第一个 token 来得更早。</li>
+  <li><b>两层共享最赚。</b>HellaSwag 既共享 20 个示例，又让同一道题的 4 个选项共享题目正文，按柱高推算吞吐量约是 vLLM 的 30 倍，延迟约为 1/7.3，是图中差距最大的一项。</li>
+  <li><b>并行和格式约束主要改善延迟。</b>思维树、思维骨架、LLM 评委这几个程序内部有并行分支，单个程序的延迟降到约 1/3.3–1/3.6；JSON 解码靠压缩有限状态机，延迟降到约 1/4.0。</li>
+  <li><b>decode 占主导、请求之间不共享时，几乎没有加速。</b>论文明确说，多轮对话的长输出版本几乎没有加速，因为不同对话之间没有多少可共享的内容，时间主要花在逐个生成 token 上；短输出版本的加速更明显，因为缓存复用主要省的是 prefill。生成式 agent 的两项也只有约 1.1 倍。</li>
+</ul>
+<p>论文还说，各基准上的缓存命中率在 50% 到 99% 之间，缓存感知调度平均达到最优命中率的 96%。附录图 13 画出了每个基准实际达到的命中率和理论最优值，本站读数如下：</p>
+<div class="dia">
+  <div class="dia-title">简化图：各基准实际达到的缓存命中率与最优命中率（本站读数）</div>
+  <div class="dia-row"><span class="lbl">MMLU</span><div class="dia-track"><span class="dia-seg kv" style="flex:85">85%（= 最优）</span><span class="dia-seg oth" style="flex:15"></span></div></div>
+  <div class="dia-row"><span class="lbl">ReAct agent</span><div class="dia-track"><span class="dia-seg kv" style="flex:93.5">93.5%（最优 93.9%）</span><span class="dia-seg oth" style="flex:6.5"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成式 agent</span><div class="dia-track"><span class="dia-seg kv" style="flex:90.8">90.8%（最优 91.1%）</span><span class="dia-seg oth" style="flex:9.2"></span></div></div>
+  <div class="dia-row"><span class="lbl">思维树</span><div class="dia-track"><span class="dia-seg kv" style="flex:98.6">98.6%（最优 98.9%）</span><span class="dia-seg oth" style="flex:1.4"></span></div></div>
+  <div class="dia-row"><span class="lbl">思维骨架</span><div class="dia-track"><span class="dia-seg kv" style="flex:92.2">92.2%</span><span class="dia-seg res" style="flex:2.4"></span><span class="dia-seg oth" style="flex:5.4"></span></div></div>
+  <div class="dia-row"><span class="lbl">LLM 评委</span><div class="dia-track"><span class="dia-seg kv" style="flex:72.3">72.3%（最优 73.3%）</span><span class="dia-seg oth" style="flex:27.7"></span></div></div>
+  <div class="dia-row"><span class="lbl">HellaSwag</span><div class="dia-track"><span class="dia-seg kv" style="flex:97.9">97.9%（= 最优）</span><span class="dia-seg oth" style="flex:2.1"></span></div></div>
+  <div class="dia-row"><span class="lbl">JSON 解码</span><div class="dia-track"><span class="dia-seg kv" style="flex:87.9">87.9%（= 最优）</span><span class="dia-seg oth" style="flex:12.1"></span></div></div>
+  <div class="dia-row"><span class="lbl">多轮对话·短</span><div class="dia-track"><span class="dia-seg kv" style="flex:49.5">49.5%</span><span class="dia-seg res" style="flex:10.9">差 10.9</span><span class="dia-seg oth" style="flex:39.6"></span></div></div>
+  <div class="dia-row"><span class="lbl">多轮对话·长</span><div class="dia-track"><span class="dia-seg kv" style="flex:57">57.0%</span><span class="dia-seg res" style="flex:17.4">差 17.4</span><span class="dia-seg oth" style="flex:25.6"></span></div></div>
+  <div class="dia-row"><span class="lbl">DSPy RAG</span><div class="dia-track"><span class="dia-seg kv" style="flex:90.1">90.1%</span><span class="dia-seg res" style="flex:2.7"></span><span class="dia-seg oth" style="flex:7.2"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每一行的总长代表 100%。蓝色是 SGLang 实际达到的命中率，斜纹是它离最优命中率还差的部分（思维骨架最优 94.6%，DSPy RAG 最优 92.8%），灰色是最优情况下也无法命中的部分。大多数基准几乎贴着最优值；差得最多的是两个多轮对话基准（本站的理解：对话是一轮一轮陆续到来的，调度器无法像离线那样按深度优先顺序安排，论文没有逐项解释）。把 11 项“实际 ÷ 最优”取平均约为 95.5%（推算），与论文说的 96% 一致。数值由本站从 <a href="https://arxiv.org/html/2312.07104#A3" target="_blank" rel="noopener">原文附录图 13 ↗</a> 的矢量数据量出，四舍五入到 0.1。</div>
+</div>
+<p>Guidance 和 LMQL 在后五个基准中的一部分上没有结果，论文的解释是它们太慢或者缺少功能：LMQL 的问题在于逐 token 处理很慢、后端没有优化，Guidance 不支持批处理和并行。在有结果的基准上，它们和 SGLang 的差距常常是几十倍（本站读数，例如思维树上 Guidance 的吞吐量只有 SGLang 的约 1/48），但这主要反映的是 llama.cpp、HF Transformers 这些后端缺少批处理，和 RadixAttention 本身关系不大。</p>
+<div class="note-warn"><b>关于“最高 6.4 倍”和“最高 3.7 倍”：</b>按本站对原文图 5、图 6 的读数，Llama-7B 上相对 vLLM 的吞吐量倍数从约 1.0（多轮对话长输出）到约 30（HellaSwag）不等，延迟倍数从约 0.99 到约 7.3 不等。正文的 6.4 恰好等于 MMLU 上 SGLang 相对表现最好的对照系统（Guidance，略好于 vLLM）的倍数，但 HellaSwag 一项相对最好的对照系统（vLLM）约为 30 倍，远大于 6.4；3.7 也找不到精确对应的柱子（最接近的是思维树上的约 3.6）。论文没有说明这两个数是怎么从图中得出的。引用时更稳妥的说法是：加速幅度强烈依赖负载的共享结构，从几乎没有到一个数量级以上都有。</div>
+
+<p><b>更大的模型。</b>Mixtral-8x7B（8 张 A10G，张量并行，原文图 7）和 Llama-70B（4 张 A100，附录图 12）上，加速的趋势和 7B 相同，说明这些优化也适用于更大的模型；Guidance 和 LMQL 没有高效的张量并行实现，所以这两张图里只比较了 vLLM。按本站读数，Mixtral 上吞吐量倍数从约 1.5（生成式 agent、思维骨架）到约 36（HellaSwag），MMLU 约 6.9、JSON 解码约 9.6；Llama-70B 上从约 1.3（思维骨架）到约 33（HellaSwag）。</p>
+<p><b>多模态模型。</b>SGLang 用 <code>image</code> 和 <code>video</code> 原语原生支持多模态模型。为了让 RadixAttention 能复用图片对应的 KV 缓存，SGLang 计算输入图片的哈希值，把它作为基数树里的键：同一张图片的多个问题就能共享图片 token 的 KV。由于其他对照系统当时对这些模型支持不好，这里的对照是模型作者在 Hugging Face Transformers 里的原始实现：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型 / 数据</th><th>作者原始实现</th><th>SGLang</th><th>倍数（推算）</th></tr>
+  <tr><td>LLaVA-v1.5-7B，图像（llava-bench-in-the-wild）</td><td class="num">0.18 张/秒</td><td class="num">1.15 张/秒</td><td class="num">约 6.4×</td></tr>
+  <tr><td>LLaVA-NeXT-34B，视频（ActivityNet）</td><td class="num">0.02 帧/秒</td><td class="num">0.10 帧/秒</td><td class="num">约 5×</td></tr>
+</table></div>
+<p class="w-note">前两列数字来自原文表 2，倍数为本站推算。论文正文说“最高 6 倍”。llava-bench-in-the-wild 里同一张图片有多个问题，这正是缓存复用发挥作用的地方。</p>
+<p><b>生产部署。</b>SGLang 部署在 Chatbot Arena 上为开源模型提供服务。由于有些模型的流量不大，每个模型只用一个 SGLang worker。运行一个月后，LLaVA-Next-34B 的 RadixAttention 缓存命中率为 52.4%，Vicuna-33B 为 74.1%。命中来自三处：常见的系统提示、经常被重复使用的示例图片、多轮对话的历史。对 Vicuna-33B，第一个 token 的延迟平均降低到 1/1.7。这是全文唯一一组来自真实流量的数字，比合成基准更能说明前缀缓存在实际服务中的价值。</p>
+<p><b>API 模型。</b>§5 已经讲过：用 GPT-3.5 从维基百科页面抽取三个字段，投机执行让输入 token 的花费降到约三分之一。</p>
+
+<h4 id="n-6-3">6.3 消融实验：每个部件贡献了多少</h4>
+<p><b>命中率与性能的关系。</b>原文图 8(a)(b) 在思维树基准上，通过在运行时故意让一部分已匹配的 token 不被复用，人为地调低命中率，观察第一个 token 的延迟、总延迟、批大小和吞吐量怎么变化。结论是：命中率越高，批越大，吞吐量越高，延迟越低。按本站读数，命中率从 0 升到约 99% 时，平均批大小从约 20 增加到约 48，吞吐量从约 340 增加到约 1,150 token/秒（约 3.4 倍），总延迟从约 420 秒降到约 125 秒，第一个 token 的延迟从约 24 秒降到约 2 秒。这组数字说明，前缀缓存同时作用于“省显存、批更大”和“少算 prefill”两条路径。</p>
+<p><b>RadixAttention 各个部件的作用。</b>原文图 8(c) 在四个代表性基准上，逐个关掉某个部件，看归一化吞吐量（全部打开 = 1）掉了多少：</p>
+<div class="table-wrap"><table>
+  <tr><th>配置</th><th class="num">LLM 评委</th><th class="num">思维树</th><th class="num">MMLU</th><th class="num">多轮对话（短）</th></tr>
+  <tr class="hl"><td>全部优化打开</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td><td class="num">1.00</td></tr>
+  <tr><td>不用缓存</td><td class="num">0.41</td><td class="num">0.28</td><td class="num">0.16</td><td class="num">0.54</td></tr>
+  <tr><td>缓存不用树，改用简单的表</td><td class="num">0.47</td><td class="num">0.37</td><td class="num">0.60</td><td class="num">0.88</td></tr>
+  <tr><td>先来先服务调度</td><td class="num">0.15</td><td class="num">0.36</td><td class="num">0.98</td><td class="num">0.55</td></tr>
+  <tr><td>随机顺序调度</td><td class="num">0.50</td><td class="num">0.47</td><td class="num">0.98</td><td class="num">0.68</td></tr>
+  <tr><td>关掉前端的程序内并行</td><td class="num">0.53</td><td class="num">0.36</td><td class="num">0.98</td><td class="num">0.95</td></tr>
+  <tr><td>关掉前端提示</td><td class="num">0.51</td><td class="num">0.87</td><td class="num">0.98</td><td class="num">0.98</td></tr>
+</table></div>
+<p class="w-note">数值为本站从 <a href="https://arxiv.org/html/2312.07104#S6.F8" target="_blank" rel="noopener">原文图 8(c) ↗</a> 的矢量数据量出的归一化吞吐量，四舍五入到 0.01；Llama-7B，1 张 A10G。</p>
+<p>论文只给出了定性结论：每个部件都是达到最佳性能所必需的；关掉前端的并行和提示也会让运行时性能变差，说明前端语言和运行时需要协同设计。从表里还能读出几点：MMLU 的共享结构很简单（一组示例 + 各题），所以调度顺序和前端几乎不影响它，但缓存本身和树结构影响很大；LLM 评委对调度顺序最敏感，先来先服务时吞吐量甚至低于完全不用缓存（0.15 对 0.41），论文没有解释原因；思维树最依赖程序内并行。</p>
+<p><b>RadixAttention 的开销。</b>在一个完全没有复用机会的基准上（ShareGPT 数据集的吞吐量测试），跑 100 个请求共用 74.3 秒，其中维护 RadixAttention 数据结构的时间只有 0.2 秒，不到 0.3%。原因是树操作的复杂度是线性的，而且常数很小。因此 SGLang 默认打开 RadixAttention。</p>
+<p><b>压缩有限状态机。</b>在 JSON 解码基准上，压缩有限状态机让吞吐量提高到 1.6 倍；而如果不把状态机的预处理结果在一批请求之间复用，每个请求都重做一遍，吞吐量会降到原来的 1/2.4（见 §4）。</p>
+<div class="note-warn"><b>读实验结果时要注意的几点：</b>
+<ul>
+  <li><b>vLLM 用的是没有跨请求前缀缓存的老版本（v0.2.5）。</b>所以和 vLLM 的比较，本质上是“有没有自动的跨请求 KV 复用、有没有程序结构信息”的比较，而不是和今天的 vLLM 比。今天的 vLLM 默认打开了自动前缀缓存（见“后来怎么样了”）。</li>
+  <li><b>吞吐量和延迟的测法不同。</b>吞吐量是大批量满负荷的结果，延迟是一次只跑一个程序的结果，两者的加速来源不同，不能互相换算。</li>
+  <li><b>和 Guidance、LMQL 的巨大差距主要来自后端。</b>它们用的是 llama.cpp 和 HF Transformers，不支持批处理或没有优化，几十倍的差距不能全算在 SGLang 的新技术上。</li>
+  <li><b>多模态的对照是 HF Transformers 里的参考实现</b>，不是专门的推理服务系统。</li>
+  <li><b>本页图表里的逐项倍数是本站读数。</b>论文正文只给了“最高 6.4×/3.7×”“命中率 50%–99%”“平均达到最优的 96%”等汇总数字。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2312.07104#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作：谁也在做 KV 复用，谁也在做 LLM 编程</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KV 缓存复用和“给大模型写程序”都不是 SGLang 独有的想法。和同期工作相比，SGLang 到底新在哪里？</div>
+<p><b>KV 缓存复用。</b>论文承认很多工作也在探索 KV 复用，其中不少是同期的。它认为自己的独特之处在于：RadixAttention 第一个提出把 KV 缓存当作<b>基于树的 LRU 缓存</b>来管理，也是第一个同时支持多层共享、缓存感知调度、前端与运行时协同调度以及分布式场景的方案。逐个对比：</p>
+<ul>
+  <li><b>vLLM 和 ChunkedAttention</b> 处理了一些简单的复用场景（比如共享系统提示），但不支持多层的树状共享，也没有 LRU 缓存。</li>
+  <li><b>PromptCache</b> 提出按模块复用 KV，可以复用不在开头的片段，但这样算出的结果和原来不同，论文引用说准确率最多会下降 43%。</li>
+  <li><b>Hydragen、FlashInfer、ChunkedAttention</b> 关注的是 CUDA 内核层面的优化：当一批请求共享前缀时，怎样让注意力计算对这段前缀只读一次、算得更快。它们没有“LRU 缓存”这个概念。这一层和 RadixAttention 是互补的：一个决定“哪些 KV 留着、谁和谁共享”，一个决定“共享的 KV 怎么算得快”。</li>
+  <li><b>API Serve 和 LLM-SQL</b> 研究特定应用里的 KV 复用（与外部 API 调用交错执行、关系数据库查询），但没有基数树和缓存感知调度。</li>
+</ul>
+<p><b>LLM 编程框架。</b>Guidance、LMQL、DSPy、LangChain、AutoGen、LLM Compiler 等都属于这一类，其中 Guidance 和 LMQL 与 SGLang 最像（§2 已比较）。论文认为自己的创新在于为这种编程模型配上了新的运行时优化；SGLang 和这些框架是兼容的，可以给它们加速（比如 §6 的 DSPy 实验）。SGLang 也和许多常见的推理优化（连续批处理、PagedAttention、量化、投机解码等）兼容。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 未来方向与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者认为 SGLang 还有哪些局限？哪些方向值得继续做？</div>
+<p>论文列出了六个未来方向：支持更多的输出模态；让 RadixAttention 跨越多级存储工作（显存之外再用 CPU 内存、磁盘）；在 RadixAttention 里支持模糊的语义匹配（不要求前缀逐 token 相同）；在 SGLang 之上提供更高层的原语；解决缓存感知调度的饥饿问题；增强编译器，做调度、内存规划等更高级的静态优化。其中“跨多级存储”这一条，后来在 SGLang 里实现了（见本页最后一节“后来怎么样了”）。</p>
+<p>结论部分重申：SGLang 是一个用来编写和高效执行结构化 LM 程序的框架，通过 RadixAttention、压缩有限状态机和语言解释器等优化，显著提高了复杂 LM 程序的吞吐量、降低了延迟，可以用来开发高级的提示技术和 agent 工作流。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 附录 D：编译模式，以及让 GPT-4 帮忙调整提示顺序</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>正文默认用解释器执行 SGLang 程序。如果先把程序编译成计算图再执行，能多做哪些优化？论文附录给了一个有意思的例子：通过调整提示里各段文字的顺序，让可共享的前缀变长。</div>
+<p><b>中间表示。</b>作者为 SGLang 设计了一种中间表示（IR），把程序表示成计算图：节点是原语操作，边是依赖关系。<code>+=</code> 和 <code>+</code> 的每个操作数都是一个节点，节点类型包括 ConstantText（常量文字）、Argument（函数参数）、Gen、Select、Variable（读取某个生成结果）、Fork、GetForkItem 和 Join。每次调用一个被装饰的函数、或者执行一次 <code>fork</code>，都会产生一条新的提示状态，也就是一条新的“流”。依赖分两种：<b>流内依赖</b>，同一条流里用 <code>+=</code> 提交的操作必须按顺序执行；<b>流间依赖</b>，一条流要读另一条流里某个变量的值，必须等那边算完。</p>
+<p>原文附录图 14 用一个“思维骨架”程序举例：先在一条流里生成两条简短的建议，再调用两次“展开”函数，各开一条新流，把两条建议分别扩写成段落；最后回到第一条流，把两段扩写拼起来，生成总结。</p>
+<div class="dia">
+  <div class="dia-title">示意图：思维骨架程序对应的三条流与它们之间的依赖</div>
+  <div class="dia-flow"><b style="width:56px">流 1</b><span class="dia-box">“这里有 2 条建议…”</span><span class="dia-arrow">→</span><span class="dia-box act">Gen：建议 1</span><span class="dia-arrow">→</span><span class="dia-box act">Gen：建议 2</span><span class="dia-arrow">→ 等待流 2、3 →</span><span class="dia-box">拼接两段扩写</span><span class="dia-arrow">→</span><span class="dia-box act">Gen：总结</span></div>
+  <div class="dia-flow"><b style="width:56px">流 2</b><span class="dia-box">“请展开这条建议：”</span><span class="dia-arrow">→</span><span class="dia-box reg">读取流 1 的建议 1</span><span class="dia-arrow">→</span><span class="dia-box act">Gen：段落</span></div>
+  <div class="dia-flow"><b style="width:56px">流 3</b><span class="dia-box">“请展开这条建议：”</span><span class="dia-arrow">→</span><span class="dia-box reg">读取流 1 的建议 2</span><span class="dia-arrow">→</span><span class="dia-box act">Gen：段落</span></div>
+  <div class="dia-note">每条流内部按顺序执行；青色框是流间依赖（要等另一条流把变量算出来）。流 2 和流 3 之间没有依赖，可以并行，而且它们以同一段常量文字开头，可以共享这段前缀。本站示意图，对应 <a href="https://arxiv.org/html/2312.07104#A3" target="_blank" rel="noopener">原文附录图 14 ↗</a>。</div>
+</div>
+<p>计算图是用<b>追踪</b>的方法生成的：拿抽象的参数把程序跑一遍，动态地记录下图。这种方法的局限是只能处理不依赖数据的控制流（比如 <code>if s["related"] == "no"</code> 这种根据生成结果决定走向的分支就无法追踪），作者计划以后解决。图建好之后交给图执行器运行，不用再重新解释 Python 程序，好处包括可以改写计算图做优化、减少运行时开销、可以把程序序列化保存。执行时，为每条流启动一个流执行器，按拓扑顺序把节点分发到各条流上。</p>
+<p><b>案例：调整代码顺序，让共享前缀变长。</b>作者尝试了一种编译优化：重新排列图中节点的顺序，让开头的常量部分更长，从而能被更多请求共享。这种优化并不严格保持原来的计算，属于“激进”的优化。例子大意如下：</p>
+<div class="dia">
+  <div class="dia-title">示意图：把固定的说明挪到可变内容前面，共享前缀就变长了</div>
+  <div class="dia-row"><span class="lbl">调整前</span><div class="dia-track"><span class="dia-seg kv" style="flex:2">这是一道题：</span><span class="dia-seg cmp" style="flex:3">{具体题目}</span><span class="dia-seg oth" style="flex:4">请以数学专家的身份解答这道题。</span></div></div>
+  <div class="dia-row"><span class="lbl">调整后</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">请以数学专家的身份解答下面的题。</span><span class="dia-seg kv" style="flex:2">这是一道题：</span><span class="dia-seg cmp" style="flex:3">{具体题目}</span></div></div>
+  <div class="dia-note">蓝色 = 所有请求都相同、可以共享的前缀；绿色 = 每个请求不同的部分；灰色 = 虽然每个请求都相同，但因为排在可变内容后面，无法作为前缀共享。本站示意图，改写自原文附录 D.2 的例子。</div>
+</div>
+<p>这种调整之所以有意思，是因为传统的程序分析做不到：提示里是自然语言，调换顺序后意思变没变，只有“读得懂”的人或模型才能判断。所以作者让 GPT-4 来做：写一段带几个示例的提示，教 GPT-4 理解 SGLang 的中间表示，再让它重排图中的节点。实验收集了 20 个网上的提示模板，用 5 个做示例、15 个做测试。在 15 个测试模板里，GPT-4 成功地在不改变语义的前提下重排了 12 个（人工检查确认），平均让可共享的前缀变长了 60 个 token。失败的情况来自 GPT-4 误解了节点的语义，过于激进地把所有常量都提到前面，即使这样改变了原意。作者认为这只是一个探索，要让这类优化可靠还需要更多工作。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2312.07104#A4" target="_blank" rel="noopener">英文原文 附录 D ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">10 后来怎么样了</h3>
+<p>这一节只写能查证的事实，出处在每段末尾或表格里注明，查证日期为 2026-10-19。</p>
+<h4 id="n-10-1">10.1 SGLang 成了一个通用的推理服务引擎</h4>
+<p>论文发表后，SGLang 的重心从“LM 程序的语言 + 运行时”逐渐转向它的运行时部分，成为一个通用的推理服务框架。它的 GitHub 仓库描述今天写的是“面向大语言模型和多模态模型的高性能服务框架”；截至 2026-10-19 有 37,341 个 star、9,680 个 fork，采用 Apache-2.0 许可。仓库的 README 说明：项目由非营利开源组织 LMSYS 托管；支持 NVIDIA、AMD、Google TPU、Intel、华为昇腾、摩尔线程等多种硬件；verl、slime、AReaL、Tunix、Miles 等强化学习训练框架用它来生成 rollout；NVIDIA Dynamo、llm-d、Ray Serve 等部署和编排系统可以以它为后端。据 TechCrunch 2026-01-21 的报道，SGLang 的核心成员成立了公司 RadixArk，由论文共同一作 Ying Sheng 任 CEO，SGLang 继续作为开源项目维护。</p>
+<p class="w-note">出处：GitHub API 与 <a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang README ↗</a>；<a href="https://techcrunch.com/2026/01/21/sources-project-sglang-spins-out-as-radixark-with-400m-valuation-as-inference-market-explodes" target="_blank" rel="noopener">TechCrunch ↗</a>。</p>
+
+<h4 id="n-10-2">10.2 论文里的几个想法后来的样子</h4>
+<ul>
+  <li><b>RadixAttention 仍然默认打开。</b>今天的 SGLang 文档里，<code>--disable-radix-cache</code> 默认为 False（即默认开启前缀缓存），<code>--page-size</code> 默认为 1（与论文“每页一个 token”一致），淘汰策略 <code>--radix-eviction-policy</code> 默认为 lru，另可选 lfu、slru、priority。</li>
+  <li><b>缓存感知调度变成了可选项。</b>文档里 <code>--schedule-policy</code> 的默认值是 fcfs（先来先服务），可选值包括 lpm（最长前缀匹配，即论文 §3.4 的做法）、dfs-weight、random、lof、priority、routing-key。论文的实验用的是最长前缀优先；今天默认改用先来先服务，文档没有说明原因。论文自己承认，最长前缀优先这种贪心策略可能让一些请求“饿死”（§3.4）。</li>
+  <li><b>数据并行的缓存感知分发（附录 A.4）产品化了。</b>SGLang v0.4（2024-12-04 的 LMSYS 博客）推出了缓存感知的负载均衡器：路由器维护一棵近似的基数树，预测请求在各个 worker 上的前缀命中率，把请求发给命中率高的 worker，不需要 worker 之间同步缓存状态，用 Rust 实现。博客在一个由多组长公共前缀构成的负载上（8 张 A100，Llama-3.1-8B，8 路数据并行）测得吞吐量从 82,665 提高到 158,596 token/秒，命中率从 20% 提高到 75%。同一版本还加入了把 CPU 调度和 GPU 计算重叠起来的“零开销”批调度器（相对上一版提速 1.1 倍），它能把基数树操作等 CPU 开销藏在 GPU 计算后面。</li>
+  <li><b>多级存储（论文的未来方向之一）实现了。</b>今天的 SGLang 提供分层缓存 HiCache（<code>--enable-hierarchical-cache</code>，默认关闭）：在 GPU 显存之外，再用主机内存（默认大小为显存池的 2 倍）以及 file、Mooncake、3FS、NIXL、AIBrix 等存储后端存放 KV 缓存。这方面的背景见本站的 <a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储</a> 页面。</li>
+  <li><b>约束解码换成了可插拔的语法后端。</b>今天的 <code>--grammar-backend</code> 可选 xgrammar、outlines、llguidance。v0.4 的博客说，接入 XGrammar 后 JSON 解码比其他开源方案最多快 10 倍。XGrammar（arXiv 2411.15100）支持上下文无关文法，弥补了 §4 提到的“正则表达式描述不了任意嵌套结构”的局限。</li>
+</ul>
+<p class="w-note">出处：<a href="https://docs.sglang.io/docs/advanced_features/server_arguments" target="_blank" rel="noopener">SGLang 文档：Server Arguments ↗</a>；<a href="https://lmsys.org/blog/2024-12-04-sglang-v0-4/" target="_blank" rel="noopener">LMSYS 博客：SGLang v0.4 ↗</a>；<a href="https://arxiv.org/abs/2411.15100" target="_blank" rel="noopener">XGrammar ↗</a>。</p>
+
+<h4 id="n-10-3">10.3 前缀缓存成了各家推理引擎的标配</h4>
+<p>论文写作时（2024 年中），它在脚注里说 RadixAttention 已经被部分地并入了 vLLM，作为一个可选的实验性功能。到今天，主流引擎都默认打开了跨请求的前缀缓存，只是实现方式不同：</p>
+<div class="table-wrap"><table>
+  <tr><th>系统</th><th>复用的粒度</th><th>怎么找到可复用的前缀</th><th>淘汰</th><th>默认</th></tr>
+  <tr><td>SGLang</td><td>1 个 token（页大小默认 1）</td><td>基数树上逐 token 匹配</td><td>LRU（默认），可选 LFU 等</td><td>开启</td></tr>
+  <tr><td>vLLM（自动前缀缓存）</td><td>整块，只缓存填满的块（默认块大小 16）</td><td>给每个块算哈希：父块的哈希 + 本块的 token + 额外的键（LoRA、多模态输入等）</td><td>LRU</td><td>开启（<code>enable_prefix_caching = True</code>）</td></tr>
+  <tr><td>TensorRT-LLM（KV cache reuse）</td><td>整块，只有填满的块能被共享（文档中默认每块 128 个 token）</td><td>按块匹配</td><td>LRU，可选卸载到主机内存</td><td>KVCacheManager 中默认开启</td></tr>
+</table></div>
+<p class="w-note">出处：<a href="https://docs.vllm.ai/en/latest/design/prefix_caching.html" target="_blank" rel="noopener">vLLM 设计文档：Automatic Prefix Caching ↗</a> 与 vLLM 源码 <code>vllm/config/cache.py</code>；<a href="https://nvidia.github.io/TensorRT-LLM/advanced/kv-cache-reuse.html" target="_blank" rel="noopener">TensorRT-LLM 文档：KV cache reuse ↗</a>；SGLang 文档同上。</p>
+<p>对比可以看出两种思路。SGLang 用基数树，匹配粒度细到单个 token，节点可以在任意位置拆分；vLLM 和 TensorRT-LLM 沿用分页的块，用“链式哈希”标识每个块连同它之前全部内容，只有整块相同才能复用。后者和已有的块管理器结合得更自然，代价是最后一个没填满的块无法共享。Hugging Face 的 TGI 在 v3（2024-12-09 发布）也把前缀缓存列为主要的提速来源之一，文档说查找开销只有几微秒，并在自己的长提示基准上报告了相对 vLLM 的大幅加速（这是 TGI 自己的测试）。</p>
+<p>本站相关页面：SGLang 用 FlashInfer 的内核读取按 token 分页的 KV（见 <a href="../legacy/tracks/ai-infra/02-flashinfer.html">FlashInfer 拆解页</a>）；连续批处理的来龙去脉见 <a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca / Sarathi-Serve</a>；SGLang 在强化学习训练里作为 rollout 引擎的用法见 <a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 系统</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、可靠媒体报道。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Lianmin Zheng</b>（共同一作）<div class="aff">UC Berkeley（论文署名）；博士导师 Ion Stoica、Joseph E. Gonzalez</div>Vicuna、Chatbot Arena、FastChat、Alpa、Ansor 等项目的作者之一，也是 <a href="vllm.html">vLLM 论文</a>的作者。个人主页显示他现在在 xAI，负责运行 Grok 模型的推理团队。</div>
+  <div class="author-card"><b>Liangsheng Yin</b><div class="aff">Shanghai Jiao Tong University（论文署名）</div>LMSYS 关于压缩有限状态机的博客（2024-02）的第一作者。</div>
+  <div class="author-card"><b>Zhiqiang Xie</b><div class="aff">Stanford University（论文署名）</div>也是 FlexGen 的作者之一。</div>
+  <div class="author-card"><b>Chuyue Sun</b><div class="aff">Stanford University（论文署名）</div></div>
+  <div class="author-card"><b>Jeff Huang</b><div class="aff">Texas A&amp;M University（论文署名）</div></div>
+  <div class="author-card"><b>Cody Hao Yu</b><div class="aff">独立研究者（论文署名）</div>也是 vLLM 论文的作者之一。</div>
+  <div class="author-card"><b>Shiyi Cao</b><div class="aff">UC Berkeley（论文署名）</div></div>
+  <div class="author-card senior"><b>Christos Kozyrakis</b><div class="aff">Stanford 电气工程与计算机科学教授</div>研究计算机体系结构与计算机系统，近年关注云计算和面向机器学习的系统；ACM 与 IEEE Fellow。</div>
+  <div class="author-card senior"><b>Ion Stoica</b><div class="aff">UC Berkeley 教授，Sky Computing Lab 主任</div>Databricks 与 Anyscale 联合创始人，Apache Spark 与 Ray 背后的研究负责人。</div>
+  <div class="author-card senior"><b>Joseph E. Gonzalez</b><div class="aff">UC Berkeley EECS 教授</div>他的组还做了 Vicuna、Chatbot Arena、vLLM 等工作。</div>
+  <div class="author-card senior"><b>Clark Barrett</b><div class="aff">Stanford 计算机科学研究教授</div>研究自动推理与 SMT（可满足性模理论）求解，个人主页把 cvc5 求解器列为研究项目、把 Stanford Center for Automated Reasoning（Centaur）列为所属中心；论文致谢提到了这个中心的资助。</div>
+  <div class="author-card senior"><b>Ying Sheng</b>（共同一作）<div class="aff">Stanford University（论文署名）；计算机科学博士，导师 Clark Barrett</div>FlexGen 第一作者，也参与了 S-LoRA、Vicuna 等项目。个人主页显示她 2024-10 至 2025-08 在 xAI 共同负责推理团队；据 TechCrunch（2026-01）报道，她是 RadixArk 的联合创始人兼 CEO。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/sgl-project/sglang" target="_blank" rel="noopener">sgl-project/sglang</a> 有 37,341 个 star、9,680 个 fork（截至 2026-10-19，GitHub API），Apache-2.0 许可；仓库创建于 2024-01-08。RadixAttention 最早在 2024-01-17 的 LMSYS 博客中公开介绍。</li>
+  <li><b>部署</b>：论文报告部署于 Chatbot Arena（§6.2）；项目 README 称其服务于 AI 实验室、云平台、企业和大学的生产负载，并被多个强化学习训练框架用于 rollout。</li>
+  <li><b>发表</b>：NeurIPS 2024 主会（Main Conference Track）。arXiv 第一版 2023-12-12，第二版 2024-06-06。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="distserve.html">DistServe</a>、<a href="speculative-decoding.html">投机解码</a></li>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：本文的直接前身——KV 缓存分页管理、块表与写时复制。</li>
+  <li><a href="../legacy/tracks/ai-infra/04-sglang.html">SGLang 结构拆解</a>：可点击的 RadixAttention 架构图、与 vLLM 的对比简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/02-flashinfer.html">FlashInfer</a>：SGLang 使用的注意力内核库，用块稀疏抽象覆盖各种 KV 布局。</li>
+  <li><a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储</a>：把前缀缓存从显存扩展到 CPU 内存与外部存储。</li>
+  <li><a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca / Sarathi-Serve</a>：连续批处理与分块 prefill。</li>
+  <li><a href="../legacy/tracks/ai-infra/05-speculative-decoding.html">投机解码</a>：另一种“一次多出几个 token”的思路，和压缩有限状态机的跳跃解码对照着看。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, Ying Sheng.
+<em>SGLang: Efficient Execution of Structured Language Model Programs.</em> NeurIPS 2024.
+<a href="https://arxiv.org/abs/2312.07104" target="_blank" rel="noopener">arXiv:2312.07104</a>，以 arXiv 非独占分发许可（arXiv.org perpetual, non-exclusive license）发布。
+本页是对论文的中文精读笔记，正文为本站撰写，并非翻译；因许可证不允许转载，本页没有使用原文图片，所有示意图均为本站绘制，并链接到对应的原图。标“本站读数”的数值是本站从原文矢量图中量出的近似值，标“推算”的数值是本站的计算，数字与结论均以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

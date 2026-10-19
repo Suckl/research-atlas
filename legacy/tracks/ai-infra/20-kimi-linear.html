@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimi Linear 与 KDA</title>
+<meta name="description" content="Kimi Linear：逐通道门控的 Kimi Delta Attention（KDA）、DPLR 特化的分块算法、3:1 KDA / MLA 混合与 NoPE；以及沿用这一架构的 Kimi K3（2.8T-A104B）在 Attention Residuals、KDA 上下文并行与前缀缓存上的系统设计。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="kimi-linear">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：让线性注意力的“遗忘”更精细</h2>
+<p><a href="11-gated-deltanet.html">Gated DeltaNet</a> 用一个<b>标量</b>门 α<sub>t</sub> 让整个状态矩阵一起衰减：一个头里 128 个键通道，要么一起记住，要么一起淡忘。而不同通道承载的信息寿命往往不同。GLA 有逐通道的衰减但没有 delta 规则的“定点改写”；Mamba2 两者都没有。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  KDA = Gated DeltaNet 的标量门换成逐通道对角门 Diag(α<sub>t</sub>)：每个键通道有自己的遗忘速度，同时保留 delta 规则。为了让它训得快，作者把分块算法特化为一种受约束的 DPLR 形式，比通用 DPLR 内核快约 2×。再按 3 层 KDA : 1 层 MLA 混合、全注意力层干脆不加位置编码——在相同配方下首次全面超过全注意力基线，1M 上下文解码最多快 6×。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 一个 KDA 层与混合堆叠</h2>
+<div class="legend">
+  <span><i class="sw data"></i>输入</span><span><i class="sw enc"></i>投影与卷积</span><span><i class="sw reg"></i>门控</span>
+  <span><i class="sw tgt"></i>递归状态</span><span><i class="sw pred"></i>全注意力层</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 480" role="img" aria-label="KDA 层结构与 3:1 混合堆叠">
+    <g data-part="stack" data-step="1">
+      <rect class="panel" x="10" y="10" width="210" height="460" rx="12"/>
+      <text class="t-c t-sm" x="115" y="32" style="fill:var(--text);font-weight:650">混合堆叠（3:1）</text>
+      <g class="tgt"><rect class="box" x="30" y="48" width="170" height="40" rx="8"/></g><text class="t-c" x="115" y="68">KDA</text>
+      <g class="tgt"><rect class="box" x="30" y="96" width="170" height="40" rx="8"/></g><text class="t-c" x="115" y="116">KDA</text>
+      <g class="tgt"><rect class="box" x="30" y="144" width="170" height="40" rx="8"/></g><text class="t-c" x="115" y="164">KDA</text>
+      <text class="t-c t-xs" x="115" y="390">每层后接 MoE（48B 总参 / 3B 激活，</text>
+      <text class="t-c t-xs" x="115" y="406">256 专家选 8，含 1 个共享专家）</text>
+      <text class="t-c t-b" x="115" y="300">× N</text>
+      <text class="t-c t-xs" x="115" y="326">KV 只出现在 1/4 的层</text>
+      <text class="t-c t-xs" x="115" y="342">→ KV cache 约少 75%</text>
+    </g>
+    <g class="pred" data-part="mla" data-step="6">
+      <rect class="box" x="30" y="192" width="170" height="52" rx="8"/>
+      <text class="t-c t-b" x="115" y="210">MLA 全注意力</text>
+      <text class="t-c t-xs" x="115" y="230">NoPE：不加位置编码</text>
+    </g>
+    <path class="edge" d="M200,68 C230,68 240,90 262,90" data-step="2"/>
+    <!-- KDA internals -->
+    <rect class="panel" x="240" y="10" width="710" height="460" rx="12"/>
+    <text class="t-sm" x="258" y="32" style="fill:var(--text);font-weight:650">一个 KDA 层（每头 d<tspan font-size="8" dy="2">k</tspan><tspan dy="-2"> = d</tspan><tspan font-size="8" dy="2">v</tspan><tspan dy="-2"> = 128）</tspan></text>
+    <g class="data"><rect class="box" x="266" y="70" width="80" height="40" rx="8"/></g><text class="t-c" x="306" y="90">x<tspan font-size="9" dy="3">t</tspan></text>
+    <g class="enc" data-part="proj" data-step="2">
+      <rect class="box" x="380" y="48" width="230" height="84" rx="10"/>
+      <text class="t-c t-b" x="495" y="68">q, k, v 投影</text>
+      <text class="t-c t-xs" x="495" y="88">线性 → 短卷积 → Swish</text>
+      <text class="t-c t-xs" x="495" y="106">q、k 再做 L2 归一化（稳定特征值）</text>
+      <text class="t-c t-xs" x="495" y="122">v 不归一化</text>
+    </g>
+    <path class="edge" d="M346,90 H376" data-step="2"/>
+    <g class="reg" data-part="alpha" data-step="3">
+      <rect class="box" x="380" y="150" width="230" height="64" rx="10"/>
+      <text class="t-c t-b" x="495" y="170">逐通道衰减 α<tspan font-size="9" dy="3">t</tspan><tspan dy="-3"> ∈ [0,1]</tspan><tspan font-size="9" dy="3">d_k</tspan></text>
+      <text class="t-c t-xs" x="495" y="192">低秩投影 W↑W↓x<tspan font-size="8" dy="2">t</tspan><tspan dy="-2"> → f(·)（秩 = 头维）</tspan></text>
+    </g>
+    <g class="reg" data-part="beta" data-step="3">
+      <rect class="box" x="380" y="226" width="230" height="44" rx="10"/>
+      <text class="t-c t-b" x="495" y="248">写入强度 β<tspan font-size="9" dy="3">t</tspan><tspan dy="-3"> = σ(W</tspan><tspan font-size="9" dy="3">β</tspan><tspan dy="-3">x</tspan><tspan font-size="9" dy="3">t</tspan><tspan dy="-3">)</tspan></text>
+    </g>
+    <path class="edge" d="M306,110 C306,180 340,182 376,182" data-step="3"/>
+    <path class="edge" d="M306,110 C306,248 340,248 376,248" data-step="3"/>
+    <g class="tgt" data-part="state" data-step="4">
+      <rect class="box" x="660" y="48" width="270" height="222" rx="12"/>
+      <text class="t-c t-b" x="795" y="72">递归状态 S<tspan font-size="9" dy="3">t</tspan><tspan dy="-3"> ∈ ℝ</tspan><tspan font-size="9" dy="-6">d_k×d_v</tspan></text>
+      <text class="t-c t-sm" x="795" y="100">S<tspan font-size="8" dy="3">t</tspan><tspan dy="-3"> = (I − β</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">k</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">k</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">ᵀ) Diag(α</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">) S</tspan><tspan font-size="8" dy="3">t−1</tspan><tspan dy="-3"> + β</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">k</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">v</tspan><tspan font-size="8" dy="3">t</tspan><tspan dy="-3">ᵀ</tspan></text>
+      <text class="t-c t-xs" x="795" y="124">Diag(α)：每个键通道各自衰减</text>
+      <text class="t-c t-xs" x="795" y="142">(I − βkkᵀ)：沿 k 擦掉旧值（delta 规则）</text>
+      <text class="t-c t-xs" x="795" y="160">βkvᵀ：写入新值</text>
+      <g><rect class="tk tgt" x="700" y="178" width="14" height="14"/><rect class="tk tgt" x="714" y="178" width="14" height="14" style="fill-opacity:.6"/><rect class="tk tgt" x="728" y="178" width="14" height="14" style="fill-opacity:.3"/><rect class="tk tgt" x="742" y="178" width="14" height="14" style="fill-opacity:.85"/><rect class="tk tgt" x="756" y="178" width="14" height="14" style="fill-opacity:.45"/></g>
+      <text class="t-xs" x="780" y="186">不同通道不同的保留率</text>
+      <text class="t-c t-xs" x="795" y="216">读出 o = Sᵀq；状态大小与序列长度无关</text>
+      <text class="t-c t-xs" x="795" y="234">GDN 是这里的特例：Diag(α) = α·I</text>
+      <text class="t-c t-xs" x="795" y="254">decode 每步只读写 128 × 128 / 头</text>
+    </g>
+    <path class="edge" d="M610,90 H656" data-step="4"/>
+    <path class="edge reg" d="M610,182 H656" data-step="4"/>
+    <path class="edge reg" d="M610,248 C632,248 636,240 656,240" data-step="4"/>
+    <g class="enc" data-part="out" data-step="5">
+      <rect class="box" x="380" y="300" width="550" height="76" rx="10"/>
+      <text class="t-c t-b" x="655" y="322">输出 = W<tspan font-size="9" dy="3">o</tspan><tspan dy="-3">( σ(W↑</tspan><tspan font-size="9" dy="3">g</tspan><tspan dy="-3">W↓</tspan><tspan font-size="9" dy="3">g</tspan><tspan dy="-3">x</tspan><tspan font-size="9" dy="3">t</tspan><tspan dy="-3">) ⊙ RMSNorm</tspan><tspan font-size="9" dy="3">head</tspan><tspan dy="-3">(o</tspan><tspan font-size="9" dy="3">t</tspan><tspan dy="-3">) )</tspan></text>
+      <text class="t-c t-xs" x="655" y="346">逐头 RMSNorm + 低秩 sigmoid 输出门（去掉门或换成 Swish 门都会变差）</text>
+      <text class="t-c t-xs" x="655" y="362">门控还缓解了注意力汇点（attention sink）</text>
+    </g>
+    <path class="edge" d="M795,270 V296" data-step="5"/>
+    <g data-part="kv" data-step="7">
+      <rect class="note-bg" x="266" y="396" width="664" height="62" rx="8"/>
+      <text class="t-sm" x="280" y="414" style="fill:var(--text);font-weight:650">1M 上下文解码（48B-A3B，与全 MLA 同配方对比）</text>
+      <text class="t-xs" x="280" y="434">每输出 token 耗时 TPOT：1.84 ms vs 11.48 ms（6.3×）；prefill：512K 时快 2.3×、1M 时快 2.9×</text>
+      <text class="t-xs" x="280" y="450">KV cache 最多减少 75%（只有 1/4 的层有随长度增长的 KV）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="stack"><h4>3:1 层间混合</h4><p>每 3 层 KDA 接 1 层 MLA。论文比较了不同比例的验证困惑度：3:1 = 5.65、1:1 = 5.66、7:1 = 5.70、15:1 = 5.82、纯 MLA = 5.77，选 3:1。选择层间混合而不是同一层内按头混合，是为了基础设施简单、训练稳定。<span class="src">Kimi Linear §4、Tab. 1</span></p></div>
+    <div data-note="mla"><h4>MLA 层用 NoPE</h4><p>全注意力层不加任何位置编码，位置信息交给 KDA——递归本身是有序的，逐通道衰减就是一种可学习的“相对位置”先验。两个工程好处：推理时 MLA 可以完全转成 MQA（RoPE 会阻止把投影矩阵吸收进 KV）；长上下文扩展时不需要调 RoPE 频率。</p></div>
+    <div data-note="proj"><h4>投影</h4><p>q、k、v 都经过线性投影、短卷积（局部顺序信息）和 Swish；q、k 再做 L2 归一化以保证状态更新矩阵 (I − βkkᵀ) 的特征值稳定。d<sub>k</sub> = d<sub>v</sub> = 128。</p></div>
+    <div data-note="alpha"><h4>逐通道衰减</h4><p>α<sub>t</sub> 是一个 d<sub>k</sub> 维向量，由秩等于头维的低秩投影再过一个与 GDN / Mamba 类似的函数得到，值在 [0,1]。每个键通道独立决定保留多少旧信息。这是 KDA 与 GDN 唯一的结构差别，却要求重写分块算法（见 3.2）。</p></div>
+    <div data-note="beta"><h4>写入强度</h4><p>β<sub>t</sub> 是每头一个标量，sigmoid 激活：delta 规则的“学习率”，决定沿 k<sub>t</sub> 方向用新值替换旧值的程度。</p></div>
+    <div data-note="state"><h4>状态更新</h4><p>先按通道衰减（Diag(α)），再沿 k 擦除（I − βkkᵀ），最后写入 βkvᵀ。读出 o = Sᵀq。这里采用论文的记法，S 为 d<sub>k</sub> × d<sub>v</sub>；GDN 页的公式是同一递归的转置写法。</p></div>
+    <div data-note="out"><h4>输出路径</h4><p>逐头 RMSNorm 后乘一个低秩参数化的 sigmoid 门，再过输出投影 W<sub>o</sub>。消融：去掉门变差，把 sigmoid 换成 Swish 也变差。</p></div>
+    <div data-note="kv"><h4>为什么是 75%</h4><p>论文只给出“最多 75%”的结论。按结构推算：KDA 层每头只有固定的 128 × 128 状态，随序列增长的 KV 只存在于 MLA 层，3:1 时只占 1/4 的层，所以长上下文下 KV 约为全 MLA 模型的 1/4。</p></div>
+    <div data-step-note="1"><h4>① 堆叠</h4><p>3 层 KDA + 1 层 MLA 为一组。</p></div>
+    <div data-step-note="2"><h4>② 投影</h4><p>q、k、v：线性 + 短卷积 + Swish（+ L2Norm）。</p></div>
+    <div data-step-note="3"><h4>③ 门</h4><p>逐通道 α 与标量 β。</p></div>
+    <div data-step-note="4"><h4>④ 递归</h4><p>按通道衰减、沿 k 擦除、写入新值。</p></div>
+    <div data-step-note="5"><h4>⑤ 输出</h4><p>RMSNorm + sigmoid 门 + 投影。</p></div>
+    <div data-step-note="6"><h4>⑥ 全注意力层</h4><p>MLA，不加位置编码。</p></div>
+    <div data-step-note="7"><h4>⑦ 效率</h4><p>1M 上下文 TPOT 6.3× 更快。</p></div>
+  </div>
+  <figcaption>图 1　KDA 层（解码视角）与 Kimi Linear 的 3:1 混合堆叠。依据 Kimi Linear §2–5。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-family">3.1 在线性注意力家族里的位置</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>衰减粒度</th><th>delta 规则（定点擦写）</th><th>状态更新（S ∈ ℝ<sup>d_k×d_v</sup>）</th></tr></thead>
+  <tbody>
+    <tr><td>Mamba2</td><td>每头一个标量</td><td>无</td><td>S<sub>t</sub> = α<sub>t</sub>S<sub>t−1</sub> + k<sub>t</sub>v<sub>t</sub>ᵀ</td></tr>
+    <tr><td>GLA</td><td>逐通道</td><td>无</td><td>S<sub>t</sub> = Diag(α<sub>t</sub>)S<sub>t−1</sub> + k<sub>t</sub>v<sub>t</sub>ᵀ</td></tr>
+    <tr><td>Gated DeltaNet</td><td>每头一个标量</td><td>有</td><td>S<sub>t</sub> = α<sub>t</sub>(I − β<sub>t</sub>k<sub>t</sub>k<sub>t</sub>ᵀ)S<sub>t−1</sub> + β<sub>t</sub>k<sub>t</sub>v<sub>t</sub>ᵀ</td></tr>
+    <tr class="hl"><td>KDA</td><td>逐通道</td><td>有</td><td>S<sub>t</sub> = (I − β<sub>t</sub>k<sub>t</sub>k<sub>t</sub>ᵀ)Diag(α<sub>t</sub>)S<sub>t−1</sub> + β<sub>t</sub>k<sub>t</sub>v<sub>t</sub>ᵀ</td></tr>
+  </tbody>
+</table></div>
+<p>论文在合成任务上报告 Mamba2 在其设置下全部失败；KDA 在需要精细记忆管理的任务上优于 GDN。<span class="src">Kimi Linear §5.1</span></p>
+
+<h3 id="c-dplr">3.2 分块算法：DPLR 的受约束特化</h3>
+<p>线性注意力的训练靠分块并行：块内用矩阵乘并行算，块间只传递状态。delta 规则让状态转移矩阵变成“对角 + 低秩”（DPLR）形式 D − abᵀ，通用 DPLR 的分块算法需要两次二级分块，并要除以累积衰减 Γ（数值上不稳定）。KDA 的转移恰好是受约束的 DPLR：a = βk、b = k ⊙ α、D = Diag(α)。利用这个结构（WY 表示 + UT 变换），二级分块的矩阵计算从 4 次降到 2 次、再省掉 3 次额外矩阵乘，并避开了 1/Γ 项。实测在 64K 以内的序列长度上比通用 DPLR 内核快近 2×。<span class="src">Kimi Linear §3.1–3.2、§6.2、Fig. 2</span> 内核已开源在 flash-linear-attention（<code>fla/ops/kda</code>），并提供 vLLM 实现。</p>
+
+<h3 id="c-nope">3.3 为什么全注意力层可以不要位置编码</h3>
+<p>在纯 Transformer 里，NoPE 层只能从因果掩码间接感知顺序，长度外推也不可靠。但在混合模型里，每个 MLA 层之前都有 KDA 层：递归按顺序处理 token，衰减随距离累积，相当于已经把“相对位置”编码进了隐状态。于是 MLA 层只负责基于内容的精确检索。这与 Qwen3-Next / Qwen3.5 不同——它们的全注意力层仍保留（部分）RoPE。对比与讨论见 <a href="10-rope.html#q24">RoPE 页 Q24</a>。</p>
+
+<h3 id="c-k3">3.4 规模化：Kimi K3（2026-07）</h3>
+<p>Kimi K3 是 2.8T 总参、104B 激活的 MoE，原生视觉、1M 上下文，沿用 Kimi Linear 的思路并加了几件新东西：<span class="src">Kimi K3 报告 §2–5</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方面</th><th>设计</th></tr></thead>
+  <tbody>
+    <tr><td>层结构</td><td>93 层，宽 7168：每组 3 层 KDA + 1 层门控 MLA（NoPE、全秩输入相关的输出门），末尾再加 1 层门控 MLA；共 69 层 KDA、24 层 MLA。KDA 的衰减设下界 g<sub>min</sub> = −5，使分块计算保持在 BF16 范围内</td></tr>
+    <tr><td>Attention Residuals</td><td>不再把各层输出等权相加到残差流，而是每层用一个可学习的伪 query 对之前各层的输出做注意力；按 12 层一块分成 8 块（Block AttnRes），显存从 O(Ld) 降到 O(Nd)</td></tr>
+    <tr><td>MoE</td><td>Stable LatentMoE：896 个路由专家选 16 个 + 2 个共享专家，路由专家在 3584 维（0.5×）的潜空间里计算</td></tr>
+    <tr><td>优化器与精度</td><td>逐头 Muon（每个注意力头的动量块单独正交化）+ 沿用 K2 的权重裁剪；专家权重 MXFP4、激活 MXFP8 的量化感知训练贯穿 SFT 与 RL</td></tr>
+    <tr><td>KDA 系统</td><td>FlashKDA（CUTLASS 实现的分块内核）；KDA 上下文并行（KCP）：每段的影响拆成“累积转移 + 本地状态”，各卡一次固定大小的 all-gather 即可还原入口状态</td></tr>
+    <tr><td>前缀缓存</td><td>KDA 状态与 MLA 的 KV 共用一个分页池；6144 token 的物理块里按 512 token 做哈希；KDA 的递归状态只在稀疏的边界（通常是对话轮次边界）存只读快照，命中时复制为请求私有状态</td></tr>
+    <tr><td>专家并行</td><td>MoonEP：根据路由结果在线规划冗余专家，使每张卡恰好收到 S×K 个 token（完全均衡），通信缓冲区与形状静态化</td></tr>
+  </tbody>
+</table></div>
+<p>论文称这些改动合起来让整体缩放效率比 Kimi K2 提高约 2.5×。<b>递归状态的前缀缓存</b>是混合架构特有的系统问题：注意力的 KV 按 token 存，任意前缀都能复用；递归状态只是某个位置上的一个快照，只能在事先存了快照的边界上复用。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">kda_decode_step.py（单头，逐 token 递归）</div>
+<pre><code class="lang-py">def kda_step(S, x, p):                                   # S: [d_k, d_v]
+    q = l2norm(swish(p.conv_q(p.Wq @ x)))                # 短卷积带自己的小缓存
+    k = l2norm(swish(p.conv_k(p.Wk @ x)))
+    v = swish(p.conv_v(p.Wv @ x))
+    alpha = f(p.Wa_up @ (p.Wa_down @ x))                 # [d_k]，逐通道，取值 [0, 1]
+    beta = sigmoid(p.Wb @ x)                             # 标量
+    S = alpha[:, None] * S                               # Diag(α) S：按键通道衰减
+    S = S - beta * outer(k, k @ S) + beta * outer(k, v)  # 沿 k 擦除旧值、写入新值
+    o = S.T @ q
+    g = sigmoid(p.Wg_up @ (p.Wg_down @ x))
+    return S, p.Wo @ (g * rmsnorm(o))</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">5. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>同配方 1.4T token 对比</th><th>全 MLA</th><th>Kimi Linear</th></tr></thead>
+  <tbody>
+    <tr><td>MMLU-Pro（base）</td><td>47.2</td><td>51.0</td></tr>
+    <tr><td>MMLU（base）</td><td>71.6</td><td>73.8</td></tr>
+    <tr><td>BBH（base）</td><td>71.6</td><td>72.9</td></tr>
+    <tr><td>RULER @128K</td><td>81.3</td><td>84.3</td></tr>
+    <tr><td>MRCR @128K</td><td>22.6</td><td>29.6</td></tr>
+    <tr><td>GPQA-Diamond（instruct，Avg@8）</td><td>57.1</td><td>62.1</td></tr>
+    <tr><td>EvalPlus（instruct）</td><td>62.6</td><td>61.0</td></tr>
+    <tr><td>LiveBench</td><td>45.7</td><td>45.2</td></tr>
+  </tbody>
+</table></div>
+<p>来源：Kimi Linear Tab. 3–5。并非全面领先：指令版的 EvalPlus、LiveBench 略低，§5.5.1 还提到 LongBench v2 与 Frames 上 MLA 更好。发布的检查点（48B-A3B）训练了 5.7T token，支持 1M 上下文。</p>
+
+<!-- ================================================================== -->
+<h2 id="questions">6. 简答题</h2>
+<div class="qa">
+  <h3 id="q40"><span class="qid">Q40</span>KDA 相比 Gated DeltaNet 改了什么？Kimi Linear 的全注意力层为什么可以不用位置编码？</h3>
+  <div class="ans">
+    <p class="short">结构上只改了一处：GDN 的遗忘门是每头一个标量 α<sub>t</sub>，整个状态一起衰减；KDA 改成逐通道的对角门 Diag(α<sub>t</sub>)，每个键通道有自己的遗忘速度，delta 规则保留。代价在算法层：状态转移变成受约束的 DPLR 形式，作者据此重写了分块算法，比通用 DPLR 内核快约 2×，并避开了数值不稳定的 1/Γ 项。</p>
+    <ul>
+      <li><b>NoPE 的理由</b>：每个 MLA 层前都有 KDA 层，递归按序处理、衰减随距离累积，隐状态里已经带着相对位置信息；MLA 只负责基于内容的检索。</li>
+      <li><b>工程好处</b>：没有 RoPE，MLA 的投影可以完全吸收、推理时等价于 MQA；长上下文扩展无需调整 RoPE 频率。</li>
+      <li><b>对照</b>：Qwen3-Next / Qwen3.5 的门控全注意力层仍保留（部分）RoPE，GDN 层不加位置编码；Kimi K3 延续了 NoPE 的门控 MLA。</li>
+    </ul>
+    <p class="cite">依据：Kimi Linear §2.2、§3、§4、§6.2；Kimi K3 §2.1。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Kimi Team. <i>Kimi Linear: An Expressive, Efficient Attention Architecture.</i> 2025. <a href="https://arxiv.org/abs/2510.26692">arXiv:2510.26692</a></li>
+  <li>Kimi Team. <i>Kimi K3: Open Frontier Intelligence.</i> 2026. <a href="https://arxiv.org/abs/2607.24653">arXiv:2607.24653</a></li>
+  <li>Kimi Team. <i>Attention Residuals.</i> 2026. <a href="https://arxiv.org/abs/2603.15031">arXiv:2603.15031</a></li>
+  <li>Yang, Kautz, Hatamizadeh. <i>Gated Delta Networks: Improving Mamba2 with Delta Rule.</i> ICLR 2025. <a href="https://arxiv.org/abs/2412.06464">arXiv:2412.06464</a></li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ViRDM：把图像表征分布匹配搬到因果视频</title>
+<meta name="description" content="ViRDM：固定视频—文本表征参考取代 DMD 的在线教师与 critic，以随机干净退出、轻量 VAE 和分阶段 VJP 解决显存，再用因果初始化与动态正则修复视频特有问题。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="virdm">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+<div data-hero></div>
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：能否只更新生成器，把监督提前算好？</h2>
+<p><a href="12-self-forcing.html">Self Forcing</a> 与 <a href="14-causal-forcing.html">Causal Forcing</a> 的 DMD 后训练要同时维护生成器、冻结 real score 和在线 fake score：典型 Wan2.1 配置是 1.3B 学生、14B 教师、1.3B critic。score 差间接估计分布误差，每个更新都要调用大教师并训练 critic<span class="src">论文 §1、Tab. 7；Causal Forcing App. D</span>。</p>
+<p><a href="16-rdm.html">RDM</a> 在图像上提供另一条路：固定参考分布，直接比较生成结果与参考在冻结编码器中的分布。ViRDM 把它搬到少步因果视频，目标是<b>去掉后训练中的在线扩散教师和可学习 critic</b>。它仍需要一个已完成因果适配的初始化、离线视频参考、冻结表征网络与可微解码器；“generator-only”描述的是更新对象，并不表示训练只有一个网络或不继承教师生成的数据<span class="src">论文 §3.2、§3.4.2、§5</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  保留 Causal Forcing 的 causal ODE 起点，把 DMD 换成固定视频—文本表征的 MMD；用随机干净退出、轻量解码器和分阶段 VJP 让梯度放进显存，再补一个低权重光流正则。最终 20 次生成器更新得到 VBench 84.87，后训练耗费约 16 A100 GPU-hours<span class="src">论文摘要、§4.1、Tab. 7–8</span>。
+</div>
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：前向缓存，分段回传</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / latent / 参考</span><span><i class="sw enc"></i>可训练生成器</span>
+  <span><i class="sw tgt"></i>冻结解码器 / 编码器</span><span><i class="sw act"></i>文本 / 历史 KV</span>
+  <span><i class="sw loss"></i>MMD</span><span><i class="sw reg"></i>动态正则</span><span><i class="ln sg"></i>缓存 / 停止梯度</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 510" role="img" aria-label="ViRDM：缓存随机退出视频，分别通过表征、解码器与生成器回传梯度">
+    <text class="t-sm t-b" x="24" y="28">首次前向：无梯度生成与编码</text>
+    <g data-part="input" data-step="2">
+      <g class="data"><rect class="box" x="24" y="58" width="110" height="76" rx="10"/></g>
+      <text class="t-c t-b" x="79" y="84">噪声 ε</text><text class="t-c t-xs" x="79" y="110">记录全部随机性</text>
+      <g class="act"><rect class="box" x="24" y="152" width="110" height="42" rx="8"/></g>
+      <text class="t-c t-sm" x="79" y="175">文本 c</text>
+    </g>
+    <path class="edge" d="M134,96 H158" data-step="2"/>
+    <path class="edge act" d="M134,173 H146 V123 H158" data-step="2"/>
+    <g class="enc" data-part="rollout" data-step="2 6">
+      <rect class="box" x="162" y="58" width="156" height="136" rx="10"/>
+      <text class="t-c t-b" x="240" y="83">因果生成器 G_θ</text><text class="t-c t-xs" x="240" y="107">每块同一随机退出 S</text><text class="t-c t-xs" x="240" y="128">输出 clean latent ẑ₀</text><text class="t-c t-xs" x="240" y="149">自生成历史 / KV 截断</text><text class="t-c t-xs" x="240" y="175">缓存 ẑ₀ 与随机 trace</text>
+    </g>
+    <path class="edge enc" d="M318,96 H342" data-step="2"/>
+    <g class="tgt" data-part="decoder" data-step="2 5">
+      <rect class="box frozen" x="346" y="58" width="150" height="136" rx="10"/>
+      <text class="t-c t-b" x="421" y="83">轻量解码 D</text><text class="t-c t-xs" x="421" y="107">TAEW2.1 · 冻结</text><text class="t-c t-xs" x="421" y="129">latent → 视频像素 x̂₀</text><text class="t-c t-xs" x="421" y="151">是可微桥梁</text><text class="t-c t-xs" x="421" y="175">参数不更新，输入需梯度</text>
+    </g>
+    <path class="edge tgt" d="M496,96 H520" data-step="2"/>
+    <g class="tgt" data-part="representation" data-step="2 4">
+      <rect class="box frozen" x="524" y="58" width="172" height="136" rx="10"/>
+      <text class="t-c t-b" x="610" y="83">联合表征 Φ(x̂₀,c)</text><text class="t-c t-xs" x="610" y="107">V-JEPA 2.1 视频特征</text><text class="t-c t-xs" x="610" y="129">SigLIP2 文本特征</text><text class="t-c t-xs" x="610" y="151">先缓存全批 ĥ</text><text class="t-c t-xs" x="610" y="175">输入回传，编码器冻结</text>
+    </g>
+    <path class="edge sg" d="M696,96 H720" data-step="3"/>
+    <g class="loss" data-part="mmd" data-step="3">
+      <rect class="box" x="724" y="58" width="212" height="88" rx="10"/>
+      <text class="t-c t-b" x="830" y="84">RDM / MMD</text><text class="t-c t-xs" x="830" y="108">新鲜生成批内排斥</text><text class="t-c t-xs" x="830" y="130">固定参考吸引 → g_h</text>
+    </g>
+    <g class="data" data-part="reference" data-step="1 3">
+      <rect class="box" x="724" y="174" width="212" height="80" rx="10"/>
+      <text class="t-c t-b" x="830" y="199">离线视频—文本参考</text><text class="t-c t-xs" x="830" y="221">一次性编码并冻结</text><text class="t-c t-xs" x="830" y="243">参考分布不会随训练更新</text>
+      <path class="edge sg" d="M830,174 V150"/>
+    </g>
+    <g class="reg" data-part="dynamics" data-step="5">
+      <rect class="box" x="346" y="226" width="350" height="70" rx="10"/>
+      <text class="t-c t-b" x="521" y="251">动态正则：冻结 RAFT → 单侧 hinge</text><text class="t-c t-xs" x="521" y="278">仅训练使用；补足视频特征的运动监督</text>
+      <path class="edge reg" d="M421,194 V222"/>
+    </g>
+    <g data-part="replay" data-step="4 5 6">
+      <rect class="panel" x="24" y="324" width="912" height="166" rx="12"/>
+      <text class="t-sm t-b" x="40" y="348">反向：每次只保留一个模块的计算图，结束后释放</text>
+      <g class="tgt"><rect class="box" x="688" y="372" width="224" height="80" rx="10"/></g>
+      <text class="t-c t-b" x="800" y="397">重算表征编码器</text><text class="t-c t-xs" x="800" y="427">g_h → J_Φᵀ g_h = g_x</text>
+      <g class="tgt"><rect class="box" x="400" y="372" width="240" height="80" rx="10"/></g>
+      <text class="t-c t-b" x="520" y="397">重算轻量解码器</text><text class="t-c t-xs" x="520" y="427">g_x → J_Dᵀ g_x = g_z</text>
+      <g class="enc"><rect class="box" x="48" y="372" width="298" height="80" rx="10"/></g>
+      <text class="t-c t-b" x="197" y="397">回放 G_θ 的同一随机退出</text><text class="t-c t-xs" x="197" y="427">用 g_z 更新 θ；先前去噪步无梯度</text>
+      <path class="edge grad" d="M688,412 H644"/><path class="edge grad" d="M400,412 H350"/>
+      <text class="t-c t-xs" x="480" y="478">光流支路的 latent 梯度相加；只有生成器参数被更新</text>
+    </g>
+    <path class="edge grad" d="M936,102 H948 V354 H800 V368" data-step="4"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>复算必须对应同一输出</h4><p>第一次前向记录退出步、初始噪声和每次再加噪随机性；回放恢复这些量，否则缓存的输出梯度会作用于另一个样本，失去链式法则的一致性<span class="src">论文 Alg. 1–2</span>。</p></div>
+    <div data-note="rollout"><h4>随机 clean exit</h4><p>每个分布式 microbatch 同步采样退出 S，同一次视频的所有 chunk 使用相同 S。S 前不保留梯度，S 的干净预测作为 chunk 输出；更新历史 KV 时截断梯度<span class="src">论文 §3.3.1、Alg. 1</span>。</p></div>
+    <div data-note="decoder"><h4>冻结不等于省掉输入梯度</h4><p>完整 Wan VAE 单独反传仍会超显存；训练以轻量 TAEW2.1 作为 latent 到像素的可微桥梁，优化目标在表征分布而非像素重建<span class="src">论文 §3.3.2、Tab. 1</span>。</p></div>
+    <div data-note="representation"><h4>视频与条件的联合分布</h4><p>V-JEPA 2.1 对整片形成上下文特征，SigLIP2 编码文本，拼接后做核匹配；仅匹配视频边缘分布不能保证按提示词生成<span class="src">论文 §3.1–3.2、式 (1)–(2)</span>。</p></div>
+    <div data-note="mmd"><h4>不经过扩散 score 的分布误差</h4><p>对全局新鲜生成表征计算批内排斥与参考吸引，然后缓存每个表征的梯度；没有在线 real score 或 fake score<span class="src">论文式 (3)、Alg. 2</span>。</p></div>
+    <div data-note="reference"><h4>参考仍有数据来源</h4><p>参考是 Causal Forcing 训练数据中的 6505 个视频—文本对，每对编码一次。去掉在线教师不等于去掉合成参考和初始化的成本<span class="src">论文 §3.2、Tab. 7</span>。</p></div>
+    <div data-note="dynamics"><h4>运动达到阈值就停止推动</h4><p>冻结 RAFT 估计帧对光流；低权重 hinge 只纠正运动不足。它不直接判断运动是否符合物理规律，仍需外部时间质量指标与人类偏好验证<span class="src">论文 §3.5.2、§4.3</span>。</p></div>
+    <div data-note="replay"><h4>分阶段 VJP</h4><p>VJP 计算输出梯度与局部 Jacobian 的乘积，无需构造完整 Jacobian；表征、解码器与生成器的反向图依次创建与释放。它节省峰值显存，也增加复算<span class="src">论文式 (5)、Alg. 2</span>。</p></div>
+    <div data-step-note="1"><h4>① 离线固定参考</h4><p>视频—文本对编码、带宽估计在后训练之前完成。</p></div>
+    <div data-step-note="2"><h4>② 缓存新鲜视频</h4><p>不带梯度的随机退出自回归展开；缓存 latent、表征、随机 trace。</p></div>
+    <div data-step-note="3"><h4>③ 表征级梯度</h4><p>汇集全局生成表征，计算 MMD 并缓存 g_h，释放损失图。</p></div>
+    <div data-step-note="4"><h4>④ 表征 VJP</h4><p>重算编码器，得到像素梯度后释放其图。</p></div>
+    <div data-step-note="5"><h4>⑤ 解码与动态 VJP</h4><p>把像素梯度和动态损失分别传到 latent，不同时保留所有支路。</p></div>
+    <div data-step-note="6"><h4>⑥ 回放与更新</h4><p>恢复同一随机生成过程，仅对选中退出的生成器路径反传。</p></div>
+  </div>
+  <figcaption>图 1　前向缓存与分阶段反向。依据论文 Fig. 2、式 (4)–(7)、Alg. 1–2；图中的阶段编号是计算顺序。</figcaption>
+</figure>
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="from-image">3.1 从图像到视频：RDM 的三处前提失效</h3>
+<p><a href="16-rdm.html">图像 RDM</a> 把生成样本经冻结特征编码器后做 MMD。ViRDM 保留终点分布目标，却发现“接一个视频编码器”并不足够：少步 AR 展开、视频解码和时序表征改变了计算与优化条件<span class="src">论文 §1、§3</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>图像侧经验</th><th>搬到视频后哪里失效</th><th>具体改动</th></tr></thead>
+  <tbody>
+    <tr><td>一步生成后直接反传到像素与特征</td><td>少步因果 rollout、视频 VAE 与编码器的反向图共驻显存</td><td>随机干净退出 + 轻量解码器 + 分阶段 VJP</td></tr>
+    <tr><td>大量新鲜样本；可从双向基座后训练</td><td>整片视频采样昂贵；短后训练不能自行建立因果生成能力</td><td>小规模新鲜视频群体；使用已适配因果的初始化</td></tr>
+    <tr><td>图像表征分布能约束外观与语义</td><td>逐帧边缘分布不识别帧序；池化视频表征对较强运动的梯度变弱</td><td>整片上下文视频表征 + 显式动态正则</td></tr>
+  </tbody>
+</table></div>
+<p>这些是该基座与后训练设置的受控经验，并非“小批量 MMD 普遍更好”的结论；ViRDM 没有把图像 iRDM 的多编码器加权与超大批量配方原样复制<span class="src">论文 §3.4–3.5</span>。</p>
+<h3 id="c-memory">3.2 显存：退出点缩短轨迹，VJP 分开模块</h3>
+<p>普通 ODE 采样只在走完轨迹后得到终点；若终点 loss 穿过所有去噪评估，就要保留整个展开。consistency-style 采样每次预测 \(\hat z_0\)，继续采样时再加噪，所以每个退出都能解码为干净视频并接 RDM。随机监督一个退出让训练覆盖不同采样步，同时截断之前的去噪图<span class="src">论文 §3.3.1、Fig. 2</span>。</p>
+<p>但退出并未消除 decoder 与 encoder 的激活。冻结参数只省参数梯度，仍须保存计算输入梯度的激活。ViRDM 先获得表征梯度，再依次重算编码器、解码器、生成器；完整 Wan VAE 即使独立反传仍放不下，因此替换训练桥梁为 TAEW2.1。三项同时使用才得到可行配置<span class="src">论文 §3.3.2、Tab. 1</span>。</p>
+<h3 id="c-population">3.3 新鲜样本：视频群体的边际收益很快降低</h3>
+<p>固定更新预算的群体消融中，B=8 已能改善，B=64 取得较好的质量—时间平衡；B=1024 比 B=64 的 Total 只高 0.16，单次更新却约 96 分钟。不同于图像 RDM 的大批量经验，这里新鲜视频的边际收益很快降低<span class="src">论文 §3.4.1、Tab. 2</span>。这些群体消融尚未加动态正则，不能与最终主表混为同一个阶段。</p>
+<h3 id="c-initialization">3.4 初始化：短后训练需要已有因果能力</h3>
+<p>同样的 20 次更新、B=64 下，原始双向基座直接改因果推理只到 Total 65.80；TF 起点到 83.21；causal CD / causal ODE 分别到 82.99 / 83.41。TF 已能提供有效信号，说明预先少步蒸馏并非必要条件；causal ODE 则进一步改善动态，成为默认初始化<span class="src">论文 §3.4.2、Tab. 3</span>。短期分布微调能精炼已有因果 transport，不能可靠地凭空创建它。</p>
+<h3 id="c-dynamics">3.5 时间动态：表征看得见运动，不表示处处给出足够梯度</h3>
+<p>作者把视频均匀抽帧再重复到原长度，逐渐恢复运动。逐帧 DINOv2 的 MMD 在保留 25% 到 100% 动态之间几乎不变；V-JEPA 2.1 对运动更敏感，但主要响应发生在接近静止处，较强运动之间的差异变小。对 MMD 开方仍出现这一趋势，因此不能只归因于平方损失尺度<span class="src">论文 §3.5.1、Tab. 5</span>。</p>
+<p>冻结 RAFT 提供可解释的位移信号，单侧阈值避免不断奖励更大运动。默认低权重正则修复动态不足；高权重虽继续抬高 Dynamic Degree 和总分，却降低闪烁、主体与背景一致性。训练目标和 VBench 动态都使用光流，作者因此另查时间质量指标与人类偏好<span class="src">论文 §3.5.2、§4.3、Tab. 9</span>。</p>
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与显存追踪</h2>
+<p>为保持 track 记号，\(x_0\) 表示干净视频，\(z_0\) 表示其 latent（论文视频记作 v）；\(v\) 仍留给流速度。Wan 时间约定是 \(z_t=(1-t)z_0+t\epsilon\)，从噪声端向数据端采样；每次干净预测再加噪进入下一时刻<span class="src">论文 §3.3.1、§4.1；代码 <code>pipeline/virdm_training.py</code></span>。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>输出视频 / latent</td><td>81 帧，832×480 / 21 latent 帧</td><td><span class="src">论文 §4.1</span></td></tr>
+    <tr><td>整片 latent（代码布局）</td><td>[B, 21, 16, 60, 104]</td><td><span class="src">代码 <code>model/virdm.py</code></span></td></tr>
+    <tr><td>chunk / 数量</td><td>3 latent 帧；7 块（推算）</td><td><span class="src">论文 §4.1</span></td></tr>
+    <tr><td>视频特征 / 文本特征</td><td>[B,1024] / [B,1152]</td><td>V-JEPA 全时空平均；SigLIP2 文本 L2 归一化<span class="src">论文 §3.2</span></td></tr>
+    <tr><td>联合生成 / 参考表征</td><td>[64,2176] / [6505,2176]</td><td><span class="src">论文 §3.2、§4.1</span></td></tr>
+    <tr><td>生成批内核矩阵</td><td>[64,64]（推算）</td><td>全部新鲜样本共享一批分布梯度<span class="src">论文式 (3)、Alg. 2</span></td></tr>
+  </tbody>
+</table></div>
+<p>以下为一次完整更新的累计显存分析：A100 80 GB、每 GPU 一个视频 microbatch；“OOM”表示峰值 reserved memory 超过容量<span class="src">论文 Tab. 1</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>生成轨迹</th><th>解码器</th><th>反向方式</th><th>GPU 数</th><th>峰值 / GPU</th></tr></thead>
+  <tbody>
+    <tr><td>完整展开</td><td>Wan VAE</td><td>端到端</td><td>8</td><td>OOM</td></tr>
+    <tr><td>随机退出</td><td>Wan VAE</td><td>端到端</td><td>8</td><td>OOM</td></tr>
+    <tr><td>随机退出</td><td>Wan VAE</td><td>分阶段 VJP</td><td>8</td><td>OOM</td></tr>
+    <tr><td>随机退出</td><td>轻量 VAE</td><td>分阶段 VJP</td><td>1</td><td>68.5 GB</td></tr>
+    <tr class="hl"><td>随机退出</td><td>轻量 VAE</td><td>分阶段 VJP</td><td>8</td><td>48.3 GB</td></tr>
+  </tbody>
+</table></div>
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与梯度路径</h2>
+<p>\(\varphi\) 为冻结视频编码器，\(\tau(c)\) 为归一化文本特征。联合特征 \(\Phi(x,c)=[\varphi(x);\beta\tau(c)]\)，\(\beta=\sigma_v/\sigma_t\)，两种带宽由参考的中位数启发式计算；高斯核等于视觉核与文本核的乘积，因此语义不同的提示词不会仅凭外观相近就产生同样的吸引<span class="src">论文式 (1)–(2)、§3.2</span>。</p>
+<div class="formula">$$\mathcal L_{\mathrm{RDM}}=\frac{1}{B^2}\sum_{i,i'}k(\hat h_i,\hat h_{i'})-\frac{2}{BN}\sum_{i,j}k(\hat h_i,h_j^*)+\frac{1}{N^2}\sum_{j,j'}k(h_j^*,h_{j'}^*),\quad \hat h_i=\Phi(D(\hat z_{0,i}),c_i)$$</div>
+<p>生成—生成项维持分布多样性，生成—参考项提供吸引，参考—参考项对生成器参数为常数。不是把某个生成视频逐样本回归到某个参考视频<span class="src">论文式 (3)</span>。</p>
+<div class="formula">$$g_{h,i}=\nabla_{\hat h_i}\mathcal L_{\mathrm{RDM}},\qquad g_{x,i}=J_{\Phi,i}^{\top}g_{h,i},\qquad g_{z,i}=J_{D,i}^{\top}g_{x,i},\qquad \nabla_\theta\mathcal L_{\mathrm{RDM}}=\sum_iJ_{G,i}^{\top}g_{z,i}$$</div>
+<p>这是选中随机退出、历史已截断的计算图上的链式法则，并非完整多步 rollout 的精确梯度。随机退出改变了被训练的目标路径；分阶段 VJP 本身只改变同一截断图的执行顺序<span class="src">论文式 (5)、Alg. 1–2</span>。</p>
+<div class="formula">$$\mathcal L_{\mathrm{dyn}}(\hat x_0)=[\tau_{\mathrm{dyn}}-s(\hat x_0)]_+,\qquad \mathcal L=\mathcal L_{\mathrm{RDM}}+\lambda_{\mathrm{dyn}}\mathcal L_{\mathrm{dyn}}$$</div>
+<p>\(s\) 为光流动态得分，\(\tau_{\mathrm{dyn}}\) 是运动阈值，与文本编码 \(\tau(c)\) 区分。默认 \(\lambda_{\mathrm{dyn}}=5\times10^{-4}\)<span class="src">论文式 (6)–(7)、Tab. 6</span>。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码</span>
+  <ul>
+    <li>论文式 (3) 展示完整参考 MMD；公开代码以 4096 个 Nyström landmark 近似参考吸引项，保留精确批内排斥与固定参考常数，并用 <code>raw / (abs(raw.detach()) + 1e-7)</code> 自归一化。这个梯度尺度细节不能由论文公式单独恢复<span class="src">代码 <code>virdm_integration/reference.py</code>、<code>trainer/virdm.py</code>、<code>config_virdm_bs64_1x8.yaml</code></span>。</li>
+    <li>正文对光流聚合只给概述；代码对每个帧对取光流幅度最大的 5% 像素的均值，再取第 10 大帧对得分作 s，阈值 11.25。等价地，至少 10 个帧对超过阈值才使 hinge 不活跃（按代码推导）<span class="src">代码 <code>trainer/virdm.py</code> 的 <code>_dynamic_reg_s10_hinge_latent_gradients</code>；默认配置</span>。</li>
+    <li>基础 YAML 的 <code>virdm_dynamic_reg_enabled</code> 默认为 false；README 区分 <code>nodynamic</code> / <code>dynamic</code> 配方。对应最终 84.87 的模型需使用带动态正则的版本<span class="src">代码配置、README；论文 Tab. 6</span>。</li>
+  </ul>
+</div>
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">virdm_step.py（论文 Alg. 1–2 的执行顺序；加入式 (6) 动态支路）</div>
+<pre><code class="lang-py"># 离线：固定视频—文本参考，后训练不再更新
+H_ref = encode_reference(reference_videos, reference_prompts)
+G = load_causal_ode_initialization()
+freeze(D, video_encoder, text_encoder, raft)
+def update_generator(conditions):
+    cache = []
+    # 首遍无梯度：每个 distributed microbatch 同步选退出
+    for microbatch in conditions:
+        S = synchronized_uniform_exit()
+        for c in microbatch:
+            with no_grad():
+                z, trace = causal_rollout(G, c, S, record_randomness=True)
+                # 所有 chunk 同一 S；退出 S 前无梯度；KV detach
+                x = D(z)
+                h = joint_features(video_encoder(x), text_encoder(c))
+            cache.append((c, S, z, h, trace))
+    H = gather_fresh_features(cache).requires_grad_()
+    loss_rep = mmd(H, H_ref)                   # 完整群体上的损失
+    grad_h = grad(loss_rep, H)
+    release_representation_loss_graph()
+    grad_z = []
+    for item, gh in zip(cache, local_rows(grad_h)):
+        gx = replay_encoder_vjp(item, gh)
+        release_encoder_graph()
+        gz = replay_decoder_vjp(item, gx)
+        release_decoder_graph()
+        gz += lambda_dyn * staged_flow_hinge_latent_gradient(item)
+        grad_z.append(gz)
+    optimizer.zero_grad()
+    for item, gz in zip(cache, grad_z):
+        z = replay_same_rollout(G, item.trace, grad_only_at_exit=True)
+        z.backward(gz)                       # 历史 KV 仍然 detach
+        release_generator_graph()
+    optimizer.step()</code></pre>
+<p>伪代码的 <code>mmd</code> 写论文目标；公开实现的 Nyström 与自归一化需按上方代码说明加入。分阶段动态支路与主支路在 latent 梯度处相加<span class="src">代码 <code>trainer/virdm.py</code></span>。</p>
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>默认主配方</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>初始化 / 推理</td><td>Causal Forcing causal ODE；4 步，shift=5</td><td>时刻 {1,0.9375,0.8333,0.625}<span class="src">论文 §4.1</span></td></tr>
+    <tr><td>后训练</td><td>20 次生成器更新，8 张 A100</td><td><span class="src">论文 §4.1</span></td></tr>
+    <tr><td>新鲜群体</td><td>B=64；每卡 microbatch=1、累积 8 次</td><td><span class="src">论文 Tab. 2、§4.1</span></td></tr>
+    <tr><td>优化器</td><td>AdamW，lr=2e-6，β=(0.9,0.95)，无 weight decay</td><td><span class="src">论文 §3.4、§4.1</span></td></tr>
+    <tr><td>参考 / 表征</td><td>6505 视频—文本对；V-JEPA 2.1 + SigLIP2</td><td><span class="src">论文 §3.2</span></td></tr>
+    <tr><td>解码桥梁 / 动态网络</td><td>冻结 TAEW2.1 / 冻结 RAFT</td><td><span class="src">论文 §3.3.2、§3.5.2</span></td></tr>
+    <tr><td>动态正则权重</td><td>5e-4</td><td><span class="src">论文 Tab. 6、Tab. 9</span></td></tr>
+  </tbody>
+</table></div>
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果与代价边界</h2>
+<p>主表在同一环境按官方 VBench 协议、Self Forcing 扩写提示词评估；本表仅保留相同 Wan2.1-1.3B 基座、832×480、4 步因果接口的组。所有方法推理为单张 H100 上 17.0 FPS、首帧 0.69 s；基线效率沿用各原论文，ViRDM 在相同硬件条件测量<span class="src">论文 §4.1、Tab. 8</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">Total</th><th class="num">Quality</th><th class="num">Semantic</th></tr></thead>
+  <tbody>
+    <tr><td>CausVid</td><td class="num">81.15</td><td class="num">83.99</td><td class="num">69.79</td></tr>
+    <tr><td>Self Forcing</td><td class="num">84.20</td><td class="num">84.90</td><td class="num">81.39</td></tr>
+    <tr><td>Causal Forcing</td><td class="num">84.51</td><td class="num">85.36</td><td class="num">81.09</td></tr>
+    <tr class="hl"><td>ViRDM</td><td class="num">84.87</td><td class="num">85.82</td><td class="num">81.09</td></tr>
+  </tbody>
+</table></div>
+<p>ViRDM 的 Semantic 与 Causal Forcing 同分，低于 Self Forcing；优势集中于总分和 Quality。这里 Causal Forcing 的 84.51 是 ViRDM 论文统一环境中的评估值，并非 <a href="14-causal-forcing.html#results">原论文主表</a>的 84.04，不应拼成一个跨论文同协议排名<span class="src">ViRDM Tab. 8；Causal Forcing Tab. 1</span>。</p>
+<p>资源表只测<b>最后的分布匹配后训练</b>，排除共有初始化阶段；同一 8 张 A100 设置<span class="src">论文 Tab. 7</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>扩散教师 / critic</th><th>生成器更新</th><th>峰值 / GPU</th><th>墙钟时间</th><th>A100 GPU-hours</th></tr></thead>
+  <tbody>
+    <tr><td>DMD（Self Forcing）</td><td>14B / 1.3B</td><td>120</td><td>77.1 GB</td><td>22 h</td><td>176</td></tr>
+    <tr class="hl"><td>ViRDM</td><td>无 / 无</td><td>20</td><td>48.3 GB</td><td>2 h</td><td>16</td></tr>
+  </tbody>
+</table></div>
+<p>峰值少 28.8 GB / GPU；论文表中墙钟时间比为 11×（22÷2，推算），GPU-hours 同比降低。它是<b>达到论文所选效果的完整后训练运行</b>比较，更新次数也不同，并非单次更新加速 11×。单次更新约 6 分钟；单卡 A100 80 GB 也可运行，但峰值为 68.5 GB，论文未给单卡总墙钟时间<span class="src">论文 §4.1、Tab. 1、Tab. 7</span>。</p>
+<p>运动补偿的受控实验尚能分离“表征”和“正则”的作用<span class="src">论文 Tab. 6</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>表征 / 正则</th><th class="num">Total</th><th class="num">Dynamic Degree</th><th class="num">Total 去掉动态维度</th></tr></thead>
+  <tbody>
+    <tr><td>DINOv2 图像边缘，无正则</td><td class="num">82.70</td><td class="num">18.06</td><td class="num">87.04</td></tr>
+    <tr><td>V-JEPA 2.1 视频，无正则</td><td class="num">83.41</td><td class="num">48.61</td><td class="num">85.77</td></tr>
+    <tr class="hl"><td>V-JEPA 2.1 + 动态正则</td><td class="num">84.87</td><td class="num">72.02</td><td class="num">85.79</td></tr>
+  </tbody>
+</table></div>
+<p>动态正则主要修复运动维度；去掉该维度的 Total 只从 85.77 到 85.79。默认权重下，未参与训练的运动平滑、闪烁、主体和背景一致性变化均在 0.18 分以内；增至权重 1e-3 虽使 Total 达 85.64，却损伤部分时间质量指标。人类对加正则模型的动态偏好为 85.6%<span class="src">论文 §3.5.2、§4.3、Tab. 9、Fig. 6(b)</span>。</p>
+<h3 id="c-extensions">8.1 少步扩展：因果与双向必须分别读</h3>
+<p>因果低步数结果使用 First-Frame Enhancement：首块仍走 4 步，后续块采用指定预算。ViRDM 后续 2 步为 Total 84.42，后续 1 步为 84.27；这不是整片每块均为同样低步数的结果<span class="src">论文 §4.4、Tab. 10</span>。双向扩展整片同时生成，无法提供因果流式接口；论文明确将其视为探索<span class="src">论文 §4.5</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>双向采样步数</th><th class="num">Total</th><th class="num">Quality</th><th class="num">Semantic</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td class="num">83.12</td><td class="num">84.61</td><td class="num">77.16</td></tr>
+    <tr><td>2</td><td class="num">84.53</td><td class="num">85.48</td><td class="num">80.72</td></tr>
+    <tr class="hl"><td>4</td><td class="num">84.56</td><td class="num">85.84</td><td class="num">79.43</td></tr>
+  </tbody>
+</table></div>
+<p>双向结果采用相同后训练与评估协议<span class="src">论文 Tab. 11</span>；不把因果与双向结果混成统一速度排名。</p>
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>继承的东西</h4><ul>
+    <li><a href="16-rdm.html">RDM</a>：固定参考、联合视觉—文本核、直接终点分布匹配。</li>
+    <li><a href="12-self-forcing.html">Self Forcing</a>：自生成历史、随机退出与 KV 梯度截断。</li>
+    <li><a href="14-causal-forcing.html">Causal Forcing</a>：先建立因果兼容的少步 transport。</li>
+  </ul></div>
+  <div class="now"><h4>改变与边界</h4><ul>
+    <li>去掉后训练在线扩散教师和 critic，以固定参考表征直接提供分布梯度。</li>
+    <li>模块分阶段回传、小规模新鲜视频群体和动态正则构成视频特有配方。</li>
+    <li>依赖初始化与固定表征的归纳偏置；更大模型、更高分辨率与长视频仍待验证<span class="src">论文 §5</span>。</li>
+  </ul></div>
+</div>
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q33"><span class="qid">Q33</span>冻结视频编码器和 VAE 后为什么仍会超显存？随机退出与分阶段 VJP 各自省掉什么？</h3>
+  <div class="ans">
+    <p class="short">冻结仅关闭参数更新，损失仍须经过编码器、解码器的输入梯度回到生成器，激活仍要保存。随机退出截断先前去噪步骤的图，并以该步的干净终点预测接受分布监督；分阶段 VJP 则按表征、像素、latent、生成器顺序复算，避免不同模块反向图共驻。完整 Wan VAE 单独反传也放不下，还需要轻量解码桥梁。</p>
+    <ul><li>复算须恢复相同噪声、退出步和历史缓存，才能使用缓存输出梯度。</li><li>VJP 的分阶段执行保持同一截断图的链式法则；随机退出本身改变训练路径。</li><li>生成器是唯一被更新的参数集合，冻结网络仍参与计算。</li></ul>
+    <p class="cite">依据：论文 §3.3、式 (4)–(5)、Alg. 1–2、Tab. 1。</p>
+  </div>
+  <h3 id="q34"><span class="qid">Q34</span>为什么匹配图像或视频特征分布仍会生成弱动态视频？ViRDM 如何验证动态正则没有只刷光流分？</h3>
+  <div class="ans">
+    <p class="short">逐帧图像边缘分布不感知帧序与间隔；池化视频特征虽能区分静止和运动，对中等到较强运动的分布差异却不够敏感。ViRDM 用整片上下文表征，再加单侧光流阈值补运动不足。由于正则与 Dynamic Degree 都依赖光流，它同时检查未参与训练的时间一致性指标、权重变化和人类偏好。</p>
+    <ul><li>高动态不保证连贯性：崩坏与闪烁也会产生大位移。</li><li>高正则权重能抬总分却伤害时间质量，默认权重选择平衡点。</li><li>短后训练仍需要因果兼容起点；正确 loss 不会自动修复注意力结构转换。</li></ul>
+    <p class="cite">依据：论文 §3.4.2、§3.5、Tab. 5–6、§4.3、Tab. 9、Fig. 6。</p>
+  </div>
+</div>
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Meng, Ge, Huang, Zhou, Jiang. <i>ViRDM: Taming Representation Distribution Matching for Few-Step Causal Video Generation.</i> 2026，arXiv preprint。<a href="https://arxiv.org/abs/2609.28923">arXiv:2609.28923</a> · <a href="https://arxiv.org/html/2609.28923v1">全文 v1</a> · <a href="https://neu-vi.github.io/ViRDM/">项目页</a> · <a href="https://github.com/neu-vi/ViRDM">官方代码</a></li>
+  <li>Feng et al. <i>Representation Distribution Matching for One-Step Visual Generation.</i> <a href="https://arxiv.org/abs/2607.02375">arXiv:2607.02375</a> · <a href="16-rdm.html">RDM 页面</a></li>
+  <li>Huang et al. <i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion.</i> <a href="https://arxiv.org/abs/2506.08012">arXiv:2506.08012</a> · <a href="12-self-forcing.html">页面</a></li>
+  <li>Zhu et al. <i>Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation.</i> <a href="https://arxiv.org/abs/2602.02214">arXiv:2602.02214</a> · <a href="14-causal-forcing.html">页面</a></li>
+  <li><a href="https://github.com/madebyollin/taehv">TAEHV / TAEW2.1 轻量视频解码器</a>（论文指定的训练桥梁实现）。</li>
+  <li>Teed, Deng. <i>RAFT: Recurrent All-Pairs Field Transforms for Optical Flow.</i> ECCV 2020. <a href="https://arxiv.org/abs/2003.12039">arXiv:2003.12039</a></li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，具体出处见各节标注与参考。</footer>
+</body>
+</html>

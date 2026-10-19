@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PERSIST 与 Honeycomb</title>
+<meta name="description" content="动作条件的三维 world-frame 与定长 HexMemory：GT 3D 监督、离屏变化、六平面扩域融合，以及覆盖范围与分辨率的取舍。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="video-memory" data-node="persist">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：持久的是表面记录，还是世界的当前状态？</h2>
+<p>人背对一棵树移动，碰撞仍应存在；转身期间洞穴的水可能继续上涨。<a href="13-voyager-lsm.html">增长的空间点缓存</a>能记住见过的表面，但“追加新观察”与“主动预测未被观察区域如何变化”是不同能力。PERSIST 将下一 3D world-frame 和相机状态本身作为学习目标，再从它生成 RGB。<span class="src">PERSIST §4–5、Fig. 8</span></p>
+<p>Honeycomb 解决另一项持续性问题：新空间不断进入记忆时，特征容量如何保持固定？它把 chunk 的 latent 证据融合进 HexMemory 的<b>六个空间 / 时空平面</b>。扩域时平面格子数不变，因此覆盖范围、分辨率和保留细节之间必须作取舍。<span class="src">Honeycomb §3.2–3.4</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  PERSIST 学“世界状态怎样随动作改变”，但只覆盖 agent 周围的有限区域；Honeycomb 学“新观测怎样进入固定特征预算”，但扩域会让空间和写入时间的地址变粗。两者的“固定”分别限定区域与特征张量。
+</div>
+
+<h2 id="architecture">2. 全局架构：主动状态转移与观测写回</h2>
+<p>视频时间为 \(t\)，扩散 / flow 时间为 \(\tau\)，当前像素 latent 为 \(x_t\)，近期窗口为 \(H_t\)，动作是 \(a_t\)，文本是 \(c_t\)，相机状态为 \(p_t\)，记忆为 \(M_t\)，查询为 \(q_t\)，读出为 \(r_t\)。Honeycomb 平面的额外时间轴记为 \(s\)：它是<b>源观测写入时间</b>，不是去噪时间 \(\tau\)。</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\quad x_{t+1}\sim G(H_t,r_t,a_t,c_t),\quad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1})$$</div>
+<p>这一通用骨架适合 Honeycomb 的生成后写回。PERSIST 则<b>先预测下一世界状态，再读它生成观测</b>：\(M_{t+1}\sim F(M_{t-K:t},H_t,a_t,p_t)\)，预测 \(p_{t+1}\)，然后 \(r_t=\mathcal R(M_{t+1},p_{t+1})\)。近期 RGB 也进入 world-frame 条件，不能把它说成完全脱离像素的纯动力学模拟器。<span class="src">PERSIST §5.1–5.2</span></p>
+<div class="legend">
+  <span><i class="sw data"></i>观测 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结 VAE / 几何估计</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>相机 / 动作 / 文本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 390" role="img" aria-label="上：PERSIST 的动作 → 状态 → 相机 → 像素循环；下：Honeycomb 的新 chunk → 定长平面 → 读出循环。两套系统独立。依据 PERSIST §5；Honeycomb §3。">
+    <path class="edge act" d="M190,77 H216" data-step="2"/>
+    <path class="edge enc" d="M420,77 H456" data-step="2"/>
+    <path class="edge reg" d="M680,77 H716" data-step="3"/>
+    <path class="edge tgt" d="M827,109 V166" data-step="4"/>
+    <path class="edge reg" d="M560,45 V22 H320 V41" data-step="7"/>
+    <path class="edge pred" d="M720,327 H684" data-step="6"/>
+    <path class="edge pred" d="M460,327 H424" data-step="6"/>
+    <path class="edge reg" d="M320,295 V238" data-step="7"/>
+    <path class="edge pred" d="M420,202 H716" data-step="7"/>
+    <g class="act" data-part="actions" data-step="1">
+      <rect class="box" x="20" y="45" width="170" height="64" rx="10"/>
+      <text class="t-c t-b" x="105" y="69">动作 aₜ</text>
+      <text class="t-c t-sm" x="105" y="91">PERSIST 输入</text>
+    </g>
+    <g class="enc" data-part="world" data-step="2">
+      <rect class="box" x="220" y="45" width="200" height="64" rx="10"/>
+      <text class="t-c t-b" x="320" y="69">3D 状态转移</text>
+      <text class="t-c t-sm" x="320" y="91">world-frame + camera</text>
+    </g>
+    <g class="reg" data-part="state" data-step="2 7">
+      <rect class="box" x="460" y="45" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="570" y="69">下一 3D 状态</text>
+      <text class="t-c t-sm" x="570" y="91">agent 周围有限区域</text>
+    </g>
+    <g class="tgt" data-part="projection" data-step="3">
+      <rect class="box" x="720" y="45" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="69">深度分层投影</text>
+      <text class="t-c t-sm" x="827.5" y="91">读出 rₜ</text>
+    </g>
+    <g class="enc" data-part="pixel" data-step="4 7">
+      <rect class="box" x="720" y="170" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="194">各自的生成端</text>
+      <text class="t-c t-sm" x="827.5" y="216">PERSIST pixel / Wan</text>
+    </g>
+    <g class="data" data-part="chunk" data-step="5">
+      <rect class="box" x="720" y="295" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="319">Honeycomb 新 chunk</text>
+      <text class="t-c t-sm" x="827.5" y="341">latent + 估计几何</text>
+    </g>
+    <g class="pred" data-part="writer" data-step="6">
+      <rect class="box" x="460" y="295" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="570" y="319">writer + fusion</text>
+      <text class="t-c t-sm" x="570" y="341">扩域 warp / 置信融合</text>
+    </g>
+    <g class="reg" data-part="hex" data-step="6 7">
+      <rect class="box" x="220" y="295" width="200" height="64" rx="10"/>
+      <text class="t-c t-b" x="320" y="319">HexMemory</text>
+      <text class="t-c t-sm" x="320" y="341">定长空间 / 时空平面</text>
+    </g>
+    <g class="pred" data-part="reader" data-step="7">
+      <rect class="box" x="220" y="170" width="200" height="64" rx="10"/>
+      <text class="t-c t-b" x="320" y="194">camera-query reader</text>
+      <text class="t-c t-sm" x="320" y="216">位置 + 写入时间</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="actions"><h4>动作驱动状态</h4><p>PERSIST 根据动作主动预测下一 world-frame 与相机；不必等这个区域再次出现于 RGB 后才改变状态。</p></div>
+    <div data-note="world"><h4>学到的动力学</h4><p>3D flow denoiser 预测 world-frame，独立的相机 transformer 预测视点；近期像素、世界状态和动作共同作为条件。</p></div>
+    <div data-note="state"><h4>有边界的持久状态</h4><p>world-frame 是围绕 agent 的有限体素区域，不是无限世界全图。移出区域的远处内容会被丢弃。</p></div>
+    <div data-note="projection"><h4>读取深度堆叠</h4><p>将 3D 特征按相机投影，保留每个像素的多层深度有序特征，再拼接深度，不只是最前表面的 RGB 渲染。</p></div>
+    <div data-note="pixel"><h4>两条路线的生成端</h4><p>上半图是 PERSIST 的 learned deferred shader；下半图的 reader 输出接 Honeycomb 的 Wan 侧分支。共用图中位置只是比较读出职责，两套生成器并非一个模型。</p></div>
+    <div data-note="chunk"><h4>Honeycomb 仅写新观测</h4><p>下半图是独立的 Honeycomb 读写循环。生成 chunk 完成后，用 decoded RGB 估计深度，将新 latent 抬升到世界坐标。</p></div>
+    <div data-note="writer"><h4>扩域和融合</h4><p>对旧平面及置信图按新空间 / 时间边界重采样，再与新 chunk 的平面做置信加权池化和零初始化残差修正。</p></div>
+    <div data-note="hex"><h4>特征定长的范围</h4><p>平面尺寸保持不变，坐标覆盖增长时格距变大。reader 还需投影点位置与源写入时间确定可见性；定长声明限定于 HexMemory 特征存储。</p></div>
+    <div data-note="reader"><h4>从平面重建 latent</h4><p>按可见点的世界坐标及源写入时间查询成对平面乘积，结合目标相机射线解码成 latent，形成下一 chunk 的生成条件。</p></div>
+    <div data-step-note="1"><h4>1. 动作到来</h4><p>PERSIST 从上一状态与动作开始一步预测。</p></div>
+    <div data-step-note="2"><h4>2. 主动更新世界</h4><p>先生成下一 3D world-frame，再预测相机。</p></div>
+    <div data-step-note="3"><h4>3. 投影读取</h4><p>读取新世界状态的深度有序特征。</p></div>
+    <div data-step-note="4"><h4>4. 生成观测</h4><p>PERSIST 在 3D 约束下合成 RGB。上半循环回到世界预测。</p></div>
+    <div data-step-note="5"><h4>5. 新 chunk 写入对象</h4><p>切换到下半图 Honeycomb：获取另一套生成器完成的 latent 与几何。</p></div>
+    <div data-step-note="6"><h4>6. 写定长平面</h4><p>新 chunk 进入 writer；旧平面扩域 warp 后融合，尺寸不变。</p></div>
+    <div data-step-note="7"><h4>7. 读回与下一轮</h4><p>Honeycomb reader 查询平面形成条件；PERSIST 则继续主动预测世界。</p></div>
+  </div>
+  <figcaption>图 1　上：PERSIST 的动作 → 状态 → 相机 → 像素循环；下：Honeycomb 的新 chunk → 定长平面 → 读出循环。两套系统独立。依据 PERSIST §5；Honeycomb §3。</figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-worldframe">3.1 PERSIST：world-frame 是有限的状态代理</h3>
+<p>world-frame \(w_t\) 是围绕 agent 的体素区域，结合相机 \(p_t\) 成为隐藏环境状态的代理。训练轨迹直接给出 RGB、动作、GT 体素和 GT 相机；3D-VAE 将 voxel 类别编码成 latent。3D flow denoiser 学习下一 world-frame，动作和相机经嵌入 / AdaLN 输入，近期 RGB 与相机 Plücker 信息通过 cross-attention 进入。<span class="src">PERSIST §4、§5.1</span></p>
+<p>这里的“world-frame”并不等于永不移动的无限全局地图：区域以 agent 为中心，随着移动丢掉远处内容。稳定的三维语义有助于在当前区域内保留离屏碰撞和变化；离开其覆盖范围的地点没有自动获得永久归档。<span class="src">PERSIST App. E</span></p>
+<p>相机由独立模型根据最近相机、世界与动作预测。相机状态包含位置、连续旋转和 FoV；让 GT 相机强行穿过模型生成的障碍，可能产生物理不相容。论文展示这一案例，并指出 FVD 未能充分惩罚它。<span class="src">PERSIST §5.1、§6.1、Fig. 11</span></p>
+
+<h3 id="c-renderer">3.2 从世界到像素：不是把 voxel 类别直接染色</h3>
+<p>3D-VAE 将 world latent 恢复到较高三维分辨率，再对每个像素形成<b>按深度排序的多层 voxel 特征堆叠</b>，同时保留线性深度。将特征和深度拼接、映射为像素生成条件后，独立 pixel flow denoiser 合成观测。它类似 learned deferred shader，补上纹理、光照、粒子效果与屏幕叠加等 3D 状态未显式给出的信息。<span class="src">PERSIST §5.2、Fig. 4、App. A.1</span></p>
+<p>这使“状态正确”和“像素渲染正确”可以分别诊断：错误方块来自 world model，正确几何但纹理漂移来自像素侧。论文给出的长 rollout 有两类现象，不应把所有视频错误都归因于“记忆不够大”。<span class="src">PERSIST App. E、Fig. 13</span></p>
+
+<h3 id="honeycomb">3.3 Honeycomb：HexMemory 用空间与写入时间分解特征</h3>
+<p>HexMemory 沿世界坐标 \((x,y,z)\) 与写入时间 \(s\) 的坐标对建立平面，组合为 \((S_{XY},T_{ZS})\)、\((S_{XZ},T_{YS})\)、\((S_{YZ},T_{XS})\)。在同一地址查询成对平面，做逐元素乘积后拼接：</p>
+<div class="formula">$$\phi(x,y,z,s)=\big[S_{XY}(x,y)\odot T_{ZS}(z,s);\ S_{XZ}(x,z)\odot T_{YS}(y,s);\ S_{YZ}(y,z)\odot T_{XS}(x,s)\big]$$</div>
+<p>空间平面共享跨时间信息，时空平面区分不同写入时刻；不是六份完整体素地图。writer 将新 chunk 的 latent、反投影位置、源相机和射线映射为各平面贡献，通过 bilinear splatting 聚合到网格。每格累积插值权重作为置信图，再通过轻量网络形成特征。<span class="src">Honeycomb §3.2–3.3、Fig. 4</span></p>
+<p>reader 先投影空间点并选目标 latent 单元前方最近的点，取该点的<b>世界位置与源写入时间</b>查询平面，再结合目标射线与相机解码成 latent，附上 visibility mask 送往 Wan 侧分支。因此定长特征平面不意味着系统不再需要几何点与可见性信息。<span class="src">Honeycomb §3.5</span></p>
+
+<h3 id="c-expand">3.4 扩域 warp 与融合：固定格数意味着格距改变</h3>
+<p>新 chunk 超出旧空间或时间边界时，先扩大 bounds，把旧平面及置信图按相同世界地址重采样到新坐标范围。平面 dimensions 保持不变；未覆盖区域置信度为零。新 writer 只处理新 chunk，避免每步重编码完整历史。<span class="src">Honeycomb §3.4</span></p>
+<div class="formula">$$P_{\mathrm{pool}}=\frac{N_oP_o+N_nP_n}{N_o+N_n},\qquad P'=P_{\mathrm{pool}}+h_\theta(P_o,P_n,P_{\mathrm{pool}},N_o,N_n),\quad N'=N_o+N_n$$</div>
+<p>上式是按论文的置信池化与残差修正作的示意；无置信格保留旧值，修正网络输出层零初始化。历史内容不会因“张量没变大”而无损保存：反复 warp 的插值、贡献碰撞和低秩表示都限制细节。空间范围变大时相同格子的物理跨度变大，时间范围变长时写入时间分辨率也下降。<span class="src">Honeycomb §3.4；容量解释为机制分析</span></p>
+<p>Honeycomb 写入不排除动态主体和天空，时空平面能编码随写入时间变化的观测；但这没有把 writer 变成预测离屏演化的动作条件世界转移。PERSIST 的离屏水流案例与 Honeycomb 的回访重建实验回答不同问题。<span class="src">Honeycomb §3.1、§4.2；PERSIST Fig. 8</span></p>
+
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>PERSIST</th><th>Honeycomb</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>agent-centered voxel world-frame latent 与相机状态；近期世界 / 像素条件。<span class="src">§4–5</span></td><td>六个固定形状特征平面、置信图及 bounds；读出还依赖点位置 / 源写入时间。<span class="src">§3.2、§3.5</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>每步先从噪声生成新的 clean world-frame。训练用 GT 3D；默认推理从首帧推断初始 3D。<span class="src">§5.1</span></td><td>输入图像初始化；完成 denoising 后将新 chunk latent 与估计几何写入。memory 模型训练用 GT clips。<span class="src">§3.3、§3.6</span></td></tr>
+    <tr><td>如何寻址</td><td>生成的相机查询下一世界状态；动作更新状态。<span class="src">§5.1–5.2</span></td><td>目标相机先确定可见点，按空间坐标与源 write time 查询平面。<span class="src">§3.5</span></td></tr>
+    <tr><td>如何读</td><td>深度有序 3D 特征堆叠 + depth → pixel denoiser。<span class="src">§5.2</span></td><td>成对平面乘积 + learned reader → latent + mask → 生成侧分支。<span class="src">§3.2、§3.5</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>下一预测替代当前状态；移出有限区域的远处信息丢失，近期窗滚动。<span class="src">App. E</span></td><td>bounds 扩大后 warp，同形平面置信池化与残差融合；没有逐条旧帧的精确地址承诺。<span class="src">§3.4</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<p>省略 batch，\(R\) 为平面 feature rank，\(n\) 为轴向网格分辨率。固定 \(n,R\) 固定的是特征张量容量；总系统还包含几何、历史边界帧、VAE、生成器和工作激活。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>边界</th></tr></thead>
+  <tbody>
+    <tr><td>PERSIST GT voxel grid</td><td>[48, 48, 48, 2138] 类别输入</td><td>有限 cuboid 的语义状态监督。<span class="src">Tab. 3</span></td></tr>
+    <tr><td>world latent</td><td>[12, 12, 12, 48]</td><td>3D-VAE 压缩；不是由 RGB 自监督自然得到的无监督状态。<span class="src">PERSIST Tab. 3</span></td></tr>
+    <tr><td>3D-S / 3D-XL spatial tokens</td><td>216 / 1728；world context 8</td><td>S / XL 改 patch 粒度，参数数量相同。<span class="src">PERSIST Tab. 6–7</span></td></tr>
+    <tr><td>pixel latent / projected stack</td><td>[36,64,16] / [36,64,192,32]</td><td>pixel context 16；投影保留深度有序多层特征。<span class="src">PERSIST Tab. 4、8</span></td></tr>
+    <tr><td>HexMemory 特征平面</td><td>6 个二维 grids；每面 [nᵤ,nᵥ,R]，R = 48</td><td>各面格数固定，覆盖空间 / 写入时间可变；实际 MB 用论文测量值。<span class="src">Honeycomb §3.2、§4.1</span></td></tr>
+    <tr><td>Honeycomb chunk</td><td>9 latent 帧，44 × 80 ↔ 33 RGB 帧，704 × 1280</td><td>Wan2.2 的 native latent 读出条件。<span class="src">Honeycomb §4.1</span></td></tr>
+  </tbody>
+</table></div>
+<p>若某轴范围为 \(L_x\)，该轴有效格距约为 \(L_x/(n-1)\)。这是网格几何推导；扩域而不增 \(n\) 就难以同时维持旧区域的精细地址。PERSIST 的取舍则是保留有限区域的格距，但丢掉移出的远处状态。两种“常量”不能互换。</p>
+
+<h2 id="objective">5. 训练目标：GT 状态转移与潜变量重建</h2>
+<h3 id="o-persist">5.1 PERSIST：世界、相机、像素分别受监督</h3>
+<p>3D-VAE 用 voxel 类别交叉熵与 KL；2D-VAE 用像素重建 MSE 与 KL。world / pixel flow 模型各自预测从噪声向 clean latent 的速度，camera 模型对位置与旋转 / FoV 残差做 MSE。训练用 GT 世界与相机，并非只用最终 RGB 损失识别三维状态。<span class="src">PERSIST §3、§5、App. A.1</span></p>
+<div class="formula">$$x^{\tau}=(1-\tau)x+\tau\epsilon,\qquad \mathcal L_{\mathrm{flow}}=\mathbb E\|v_\theta(x^{\tau},\tau,\mathrm{conditions})-(x-\epsilon)\|_2^2$$</div>
+<p>此处采用论文向 clean 方向的速度约定，积分时要与该符号配套。默认推理仅需首帧 RGB 与初始相机即可采样 \(w_0\)；\(\mathrm{PERSIST}+w_0\) 是额外给 GT 3D 初始化的另一条件，分数不能当成普通首帧版。<span class="src">PERSIST §3、§5.1、§6.2</span></p>
+<p>训练与推理之间有 GT / generated 分布差异。作者用 diffusion forcing、略加噪的历史条件与跨模块随机噪声增强缓解；各模块独立训练后组合，没有证明所有自生成长 rollout 上的误差传播已经消失。<span class="src">PERSIST §5.3、App. E</span></p>
+
+<h3 id="o-honeycomb">5.2 Honeycomb：writer / fusion / reader 联合重建 latent</h3>
+<p>记忆模型从训练 clip 依次写入首帧和后续 chunks，每次写后查询相机视图，对投影可见点对应的原始 latent 做归一化空间 MSE。writer、融合网络和 reader 联合训练，因此平面学的是支持读回的特征，而不是直接 RGB 颜色。<span class="src">Honeycomb §3.3</span></p>
+<div class="formula">$$\mathcal L_{\mathrm{memory}}=\mathbb E\!\left[\frac{\sum_{i\in\mathcal V}\|\mathrm{Reader}_\theta(M_t,P_i,s_i,p_q)-f_i\|_2^2}{|\mathcal V|}\right]$$</div>
+<p>上式为目标的讲解记号，\(\mathcal V\) 是当前投影可见点。随后冻结 memory 模型、预计算 readouts 来适配生成器：先训练 ControlNet branch，再冻结 branch 训练 backbone LoRA。写入训练主要读 GT 观测；推理读 generated chunk，近期条件加入噪声增强以缓解偏移。<span class="src">Honeycomb §3.6、§4.1、App. A</span></p>
+
+<h2 id="pseudocode">6. 伪代码：先更新世界，或先完成观测</h2>
+<p>两个独立循环，突出顺序差异；初始状态及重编码细节遵循论文的条件划分。</p>
+<pre><code class="lang-py"># PERSIST: actions update the 3D state before pixels are generated.
+M, pose = initialize_world_from_rgb(seed_rgb, initial_camera)
+H = encode_pixel_context(seed_rgb)
+world_history = [M]
+for action in action_stream:
+    next_M = denoise_world(noise(), world_history, H, pose, action)
+    next_pose = camera_model(pose, next_M, action)
+    world_features = decode_world_vae(next_M)
+    layers, depths = depth_peel_project(world_features, next_pose)
+    r = embed_depth_stack(layers, depths)
+    x = denoise_pixels(noise(), H, r, action)
+    rgb = decode_pixel_vae(x)
+    M, pose = next_M, next_pose
+    world_history = roll_world_context(world_history, M)
+    H = roll_pixel_context(H, x)
+    yield rgb
+
+# Honeycomb: only the new observed/generated chunk enters the writer.
+M, geometry = initialize_hexmemory(seed_rgb, initial_camera)
+H = encode_pixel_context(seed_rgb)
+for target_poses, text in camera_requests:
+    visible_points = zbuffer_project(geometry, target_poses)
+    r, mask = reader(M, visible_points, target_poses)
+    x = denoise_chunk(noise(), H, r, mask, text)
+    rgb = vae_decode(x)
+    depth = estimate_depth_at_latent_timesteps(rgb)
+    new_points = lift_new_latents(x, depth, target_poses)
+    new_bounds = expand_space_and_write_time(M.bounds, new_points)
+    old_planes, old_conf = warp_same_shape(M, new_bounds)
+    new_planes, new_conf = writer(new_points, new_bounds)
+    pooled = confidence_pool(old_planes, new_planes, old_conf, new_conf)
+    M = residual_fusion(pooled, old_planes, new_planes,
+                        old_conf, new_conf, new_bounds)
+    geometry = update_geometry_for_visibility(geometry, new_points)
+    H = reencode_boundary_and_recent_frames(rgb)
+    yield rgb</code></pre>
+
+<h2 id="hyperparams">7. 关键配置：分辨率与覆盖不是同一个容量</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>配置</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td>PERSIST</td><td>世界 48³ voxels；world / camera context 8、pixel context 16。<span class="src">§6、Tab. 5–8</span></td><td>局部三维状态和近期条件固定，不保存无限远地点。</td></tr>
+    <tr><td>PERSIST 推理</td><td>默认各 flow denoiser 20 steps；历史噪声 0.02 / 0.1。<span class="src">Tab. 9</span></td><td>世界与像素分别采样；较小上下文噪声减轻 exposure bias。</td></tr>
+    <tr><td>Honeycomb planes</td><td>默认 resolution 512，rank 48。<span class="src">§4.1、Tab. 3</span></td><td>固定格数；扩域 warp 改变有效空间 / 时间分辨率。</td></tr>
+    <tr><td>Honeycomb adaptation</td><td>branch 10,000 iterations；LoRA rank 64，5000 iterations；UniPC 40 steps。<span class="src">§4.1</span></td><td>记忆重建与生成适配分阶段训练。</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="results">8. 关键结果：状态、回访和容量分别报告</h2>
+<h3 id="r-persist">8.1 PERSIST：同数据重训基线的长 horizon FVD</h3>
+<p>作者使用 <b>168 条 held-out game trajectories</b>；主表基线与 ablations 用相同 VAEs、数据和 flow 训练。WorldMem 初始化额外提供前 <b>400 个 GT 帧与相机</b>，PERSIST 默认仅首帧与初始相机。FVD 是包含回访策略的整体视频分布指标，不是独立的记忆读取准确率。<span class="src">PERSIST §6.1、App. B.1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法 <span class="src">PERSIST Tab. 1</span></th><th>200 帧 FVD ↓</th><th>400 帧 ↓</th><th>600 帧 ↓</th></tr></thead>
+  <tbody>
+    <tr><td>Oasis <span class="src">Tab. 1</span></td><td>409</td><td>687</td><td>875</td></tr>
+    <tr><td><a href="08-worldmem.html">WorldMem</a> <span class="src">Tab. 1</span></td><td>358</td><td>—</td><td>—</td></tr>
+    <tr><td>No-3D-Upscale <span class="src">Tab. 1</span></td><td>216</td><td>231</td><td>247</td></tr>
+    <tr><td>PERSIST-S <span class="src">Tab. 1</span></td><td>159</td><td>170</td><td>179</td></tr>
+    <tr class="hl"><td>PERSIST <span class="src">Tab. 1</span></td><td>129</td><td>141</td><td>148</td></tr>
+    <tr><td>PERSIST + GT w₀ <span class="src">Tab. 1</span></td><td>80</td><td>93</td><td>104</td></tr>
+  </tbody>
+</table></div>
+<p>WorldMem 的破折号是未报告，不能填成失败分。PERSIST 相对检索基线的收益同时包含 GT 3D 训练、世界模型与渲染设计；不是只交换一个 memory reader 的受控消融。</p>
+<p>另一个<b>人工研究</b>使用原作者发布的 Oasis / WorldMem Minecraft 模型，而 PERSIST 在 Luanti；WorldMem 的 bank 预填 <b>600 个 GT 观测与相机</b>。Temporal Consistency 均值为 WorldMem <b>1.5 ± 0.08</b>、PERSIST <b>2.5 ± 0.09</b>（评分范围 <b>1–5</b>）。这是另一协议，有域差异和不同初始化，不能与主表合成统一的公平性结论。<span class="src">PERSIST Tab. 2、App. B.2–B.3</span></p>
+<p>离屏水位增长和碰撞来自 Fig. 8 的定性例子；它们支持状态路线的可能性，不证明任意物理过程都被正确模拟。远处遗忘、逐步漂移和非实时推理仍是作者列出的局限。<span class="src">PERSIST Fig. 8、App. E</span></p>
+
+<h3 id="r-honeycomb">8.2 Honeycomb：WorldScore 闭环回访</h3>
+<p>用 <b>100 个 WorldScore 场景</b>，相机离开再返回输入视角；终帧与输入帧比较，Flow<sub>C</sub> 是 RAFT 光流幅度，单位 pixels。以下均来自 Honeycomb 的默认设置对照，不与 <a href="13-voyager-lsm.html#r-revisit">LSM 的 RE10K 闭环</a>混合。<span class="src">Honeycomb §4.2、Tab. 2</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>PSNR<sub>C</sub> ↑</th><th>SSIM<sub>C</sub> ↑</th><th>LPIPS<sub>C</sub> ↓</th><th>Flow<sub>C</sub> ↓</th></tr></thead>
+  <tbody>
+    <tr><td>Voyager <span class="src">Honeycomb Tab. 2</span></td><td>15.99</td><td>0.459</td><td>0.423</td><td>7.11</td></tr>
+    <tr><td>Spatia <span class="src">Honeycomb Tab. 2</span></td><td>15.67</td><td>0.488</td><td>0.353</td><td>6.64</td></tr>
+    <tr><td><a href="13-voyager-lsm.html#latent-spatial-memory">LSM-World</a> <span class="src">Honeycomb Tab. 2</span></td><td>15.12</td><td>0.460</td><td>0.463</td><td>27.05</td></tr>
+    <tr class="hl"><td>Honeycomb <span class="src">Honeycomb Tab. 2</span></td><td>17.22</td><td>0.504</td><td>0.311</td><td>3.00</td></tr>
+  </tbody>
+</table></div>
+<p>Honeycomb 的 WorldScore generation 表在无动态过滤条件下比较；其中 LSM 为 <b>61.20</b>，对应其无过滤变体，并非 LSM 完整过滤模型的 <b>70.36</b>。不能用这一表声称 Honeycomb 在全部协议上超过 LSM。<span class="src">Honeycomb §4.2、Tab. 1；LSM Tab. 3</span></p>
+
+<h3 id="r-capacity">8.3 定长容量与读回质量的受控取舍</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>平面 resolution</th><th>HexMemory MB ↓</th><th>闭环 PSNR ↑</th><th>LPIPS ↓</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>512 <span class="src">Honeycomb Tab. 3</span></td><td>73.9</td><td>17.22</td><td>0.311</td></tr>
+    <tr><td>256 <span class="src">Honeycomb Tab. 3</span></td><td>19.8</td><td>17.10</td><td>0.319</td></tr>
+    <tr><td>128 <span class="src">Honeycomb Tab. 3</span></td><td>5.8</td><td>16.77</td><td>0.338</td></tr>
+  </tbody>
+</table></div>
+<p>recurrent writer 在 chunk <b>2 / 5 / 9</b>的写时间为 <b>13.1 / 13.2 / 13.2 ms</b>；从所有历史重建的 replacement writer 为 <b>11.2 / 23.3 / 40.1 ms</b>。这是 writer 时间，不是整个生成器单 chunk 耗时。<span class="src">Honeycomb Tab. 4</span></p>
+<p>早期信息保留的单序列 probe 将 <b>129 帧</b>的 GT 观测连续写入；chunk 1 重建 PSNR 从 write 2 的 <b>16.71</b>到 write 5 的 <b>16.30</b>。它直接检查新写入是否破坏旧内容，但只有有限长度、GT write 条件，不能推出无限探索无损。<span class="src">Honeycomb App. C</span></p>
+<div class="callout code-note">
+  <span class="callout-title">“Constant-size”的边界</span>
+  论文严格支持 HexMemory 特征存储固定。§3.5 的 reader 仍需投影点位置与写入时间，推理也有 RGB 解码 / 重编码和几何估计；全文没有提供所有历史、几何元数据与各模型激活的统一定长上限。因此本页不把它登记为整机常数内存。
+</div>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>读取历史表面或旧视图</h4><ul>
+    <li><a href="08-worldmem.html">WorldMem</a> 检索历史帧；PERSIST 与它作主基线对照，不继承其权重。</li>
+    <li><a href="13-voyager-lsm.html">Voyager / LSM</a> 增长的空间点缓存提供可检查的地址与具体特征。</li>
+  </ul></div>
+  <div class="now"><h4>状态预测与固定特征容量</h4><ul>
+    <li>PERSIST 主动演化局部世界；有限区域、GT 3D 监督与 exposure bias 限制推广。</li>
+    <li>LSM → Honeycomb 是增长缓存与固定平面的对照关系；固定网格扩域不能同时维持无限细节。</li>
+    <li><a href="15-matrix-game.html">游戏记忆页</a>进一步讨论动作控制、静动态分解与实时生成条件。</li>
+  </ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q27"><span class="qid">Q27</span>为什么 PERSIST 的动作条件 3D 状态比“生成后追加点云”更接近可变化的世界？代价是什么？</h3>
+  <div class="ans">
+    <p class="short">PERSIST 在合成下一 RGB 前就预测 world-frame 与相机，离屏区域仍可通过状态转移改变，也能影响碰撞与之后的可见画面。追加点缓存通常等新观测出现才写入证据。代价是需要 GT 3D / 相机监督、独立世界与像素模型，并且只维护 agent 周围的有限区域。</p>
+    <ul>
+      <li>默认推理可从首帧推断初始 3D，不能因此抹去训练的特权监督。</li>
+      <li>显式 3D 初始化是另一条件，不能与普通首帧版合并分数。</li>
+      <li>离屏动态的定性案例支持能力方向，尚未证明所有隐藏过程正确。</li>
+    </ul>
+    <p class="cite">依据：PERSIST §4–5、§6.2、Fig. 8、App. E。</p>
+  </div>
+</div>
+<div class="qa">
+  <h3 id="q28"><span class="qid">Q28</span>Honeycomb 保持六个平面尺寸不变，为什么扩域仍可能遗忘？与 PERSIST 的有限区域有什么不同？</h3>
+  <div class="ans">
+    <p class="short">HexMemory 把更多空间与写入时间重采样进相同格数，地址分辨率下降，插值和融合也会压缩旧细节；定长存储不等于无限信息容量。PERSIST 通常维持局部区域的粒度，却在 agent 离开时丢掉远处状态。前者摊薄表示，后者截断覆盖。</p>
+    <ul>
+      <li>Honeycomb 的 source write time 只是观测地址，不是离屏动力学预测器。</li>
+      <li>平面尺寸消融与连续写入 probe 支持有限长度下的容量取舍。</li>
+      <li>固定的是 HexMemory features；整个系统的几何和峰值显存需另算。</li>
+    </ul>
+    <p class="cite">依据：Honeycomb §3.2–3.5、Tab. 3–4、App. C；PERSIST App. E。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Garcin et al. <i>Beyond Pixel Histories: World Models with Persistent 3D State.</i> ICML 2026. <a href="https://arxiv.org/abs/2603.03482v2">arXiv v2</a> · <a href="https://francelico.github.io/persist.github.io/">项目页</a> · <a href="https://github.com/francelico/PERSIST">代码</a>。</li>
+  <li>Shi et al. <i>Honeycomb: Constant-Size Scene Memory Representation for Video World Models.</i> arXiv preprint. <a href="https://arxiv.org/abs/2609.37690v2">arXiv v2</a> · <a href="https://jackswl.github.io/honeycomb/">项目页</a> · <a href="https://github.com/kaichen-z/honeycomb">代码</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="#references">参考</a></footer>
+</body>
+</html>

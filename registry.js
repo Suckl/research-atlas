@@ -19,7 +19,7 @@ window.ATLAS_REGISTRY = {
       "title": "JEPA：从表征学习到潜空间世界模型",
       "short": "JEPA",
       "status": "active",
-      "page": "tracks/jepa/index.html",
+      "page": "legacy/tracks/jepa/index.html",
       "summary": "从 LeCun 的 JEPA 构想出发：I-JEPA（图像）→ V-JEPA（视频）→ V-JEPA 2 / 2.1（规模化、稠密特征）→ RoboJEPA（机器人世界模型的缩放律）；潜空间规划一支从 DINO-WM / PLDM 到层级世界模型 HWM / H-JEPA；原理化一支由 LeJEPA 的 SIGReg 推出 LeWorldModel 与 LeVJEPA；并延伸到语言（LLM-JEPA）与视觉-语言（VL-JEPA）。时间线覆盖到 2026-10。",
       "reading_order": ["jepa-foundations", "i-jepa", "v-jepa", "dino-wm", "v-jepa-2", "llm-jepa", "vl-jepa", "le-world-model", "v-jepa-2-1", "hwm", "h-jepa", "levjepa", "robojepa"],
       "lanes": [
@@ -76,7 +76,7 @@ window.ATLAS_REGISTRY = {
       "title": "AI Infra：LLM 推理与训练系统",
       "short": "AI Infra",
       "status": "active",
-      "page": "tracks/ai-infra/index.html",
+      "page": "legacy/tracks/ai-infra/index.html",
       "summary": "以论文为单位讲 LLM 系统，时间线覆盖 2017 → 2026-10：注意力内核（FlashAttention 1–4 / FlashInfer）、推理引擎（Orca 连续批处理 / vLLM / SGLang / KV 分层缓存 / 投机解码与 EAGLE / PD 分离）、训练系统与数值（Megatron / ZeRO-FSDP / FP8 / FP4 / DeepSeek-V3 / RL 训练系统 / 批不变性）、模型架构（RoPE / Gated DeltaNet / Kimi Linear / DSA / DeepSeek-V4）与 AMD 硬件。每页末尾附简答题，用论文作答。",
       "reading_order": ["infra-basics", "orca", "flash-attention", "flash-attention-4", "flashinfer", "vllm", "sglang", "kv-tiering", "speculative-decoding", "eagle", "pd-disaggregation", "megatron", "zero-fsdp", "fp8-formats", "fp4-training", "deepseek-v3", "rope", "gated-deltanet", "kimi-linear", "deepseek-sparse-attention", "deepseek-v4", "batch-invariance", "rl-systems", "amd-rocm"],
       "lanes": [
@@ -206,7 +206,7 @@ window.ATLAS_REGISTRY = {
       "title": "少步生成：扩散 / 流模型蒸馏，从图像到视频",
       "short": "少步生成",
       "status": "active",
-      "page": "tracks/few-step/index.html",
+      "page": "legacy/tracks/few-step/index.html",
       "summary": "扩散 / 流模型的少步与一步生成，按监督信号分五个范式：轨迹蒸馏（Progressive Distillation / Rectified Flow）、一致性与流映射（CM / LCM / sCM / MeanFlow）、对抗蒸馏（ADD / LADD / Lightning）、分布匹配（DMD / DMD2）、表征空间匹配与漂移（Drifting / RDM）；并追踪每个范式迁移到视频时的改动（VideoLCM / T2V-Turbo、rCM、Seaweed-APT / APT2、CausVid → Self Forcing → Causal Forcing、ViRDM）。时间线 2020 → 2026-10，每页附简答题。",
       "reading_order": ["fs-foundations", "progressive-distillation", "rectified-flow", "consistency-models", "lcm", "add", "dmd", "dmd2", "video-consistency", "scm", "causvid", "apt", "meanflow", "self-forcing", "rcm", "causal-forcing", "drifting", "rdm", "virdm"],
       "lanes": [
@@ -339,7 +339,7 @@ window.ATLAS_REGISTRY = {
       "title": "视频记忆：离开视野以后，世界还在吗？",
       "short": "视频记忆",
       "status": "active",
-      "page": "tracks/video-memory/index.html",
+      "page": "legacy/tracks/video-memory/index.html",
       "summary": "视频生成与交互世界模型如何在内容离开注意力窗口后保存、找回、更新它：历史上下文（FramePack / LCT / MoC）、循环状态（TTT / SSM / RAD）、流式缓存（Self Forcing / LongLive / Rolling Forcing / WorldKV / Memory Forcing）、历史检索（WorldMem / Context-as-Memory / VMem / HyDRA）、三维状态（GEN3C / Voyager / PERSIST / Honeycomb / Matrix-Game 3.x）与叙事记忆（Captain Cinema / StoryMem / SlotMem / ShotStream）。18 页、37 篇论文，时间线 2022 → 2026-10，附记忆专测索引与简答题。",
       "lineage_band": "quarter",
       "reading_order": ["vm-foundations", "framepack", "tinyhistory", "lct", "moc", "ttt-video", "ssm-wm", "rad", "vm-self-forcing", "vm-longlive", "vm-rolling-forcing", "worldkv", "memory-forcing-kv", "worldtrace", "l2r", "worldmem", "vrag", "memory-forcing", "context-as-memory", "worldpack", "vmem", "hydra", "actworld", "gen3c", "spatial-memory", "voyager", "lsm-world", "persist", "honeycomb", "matrix-game-3", "matrix-game-3-5", "captain-cinema", "onestory", "storymem", "iamflow", "slotmem", "shotstream", "causalcine"],
@@ -485,7 +485,7 @@ window.ATLAS_REGISTRY = {
       "title": "扩散语言模型：不再从左到右",
       "short": "扩散 LLM",
       "status": "active",
-      "page": "tracks/dllm/index.html",
+      "page": "legacy/tracks/dllm/index.html",
       "summary": "扩散语言模型：用迭代去噪代替从左到右生成——噪声与目标（SEDD / MDLM / 离散流匹配 / 均匀噪声）、规模与配方（LLaDA / Dream / LLaDA2.x / DiffusionGemma / Mercury / Seed Diffusion）、块扩散与 AR 混合（BD3-LM / SDAR / WeDLM / TiDAR / DFlash）、缓存与并行解码（Fast-dLLM / dParallel / 并行上限分析）、后训练与代码（d1 / LLaDA 1.5 / TraceRL / DiffuCoder）、多模态（MMaDA / LLaDA-V / LaViDa）。19 页、47 篇论文，时间线 2021 → 2026-10，附测量条件检查清单与简答题。",
       "lineage_band": "quarter",
       "reading_order": ["dllm-foundations", "sedd", "radd", "mdlm", "md4", "dfm", "edit-flows", "duo", "uniform-scaling", "llada", "smdm", "illada", "dream", "diffullama", "data-constrained", "super-data", "llada2", "llada-moe", "llada21", "diffusiongemma", "mercury", "seed-diffusion", "bd3lm", "eso-lm", "sdar", "fast-dllm-v2", "wedlm", "tidar", "nemotron-diffusion", "dflash", "fast-dllm", "dkv-cache", "d2f", "dparallel", "d3llm", "cdlm", "train-worst", "parallelbench", "flexibility-trap", "d1", "llada-15", "tracerl", "diffucoder", "dream-coder", "stable-diffcoder", "mmada", "llada-v", "lavida"],
@@ -636,6 +636,18 @@ window.ATLAS_REGISTRY = {
         { "id": "Q37", "text": "MMaDA 把图像离散成码、与文本共用一个掩码预测目标；LLaDA-V / LaViDa 用连续视觉特征作不加噪的前缀。两条路线各自换来了什么、失去了什么？", "nodes": [{ "node": "mmada", "anchor": "q37" }] },
         { "id": "Q38", "text": "LaViDa 的前缀 DLM 缓存为什么能精确复用视觉与问题的 K/V，却仍然让 CIDEr 下降？它与块扩散的缓存有什么不同？", "nodes": [{ "node": "lavida", "anchor": "q38" }] }
       ]
+    },
+    {
+      "id": "multimodal",
+      "title": "统一多模态模型",
+      "short": "统一多模态",
+      "status": "papers-only",
+      "page": "index.html",
+      "summary": "只有论文精读页、没有旧版路线页的分类：统一理解与生成的多模态模型。",
+      "reading_order": ["ktp-umm"],
+      "lanes": [],
+      "milestones": [],
+      "compare_fields": []
     }
   ],
   "nodes": [
@@ -653,7 +665,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "OpenReview", "url": "https://openreview.net/forum?id=BZ5a1r-kVsf" }
       ],
-      "page": "tracks/jepa/00-foundations.html",
+      "page": "legacy/tracks/jepa/00-foundations.html",
       "tldr": "三种自监督架构（联合嵌入 / 生成式 / JEPA）的对比、表征坍塌问题与四类对策、能量模型视角，以及“潜空间世界模型 + 规划”的整体构想。",
       "tags": ["概念", "能量模型", "坍塌", "世界模型"]
     },
@@ -673,7 +685,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2301.08243" },
         { "label": "Code", "url": "https://github.com/facebookresearch/ijepa" }
       ],
-      "page": "tracks/jepa/01-i-jepa.html",
+      "page": "legacy/tracks/jepa/01-i-jepa.html",
       "tldr": "从同一张图像的一个大“上下文块”出发，预测若干“目标块”在目标编码器中的表征（而不是像素）。不依赖手工数据增强，靠多块掩码 + 预测器 + EMA 目标编码器学到语义表征。",
       "tags": ["图像", "多块掩码", "EMA", "ViT"],
       "facts": {
@@ -707,7 +719,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2404.08471" },
         { "label": "Code", "url": "https://github.com/facebookresearch/jepa" }
       ],
-      "page": "tracks/jepa/02-v-jepa.html",
+      "page": "legacy/tracks/jepa/02-v-jepa.html",
       "tldr": "把 I-JEPA 搬到视频：用 2×16×16 的 tubelet 切出时空 token，以贯穿整段时间的多块掩码遮住约 90% 的 token，用 L1 回归 EMA 目标编码器的特征。仅靠特征预测这一个目标，就得到冻结即可用于动作与外观任务的视频表征。",
       "tags": ["视频", "时空掩码", "L1", "attentive probe"],
       "facts": {
@@ -741,7 +753,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2506.09985" },
         { "label": "Code", "url": "https://github.com/facebookresearch/vjepa2" }
       ],
-      "page": "tracks/jepa/03-v-jepa-2.html",
+      "page": "legacy/tracks/jepa/03-v-jepa-2.html",
       "tldr": "两阶段：① 把 V-JEPA 规模化到 >100 万小时视频、1B 参数（ViT-g）并用 3D-RoPE 与渐进分辨率训练；② 冻结编码器，只用 <62 小时机器人视频训练 300M 的动作条件预测器 V-JEPA 2-AC，在潜空间里用 CEM 规划，零样本驱动 Franka 机械臂完成抓取与放置。",
       "tags": ["规模化", "3D-RoPE", "动作条件", "CEM 规划", "机器人"],
       "facts": {
@@ -773,7 +785,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2511.08544" }
       ],
-      "page": "tracks/jepa/04-le-world-model.html#lejepa",
+      "page": "legacy/tracks/jepa/04-le-world-model.html#lejepa",
       "tldr": "证明各向同性高斯是使下游预测风险最小的嵌入分布，并提出 SIGReg（随机一维投影 + Epps–Pulley 检验）把嵌入推向它；由此去掉 stop-gradient、teacher-student、调度器等启发式。本站在 LeWorldModel 页中作为前置知识讲解。",
       "tags": ["SIGReg", "各向同性高斯", "无启发式"]
     },
@@ -793,7 +805,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/lucas-maes/le-wm" },
         { "label": "Project", "url": "https://le-wm.github.io/" }
       ],
-      "page": "tracks/jepa/04-le-world-model.html",
+      "page": "legacy/tracks/jepa/04-le-world-model.html",
       "tldr": "约 15M 参数、单 GPU 数小时即可从像素端到端训练的 JEPA 世界模型：每帧压成一个 192 维嵌入，损失只有“下一嵌入预测 + λ·SIGReg”两项，不用 EMA、stop-gradient 或预训练编码器；规划速度比基于 DINOv2 特征的 DINO-WM 快至 48×。",
       "tags": ["世界模型", "端到端", "SIGReg", "AdaLN", "CEM 规划"],
       "facts": {
@@ -823,7 +835,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "Attention Is All You Need", "url": "https://arxiv.org/abs/1706.03762" }
       ],
-      "page": "tracks/ai-infra/00-inference-basics.html",
+      "page": "legacy/tracks/ai-infra/00-inference-basics.html",
       "tldr": "推理分两阶段：prefill 是算力受限的大矩阵乘，decode 是带宽受限的“每步读一遍权重 + KV”。用 Roofline 和 KV cache 公式把这条路线上几乎所有问题（投机解码、PagedAttention、PD 分离、通信量）的来源讲清楚。",
       "tags": ["概念", "Roofline", "KV cache", "prefill / decode"]
     },
@@ -845,8 +857,9 @@ window.ATLAS_REGISTRY = {
         { "label": "FA3", "url": "https://arxiv.org/abs/2407.08608" },
         { "label": "Code", "url": "https://github.com/Dao-AILab/flash-attention" }
       ],
-      "page": "tracks/ai-infra/01-flash-attention.html",
-      "tldr": "精确注意力不必把 N×N 矩阵写进 HBM：分块 + 在线 softmax + 反向重算，把 IO 从 O(N²) 降到 O(N²d²/M)。FA2 重排并行与 warp 分工（A100 上 50–73% 峰值），FA3 用 Hopper 的异步与 FP8（H100 上 75%）。",
+      "page": "legacy/tracks/ai-infra/01-flash-attention.html",
+      "reading": "papers/flashattention.html",
+      "tldr": "FlashAttention 不改变注意力的数学，只改变数据在显存（HBM）和片上 SRAM 之间的搬运方式：把 Q、K、V 分块放进 SRAM，用在线 softmax 拼出精确结果，反向时重算而不存 N×N 矩阵。HBM 读写因此大幅减少，注意力快 2–4 倍、显存随序列长度线性增长，Transformer 也第一次在 16K、64K 长度的 Path-X、Path-256 上超过随机水平。",
       "tags": ["内核", "在线 softmax", "分块", "Hopper"],
       "facts": {
         "problem": "标准注意力把 N×N 分数矩阵读写 HBM，带宽成为瓶颈",
@@ -873,7 +886,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2501.01005" },
         { "label": "Code", "url": "https://github.com/flashinfer-ai/flashinfer" }
       ],
-      "page": "tracks/ai-infra/02-flashinfer.html",
+      "page": "legacy/tracks/ai-infra/02-flashinfer.html",
       "tldr": "面向“服务”的注意力引擎：把分页 / 基数树 / 树状等各种 KV 布局统一成块稀疏矩阵，用 JIT 模板生成注意力变体，用 plan/run 两阶段做负载均衡调度并兼容 CUDAGraph。相对 FlashAttention 的区别不在数学，而在批处理、布局与调度。",
       "tags": ["内核", "块稀疏 KV", "JIT", "调度"],
       "facts": {
@@ -901,7 +914,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2309.06180" },
         { "label": "Code", "url": "https://github.com/vllm-project/vllm" }
       ],
-      "page": "tracks/ai-infra/03-vllm.html",
+      "page": "legacy/tracks/ai-infra/03-vllm.html",
       "reading": "papers/vllm.html",
       "tldr": "把操作系统的分页虚拟内存搬到 KV cache：按 16 token 的块分配、块表做逻辑→物理映射、引用计数 + 写时复制实现共享。现有系统只有 20–38% 的 KV 显存装的是真实 token，vLLM 把浪费限制在每请求最后一块之内，吞吐提升 2–4×。",
       "tags": ["推理引擎", "分页", "块表", "写时复制"],
@@ -921,8 +934,8 @@ window.ATLAS_REGISTRY = {
       "lane": "serving",
       "title": "SGLang / RadixAttention",
       "full_title": "SGLang: Efficient Execution of Structured Language Model Programs",
-      "authors": ["Lianmin Zheng", "Liangsheng Yin", "Zhiqiang Xie", "Chuyue Sun", "Jeff Huang", "Cody Hao Yu", "…", "Ying Sheng"],
-      "org": "UC Berkeley / Stanford 等",
+      "authors": ["Lianmin Zheng", "Liangsheng Yin", "Zhiqiang Xie", "Chuyue Sun", "Jeff Huang", "Cody Hao Yu", "Shiyi Cao", "Christos Kozyrakis", "Ion Stoica", "Joseph E. Gonzalez", "Clark Barrett", "Ying Sheng"],
+      "org": "Stanford / UC Berkeley / 上海交通大学 / Texas A&M / 独立研究者",
       "date": "2023-12",
       "venue": "NeurIPS 2024",
       "arxiv": "2312.07104",
@@ -930,8 +943,9 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2312.07104" },
         { "label": "Code", "url": "https://github.com/sgl-project/sglang" }
       ],
-      "page": "tracks/ai-infra/04-sglang.html",
-      "tldr": "把“LM 程序”当作一等公民：前端 DSL（gen / select / fork）+ 运行时三件套——RadixAttention（基数树管理 KV 前缀，LRU 淘汰，缓存感知调度）、压缩有限状态机（约束解码一次跳多 token）、API 投机执行。吞吐最高 6.4×。",
+      "page": "legacy/tracks/ai-infra/04-sglang.html",
+      "reading": "papers/sglang.html",
+      "tldr": "这篇论文把多次调用大模型的“LM 程序”当作整体来优化：请求结束后不再丢弃 KV 缓存，而是存进一棵基数树，让后来开头相同的请求自动复用，并优先执行能复用得多的请求；输出格式里写死的部分则一步跳过，不再逐个 token 解码。论文报告在 Llama-7B 等模型上吞吐量最高提高到 6.4 倍。",
       "tags": ["推理引擎", "基数树", "前缀缓存", "约束解码"],
       "facts": {
         "problem": "多轮对话、few-shot、树状搜索等场景下大量共享前缀被重复计算；结构化输出逐 token 慢",
@@ -958,8 +972,9 @@ window.ATLAS_REGISTRY = {
         { "label": "Leviathan et al.", "url": "https://arxiv.org/abs/2211.17192" },
         { "label": "Chen et al.", "url": "https://arxiv.org/abs/2302.01318" }
       ],
-      "page": "tracks/ai-infra/05-speculative-decoding.html",
-      "tldr": "解码是带宽受限的：读一遍权重只算 1 个 token 太亏。让小模型先猜 γ 个 token，大模型一次前向并行验证，用“接受概率 min(1, p/q) + 残差分布重采样”保证输出分布与大模型逐 token 完全一致。T5-XXL 上 2–3.4×（batch 1）。",
+      "page": "legacy/tracks/ai-infra/05-speculative-decoding.html",
+      "reading": "papers/speculative-decoding.html",
+      "tldr": "大模型解码受显存带宽限制，一次前向多检查几个位置几乎不增加耗时。论文让小模型先猜 γ 个 token、大模型一次并行验证，并用“按 min(1, p/q) 接受、被拒时从 max(0, p−q) 补采”的投机采样保证输出分布与大模型完全一致；在 T5-XXL 上、批大小为 1 时加速 2–3.4 倍。",
       "tags": ["解码", "拒绝采样", "延迟", "草稿模型"],
       "facts": {
         "problem": "自回归解码每步只产出 1 个 token，GPU 算力大量闲置",
@@ -987,8 +1002,9 @@ window.ATLAS_REGISTRY = {
         { "label": "Splitwise", "url": "https://arxiv.org/abs/2311.18677" },
         { "label": "Mooncake", "url": "https://arxiv.org/abs/2407.00079" }
       ],
-      "page": "tracks/ai-infra/06-pd-disaggregation.html",
-      "tldr": "prefill（算力受限、长任务）和 decode（带宽受限、延迟敏感）混在一张卡上互相拖慢。把两者拆到不同 GPU 池，各自选并行度与 batch 策略，用 KV cache 传输把它们接起来：优化的不是“更快”，而是在 TTFT / TPOT SLO 约束下的 goodput。",
+      "page": "legacy/tracks/ai-infra/06-pd-disaggregation.html",
+      "reading": "papers/distserve.html",
+      "tldr": "DistServe 把大模型推理的 prefill 和 decode 拆到不同的 GPU 上，消除两个阶段的互相干扰，并按 TTFT 和 TPOT 的要求分别为两边搜索并行配置和卡数。在至少 90% 的请求满足延迟要求的前提下，每张卡能接的请求是 vLLM 的 2.0–5.7 倍。",
       "tags": ["推理系统", "goodput", "KV 传输", "异构"],
       "facts": {
         "problem": "prefill 与 decode 同卡执行互相干扰，无法同时满足 TTFT 与 TPOT SLO",
@@ -1017,8 +1033,9 @@ window.ATLAS_REGISTRY = {
         { "label": "Sequence Parallel", "url": "https://arxiv.org/abs/2205.05198" },
         { "label": "Code", "url": "https://github.com/NVIDIA/Megatron-LM" }
       ],
-      "page": "tracks/ai-infra/07-megatron.html",
-      "tldr": "把每个 Transformer 层按“先列切后行切”拆到多卡，每层前向只需 2 次 all-reduce（MLP 一次、注意力一次），不改编译器。张量并行留在 NVLink 节点内，跨节点用流水并行（1F1B / 交错调度），再叠数据并行：3072 张 A100 上 1T 模型达 52% 峰值。",
+      "page": "legacy/tracks/ai-infra/07-megatron.html",
+      "reading": "papers/megatron-lm.html",
+      "tldr": "把 Transformer 每层的矩阵乘按“先列切、后行切”分到多张 GPU 上，注意力按头切，每层前向和反向各只需两次 all-reduce，用原生 PyTorch 加几行代码就能实现。作者借此在 512 张 V100 上训练了 83 亿参数的 GPT-2 式模型，并发现调整 LayerNorm 的位置后 BERT 才能继续放大。",
       "tags": ["训练", "张量并行", "流水并行", "集合通信"],
       "facts": {
         "problem": "单卡装不下模型；朴素切分通信过多",
@@ -1044,7 +1061,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2209.05433" }
       ],
-      "page": "tracks/ai-infra/08-fp8-formats.html",
+      "page": "legacy/tracks/ai-infra/08-fp8-formats.html",
       "tldr": "两种 8 位浮点：E4M3（精度高，最大 448，没有 inf，只保留一个 NaN 编码）和 E5M2（范围大，最大 57344，IEEE 风格）。推荐前向的权重 / 激活用 E4M3、梯度用 E5M2，配合逐张量缩放因子；GPT-3 175B 的 FP8 训练困惑度与 bf16 相差 0.03。",
       "tags": ["数值", "E4M3", "E5M2", "缩放因子"],
       "facts": {
@@ -1066,14 +1083,15 @@ window.ATLAS_REGISTRY = {
       "authors": ["DeepSeek-AI"],
       "org": "DeepSeek",
       "date": "2024-12",
-      "venue": "arXiv 2412.19437",
+      "venue": "arXiv 技术报告",
       "arxiv": "2412.19437",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2412.19437" },
         { "label": "DeepEP", "url": "https://github.com/deepseek-ai/DeepEP" }
       ],
-      "page": "tracks/ai-infra/09-deepseek-v3.html",
-      "tldr": "671B 总参 / 37B 激活的 MoE，在 2048 张 H800 上用 2.788M GPU 小时训完：64 路专家并行（all-to-all 经 IB + NVLink，节点受限路由）、DualPipe 把通信藏进计算、细粒度 FP8（全部 E4M3，1×128 / 128×128 分块缩放，每 128 元素提升到 FP32 累加）、MLA 把每 token KV 压到 576 个数。",
+      "page": "legacy/tracks/ai-infra/09-deepseek-v3.html",
+      "reading": "papers/deepseek-v3.html",
+      "tldr": "DeepSeek-V3 是一个总参数 671B、每个 token 只激活 37B 的 MoE 模型，用 MLA 把 KV 缓存压到每层 576 个数，用偏置项代替辅助损失做专家负载均衡，并加入多 token 预测目标。报告详细说明了它怎样靠 DualPipe 通信重叠和细粒度 FP8 训练，只用 278.8 万 H800 GPU 小时就训到与 GPT-4o、Claude-3.5-Sonnet 相当的水平。",
       "tags": ["训练", "MoE", "专家并行", "FP8", "MLA"],
       "facts": {
         "problem": "超大 MoE 的跨节点 all-to-all 通信与训练成本",
@@ -1094,13 +1112,14 @@ window.ATLAS_REGISTRY = {
       "authors": ["Jianlin Su", "Yu Lu", "Shengfeng Pan", "Ahmed Murtadha", "Bo Wen", "Yunfeng Liu"],
       "org": "追一科技",
       "date": "2021-04",
-      "venue": "arXiv 2104.09864（Neurocomputing 2024）",
+      "venue": "Neurocomputing 2024（arXiv 2021-04）",
       "arxiv": "2104.09864",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2104.09864" }
       ],
-      "page": "tracks/ai-infra/10-rope.html",
-      "tldr": "把 q、k 按二维一组旋转 mθᵢ 角，点积自然只依赖相对位置 m−n：用绝对位置的操作得到相对位置的效果，不加参数、随距离衰减、可用于线性注意力。LLaMA 以来几乎所有主流 LLM 的默认选择，也是 NTK / YaRN 等长度外推方法的基础。",
+      "page": "legacy/tracks/ai-infra/10-rope.html",
+      "reading": "papers/roformer.html",
+      "tldr": "RoPE 把 query 和 key 的每两维看成平面上的一个点，按词的位置转过一个角度；两个转过的向量做点积时只剩下角度之差，所以注意力分数只依赖相对位置，而且不加参数、不用改注意力公式。它后来成为 LLaMA 等大模型最常用的位置编码，位置插值、NTK、YaRN 等上下文扩展方法也都是在它的频率上做调整。",
       "tags": ["位置编码", "旋转", "相对位置", "长度外推"],
       "facts": {
         "problem": "绝对位置编码不表达相对关系、难以外推；相对位置偏置又不适合高效内核",
@@ -1128,7 +1147,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code (FLA)", "url": "https://github.com/fla-org/flash-linear-attention" },
         { "label": "Qwen3.5 docs", "url": "https://huggingface.co/docs/transformers/en/model_doc/qwen3_5" }
       ],
-      "page": "tracks/ai-infra/11-gated-deltanet.html",
+      "page": "legacy/tracks/ai-infra/11-gated-deltanet.html",
       "tldr": "线性注意力的状态是一个 d×d 矩阵：Mamba2 式的门控 α 负责“整体遗忘”，DeltaNet 的 delta 规则 β 负责“定点改写”，二者相加得到 Gated DeltaNet；分块并行算法让训练接近 Mamba2 速度。Qwen3-Next / Qwen3.5 以 3 层 GDN : 1 层门控全注意力混合，线性层不用 RoPE。",
       "tags": ["线性注意力", "delta 规则", "混合架构", "位置编码"],
       "facts": {
@@ -1157,7 +1176,7 @@ window.ATLAS_REGISTRY = {
         { "label": "NSA", "url": "https://arxiv.org/abs/2502.11089" },
         { "label": "V4", "url": "https://arxiv.org/abs/2606.19348" }
       ],
-      "page": "tracks/ai-infra/12-deepseek-sparse-attention.html",
+      "page": "legacy/tracks/ai-infra/12-deepseek-sparse-attention.html",
       "tldr": "用一个极轻的“闪电索引器”（少头、ReLU、FP8）给每个 query 对所有历史 token 打分，只对 top-k = 2048 个 MLA 潜向量做注意力，核心注意力从 O(L²) 降到 O(Lk)；先用 KL 把索引器对齐到稠密注意力再稀疏训练。V4 进一步在压缩后的 KV 上做 DSA（CSA）并与重压缩的稠密分支（HCA）交错。",
       "tags": ["稀疏注意力", "索引器", "长上下文", "MLA"],
       "facts": {
@@ -1184,7 +1203,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Blog", "url": "https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" },
         { "label": "TIS", "url": "https://fengyao.notion.site/off-policy-rl" }
       ],
-      "page": "tracks/ai-infra/13-batch-invariance.html",
+      "page": "legacy/tracks/ai-infra/13-batch-invariance.html",
       "tldr": "温度 0 也不确定，根源不是“并发 + 浮点”而是内核缺乏批不变性：归约顺序随 batch 大小变化，于是你的结果取决于同批里还有谁。把 RMSNorm / matmul / attention 改成固定归约策略后 1000 次采样完全一致；由此可做“逐位一致”的 on-policy RL，否则需用截断重要性采样修正训推偏差。",
       "tags": ["数值", "确定性", "RL", "重要性采样"],
       "facts": {
@@ -1210,7 +1229,7 @@ window.ATLAS_REGISTRY = {
         { "label": "ROCm docs", "url": "https://rocm.docs.amd.com/" },
         { "label": "MI300X", "url": "https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html" }
       ],
-      "page": "tracks/ai-infra/14-amd-rocm.html",
+      "page": "legacy/tracks/ai-infra/14-amd-rocm.html",
       "tldr": "MI300X：8 个 XCD 小芯片、304 CU、192 GB HBM3 / 5.3 TB/s；MI355X（CDNA 4）：288 GB HBM3E / 8 TB/s，FP8 约 5 PFLOPS、原生 FP4/FP6。软件上 HIP ≈ CUDA 的方言（hipify 直译），RCCL ≈ NCCL，wavefront 64 而非 warp 32，LDS 对应 shared memory；vLLM / SGLang / FlashAttention 均有 ROCm 后端。",
       "tags": ["硬件", "ROCm", "HIP", "MI300"]
     },
@@ -1230,7 +1249,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2411.04983" },
         { "label": "Project", "url": "https://dino-wm.github.io/" }
       ],
-      "page": "tracks/jepa/05-dino-wm.html",
+      "page": "legacy/tracks/jepa/05-dino-wm.html",
       "tldr": "把冻结 DINOv2 的 patch 特征当作世界状态，只训练一个带帧级因果掩码的 ViT 预测器（≈19M）去预测下一帧的 patch 特征；测试时用 CEM 在潜空间里把预测终态推向目标图像的特征。6 个环境零样本规划，不需要奖励、专家示范或逆模型。",
       "tags": ["世界模型", "冻结编码器", "CEM", "MPC"],
       "facts": {
@@ -1264,7 +1283,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2502.14819" },
         { "label": "Project", "url": "https://latent-planning.github.io/" }
       ],
-      "page": "tracks/jepa/05-dino-wm.html#pldm",
+      "page": "legacy/tracks/jepa/05-dino-wm.html#pldm",
       "tldr": "端到端训练的 JEPA 潜动力学模型：编码器与预测器联合训练，用 VICReg 式方差 / 协方差 + 时间平滑 + 逆动力学共 5 项损失防坍塌，MPPI 规划。在离线、无奖励、质量参差的数据上，比目标条件 RL 更能泛化到没见过的迷宫布局。本站在 DINO-WM 页中讲解。",
       "tags": ["端到端", "VICReg", "MPPI", "离线数据"]
     },
@@ -1283,7 +1302,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2509.14252" },
         { "label": "Code", "url": "https://github.com/rbalestr-lab/llm-jepa" }
       ],
-      "page": "tracks/jepa/06-llm-jepa.html",
+      "page": "legacy/tracks/jepa/06-llm-jepa.html",
       "tldr": "把 JEPA 目标加进 LLM 训练：同一知识的两个“视图”（如自然语言描述与正则 / SQL）各取最后一个 token 的隐状态作嵌入，在保留 next-token 损失的同时，让同一个 LLM 追加 k 个 [PRED] token 从 Text 的嵌入预测 Code 的嵌入。Llama-3.2-1B 在 NL-RX-SYNTH 上 57.3% → 71.5%，且更抗过拟合。",
       "tags": ["语言", "多视图", "正则项", "微调"],
       "facts": {
@@ -1316,7 +1335,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2512.10942" }
       ],
-      "page": "tracks/jepa/07-vl-jepa.html",
+      "page": "legacy/tracks/jepa/07-vl-jepa.html",
       "tldr": "视觉-语言模型不再逐 token 生成，而是预测“答案文本的嵌入”：冻结 V-JEPA 2 ViT-L 看视频，Llama-3.2-1B 末 8 层初始化的预测器读入视觉与问题，目标是 EmbeddingGemma 初始化的文本编码器输出，用双向 InfoNCE 训练；需要文字时才调用轻量解码器。同数据同编码器下比 token 空间 VLM 学得更快、可训练参数少一半；选择性解码让解码次数降 2.85×。",
       "tags": ["视觉-语言", "嵌入预测", "InfoNCE", "选择性解码"],
       "facts": {
@@ -1349,7 +1368,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2603.14482" }
       ],
-      "page": "tracks/jepa/08-v-jepa-2-1.html",
+      "page": "legacy/tracks/jepa/08-v-jepa-2-1.html",
       "tldr": "V-JEPA 2 的 patch 特征“稠密质量”差：损失只看被遮挡 token，可见 token 被当成寄存器用。2.1 对可见 token 也加损失（离掩码越近权重越大）、在 4 个层级上做深度自监督、图像与视频分别用 2D / 3D 分词器，并扩到 ViT-G（2B）：ADE20K 线性分割 22.2 → 47.9 mIoU、NYUv2 深度 0.307 RMSE，同时 SSv2 77.7。",
       "tags": ["视频", "稠密特征", "深度自监督", "图像 + 视频"],
       "facts": {
@@ -1382,7 +1401,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2604.03208" }
       ],
-      "page": "tracks/jepa/10-hierarchical-wm.html",
+      "page": "legacy/tracks/jepa/10-hierarchical-wm.html",
       "tldr": "在同一个潜空间里训练两个时间尺度的预测器：低层预测下一步，高层用动作编码器把一段原始动作压成 4 维“潜宏动作”、预测下一个航点。规划时高层 CEM 给出子目标，低层 MPC 去匹配它。Franka 单目标图像抓放从单层的 0% 提到 70%，规划算力最多省 3×。",
       "tags": ["层级规划", "宏动作", "MPC", "V-JEPA 2-AC"],
       "facts": {
@@ -1415,7 +1434,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2610.06805" }
       ],
-      "page": "tracks/jepa/10-hierarchical-wm.html#h-jepa",
+      "page": "legacy/tracks/jepa/10-hierarchical-wm.html#h-jepa",
       "tldr": "把 2022 年构想中的 H-JEPA 端到端实现：每层有自己学出来的潜空间（高层只看下层潜变量），各层用“预测 + λ·SIGReg”训练、梯度穿过下层编码器；规划自上而下，每层用梯度下降优化动作。Visual AntMaze 上三层把成功率从 18% 提到 73%。",
       "tags": ["层级世界模型", "SIGReg", "端到端", "LeWM"],
       "facts": {
@@ -1447,7 +1466,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2608.27395" }
       ],
-      "page": "tracks/jepa/09-levjepa.html",
+      "page": "legacy/tracks/jepa/09-levjepa.html",
       "tldr": "第一个用 LeJEPA 目标训练的视频编码器：只有一个编码器 + 投影头，损失 = 多视图不变性 + λ·SIGReg（λ = 0.02 固定），去掉了 EMA 目标编码器、stop-gradient 和预测器，再随机丢掉 95% 的 token。同 epoch 下用 5.6–20.8× 更少的预训练算力追平或超过 V-JEPA 2，且可以直接用块因果注意力。",
       "tags": ["视频", "SIGReg", "token 丢弃", "无启发式"],
       "facts": {
@@ -1480,7 +1499,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2610.10515" }
       ],
-      "page": "tracks/jepa/11-robojepa.html",
+      "page": "legacy/tracks/jepa/11-robojepa.html",
       "tldr": "冻结 V-JEPA 2.1-G 编码器，在 12 种机器人平台、15022 小时视频（6692 小时带动作）上训练 22M–8B 的动作条件预测器。潜空间 rollout 的“想象误差”随算力服从二阶幂律，用 ≤2B 的模型拟合即可准确外推到 4B / 8B；8B 预测器只凭一张目标图像在真实机械臂上零样本规划。",
       "tags": ["机器人", "缩放律", "多本体", "8B 预测器"],
       "facts": {
@@ -1515,7 +1534,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Sarathi arXiv", "url": "https://arxiv.org/abs/2403.02310" },
         { "label": "Code", "url": "https://github.com/microsoft/sarathi-serve" }
       ],
-      "page": "tracks/ai-infra/15-orca-sarathi.html",
+      "page": "legacy/tracks/ai-infra/15-orca-sarathi.html",
       "tldr": "Orca 把调度粒度从“请求”降到“一次前向迭代”（迭代级调度，即连续批处理），并用 selective batching 只对与序列长度无关的算子拼批：GPT-3 175B 上同延迟吞吐 36.9×。Sarathi-Serve 再把长 prompt 切成等大的块与 decode 拼进同一批（chunked prefill + 无停顿调度），消除 prefill 对 decode 的阻塞：服务容量比 vLLM 高 2.6–5.6×。",
       "tags": ["调度", "连续批处理", "chunked prefill"],
       "facts": {
@@ -1543,8 +1562,9 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/1910.02054" },
         { "label": "FSDP arXiv", "url": "https://arxiv.org/abs/2304.11277" }
       ],
-      "page": "tracks/ai-infra/16-zero-fsdp.html",
-      "tldr": "数据并行时每张卡都存一份完整的参数、梯度和 Adam 状态（混合精度下每参数 16 字节）。ZeRO 把三者按数据并行维度切开：Stage 1 切优化器状态、Stage 2 再切梯度、Stage 3 再切参数（用时 all-gather）。前两级通信量与数据并行相同，Stage 3 为 1.5×。PyTorch FSDP 是 ZeRO-3 的原生实现，FSDP2 改为逐参数 DTensor 分片。",
+      "page": "legacy/tracks/ai-infra/16-zero-fsdp.html",
+      "reading": "papers/zero.html",
+      "tldr": "数据并行让每张卡都存一份完整的参数、梯度和 Adam 状态，混合精度下每个参数要 16 字节。ZeRO 保留数据并行的算法，把这三样切成 N 份、每张卡只存一份，前两个阶段通信量与数据并行相同、第三阶段只多 50%，并在 400 张 V100 上训练了 1000 亿参数的模型。",
       "tags": ["数据并行", "显存", "分片", "DeepSpeed"],
       "facts": {
         "problem": "纯数据并行的显存冗余：每卡 16Ψ 字节（Ψ = 参数量，混合精度 Adam）",
@@ -1573,7 +1593,7 @@ window.ATLAS_REGISTRY = {
         { "label": "EAGLE-3", "url": "https://arxiv.org/abs/2503.01840" },
         { "label": "Code", "url": "https://github.com/SafeAILab/EAGLE" }
       ],
-      "page": "tracks/ai-infra/17-eagle.html",
+      "page": "legacy/tracks/ai-infra/17-eagle.html",
       "tldr": "不训练独立的小模型，而是在目标模型顶层特征上接一个单层 Transformer 起草：EAGLE-1 把“特征 + 后移一位的 token 嵌入”喂给草稿头，消除采样带来的特征不确定性；EAGLE-2 按草稿置信度动态生长草稿树；EAGLE-3 放弃特征回归、融合低/中/高三层特征，并在训练时模拟多步起草（training-time test），让加速比随训练数据继续增长：最高 6.5×，约为 EAGLE-2 的 1.4×。",
       "tags": ["投机解码", "草稿头", "草稿树", "训练时测试"],
       "facts": {
@@ -1600,10 +1620,11 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2409.19256" },
         { "label": "AReaL", "url": "https://arxiv.org/abs/2505.24298" },
-        { "label": "verl", "url": "https://github.com/volcengine/verl" }
+        { "label": "verl", "url": "https://github.com/verl-project/verl" }
       ],
-      "page": "tracks/ai-infra/18-rl-systems.html",
-      "tldr": "LLM 的 RL 后训练是一张数据流图：生成（推理引擎）→ 打分 / 参考概率（前向）→ 训练（训练引擎）。HybridFlow（verl）用“单控制器管数据流 + 多控制器（SPMD）跑每个模型”的混合编程模型，3D-HybridEngine 让 actor 在训练与生成两种并行布局间零冗余切换：吞吐 1.53–20.57×。AReaL 把生成与训练彻底异步：可中断的 rollout、陈旧度上限 η、解耦 PPO 目标，训练时间最多缩短 2.77×。",
+      "page": "legacy/tracks/ai-infra/18-rl-systems.html",
+      "reading": "papers/hybridflow.html",
+      "tldr": "RLHF 的一轮迭代是多个大模型、多种计算组成的数据流，HybridFlow 让一个中心控制器编排模型之间的调用、每个模型内部仍由各 GPU 并行执行，从而几行代码就能写出 PPO 等算法。它还让 actor 在训练和生成之间换并行切法时不留多余权重副本，并自动搜索模型放置，在最多 128 张 A100 上比当时的 RLHF 系统快 1.53–20.57 倍；开源实现就是 verl。",
       "tags": ["RL", "数据流", "异步", "重分片"],
       "facts": {
         "problem": "同步 RL：生成要等最长输出、生成与训练交替导致 GPU 空转；训练 / 推理两套并行布局切换昂贵",
@@ -1629,7 +1650,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2509.25149" }
       ],
-      "page": "tracks/ai-infra/19-fp4-training.html",
+      "page": "legacy/tracks/ai-infra/19-fp4-training.html",
       "tldr": "Blackwell 的 FP4 张量核数学吞吐是 FP8 的 2–3×。MXFP4 = E2M1 元素 + 每 32 个共享一个 2 的幂缩放（E8M0）；NVFP4 把块缩到 16、块缩放改用 E4M3、再加一级 FP32 张量缩放。NVIDIA 用 NVFP4 把 12B 混合 Mamba-Transformer 训练到 10T token：约 15% 的层留高精度、Wgrad 输入做 16×16 随机 Hadamard 变换、权重二维缩放、梯度随机舍入；MMLU-Pro 62.58 对 FP8 的 62.62。MXFP4 要多 36% 的 token 才追上。",
       "tags": ["数值", "FP4", "微缩放", "Blackwell"],
       "facts": {
@@ -1658,7 +1679,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Kimi K3", "url": "https://arxiv.org/abs/2607.24653" },
         { "label": "HF", "url": "https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct" }
       ],
-      "page": "tracks/ai-infra/20-kimi-linear.html",
+      "page": "legacy/tracks/ai-infra/20-kimi-linear.html",
       "tldr": "KDA（Kimi Delta Attention）把 Gated DeltaNet 的标量遗忘门换成逐通道的对角门 Diag(α_t)，并把分块算法特化为受约束的 DPLR，比通用 DPLR 内核快约 2×。3 层 KDA : 1 层 MLA 混合，MLA 层不用位置编码。48B-A3B 在同配方下全面超过全 MLA：1M 上下文 KV 少 75%、解码吞吐最高 6×。2026-07 的 Kimi K3（2.8T-A104B）沿用 3:1 KDA + 门控 MLA，并加入 Attention Residuals。",
       "tags": ["线性注意力", "混合架构", "NoPE", "KDA"],
       "facts": {
@@ -1687,7 +1708,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Strata", "url": "https://arxiv.org/abs/2508.18572" },
         { "label": "LMCache", "url": "https://github.com/LMCache/LMCache" }
       ],
-      "page": "tracks/ai-infra/21-kv-cache-tiering.html",
+      "page": "legacy/tracks/ai-infra/21-kv-cache-tiering.html",
       "tldr": "长上下文与多轮 / 智能体负载让可复用的 KV 远超显存，于是 KV 变成要分层管理的数据：GPU → CPU DRAM → 本地 SSD → 远端存储。LMCache 把 KV 按 256 token 分块、跨层打包、逐层流水加载，作为 vLLM / SGLang 的连接器同时服务前缀复用与 PD 分离：吞吐最高 15×。Strata（OSDI 2026）指出分页布局导致碎片化 I/O、调度器不感知加载延迟，用 GPU 辅助 I/O 与缓存感知调度，长上下文上比 vLLM + LMCache 最高快 5×、比 TensorRT-LLM 快 3.75×。",
       "tags": ["KV cache", "存储层级", "前缀复用", "调度"],
       "facts": {
@@ -1715,7 +1736,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2603.05451" },
         { "label": "Code", "url": "https://github.com/Dao-AILab/flash-attention" }
       ],
-      "page": "tracks/ai-infra/22-flash-attention-4.html",
+      "page": "legacy/tracks/ai-infra/22-flash-attention-4.html",
       "tldr": "Blackwell（B200）把张量核吞吐翻倍到 8192 op/clk/SM，但共享内存带宽（128 B/clk/SM）和 exp 单元（16 op/clk/SM）原地不动，注意力的瓶颈从矩阵乘移到了 softmax 与数据搬运。FA4 用全异步 MMA + 张量内存（TMEM）重排流水线、两个 Q tile 乒乓；用多项式软件模拟 10–25% 的 exp2；只在行最大值涨幅超过 log₂256 时才重缩放；反向用 2-CTA MMA 减半 dQ 原子加。B200 BF16 前向最高 1613 TFLOPS（71%）。",
       "tags": ["内核", "Blackwell", "TMEM", "CuTe-DSL"],
       "facts": {
@@ -1743,7 +1764,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2606.19348" },
         { "label": "mHC", "url": "https://arxiv.org/abs/2512.24880" }
       ],
-      "page": "tracks/ai-infra/23-deepseek-v4.html",
+      "page": "legacy/tracks/ai-infra/23-deepseek-v4.html",
       "tldr": "V4-Pro（1.6T-A49B，61 层）与 V4-Flash（284B-A13B，43 层），原生 1M 上下文。架构上三件事：CSA（每 4 个 token 压成 1 条 KV 再用 DSA 取 top-k）与 HCA（每 128 个 token 压 1 条、稠密注意）交错；mHC 把残差流扩成 4 路、混合矩阵约束为双随机矩阵（Sinkhorn 20 次），解决超连接在 27B 上信号放大约 3000× 的不稳定；大部分参数改用 Muon。系统上有 MegaMoE 融合 EP 内核、TileLang、批不变的确定性内核、专家权重 FP4 QAT 与磁盘 KV 缓存。1M 上下文单 token FLOPs 为 V3.2 的 27%、KV 为 10%。",
       "tags": ["MoE", "压缩注意力", "超连接", "Muon", "1M 上下文"],
       "facts": {
@@ -1774,7 +1795,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Score SDE", "url": "https://arxiv.org/abs/2011.13456" },
         { "label": "Flow Matching", "url": "https://arxiv.org/abs/2210.02747" }
       ],
-      "page": "tracks/few-step/01-foundations.html",
+      "page": "legacy/tracks/few-step/01-foundations.html",
       "tldr": "网络学习局部 score 或速度场，采样仍需数值积分；少步生成将这部分工作搬进训练。按轨迹回归、终点一致性与分布匹配辨认监督资源，并统一 NFE、评估指标及视频部署口径。",
       "tags": ["probability-flow ODE", "NFE", "监督分类", "评估协议", "视频迁移"],
       "facts": {
@@ -1804,7 +1825,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/google-research/google-research/tree/master/diffusion_distillation" },
         { "label": "Guided Distillation", "url": "https://arxiv.org/abs/2210.03142" }
       ],
-      "page": "tracks/few-step/02-trajectory-distillation.html",
+      "page": "legacy/tracks/few-step/02-trajectory-distillation.html",
       "tldr": "反解 DDIM 得到让学生一步匹配教师两步落点的数据预测目标，训练后将学生冻结成下一轮教师、逐轮减半。v 参数化与低 SNR 权重使接近纯噪声的大跳跃仍可学习。",
       "tags": ["局部 ODE 回归", "逐轮减半", "v-parameterization", "guided distillation"],
       "facts": {
@@ -1835,7 +1856,7 @@ window.ATLAS_REGISTRY = {
         { "label": "InstaFlow", "url": "https://arxiv.org/abs/2309.06380" },
         { "label": "InstaFlow Code", "url": "https://github.com/gnobitab/InstaFlow" }
       ],
-      "page": "tracks/few-step/02-trajectory-distillation.html#reflow",
+      "page": "legacy/tracks/few-step/02-trajectory-distillation.html#reflow",
       "tldr": "Reflow 用旧 ODE 的噪声—终点重新配对，学习更直、更容易少步积分的新流；InstaFlow 再把 2-Rectified Flow 的映射蒸馏为单步文生图出口。条件训练直线不等于实际 ODE 轨迹已经直。",
       "tags": ["Rectified Flow", "Reflow coupling", "直化轨迹", "InstaFlow", "端点蒸馏"],
       "facts": {
@@ -1866,7 +1887,7 @@ window.ATLAS_REGISTRY = {
         { "label": "iCT", "url": "https://arxiv.org/abs/2310.14189" },
         { "label": "ECT", "url": "https://arxiv.org/abs/2406.14548" }
       ],
-      "page": "tracks/few-step/03-consistency-models.html",
+      "page": "legacy/tracks/few-step/03-consistency-models.html",
       "tldr": "学习将同一 ODE 轨迹的状态映射到共同终点，并用恒等边界排除全局常数解。CD 依赖冻结 score 的局部邻居；CT 可从数据直接训练，iCT 和 ECT 继续改善目标与训练课程。",
       "tags": ["self-consistency", "恒等边界", "CD / CT", "EMA target", "iCT / ECT"],
       "facts": {
@@ -1896,7 +1917,7 @@ window.ATLAS_REGISTRY = {
         { "label": "LCM-LoRA", "url": "https://arxiv.org/abs/2311.05556" },
         { "label": "Code", "url": "https://github.com/luosiallen/latent-consistency-model" }
       ],
-      "page": "tracks/few-step/03-consistency-models.html#lcm",
+      "page": "legacy/tracks/few-step/03-consistency-models.html#lcm",
       "tldr": "在冻结 VAE 的 latent 空间做一致性蒸馏，把教师 CFG 及其强度条件吸收进学生，并用 skipping-step 扩大局部监督跨度。LCM-LoRA 只训练低秩加速增量，再迁移到兼容的定制基座。",
       "tags": ["latent consistency", "guided distillation", "skipping-step", "LCM-LoRA"],
       "facts": {
@@ -1927,7 +1948,7 @@ window.ATLAS_REGISTRY = {
         { "label": "SDXL-Turbo", "url": "https://huggingface.co/stabilityai/sdxl-turbo" },
         { "label": "SDXL-Lightning", "url": "https://huggingface.co/ByteDance/SDXL-Lightning" }
       ],
-      "page": "tracks/few-step/04-adversarial-distillation.html",
+      "page": "legacy/tracks/few-step/04-adversarial-distillation.html",
       "tldr": "用扩散预训练初始化少步学生，再用对抗损失补清晰度。ADD 保留教师分数蒸馏；LADD 与 SDXL-Lightning 将判别器移入潜空间，分别改用冻结教师特征与可训练扩散编码器。",
       "tags": ["对抗蒸馏", "SDS", "潜空间判别器"],
       "facts": {
@@ -1957,7 +1978,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://tianweiy.github.io/dmd/" },
         { "label": "后续官方代码（DMD2）", "url": "https://github.com/tianweiy/DMD2" }
       ],
-      "page": "tracks/few-step/05-dmd.html",
+      "page": "legacy/tracks/few-step/05-dmd.html",
       "tldr": "在加噪学生输出上比较冻结 real score 与在线 fake score，用二者之差更新一步生成器；第一版仍以教师离线噪声—图像配对做 LPIPS 回归，稳定训练与模式覆盖。",
       "tags": ["distribution matching", "reverse KL", "online fake score", "paired regression", "VSD"],
       "facts": {
@@ -1987,7 +2008,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/tianweiy/DMD2" },
         { "label": "Project", "url": "https://tianweiy.github.io/dmd2/" }
       ],
-      "page": "tracks/few-step/06-dmd2.html",
+      "page": "legacy/tracks/few-step/06-dmd2.html",
       "tldr": "用 TTUR 稳定在线 fake score，删除主训练的配对回归；共享瓶颈 GAN 从真实数据补充监督，backward simulation 让少步学生训练在自己产生的中间状态上。",
       "tags": ["distribution matching", "TTUR", "GAN", "backward simulation", "SDXL"],
       "facts": {
@@ -2018,7 +2039,7 @@ window.ATLAS_REGISTRY = {
         { "label": "AnimateLCM Code", "url": "https://github.com/G-U-N/AnimateLCM" },
         { "label": "T2V-Turbo Code", "url": "https://github.com/Ji4chenLi/t2v-turbo" }
       ],
-      "page": "tracks/few-step/07-video-consistency.html",
+      "page": "legacy/tracks/few-step/07-video-consistency.html",
       "tldr": "将 LCM 的潜空间一致性蒸馏移植到视频。VideoLCM 给出直接移植基线，AnimateLCM 解耦画面与运动先验，T2V-Turbo 用一步预测上的图文 / 视频文奖励改善对齐。",
       "tags": ["LCM", "解耦一致性", "奖励反馈"],
       "facts": {
@@ -2047,7 +2068,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2410.11081" },
         { "label": "官方介绍", "url": "https://openai.com/index/simplifying-stabilizing-and-scaling-continuous-time-consistency-models/" }
       ],
-      "page": "tracks/few-step/08-scm.html",
+      "page": "legacy/tracks/few-step/08-scm.html",
       "tldr": "用 TrigFlow、时间条件改造、切向量控制与自适应加权稳定连续一致性目标；通过 FlashAttention JVP 扩规模。sCT 用数据噪声方向，sCD 用教师 PF-ODE 方向，监督来源与缩放效果需分别阅读。",
       "tags": ["continuous-time consistency", "TrigFlow", "JVP", "tangent normalization", "FlashAttention"],
       "facts": {
@@ -2077,7 +2098,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/tianweiy/CausVid" },
         { "label": "Project", "url": "https://causvid.github.io/" }
       ],
-      "page": "tracks/few-step/09-causvid.html",
+      "page": "legacy/tracks/few-step/09-causvid.html",
       "tldr": "把双向视频 DiT 改成块因果学生，先用教师 ODE 轨迹回归初始化，再由双向教师做非对称 DMD。推理按 chunk 生成并复用干净历史的 KV cache。",
       "tags": ["DMD", "非对称蒸馏", "块因果", "KV cache"],
       "facts": {
@@ -2107,7 +2128,7 @@ window.ATLAS_REGISTRY = {
         { "label": "APT Project", "url": "https://seaweed-apt.com/1" },
         { "label": "APT2 Project", "url": "https://seaweed-apt.com/2" }
       ],
-      "page": "tracks/few-step/10-apt.html",
+      "page": "legacy/tracks/few-step/10-apt.html",
       "tldr": "以一致性蒸馏初始化一步视频生成器，再对真实数据做对抗后训练，最终阶段不调用教师。APT2 加入结果回收、学生强制自回归与分段长视频判别，支持低延迟交互。",
       "tags": ["对抗后训练", "一步视频", "学生强制", "近似 R1"],
       "facts": {
@@ -2136,7 +2157,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2505.13447" },
         { "label": "Code", "url": "https://github.com/Gsunshine/meanflow" }
       ],
-      "page": "tracks/few-step/11-meanflow.html",
+      "page": "legacy/tracks/few-step/11-meanflow.html",
       "tldr": "直接学习跨时间区间的平均速度，用 MeanFlow 恒等式与停止梯度的 JVP 目标从零训练生成网络；CFG 折入训练，ImageNet 一次生成网络调用达到 FID 3.43。流映射视角连接固定终点的 CM、步长自举的 Shortcut 与教师蒸馏的 AYF。",
       "tags": ["average velocity", "JVP", "flow maps", "from scratch", "training-time CFG"],
       "facts": {
@@ -2166,7 +2187,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/guandeh17/Self-Forcing" },
         { "label": "Project", "url": "https://self-forcing.github.io/" }
       ],
-      "page": "tracks/few-step/12-self-forcing.html",
+      "page": "legacy/tracks/few-step/12-self-forcing.html",
       "tldr": "训练时让学生用自己的输出与 KV cache 自回归生成整段视频，再做视频层面的 DMD / SiD / GAN 分布匹配。随机退出步与历史梯度截断控制展开开销，缩小训练与推理的历史分布差。",
       "tags": ["暴露偏差", "自回归展开", "DMD", "随机梯度截断"],
       "facts": {
@@ -2196,7 +2217,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://research.nvidia.com/labs/dir/rcm" },
         { "label": "Code", "url": "https://github.com/NVlabs/rcm" }
       ],
-      "page": "tracks/few-step/13-rcm.html",
+      "page": "legacy/tracks/few-step/13-rcm.html",
       "tldr": "用 FlashAttention-2 JVP、层级切向接口与 FSDP / CP 把连续时间一致性扩到大规模图像和视频教师；再用 DMD 分数正则修复纯 sCM 的长跳细节。Wan2.1 14B 双向视频在 2 NFE 下达到 VBench 85.05，后续延伸到稀疏量化加速与因果流式蒸馏。",
       "tags": ["sCM", "score regularization", "DMD", "FlashAttention JVP", "FSDP", "context parallel", "video"],
       "facts": {
@@ -2226,7 +2247,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://thu-ml.github.io/CausalForcing.github.io/" },
         { "label": "Code", "url": "https://github.com/thu-ml/Causal-Forcing" }
       ],
-      "page": "tracks/few-step/14-causal-forcing.html",
+      "page": "legacy/tracks/few-step/14-causal-forcing.html",
       "tldr": "双向 ODE 的当前块终点可能依赖因果学生不可见的未来，MSE 初始化因此只学到条件期望。先用 teacher forcing 训练 AR 教师，再蒸馏相同历史下的因果 ODE 映射，最后沿用 Self Forcing 的 DMD。",
       "tags": ["video", "causal", "ODE initialization", "teacher forcing", "DMD"],
       "facts": {
@@ -2257,7 +2278,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://lambertae.github.io/projects/drifting/" },
         { "label": "DriftWorld", "url": "https://susie-lu.github.io/driftworld/" }
       ],
-      "page": "tracks/few-step/15-drifting.html",
+      "page": "legacy/tracks/few-step/15-drifting.html",
       "tldr": "在训练时用真实样本吸引与生成样本排斥的核场演化推前分布，生成器回归 stop-gradient 的漂移目标；推理只需一次前向。DriftWorld 把该目标改为动作条件、单正样本的视频预测。",
       "tags": ["训练时漂移", "反对称核场", "冻结表征", "无扩散教师"],
       "facts": {
@@ -2287,7 +2308,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/vita-epfl/RDM" },
         { "label": "Project", "url": "https://alan-lanfeng.github.io/rdm/" }
       ],
-      "page": "tracks/few-step/16-rdm.html",
+      "page": "legacy/tracks/few-step/16-rdm.html",
       "tldr": "用精确批内排斥与 Nyström 冻结全数据参考吸引估计 MMD，并以新鲜大批量、多编码器门控加权后训练一步生成器。iRDM 在 ImageNet 与 FLUX.2 [klein] 上展示该配方。",
       "tags": ["MMD", "Nyström", "多编码器", "一步后训练"],
       "facts": {
@@ -2317,7 +2338,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://neu-vi.github.io/ViRDM/" },
         { "label": "Code", "url": "https://github.com/neu-vi/ViRDM" }
       ],
-      "page": "tracks/few-step/17-virdm.html",
+      "page": "legacy/tracks/few-step/17-virdm.html",
       "tldr": "以固定视频—文本表征参考替换 DMD 的在线扩散教师与 critic。随机干净退出、轻量 VAE 与分阶段 VJP 解决显存，因果初始化、小规模新鲜视频群体和动态正则使图像 RDM 能用于少步因果视频后训练。",
       "tags": ["video", "causal", "RDM", "stochastic exit", "staged VJP", "dynamics regularization"],
       "facts": {
@@ -2340,7 +2361,7 @@ window.ATLAS_REGISTRY = {
       "org": "",
       "date": "2022-10",
       "links": [],
-      "page": "tracks/video-memory/01-foundations.html",
+      "page": "legacy/tracks/video-memory/01-foundations.html",
       "tldr": "持续出图、长上下文和长程具体记忆是不同能力。用离开返回与拆墙后回访区分历史召回、合法状态更新和离屏动力学，再按输入条件、活跃预算、总存储与专测证据比较方法。",
       "tags": ["concept", "memory operations", "revisit", "state update", "benchmarks"],
       "facts": {
@@ -2369,7 +2390,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/lllyasviel/FramePack" },
         { "label": "Proceedings", "url": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/2bde8fef08f7ebe42b584266cbcfc909-Abstract-Conference.html" }
       ],
-      "page": "tracks/video-memory/02-history-compression.html",
+      "page": "legacy/tracks/video-memory/02-history-compression.html",
       "tldr": "按时间或特征重要性给历史 latent 分配不同 patchify kernel，将活跃 context 控制在有限预算；双向 / inverted 端点采样与可选历史离散化另行抑制误差漂移。粗压缩不是无损记忆，端点填空也不是严格在线因果生成。",
       "tags": ["history compression", "variable patchify", "anti-drifting", "context budget"],
       "facts": {
@@ -2398,7 +2419,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://lllyasviel.github.io/TinyHistory_gitpage/" },
         { "label": "PFP v1", "url": "https://arxiv.org/abs/2512.23851v1" }
       ],
-      "page": "tracks/video-memory/02-history-compression.html#tinyhistory",
+      "page": "legacy/tracks/video-memory/02-history-compression.html#tinyhistory",
       "tldr": "先用随机时间位置的帧查询预训练保真历史嵌入，再让编码器与 DiT LoRA 共同适配下一段生成。LR + HR 双支路直接对齐 DiT 隐层，完整压缩历史可增量拼接，但固定压缩率仍随视频时长增长。",
       "tags": ["history embedding", "PFP", "frame query pretraining", "content consistency"],
       "facts": {
@@ -2426,7 +2447,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2503.10589" },
         { "label": "Project", "url": "https://guoyww.github.io/projects/long-context-video/" }
       ],
-      "page": "tracks/video-memory/03-lct-moc.html",
+      "page": "legacy/tracks/video-memory/03-lct-moc.html",
       "tldr": "把单镜头 MMDiT 的全注意力扩展到 scene，以交错位置和异步噪声组织跨镜头证据；context-causal 微调支持历史 KV 复用。",
       "tags": ["跨镜头", "全注意力", "历史上下文"],
       "facts": {
@@ -2454,7 +2475,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2508.21058" },
         { "label": "Project", "url": "https://primecai.github.io/moc/" }
       ],
-      "page": "tracks/video-memory/03-lct-moc.html#moc",
+      "page": "legacy/tracks/video-memory/03-lct-moc.html#moc",
       "tldr": "从 LCT 初始化，用每层每头的内容 top-k 路由选择历史块，再细读原 K/V；强制文本与镜头内锚，限制动态跨块方向以避免互选环。",
       "tags": ["跨镜头", "内容路由", "内部检索"],
       "facts": {
@@ -2483,7 +2504,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/test-time-training/ttt-video-dit" },
         { "label": "Project", "url": "https://test-time-training.github.io/video-dit" }
       ],
-      "page": "tracks/video-memory/04-recurrent-state.html",
+      "page": "legacy/tracks/video-memory/04-recurrent-state.html",
       "tldr": "小 MLP 权重作为隐藏状态，用 token 的自监督任务做内层梯度更新；在整段 noisy 视频前向中双向扫描，与局部 attention 结合。",
       "tags": ["小网络记忆", "双向生成", "循环状态"],
       "facts": {
@@ -2511,7 +2532,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2505.20171" },
         { "label": "Project", "url": "https://ryanpo.com/ssm_wm/" }
       ],
-      "page": "tracks/video-memory/04-recurrent-state.html#ssm-world",
+      "page": "legacy/tracks/video-memory/04-recurrent-state.html#ssm-world",
       "tldr": "因果 block-wise Mamba scan 为各空间块维护状态，配合近期 attention；用静态迷宫回溯与继续导航任务检验记忆。",
       "tags": ["分块状态", "动作条件", "空间回访"],
       "facts": {
@@ -2540,7 +2561,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/yeyutaihan/recurrent-autoregressive-diffusion" },
         { "label": "Project", "url": "https://yeyutaihan.github.io/recurrent-autoregressive-diffusion/" }
       ],
-      "page": "tracks/video-memory/04-recurrent-state.html#rad",
+      "page": "legacy/tracks/video-memory/04-recurrent-state.html#rad",
       "tldr": "逐帧重叠 attention 传递近邻细节，RNN 状态传递远程信息；只在最后去噪步由窗口第一 clean 帧提交状态，训练先预取 GT clean hidden bank。",
       "tags": ["逐帧循环", "clean 写入", "局部 attention"],
       "facts": {
@@ -2569,7 +2590,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/guandeh17/Self-Forcing" },
         { "label": "Project", "url": "https://self-forcing.github.io/" }
       ],
-      "page": "tracks/video-memory/05-streaming-kv.html",
+      "page": "legacy/tracks/video-memory/05-streaming-kv.html",
       "tldr": "把自生成 clean latent 以零噪声前向写进每层 K/V；后续块读近期 rolling cache，窗口满后 FIFO 淘汰。蒸馏侧另见少步轨道。",
       "tags": ["流式 KV", "clean 写入", "自生成历史"],
       "facts": {
@@ -2598,7 +2619,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/NVlabs/LongLive" },
         { "label": "Project", "url": "https://nvlabs.github.io/LongLive/" }
       ],
-      "page": "tracks/video-memory/05-streaming-kv.html#longlive",
+      "page": "legacy/tracks/video-memory/05-streaming-kv.html#longlive",
       "tldr": "在近期滚动 KV 之外保留初始 frame sink；prompt 切换时，用近期生成帧与新文本重建表示，并以流式长训练接触累积历史。",
       "tags": ["frame sink", "prompt recache", "流式 KV"],
       "facts": {
@@ -2627,7 +2648,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/TencentARC/RollingForcing" },
         { "label": "Project", "url": "https://kunhao-liu.github.io/Rolling_Forcing_Webpage/" }
       ],
-      "page": "tracks/video-memory/05-streaming-kv.html#rolling-forcing",
+      "page": "legacy/tracks/video-memory/05-streaming-kv.html#rolling-forcing",
       "tldr": "多块分级噪声联合滚动去噪，已完成块写 clean KV；保留初始 global sink 并动态重定位其 K 地址，降低持续生成的质量漂移。",
       "tags": ["联合去噪", "attention sink", "流式 KV"],
       "facts": {
@@ -2656,7 +2677,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/cvlab-kaist/WorldKV" },
         { "label": "Project", "url": "https://cvlab-kaist.github.io/WorldKV/" }
       ],
-      "page": "tracks/video-memory/06-evicted-kv.html",
+      "page": "legacy/tracks/video-memory/06-evicted-kv.html",
       "tldr": "将被滑窗逐出的 KV 压缩归档，按相机或累计动作召回少量旧 chunk，直接送回原注意力而不重编码。活动 attention 有界，GPU/CPU 历史档案另计。",
       "tags": ["KV archive", "camera/action retrieval", "training-free", "active vs total"],
       "facts": {
@@ -2683,7 +2704,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2610.11756" }
       ],
-      "page": "tracks/video-memory/06-evicted-kv.html#memory-forcing-kv",
+      "page": "legacy/tracks/video-memory/06-evicted-kv.html#memory-forcing-kv",
       "tldr": "沿用 Rolling Forcing 的滚动去噪与 DMD，将缓存分成 sink/archive/working；晋升差异较大的中段事件，按 bank 重新分配 RoPE，让有限历史直接可注意。",
       "tags": ["KV banks", "Bank-aware RoPE", "Rolling Forcing", "mid-horizon"],
       "facts": {
@@ -2711,7 +2732,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2608.07408" },
         { "label": "Project", "url": "https://research.nvidia.com/labs/sil/projects/WorldTrace/" }
       ],
-      "page": "tracks/video-memory/07-addressable.html",
+      "page": "legacy/tracks/video-memory/07-addressable.html",
       "tldr": "先解除旧 key 的时间 RoPE，再在 canonical 空间平均或冻结 scene-entry traces；按槽位排名分配不同的训练范围内虚拟地址，让压缩 KV 可以读回。",
       "tags": ["KV addressing", "canonical RoPE", "training-free", "LoopBench"],
       "facts": {
@@ -2739,7 +2760,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2610.11444" },
         { "label": "Project", "url": "https://jkhu29.github.io/l2r/" }
       ],
-      "page": "tracks/video-memory/07-addressable.html#learning-to-retrieve",
+      "page": "legacy/tracks/video-memory/07-addressable.html#learning-to-retrieve",
       "tldr": "把历史压入 GLA/GDN 内部循环状态；camera-conditioned gate 决定读什么，re-visibility 监督的 trigger 决定何时读。保留 softmax 层提供局部结构，不依赖外部历史帧 bank。",
       "tags": ["recurrent", "GLA", "GDN", "camera gate", "re-visibility"],
       "facts": {
@@ -2768,7 +2789,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/xizaoqu/WorldMem" },
         { "label": "Project", "url": "https://xizaoqu.github.io/worldmem/" }
       ],
-      "page": "tracks/video-memory/08-worldmem.html",
+      "page": "legacy/tracks/video-memory/08-worldmem.html",
       "tldr": "历史 latent 与 pose/timestamp 组成可寻址单元，按 FoV 与时间取少量帧，以相对状态增强 memory attention。GT 位姿与预测位姿、真值 bank 与在线生成历史必须分开评测。",
       "tags": ["frame bank", "pose/time", "memory attention", "Minecraft"],
       "facts": {
@@ -2797,7 +2818,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/yeyutaihan/vrag" },
         { "label": "Project", "url": "https://sites.google.com/view/vrag" }
       ],
-      "page": "tracks/video-memory/08-worldmem.html#vrag",
+      "page": "legacy/tracks/video-memory/08-worldmem.html#vrag",
       "tldr": "按 agent global state 检索旧帧，拼到近期帧里做 joint self-attention。专门的 retrieved-context 训练让生成器使用证据，避免仅在推理时多塞历史但不被采纳。",
       "tags": ["frame retrieval", "global state", "retrieved-context training", "Minecraft"],
       "facts": {
@@ -2826,7 +2847,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Junchao-cs/Memory-Forcing" },
         { "label": "Project", "url": "https://junchao-cs.github.io/MemoryForcing-demo/" }
       ],
-      "page": "tracks/video-memory/08-worldmem.html#memory-forcing-spatial",
+      "page": "legacy/tracks/video-memory/08-worldmem.html#memory-forcing-spatial",
       "tldr": "用带 source-frame ID 的点云索引关键帧，按可见区域取旧视图；Hybrid Training 与 CFT 训练生成器在探索和回访间分配 temporal/spatial 证据。与 2026 同名 KV 方法不同。",
       "tags": ["geometry index", "Hybrid Training", "CFT", "Minecraft"],
       "facts": {
@@ -2855,7 +2876,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://context-as-memory.github.io/" },
         { "label": "Code", "url": "https://github.com/KwaiVGI/Context-as-Memory" }
       ],
-      "page": "tracks/video-memory/09-context-as-memory.html",
+      "page": "legacy/tracks/video-memory/09-context-as-memory.html",
       "tldr": "原样保存历史帧与相机，按 FoV 交叠及非邻接筛选找旧证据；clean context 沿帧维拼入 DiT，帮助场景回访。",
       "tags": ["帧库", "FoV 检索", "静态回访"],
       "facts": {
@@ -2883,7 +2904,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2512.02473" },
         { "label": "OpenReview", "url": "https://openreview.net/forum?id=zJuiG3PiNJ" }
       ],
-      "page": "tracks/video-memory/09-context-as-memory.html#worldpack",
+      "page": "legacy/tracks/video-memory/09-context-as-memory.html#worldpack",
       "tldr": "独立基于 CDiT，以 FoV 与时间偏置为历史分配压缩率；在相同等效 token 预算下纳入更多历史，不与 CaM 合成一个统一存储结构。",
       "tags": ["多精度 context", "视角相关预算", "LoopNav"],
       "facts": {
@@ -2912,7 +2933,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://v-mem.github.io/" },
         { "label": "Code", "url": "https://github.com/runjiali-rl/vmem" }
       ],
-      "page": "tracks/video-memory/10-vmem.html",
+      "page": "legacy/tracks/video-memory/10-vmem.html",
       "tldr": "用粗 surfels 关联 surface 与过去 view IDs，按目标可见性投票取回历史 RGB/camera；读入生成器的是 past views，不是完整三维世界渲染。",
       "tags": ["Surfel 索引", "可见性检索", "past views"],
       "facts": {
@@ -2941,7 +2962,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://kj-chen666.github.io/Hybrid-Memory-in-Video-World-Models/" },
         { "label": "Code", "url": "https://github.com/H-EmbodVis/HyDRA" }
       ],
-      "page": "tracks/video-memory/11-dynamic-memory.html",
+      "page": "legacy/tracks/video-memory/11-dynamic-memory.html",
       "tldr": "从历史视频 token 化运动证据，按目标 query 动态选择相关时间片并与局部窗口合读，改善主体离屏再现；输入历史视频与相机，不是未来主体路径。",
       "tags": ["动态主体", "motion-aware tokens", "HM-World"],
       "facts": {
@@ -2969,7 +2990,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2606.17730" },
         { "label": "Project", "url": "https://interactwm.github.io/ActWorld/" }
       ],
-      "page": "tracks/video-memory/11-dynamic-memory.html#actworld",
+      "page": "legacy/tracks/video-memory/11-dynamic-memory.html#actworld",
       "tldr": "以 action/phase 条件重排多精度历史并放大相关 keys；持久 bank 保存阶段转换事件与对象视觉锚，区别于只保存旧外观的静态回访。",
       "tags": ["动作后果", "event memory", "symbolic phases", "I-Bench"],
       "facts": {
@@ -2998,7 +3019,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/nv-tlabs/GEN3C" },
         { "label": "Project", "url": "https://research.nvidia.com/labs/toronto-ai/GEN3C/" }
       ],
-      "page": "tracks/video-memory/12-geometry-cache.html",
+      "page": "legacy/tracks/video-memory/12-geometry-cache.html",
       "tldr": "将输入或生成帧反投影为分视图、分时间的 3D cache，按目标相机渲染条件；视频生成器补全空洞并调和几何误差。动态 NVS 的运动由输入视频提供。",
       "tags": ["3D cache", "camera control", "novel view synthesis"],
       "facts": {
@@ -3027,7 +3048,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/spmem/spmem" },
         { "label": "Project", "url": "https://spmem.github.io/" }
       ],
-      "page": "tracks/video-memory/12-geometry-cache.html#spatial-memory",
+      "page": "legacy/tracks/video-memory/12-geometry-cache.html#spatial-memory",
       "tldr": "以 TSDF 过滤的静态点图记布局，以近期帧延续运动，以稀疏 episodic 参考补充远期纹理与身份；在线 CUT3R 重建与融合生成历史。",
       "tags": ["spatial memory", "episodic memory", "TSDF", "view recall"],
       "facts": {
@@ -3056,7 +3077,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Tencent-Hunyuan/HunyuanWorld-Voyager" },
         { "label": "Project", "url": "https://voyager-world.github.io/" }
       ],
-      "page": "tracks/video-memory/13-voyager-lsm.html",
+      "page": "legacy/tracks/video-memory/13-voyager-lsm.html",
       "tldr": "Hunyuan-Video 联合生成 aligned RGB-D，反投影为 world cache；覆盖与法线检查抑制冗余点，smooth sampling 衔接相邻 chunks。",
       "tags": ["RGB-D generation", "world cache", "point culling"],
       "facts": {
@@ -3085,7 +3106,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/microsoft/LatentSpatialMemory" },
         { "label": "Project", "url": "https://aka.ms/latent-spatial-memory" }
       ],
-      "page": "tracks/video-memory/13-voyager-lsm.html#latent-spatial-memory",
+      "page": "legacy/tracks/video-memory/13-voyager-lsm.html#latent-spatial-memory",
       "tldr": "在 native VAE 网格抬升特征点，直接投影读出 latent 条件，免去每次读取的 RGB 渲染再编码；写回仍需 RGB、外部几何、分割与重编码。",
       "tags": ["latent spatial memory", "native grid", "camera query", "Mirage"],
       "facts": {
@@ -3114,7 +3135,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/francelico/PERSIST" },
         { "label": "Project", "url": "https://francelico.github.io/persist.github.io/" }
       ],
-      "page": "tracks/video-memory/14-persistent-state.html",
+      "page": "legacy/tracks/video-memory/14-persistent-state.html",
       "tldr": "从动作与近期条件主动预测 agent 周围的 3D world-frame 和相机，再投影多层深度特征生成 RGB。训练需要 GT 3D；默认推理可仅由首帧初始化。",
       "tags": ["persistent 3D state", "action conditioning", "GT 3D supervision"],
       "facts": {
@@ -3143,7 +3164,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/kaichen-z/honeycomb" },
         { "label": "Project", "url": "https://jackswl.github.io/honeycomb/" }
       ],
-      "page": "tracks/video-memory/14-persistent-state.html#honeycomb",
+      "page": "legacy/tracks/video-memory/14-persistent-state.html#honeycomb",
       "tldr": "将新 chunk 的 latent 观测写入六个固定特征平面；扩域先 warp 旧平面与置信图，再加权融合和残差修正，以 learned reader 重建相机条件。",
       "tags": ["HexMemory", "fixed feature storage", "recurrent writer", "spatial planes"],
       "facts": {
@@ -3172,7 +3193,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/SkyworkAI/Matrix-Game/tree/main/Matrix-Game-3" },
         { "label": "Project", "url": "https://matrix-game-v3.github.io/" }
       ],
-      "page": "tracks/video-memory/15-matrix-game.html",
+      "page": "legacy/tracks/video-memory/15-matrix-game.html",
       "tldr": "按目标相机与 FoV 重叠检索历史 latent 帧，与近期历史、当前噪声共同 self-attend；误差注入和在线多段蒸馏让记忆条件适应自生成历史。",
       "tags": ["游戏世界", "相机检索", "joint attention", "误差注入"],
       "facts": {
@@ -3201,7 +3222,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Riemann-Dynamics/Matrix-Game-3.5" },
         { "label": "Project", "url": "https://matrix-game-v3-5.github.io/" }
       ],
-      "page": "tracks/video-memory/15-matrix-game.html#matrix-game-3-5",
+      "page": "legacy/tracks/video-memory/15-matrix-game.html#matrix-game-3-5",
       "tldr": "将静态 latent patch 抬升到三维并按目标相机可见性检索；动态主体由固定、因果可用的参考 prefix 保持外观。tiled PRoPE 与同一注意力序列将几何记忆读入生成器。",
       "tags": ["游戏世界", "三维 patch", "静动分离", "tiled PRoPE"],
       "facts": {
@@ -3230,7 +3251,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://thecinema.ai/" },
         { "label": "ICLR", "url": "https://proceedings.iclr.cc/paper_files/paper/2026/hash/86ab3ff2c1387c895766f5c5fc2b610c-Abstract-Conference.html" }
       ],
-      "page": "tracks/video-memory/16-story-keyframes.html",
+      "page": "legacy/tracks/video-memory/16-story-keyframes.html",
       "tldr": "planner 用语义召回与 GoldenMem 多尺度视觉历史生成关键帧，随后 LCT 类模型读取整套视觉锚合成镜头运动。planner 的在线关键帧记忆与视频阶段已给定的未来视觉锚是不同信息条件。",
       "tags": ["多镜头", "关键帧规划", "GoldenMem", "未来视觉锚"],
       "facts": {
@@ -3259,7 +3280,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://zhaochongan.github.io/projects/OneStory/" },
         { "label": "CVPR", "url": "https://openaccess.thecvf.com/content/CVPR2026/html/An_OneStory_Coherent_Multi-Shot_Video_Generation_with_Adaptive_Memory_CVPR_2026_paper.html" }
       ],
-      "page": "tracks/video-memory/16-story-keyframes.html#onestory",
+      "page": "legacy/tracks/video-memory/16-story-keyframes.html#onestory",
       "tldr": "将多镜头生成改为 next-shot：caption 驱动可训练选择器从全部此前镜头取相关帧，内容越重要获得越细 patch，再与当前噪声联合注意力。",
       "tags": ["多镜头", "内容寻址", "自适应压缩", "next-shot"],
       "facts": {
@@ -3288,7 +3309,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Kevin-thu/StoryMem" },
         { "label": "Project", "url": "https://kevin-thu.github.io/StoryMem/" }
       ],
-      "page": "tracks/video-memory/16-story-keyframes.html#storymem",
+      "page": "legacy/tracks/video-memory/16-story-keyframes.html#storymem",
       "tldr": "每生成一个 shot，就用 CLIP 语义变化、HPSv3 质量筛选与去重写入关键帧 bank；sink + recent window 控制活动容量，以负 RoPE 和 latent 条件拼接读取。",
       "tags": ["多镜头", "在线关键帧", "memory sink", "LoRA"],
       "facts": {
@@ -3317,7 +3338,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Eddie0521/IAMFlow" },
         { "label": "Project", "url": "https://eddie0521.github.io/projects/iamflow" }
       ],
-      "page": "tracks/video-memory/17-entity-slots.html",
+      "page": "legacy/tracks/video-memory/17-entity-slots.html",
       "tldr": "用 LLM 把跨 prompt 人物指代绑定到持久 ID，再从整帧 KV 档案按人物覆盖召回。自生成候选帧经异步 VLM 核验，活动召回受限，档案仍随生成增长。",
       "tags": ["entity-ID", "whole-frame KV", "training-free", "在线自写"],
       "facts": {
@@ -3345,7 +3366,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2607.15772" },
         { "label": "Code", "url": "https://github.com/YilaiLiu-HKU/SlotMem" }
       ],
-      "page": "tracks/video-memory/17-entity-slots.html#slotmem",
+      "page": "legacy/tracks/video-memory/17-entity-slots.html#slotmem",
       "tldr": "从角色名称的 cross-attention 响应定位 DiT token，编码为每角色内部 slots，并仅向同角色区域注入。去噪阶段累积在线槽位，chunk 完成后以门控残差更新持久记忆。",
       "tags": ["character slots", "conservative writer", "noisy-step features", "身份再认"],
       "facts": {
@@ -3374,7 +3395,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/KlingAIResearch/ShotStream" },
         { "label": "Project", "url": "https://luo0207.github.io/ShotStream/" }
       ],
-      "page": "tracks/video-memory/18-shotstream.html",
+      "page": "legacy/tracks/video-memory/18-shotstream.html",
       "tldr": "用 global 稀疏历史 KV 与 local 当前镜头 KV 支持 next-shot 流式叙事，并以 RoPE 跳变区分镜头。先在 GT 跨镜头历史下做镜头内自生成训练，再用自生成历史训练镜头间 rollout。",
       "tags": ["dual cache", "shot boundary", "self-forcing", "streaming narrative"],
       "facts": {
@@ -3402,7 +3423,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2605.12496" },
         { "label": "Project", "url": "https://yihao-meng.github.io/CausalCine/" }
       ],
-      "page": "tracks/video-memory/18-shotstream.html#causalcine",
+      "page": "legacy/tracks/video-memory/18-shotstream.html#causalcine",
       "tldr": "每层用当前 chunk 的平均 Q 对历史帧平均 K 打分，选择窗外 top-k 与 local 合读；未旋转 K 在读取后做 Block-Relative RoPE。活动注意力受限，历史 KV 与描述符仍增长。",
       "tags": ["content-aware routing", "unrotated KV", "Block-Relative RoPE", "AR narrative"],
       "facts": {
@@ -3430,7 +3451,7 @@ window.ATLAS_REGISTRY = {
         { "label": "MDLM", "url": "https://arxiv.org/abs/2406.07524" },
         { "label": "ParallelBench", "url": "https://arxiv.org/abs/2510.04767" }
       ],
-      "page": "tracks/dllm/01-foundations.html",
+      "page": "legacy/tracks/dllm/01-foundations.html",
       "tldr": "把逐 token 预测换成在定长画布上迭代去噪：训练是按 1/t 加权的 MLM 交叉熵（NLL 上界），网络不必看时间；难点转到解码——每步定稿哪些位置。同一步独立采样相关位置会产生因子分解误差，NFE、TPF、batch 与 AR 基线必须一起报告。",
       "tags": ["concept", "masked diffusion", "ELBO", "samplers", "factorization error", "NFE/TPF"],
       "facts": {
@@ -3460,7 +3481,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/louaaron/Score-Entropy-Discrete-Diffusion" },
         { "label": "Weights", "url": "https://huggingface.co/louaaron/sedd-medium" }
       ],
-      "page": "tracks/dllm/02-sedd.html",
+      "page": "legacy/tracks/dllm/02-sedd.html",
       "tldr": "用 score entropy（以 −log 为凸函数的 Bregman 散度）学习离散分布的概率比 p_t(y)/p_t(x)，可去噪式训练并给出似然上界；吸收态版本在 GPT-2 small/medium 规模零样本困惑度与同尺寸 AR 相当，并支持任意位置 prompt。",
       "tags": ["score entropy", "concrete score", "absorbing", "CTMC", "Tweedie τ-leaping"],
       "facts": {
@@ -3490,7 +3511,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/ML-GSAI/RADD" },
         { "label": "Weights", "url": "https://huggingface.co/JingyangOu/radd-lambda-dce" }
       ],
-      "page": "tracks/dllm/02-sedd.html#radd",
+      "page": "legacy/tracks/dllm/02-sedd.html#radd",
       "tldr": "证明吸收态扩散的概率比 = e^{−σ̄}/(1−e^{−σ̄}) × 干净数据条件概率：网络可删掉时间输入、画布不变时复用输出，训练目标等价于 λ 加权交叉熵与任意顺序 AR 的期望 NLL——LLaDA“不输入 t”的直接来源。",
       "tags": ["absorbing", "time-independent", "caching", "any-order AR", "λ-DCE"],
       "facts": {
@@ -3520,7 +3541,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/kuleshov-group/mdlm" },
         { "label": "Weights", "url": "https://huggingface.co/kuleshov-group/mdlm-owt" }
       ],
-      "page": "tracks/dllm/03-mdlm.html",
+      "page": "legacy/tracks/dllm/03-mdlm.html",
       "tldr": "证明掩码扩散的连续时间 ELBO 就是按掩码率加权（线性调度下为 1/t）、只在 [M] 位置计分的 MLM 交叉熵；SUBS 参数化（[M] 概率置零、已揭示位置照抄）加上现代工程配方，使掩码扩散在 LM1B / OWT 上超过 SEDD，并成为 LLaDA 等大模型的训练目标。",
       "tags": ["掩码扩散", "ELBO", "SUBS", "半自回归"],
       "facts": {
@@ -3549,7 +3570,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2406.04329" },
         { "label": "Code", "url": "https://github.com/google-deepmind/md4" }
       ],
-      "page": "tracks/dllm/03-mdlm.html#md4",
+      "page": "legacy/tracks/dllm/03-mdlm.html#md4",
       "tldr": "与 MDLM 同期独立推出掩码扩散 ELBO = 交叉熵对掩码率的加权积分，给出 SNR 形式的调度不变性、score 与均值参数化的换算，并推广到逐词值的状态相关掩码调度（GenMD4）；指出调度影响的是并行采样冲突而不是似然。",
       "tags": ["掩码扩散", "ELBO", "调度", "GenMD4"],
       "facts": {
@@ -3578,7 +3599,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2407.15595" },
         { "label": "Code (flow_matching 库)", "url": "https://github.com/facebookresearch/flow_matching" }
       ],
-      "page": "tracks/dllm/04-discrete-flow.html",
+      "page": "legacy/tracks/dllm/04-discrete-flow.html",
       "tldr": "把离散生成写成“概率路径 + CTMC 概率速度”：任意源（掩码 / 均匀 / 混合）、任意耦合与调度器，速度公式与连续流匹配同形，并给出可证明正确、能把已揭示 token 重新掩码的 corrector 采样；1.7B 模型首次在 HumanEval / MBPP 上得到非平凡分数。",
       "tags": ["离散流匹配", "CTMC", "corrector", "代码"],
       "facts": {
@@ -3606,7 +3627,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2506.09018" }
       ],
-      "page": "tracks/dllm/04-discrete-flow.html#edit-flows",
+      "page": "legacy/tracks/dllm/04-discrete-flow.html#edit-flows",
       "tldr": "在变长序列空间上定义含插入、删除、替换的 CTMC，用训练时才有的对齐序列（空位 ε 标出编辑）把学习化为逐位置问题，摆脱定长画布与填充 token；在图像描述上超过 AR，在代码与文本上明显优于掩码构造但仍落后同算力 AR。",
       "tags": ["变长生成", "编辑操作", "离散流匹配", "代码"],
       "facts": {
@@ -3636,7 +3657,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/s-sahoo/duo" },
         { "label": "Weights", "url": "https://huggingface.co/collections/s-sahoo/duo-67f9ff8fde919224e5fbd875" }
       ],
-      "page": "tracks/dllm/05-uniform.html",
+      "page": "legacy/tracks/dllm/05-uniform.html",
       "tldr": "证明在 one-hot 上做高斯扩散再取 argmax，得到的正是均匀态离散扩散；借此用 softmax 松弛做低方差课程（训练约快 2×），并沿高斯确定性轨迹做离散一致性蒸馏，把生成从 1024 步压到 8–16 步。",
       "tags": ["均匀态扩散", "课程学习", "一致性蒸馏", "少步生成"],
       "facts": {
@@ -3666,7 +3687,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/s-sahoo/scaling-dllms" },
         { "label": "Weights", "url": "https://huggingface.co/collections/s-sahoo/sdllm" }
       ],
-      "page": "tracks/dllm/05-uniform.html#uniform-scaling",
+      "page": "legacy/tracks/dllm/05-uniform.html#uniform-scaling",
       "tldr": "首次对均匀态（Duo）与插值（Eso-LM）离散扩散做 IsoFLOP 扩展律：各族斜率与 AR 相近、常数差很大（匹配 AR 损失需 14–32× 计算）；困惑度只在族内可比，跨族应看速度-质量前沿与下游，1.7B 上困惑度更差的 Duo 在 GSM8K 上最好。",
       "tags": ["扩展律", "均匀态扩散", "评测口径", "速度-质量前沿"],
       "facts": {
@@ -3697,7 +3718,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/LLaDA-8B-Instruct" },
         { "label": "Project", "url": "https://ml-gsai.github.io/LLaDA-demo/" }
       ],
-      "page": "tracks/dllm/06-llada.html",
+      "page": "legacy/tracks/dllm/06-llada.html",
       "tldr": "8B 掩码扩散从零预训练 2.3T token 再做 SFT；用 MC-ELBO 给选择题打分、低置信度重掩码与半自回归块采样生成，Base 与同协议的 LLaMA3 8B 相当，反转诗补全反向任务超过 GPT-4o。",
       "tags": ["from scratch", "masked diffusion", "8B", "semi-AR sampling", "reversal curse"],
       "facts": {
@@ -3726,7 +3747,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2410.18514" },
         { "label": "Code", "url": "https://github.com/ML-GSAI/SMDM" }
       ],
-      "page": "tracks/dllm/06-llada.html#smdm",
+      "page": "legacy/tracks/dllm/06-llada.html#smdm",
       "tldr": "首条掩码扩散扩展律（IsoFLOP 6e18–1e20）：幂律速率与 AR 相近，但相同验证损失约需 16× 计算；提出无监督 CFG，1.1B MDM 破除反转诅咒。",
       "tags": ["scaling law", "masked diffusion", "unsupervised CFG", "16x"],
       "facts": {
@@ -3756,7 +3777,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/ML-GSAI/LLaDA" },
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/iLLaDA-8B-Instruct" }
       ],
-      "page": "tracks/dllm/06-llada.html#illada",
+      "page": "legacy/tracks/dllm/06-llada.html#illada",
       "tldr": "同一掩码扩散目标从零扩到 12T token：改回 GQA、共享嵌入、8192 长度，SFT 25B token × 12 epoch 且整段加掩码，变长块生成与置信度打分；Base 8 项平均 63.9（LLaDA 51.1）。",
       "tags": ["from scratch", "12T tokens", "GQA", "variable-length generation"],
       "facts": {
@@ -3787,7 +3808,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/HKUNLP/Dream" },
         { "label": "Weights", "url": "https://huggingface.co/Dream-org/Dream-v0-Instruct-7B" }
       ],
-      "page": "tracks/dllm/07-dream.html",
+      "page": "legacy/tracks/dllm/07-dream.html",
       "tldr": "以 Qwen2.5-7B 初始化、保留 shift，用 580B token 做掩码扩散继续预训练，并以上下文自适应的 token 级权重（CART）替代 1/t；同协议下规划任务明显强于同规模 AR。",
       "tags": ["AR-to-diffusion", "Qwen2.5 init", "CART", "7B"],
       "facts": {
@@ -3816,7 +3837,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2410.17891" },
         { "label": "Code", "url": "https://github.com/HKUNLP/DiffuLLaMA" }
       ],
-      "page": "tracks/dllm/07-dream.html#diffullama",
+      "page": "legacy/tracks/dllm/07-dream.html#diffullama",
       "tldr": "把 GPT-2 与 LLaMA-2-7B 经注意力掩码退火、shift 与掩码扩散目标继续训练成 DiffuGPT / DiffuLLaMA（7B 用 65B token），首次在 7B 规模给出 AR→扩散的转换配方。",
       "tags": ["AR-to-diffusion", "attention annealing", "shift", "LLaMA-2"],
       "facts": {
@@ -3845,7 +3866,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2507.15857" },
         { "label": "Project", "url": "https://diffusion-scaling.github.io" }
       ],
-      "page": "tracks/dllm/08-data-constrained.html",
+      "page": "legacy/tracks/dllm/08-data-constrained.html",
       "tldr": "固定独特数据、多 epoch 训练 200 个模型：扩散的数据复用半衰期 R_D* 约 500（AR 约 31），计算足够时反超 AR，临界计算量 C_crit ∝ U^2.174；用“随机掩码 = 隐式数据增强”解释。",
       "tags": ["scaling law", "data-constrained", "multi-epoch", "critical compute"],
       "facts": {
@@ -3874,7 +3895,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2511.03276" },
         { "label": "Blog", "url": "https://jinjieni.notion.site/Diffusion-Language-Models-are-Super-Data-Learners-239d8f03a866800ab196e49928c019ac" }
       ],
-      "page": "tracks/dllm/08-data-constrained.html#super-data",
+      "page": "legacy/tracks/dllm/08-data-constrained.html#super-data",
       "tldr": "严格对照预训练下，独特数据有限时扩散在多 epoch 后稳定反超同尺寸 AR：数据越多交叉点越晚、模型越大越早；归因于任意顺序、超稠密计算与 MC 增强，并公开批评同期工作的方法学。",
       "tags": ["data-constrained", "crossover", "multi-epoch", "MoE"],
       "facts": {
@@ -3904,7 +3925,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/inclusionAI/LLaDA2.X" },
         { "label": "Weights", "url": "https://huggingface.co/inclusionAI/LLaDA2.0-flash" }
       ],
-      "page": "tracks/dllm/09-llada2.html",
+      "page": "legacy/tracks/dllm/09-llada2.html",
       "tldr": "把 AR 模型 Ling-2.0 视为块长 1 的块扩散，用块长 WSD（1→4096→32）转换成 16B / 100B 的 MoE dLLM，再做块扩散 SFT、CAP 置信损失与以 ELBO 代替似然的 DPO；flash 47 项平均 73.18，与 Qwen3-30B-A3B-2507（73.60）相当。",
       "tags": ["MoE", "AR→扩散", "块扩散", "WSD", "100B"],
       "facts": {
@@ -3933,7 +3954,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2509.24389" },
         { "label": "Weights", "url": "https://huggingface.co/inclusionAI/LLaDA-MoE-7B-A1B-Instruct" }
       ],
-      "page": "tracks/dllm/09-llada2.html#llada-moe",
+      "page": "legacy/tracks/dllm/09-llada2.html#llada-moe",
       "tldr": "首个从零训练的稀疏 MoE 掩码扩散语言模型：7B 总参、1.4B 激活、约 20T tokens；Instruct 17 项平均 53.12，超过 LLaDA-8B 与 Dream-7B，接近 Qwen2.5-3B-Instruct（53.51）。",
       "tags": ["MoE", "从零训练", "掩码扩散"],
       "facts": {
@@ -3963,7 +3984,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/inclusionAI/LLaDA2.X" },
         { "label": "Weights", "url": "https://huggingface.co/inclusionAI/LLaDA2.1-flash" }
       ],
-      "page": "tracks/dllm/09-llada2.html#llada21",
+      "page": "legacy/tracks/dllm/09-llada2.html#llada21",
       "tldr": "在 [M]→token（M2T）之外加入 token→token（T2T）编辑，用两个阈值形成 Speedy / Quality 两种模式：flash S 模式 33 项平均 72.34 / 5.93 TPF，Q 模式 73.54 / 3.64 TPF；并做了基于块级 ELBO 的大规模 RL（EBPO）。",
       "tags": ["T2T 编辑", "阈值解码", "RL", "100B"],
       "facts": {
@@ -3992,7 +4013,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2608.00146" },
         { "label": "Weights", "url": "https://huggingface.co/google/diffusiongemma-26B-A4B-it" }
       ],
-      "page": "tracks/dllm/10-industrial.html",
+      "page": "legacy/tracks/dllm/10-industrial.html",
       "tldr": "由 Gemma 4 26B A4B 微调而来的开放权重文本扩散模型：均匀（多项式）噪声、256 token 画布的块自回归生成、共享权重的因果编码器 + 双向解码器、熵界采样；SFT 后用 SD·RL 联合做 RL 与采样器蒸馏，7 项平均 19.74 TPF、单卡 H100 FP8 batch 1 约 1479 TPS。",
       "tags": ["均匀噪声", "AR 初始化", "块自回归", "采样器蒸馏", "开放权重"],
       "facts": {
@@ -4020,7 +4041,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2506.17298" }
       ],
-      "page": "tracks/dllm/10-industrial.html#mercury",
+      "page": "legacy/tracks/dllm/10-industrial.html#mercury",
       "tldr": "最早公开技术报告的商用 dLLM（代码版 Mini / Small）：Transformer 去噪器、方法称扩展自 SEDD；Artificial Analysis 在 H100 上测得 1109 / 737 tok/s，代码质量与速度优化型前沿模型相当，FIM 表现突出。",
       "tags": ["商用", "代码", "速度"],
       "facts": {
@@ -4049,7 +4070,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2508.02193" },
         { "label": "Project", "url": "https://seed.bytedance.com/seed_diffusion" }
       ],
-      "page": "tracks/dllm/10-industrial.html#seed-diffusion",
+      "page": "legacy/tracks/dllm/10-industrial.html#seed-diffusion",
       "tldr": "代码 dLLM 预览版：先掩码后编辑噪声的两段课程、ELBO 挑选的受限顺序轨迹蒸馏、最小化轨迹长度的 on-policy 学习，块级半自回归推理；作者称 H20 上 2146 tok/s。",
       "tags": ["代码", "编辑噪声", "on-policy", "速度"],
       "facts": {
@@ -4079,7 +4100,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/kuleshov-group/bd3lms" },
         { "label": "Project", "url": "https://m-arriola.com/bd3lms" }
       ],
-      "page": "tracks/dllm/11-block-diffusion.html",
+      "page": "legacy/tracks/dllm/11-block-diffusion.html",
       "tldr": "块间自回归、块内掩码扩散：块长从 1（AR）到 L（MDLM）是一个旋钮；向量化的 2L 注意力掩码让训练一次前向完成，推理时跨块有精确 KV cache 并可变长生成；裁剪噪声调度降低梯度方差，困惑度刷新离散扩散纪录。",
       "tags": ["块扩散", "KV cache", "变长生成", "噪声调度"],
       "facts": {
@@ -4109,7 +4130,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/s-sahoo/Eso-LMs" },
         { "label": "Weights", "url": "https://huggingface.co/collections/sahoo-diffusion/eso-lms-6838e86cb2c49f45302f0092" }
       ],
-      "page": "tracks/dllm/11-block-diffusion.html#eso-lm",
+      "page": "legacy/tracks/dllm/11-block-diffusion.html#eso-lm",
       "tldr": "让掩码扩散的去噪器使用按去噪顺序重排的因果注意力：全序列并行生成的同时拥有精确 KV cache（一步延迟），并首次给出 MDM 的精确似然（重要性加权界）；以扩散生成比例 α0 在 MDM 与 AR 之间插值。",
       "tags": ["因果注意力", "KV cache", "精确似然", "AR-MDM 插值"],
       "facts": {
@@ -4139,7 +4160,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/JetAstra/SDAR" },
         { "label": "Weights", "url": "https://huggingface.co/collections/JetLM/sdar-689b1b6d392a4eeb2664f8ff" }
       ],
-      "page": "tracks/dllm/12-ar-to-block.html",
+      "page": "legacy/tracks/dllm/12-ar-to-block.html",
       "tldr": "把训练好的 AR 模型用 50B tokens 继续训练转成块扩散（块间 AR、块内并行去噪），在 1.7B–30B（含 MoE）上与同管线 AR 基本持平；2B 受控实验显示 AR 底座比掩码扩散底座更省算力。",
       "tags": ["AR 转换", "块扩散", "MoE", "LMDeploy"],
       "facts": {
@@ -4169,7 +4190,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/NVlabs/Fast-dLLM" },
         { "label": "Weights", "url": "https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B" }
       ],
-      "page": "tracks/dllm/12-ar-to-block.html#fast-dllm-v2",
+      "page": "legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2",
       "tldr": "以约 1B tokens 把 Qwen2.5-Instruct 微调成块扩散：互补掩码让每个 token 都受监督，token shift 贴近原 AR 头；推理用块级精确 KV + 块内子块 DualCache + 置信度阈值并行。",
       "tags": ["AR 转换", "块扩散", "互补掩码", "分层缓存"],
       "facts": {
@@ -4200,7 +4221,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/tencent/wedlm" },
         { "label": "Project", "url": "https://wedlm.github.io" }
       ],
-      "page": "tracks/dllm/12-ar-to-block.html#wedlm",
+      "page": "legacy/tracks/dllm/12-ar-to-block.html#wedlm",
       "tldr": "坚持标准因果注意力做掩码恢复：拓扑重排把已观测 token 挪到物理前缀（保留逻辑位置 id），定稿前缀立即可缓存；流式并行解码保持固定窗口，并以 vLLM 上的 AR 为速度基线。",
       "tags": ["因果注意力", "拓扑重排", "流式解码", "vLLM 基线"],
       "facts": {
@@ -4228,7 +4249,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2511.08923" }
       ],
-      "page": "tracks/dllm/13-hybrid.html",
+      "page": "legacy/tracks/dllm/13-hybrid.html",
       "tldr": "同一模型、同一次前向：前缀因果段按 AR 验证上一轮草稿，末尾 k 组掩码按组内双向一步扩散为每种接受结果预起草；1.5B / 8B 在单 H100、batch 1 下 tokens/s 为同尺寸 AR 的 4.71× / 5.91×。",
       "tags": ["自推测", "结构化注意力掩码", "一步扩散起草", "精确 KV"],
       "facts": {
@@ -4258,7 +4279,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/NVIDIA-NeMo/Megatron-Bridge/pull/3105" },
         { "label": "Weights", "url": "https://huggingface.co/collections/nvidia/nemotron-labs-diffusion" }
       ],
-      "page": "tracks/dllm/13-hybrid.html#nemotron-diffusion",
+      "page": "legacy/tracks/dllm/13-hybrid.html#nemotron-diffusion",
       "tldr": "AR 与块扩散联合训练（L_AR + 0.3·L_diff）的三模式模型：可按并发在 AR、扩散、自推测（扩散起草 + AR 验证）之间切换；3B / 8B / 14B 开放权重，8B 在 SGLang 上线性自推测相对 AR 模式最高 3.3×（GB200）。",
       "tags": ["三模式", "自推测", "联合训练", "SGLang"],
       "facts": {
@@ -4288,7 +4309,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/z-lab/dflash" },
         { "label": "Weights", "url": "https://huggingface.co/collections/z-lab/dflash" }
       ],
-      "page": "tracks/dllm/13-hybrid.html#dflash",
+      "page": "legacy/tracks/dllm/13-hybrid.html#dflash",
       "tldr": "用 5 层块扩散模型当投机解码草稿器：一次前向起草一整块，目标模型 5 层隐状态经投影注入每层 K/V；验证无损，Qwen3-8B 上平均 4.86×（EAGLE-3 为 1.76×），已接入 SGLang / vLLM。",
       "tags": ["投机解码", "扩散草稿器", "KV 注入", "SGLang / vLLM"],
       "facts": {
@@ -4317,7 +4338,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2505.22618" },
         { "label": "Code", "url": "https://github.com/NVlabs/Fast-dLLM" }
       ],
-      "page": "tracks/dllm/14-kv-cache.html",
+      "page": "legacy/tracks/dllm/14-kv-cache.html",
       "tldr": "免训练加速 LLaDA / Dream：块级近似 KV cache（DualCache 连后缀 [M] 一起缓存，块末刷新）+ 置信度阈值并行解码（定理：高置信时逐位 argmax 等于联合 argmax）；A100、batch 1 下相对原始 LLaDA 最高 27.6×。",
       "tags": ["免训练", "近似 KV cache", "DualCache", "阈值并行解码"],
       "facts": {
@@ -4346,7 +4367,7 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2505.15781" },
         { "label": "Code", "url": "https://github.com/horseee/dKV-Cache" }
       ],
-      "page": "tracks/dllm/14-kv-cache.html#dkv-cache",
+      "page": "legacy/tracks/dllm/14-kv-cache.html#dkv-cache",
       "tldr": "观察到 token 被定稿那一步 K/V 变化最大、之后趋于稳定，于是只缓存已定稿 token 并延迟一步写入、定期刷新（Decode 近无损；Prefill / PD 缓存提示；Greedy 版降到 O(L²)），免训练 2–10× 加速。",
       "tags": ["免训练", "延迟缓存", "近似 KV cache"],
       "facts": {
@@ -4376,7 +4397,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/zhijie-group/Discrete-Diffusion-Forcing" },
         { "label": "Weights", "url": "https://huggingface.co/SJTU-Deng-Lab/D2F_LLaDA_Instruct_8B_Lora" }
       ],
-      "page": "tracks/dllm/14-kv-cache.html#d2f",
+      "page": "legacy/tracks/dllm/14-kv-cache.html#d2f",
       "tldr": "离散扩散强制：块掩码率单调递增，学生改为块间因果并以非对称 KL 从双向教师蒸馏（LoRA），获得精确块级 KV；流水线并行解码让后块不等前块写完。GSM8K 上 D2F-Dream 119.9 tok/s，为 LLaMA3-8B 的 2.5×。",
       "tags": ["蒸馏", "块因果", "精确 KV cache", "流水线并行"],
       "facts": {
@@ -4406,7 +4427,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/czg1225/dParallel" },
         { "label": "Weights", "url": "https://huggingface.co/Zigeng/dParallel-LLaDA-8B-instruct" }
       ],
-      "page": "tracks/dllm/15-learned-parallel.html",
+      "page": "legacy/tracks/dllm/15-learned-parallel.html",
       "tldr": "沿模型自己的半自回归轨迹自蒸馏，并只在已预测正确的掩码位置上最小化熵（确定性强制），把按顺序收敛的置信度压成早期并行收敛；LLaDA-8B-Instruct 在 GSM8K 上 256 步降到 30 步而精度不降。",
       "tags": ["训练式并行解码", "自蒸馏", "熵最小化", "LoRA"],
       "facts": {
@@ -4437,7 +4458,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/d3LLM/d3LLM_LLaDA" },
         { "label": "AUP Leaderboard", "url": "https://huggingface.co/spaces/d3LLM/dLLM_Leaderboard" }
       ],
-      "page": "tracks/dllm/15-learned-parallel.html#d3llm",
+      "page": "legacy/tracks/dllm/15-learned-parallel.html#d3llm",
       "tldr": "用教师逐 token 解码的顺序（伪轨迹）构造训练中间态，配掩码率与窗口双课程，推理时熵驱动多块并行解码并刷新 KV cache；提出把精度–并行度曲线压成一个数的 AUP 指标。",
       "tags": ["训练式并行解码", "伪轨迹蒸馏", "多块解码", "AUP"],
       "facts": {
@@ -4467,7 +4488,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/SqueezeAILab/CDLM" },
         { "label": "Weights", "url": "https://huggingface.co/minseo25/CDLM-Dream" }
       ],
-      "page": "tracks/dllm/15-learned-parallel.html#cdlm",
+      "page": "legacy/tracks/dllm/15-learned-parallel.html#cdlm",
       "tldr": "从双向教师的逐 token 轨迹做一致性蒸馏，同时把学生改为块因果注意力：多 token 定稿减少步数，精确 KV cache 降低每步成本；数学 / 代码上延迟降低 3.6–14.5×。",
       "tags": ["一致性蒸馏", "块因果", "精确 KV cache", "训练式并行解码"],
       "facts": {
@@ -4495,7 +4516,7 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2502.06768" }
       ],
-      "page": "tracks/dllm/16-order-limits.html",
+      "page": "legacy/tracks/dllm/16-order-limits.html",
       "tldr": "证明掩码扩散训练时要解指数多个、部分计算上不可解的填空子问题；推理时按 top probability margin 自适应选位置即可绕开难子问题，Sudoku 解题率 6.88%→89.49%，超过训练时给出求解顺序的 ARM。",
       "tags": ["任意顺序", "自适应解码", "理论", "Sudoku"],
       "facts": {
@@ -4525,7 +4546,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/furiosa-ai/ParallelBench" },
         { "label": "Project / Leaderboard", "url": "https://parallelbench.github.io" }
       ],
-      "page": "tracks/dllm/16-order-limits.html#parallelbench",
+      "page": "legacy/tracks/dllm/16-order-limits.html#parallelbench",
       "tldr": "证明每步独立采样的 N 步解码与数据分布的 KL 至少为各步条件总相关之和；用可解析的列表任务和 17 个任务的基准显示，阈值类并行解码无法按任务难度调节并行度。",
       "tags": ["并行解码", "因子分解误差", "基准", "信息论"],
       "facts": {
@@ -4555,7 +4576,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/LeapLabTHU/JustGRPO" },
         { "label": "Project", "url": "https://nzl-thu.github.io/the-flexibility-trap" }
       ],
-      "page": "tracks/dllm/16-order-limits.html#flexibility-trap",
+      "page": "legacy/tracks/dllm/16-order-limits.html#flexibility-trap",
       "tldr": "发现置信度驱动的任意顺序解码会推迟高熵的连接词、压低分叉处的熵，使 Pass@k 低于左到右；RL 阶段把 dLLM 当 AR 策略直接做标准 GRPO（JustGRPO），GSM8K 89.1%，推理仍可并行解码。",
       "tags": ["任意顺序", "RL", "GRPO", "Pass@k"],
       "facts": {
@@ -4585,7 +4606,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/dllm-reasoning/d1" },
         { "label": "Project", "url": "https://dllm-reasoning.github.io" }
       ],
-      "page": "tracks/dllm/17-rl.html",
+      "page": "legacy/tracks/dllm/17-rl.html",
       "tldr": "两阶段后训练：先在 s1K 上做掩码 SFT，再用 diffu-GRPO——提示随机掩码、回答全掩码的一次前向估计逐 token 对数概率（均场），是首个面向掩码 dLLM 的策略梯度 RL。",
       "tags": ["RL", "GRPO", "似然估计", "推理"],
       "facts": {
@@ -4616,7 +4637,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/ML-GSAI/LLaDA-1.5" },
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/LLaDA-1.5" }
       ],
-      "page": "tracks/dllm/17-rl.html#llada-15",
+      "page": "legacy/tracks/dllm/17-rl.html#llada-15",
       "tldr": "用 ELBO 代替对数似然做 DPO，证明损失与梯度的偏差和方差都受偏好分数估计方差控制；以增大预算、全部分给时间步、策略与参考对偶采样三种无偏手段降方差（VRPO），得到 LLaDA 1.5。",
       "tags": ["偏好优化", "DPO", "ELBO", "方差缩减"],
       "facts": {
@@ -4646,7 +4667,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Gen-Verse/dLLM-RL" },
         { "label": "Weights", "url": "https://huggingface.co/Gen-Verse/TraDo-8B-Instruct" }
       ],
-      "page": "tracks/dllm/17-rl.html#tracerl",
+      "page": "legacy/tracks/dllm/17-rl.html#tracerl",
       "tldr": "沿模型实际推理轨迹做 RL：以前几步已定稿的 token 为条件计算每步 token 的概率（收缩参数 s 合并相邻步），并配扩散价值模型；在 SDAR 上得到 TraDo-4B/8B 与首个长 CoT dLLM。",
       "tags": ["RL", "轨迹", "价值模型", "块扩散"],
       "facts": {
@@ -4676,7 +4697,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/apple/ml-diffucoder" },
         { "label": "Weights", "url": "https://huggingface.co/apple/DiffuCoder-7B-cpGRPO" }
       ],
-      "page": "tracks/dllm/18-code.html",
+      "page": "legacy/tracks/dllm/18-code.html",
       "tldr": "由 Qwen2.5-Coder-7B 改造、训练 130B 代码 token 的 7B 掩码扩散模型。用局部 / 全局 AR 性指标分析解码顺序，发现温度会同时改变 token 与生成顺序；提出用互补掩码估计 log π 的 coupled-GRPO，使 EvalPlus +4.4。",
       "tags": ["代码", "AR 性", "coupled-GRPO", "RL", "AR 改造"],
       "facts": {
@@ -4706,7 +4727,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/DreamLM/Dream-Coder" },
         { "label": "Weights", "url": "https://huggingface.co/collections/Dream-org/dream-coder-7b-68761cfa0e218f0776a84ee7" }
       ],
-      "page": "tracks/dllm/18-code.html#dream-coder",
+      "page": "legacy/tracks/dllm/18-code.html#dream-coder",
       "tldr": "完全基于公开数据的 7B 代码 dLLM：Qwen2.5-Coder 初始化 + Dream 配方，SFT 用随机截断与 [PAD] 惩罚，RL 用 GRPO + 互补掩码；生成顺序随任务出现草图优先、左到右、交错三种模式（定性）。LiveCodeBench pass@1 21.4%。",
       "tags": ["代码", "开放配方", "草图优先", "RL"],
       "facts": {
@@ -4736,7 +4757,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/ByteDance-Seed/Stable-DiffCoder" },
         { "label": "Weights", "url": "https://huggingface.co/collections/ByteDance-Seed/stable-diffcoder" }
       ],
-      "page": "tracks/dllm/18-code.html#stable-diffcoder",
+      "page": "legacy/tracks/dllm/18-code.html#stable-diffcoder",
       "tldr": "从 Seed-Coder-8B 退火前的检查点出发，用块大小为 4 的块扩散持续预训练 1.3T token（配 warmup 与块级截断噪声），再复用 Seed-Coder 的 SFT 数据。多数代码基准超过它的 AR 对照，但最后一段的 token 数、DPO 与评测模板并未对齐。",
       "tags": ["代码", "块扩散", "持续预训练", "AR 对照"],
       "facts": {
@@ -4766,7 +4787,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/Gen-Verse/MMaDA" },
         { "label": "Weights", "url": "https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT" }
       ],
-      "page": "tracks/dllm/19-multimodal.html",
+      "page": "legacy/tracks/dllm/19-multimodal.html",
       "tldr": "以 LLaDA-8B 为骨干，用 MAGVIT-v2 把图像量化为离散码，与文本共用一个掩码预测目标，同时完成文本推理、图像理解与文生图；后训练依次为 Mixed Long-CoT SFT 和对回答随机部分加噪估计似然的 UniGRPO。",
       "tags": ["多模态", "统一模型", "离散图像码", "UniGRPO"],
       "facts": {
@@ -4796,7 +4817,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/ML-GSAI/LLaDA-V" },
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/LLaDA-V" }
       ],
-      "page": "tracks/dllm/19-multimodal.html#llada-v",
+      "page": "legacy/tracks/dllm/19-multimodal.html#llada-v",
       "tldr": "LLaVA 式视觉指令微调（SigLIP2 + MLP），把语言塔换成 LLaDA-8B，只对回答做掩码扩散；与流水线完全相同、只换语言塔的 LLaMA3-V 对照，18 个基准中 11 个胜出，数据扩展性更好。",
       "tags": ["多模态", "视觉指令微调", "AR 对照"],
       "facts": {
@@ -4826,7 +4847,7 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/jacklishufan/LaViDa" },
         { "label": "Weights", "url": "https://huggingface.co/collections/jacklishufan/lavida-10-682ecf5a5fa8c5df85c61ded" }
       ],
-      "page": "tracks/dllm/19-multimodal.html#lavida",
+      "page": "legacy/tracks/dllm/19-multimodal.html#lavida",
       "tldr": "LLaDA / Dream 骨干的扩散 VLM：用互补掩码让每个回答 token 都有监督，推理时用前缀 DLM 缓存视觉与问题的 K/V（COCO 上约 3.9× 加速），用凸的时间步偏移（α=1/3）保住少步质量；受约束看图写诗的约束满足率为 100%。",
       "tags": ["多模态", "互补掩码", "前缀缓存", "时间步偏移", "填空"],
       "facts": {
@@ -4838,6 +4859,27 @@ window.ATLAS_REGISTRY = {
         "eval": "MMMU 43.3 vs Open-LLaVA-Next 37.4；COCO CIDEr 117.3 @1.93 s（前缀缓存，100% NFE）vs 121.0 @7.65 s（无缓存），单卡 A5000（Tab. 1、Tab. 3a）",
         "limits": "上下文 4096 / 2048 迫使视觉池化，OCR 落后；前缀缓存与训练不一致导致掉分；摘要中的 +4.1 CIDEr / 1.92× 无法从表中复核"
       }
+    },
+    {
+      "id": "ktp-umm",
+      "track": "multimodal",
+      "kind": "paper",
+      "lane": "",
+      "title": "学会画图，能让统一多模态模型知道得更多吗？",
+      "full_title": "Can Visual Generation Expand What Unified Multimodal Models Know?",
+      "authors": ["Wenkai Li", "Wenyi Hong", "Zhuoyi Yang", "Jie Tang"],
+      "org": "Tsinghua University; Z.AI",
+      "date": "2026-10",
+      "venue": "",
+      "arxiv": "2610.21459",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2610.21459" },
+        { "label": "项目主页", "url": "https://kevinlllee.github.io/Knowledge-Transfer-Probing/" },
+        { "label": "数据与评测代码", "url": "https://github.com/kevinlllee/Knowledge-Transfer-Probing" }
+      ],
+      "page": "papers/visual-generation-knowledge.html",
+      "reading": "papers/visual-generation-knowledge.html",
+      "tldr": "作者把虚构实体的属性只放进文生图训练图像，训练后只用文字提问，检验统一多模态模型能否说出画图时学到的知识。三个模型画对的都远多于说对的；在一半实体上加入“先画再答”的交错图文对齐后，另一半从未被问过的实体也更容易答对，但即使画对了，多数知识仍然说不出来。"
     }
   ],
   "edges": [

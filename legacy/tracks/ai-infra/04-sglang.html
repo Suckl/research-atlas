@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGLang / RadixAttention 拆解</title>
+<meta name="description" content="SGLang（NeurIPS 2024）：RadixAttention 基数树前缀缓存与缓存感知调度、压缩有限状态机约束解码、API 投机执行，以及与 vLLM 的对比。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="sglang">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：LLM 应用不是单次调用，而是“程序”</h2>
+<p>多轮对话、few-shot 提示、思维树搜索、多路采样、Agent 的工具调用——一个应用会向模型发出<b>大量共享前缀</b>的调用，还常要求输出符合 JSON / 正则。2023 年的引擎（含 vLLM）把每次调用当作独立请求：共享的前缀被反复 prefill，结构化输出逐 token 地用掩码约束。SGLang 把“LM 程序”当作一等公民，前端给出表达这些模式的语言，后端运行时为这些模式做三项优化。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  <b>RadixAttention</b>：所有请求的 KV 放进一棵以 token 序列为键的基数树里，新请求先在树上找最长公共前缀，只 prefill 剩下的部分；<b>压缩 FSM</b>：正则约束里“只有一种走法”的那段一次跳过去；<b>API 投机执行</b>：对黑盒 API 多生成一点以省一次调用。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：RadixAttention</h2>
+<div class="legend">
+  <span><i class="sw data"></i>请求</span><span><i class="sw enc"></i>基数树节点（已缓存 KV）</span><span><i class="sw pred"></i>需要计算的部分</span><span><i class="sw act"></i>调度 / 淘汰</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 440" role="img" aria-label="RadixAttention">
+    <!-- tree -->
+    <g class="enc" data-part="root" data-step="1"><rect class="box" x="400" y="20" width="160" height="40" rx="8"/><text class="t-c t-b" x="480" y="40">root</text></g>
+    <g class="enc" data-part="sys" data-step="1"><rect class="box" x="400" y="90" width="160" height="46" rx="8"/><text class="t-c t-b" x="480" y="108">"You are a helpful…"</text><text class="t-c t-xs" x="480" y="126">系统提示（共享前缀）</text></g>
+    <path class="edge" d="M480,60 V86" style="stroke:var(--c-enc)" data-step="1"/>
+    <g class="enc" data-part="shotA" data-step="1"><rect class="box" x="200" y="170" width="170" height="46" rx="8"/><text class="t-c t-b" x="285" y="188">few-shot 例子 ①②</text><text class="t-c t-xs" x="285" y="206">多条请求共用</text></g>
+    <g class="enc" data-part="chat" data-step="1"><rect class="box" x="600" y="170" width="170" height="46" rx="8"/><text class="t-c t-b" x="685" y="188">"User: 你好 … "</text><text class="t-c t-xs" x="685" y="206">多轮对话的前几轮</text></g>
+    <path class="edge" d="M440,136 C440,160 300,150 285,166" style="stroke:var(--c-enc)" data-step="1"/>
+    <path class="edge" d="M520,136 C520,160 680,150 685,166" style="stroke:var(--c-enc)" data-step="1"/>
+    <g class="enc" data-part="leafA1" data-step="1"><rect class="box" x="120" y="250" width="150" height="40" rx="8"/><text class="t-c t-sm" x="195" y="270">问题 A（已完成）</text></g>
+    <g class="enc" data-part="leafA2" data-step="1"><rect class="box" x="290" y="250" width="150" height="40" rx="8"/><text class="t-c t-sm" x="365" y="270">问题 B（进行中，ref=1）</text></g>
+    <path class="edge" d="M250,216 C250,236 200,236 195,246" style="stroke:var(--c-enc)" data-step="1"/>
+    <path class="edge" d="M320,216 C320,236 360,236 365,246" style="stroke:var(--c-enc)" data-step="1"/>
+    <g class="enc" data-part="leafC" data-step="1"><rect class="box" x="610" y="250" width="150" height="40" rx="8"/><text class="t-c t-sm" x="685" y="270">第 3 轮回答（已完成）</text></g>
+    <path class="edge" d="M685,216 V246" style="stroke:var(--c-enc)" data-step="1"/>
+    <!-- new request -->
+    <g data-part="new-req" data-step="2">
+      <rect class="box data" x="20" y="20" width="300" height="60" rx="10"/>
+      <text class="t-c t-b" x="170" y="42">新请求：系统提示 + few-shot ①② + 问题 C</text>
+      <text class="t-c t-xs" x="170" y="64">在树上匹配最长公共前缀</text>
+    </g>
+    <path class="edge" d="M170,80 C170,120 380,100 398,108" style="stroke-dasharray:4 4" data-step="2"/>
+    <path class="edge" d="M240,80 C240,140 270,150 280,166" style="stroke-dasharray:4 4" data-step="2"/>
+    <g class="pred" data-part="miss" data-step="3"><rect class="box" x="460" y="250" width="130" height="40" rx="8"/><text class="t-c t-sm" x="525" y="270">问题 C：只算这段</text></g>
+    <path class="edge" d="M330,216 C330,240 500,236 520,246" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="3"/>
+    <text class="t-xs" x="455" y="306" data-step="3">命中部分直接复用 KV，未命中部分 prefill 后插入为新叶</text>
+    <!-- scheduler / eviction -->
+    <g class="act" data-part="sched" data-step="4">
+      <rect class="box" x="20" y="330" width="420" height="90" rx="10"/>
+      <text class="t-c t-b" x="230" y="352">缓存感知调度</text>
+      <text class="t-c t-xs" x="230" y="372">等待队列按“匹配前缀长度”排序，而非先来先服务：</text>
+      <text class="t-c t-xs" x="230" y="388">长匹配的先跑，命中率提升；按树的 DFS 顺序执行在缓存够大时命中率最优（定理 3.1）</text>
+      <text class="t-c t-xs" x="230" y="406">实测达到最优命中率的约 96%</text>
+    </g>
+    <g class="act" data-part="evict" data-step="5">
+      <rect class="box" x="500" y="330" width="440" height="90" rx="10"/>
+      <text class="t-c t-b" x="720" y="352">LRU 淘汰</text>
+      <text class="t-c t-xs" x="720" y="372">显存不够时淘汰最久未用的叶节点（引用计数为 0 的）；</text>
+      <text class="t-c t-xs" x="720" y="388">被运行中请求引用的节点不淘汰；</text>
+      <text class="t-c t-xs" x="720" y="406">每个 KV 页 1 个 token，节点边可带多 token 标签；树操作开销 &lt; 0.3%</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="root"><h4>基数树</h4><p>以 token 序列为键的前缀树，边可以带一串 token（radix = 压缩的 trie）。每个节点对应一段连续 token 的 KV 页（SGLang 中每页 1 token，<code>--page-size</code> 默认 1）。</p></div>
+    <div data-note="sys"><h4>共享前缀</h4><p>系统提示是最常见的共享前缀：所有请求都从它开始，它的 KV 只 prefill 一次。</p></div>
+    <div data-note="shotA"><h4>多级共享</h4><p>few-shot 例子在系统提示之下形成第二级共享。vLLM 论文时代只处理“系统提示共享”这类简单情况；SGLang 的树天然支持任意层级。</p></div>
+    <div data-note="chat"><h4>多轮对话</h4><p>每一轮的历史是下一轮的前缀。对话越长，树上命中的部分越长，节省越多。</p></div>
+    <div data-note="leafA1"><h4>已完成的叶</h4><p>请求结束后其 KV 仍留在树上（引用计数归零），以备后续请求复用，直到被 LRU 淘汰。</p></div>
+    <div data-note="leafA2"><h4>进行中的叶</h4><p>正在生成的请求引用着它的节点（ref ≥ 1），这条路径上的节点都不会被淘汰。</p></div>
+    <div data-note="leafC"><h4>另一分支</h4><p>不同对话在系统提示之后分叉。</p></div>
+    <div data-note="new-req"><h4>新请求到达</h4><p>按 token 序列从根开始匹配：系统提示命中、few-shot 命中、问题 C 不命中。匹配是逐 token 的，所以共享粒度比“整块哈希”细。</p></div>
+    <div data-note="miss"><h4>只算未命中的部分</h4><p>命中的 KV 直接作为上下文，未命中的尾部做 prefill，结果作为新叶插入树中。注意力内核需要支持“前缀来自树、尾部新算”的布局——这正是 FlashInfer 块稀疏抽象的用武之地。</p></div>
+    <div data-note="sched"><h4>缓存感知调度</h4><p>等待队列不按到达顺序，而按与树匹配的前缀长度排序；论文证明按树的 DFS 顺序执行、缓存不小于最长请求时命中率最优，实测调度策略达到最优的 96%。SGLang 的 <code>--schedule-policy</code> 有 lpm（最长前缀匹配）、fcfs、dfs-weight 等选项，默认在近期版本为 fcfs。</p></div>
+    <div data-note="evict"><h4>LRU 淘汰</h4><p>显存紧张时淘汰最久未访问的、无人引用的叶子。数据并行时每个 worker 维护自己的子树，路由器维护一棵元树，淘汰事件在低峰期同步。</p></div>
+    <div data-step-note="1"><h4>① 树的状态</h4><p>已服务过的请求把它们的 KV 留在树上，公共前缀只存一份。</p></div>
+    <div data-step-note="2"><h4>② 新请求匹配</h4><p>从根逐 token 匹配，找到最长公共前缀。</p></div>
+    <div data-step-note="3"><h4>③ 增量 prefill</h4><p>只计算未命中的尾部，插入为新节点。</p></div>
+    <div data-step-note="4"><h4>④ 调度</h4><p>多个等待请求按匹配长度排序，提升整体命中率。</p></div>
+    <div data-step-note="5"><h4>⑤ 淘汰</h4><p>显存不足时按 LRU 淘汰无引用的叶子。</p></div>
+  </div>
+  <figcaption>图 1　RadixAttention：一棵基数树管理所有请求的 KV。依据论文 §3.1 与图 3。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 另外两项运行时优化与前端</h2>
+<h3 id="c-fsm">3.1 压缩有限状态机：约束解码一次跳多步</h3>
+<p>要求输出符合 JSON schema / 正则时，常规做法是每步用 FSM 算出允许的 token 集合并掩码 logits——每一步都只能前进一个 token，哪怕像 <code>{"name": "</code> 这样完全确定的片段也要一步一步生成。SGLang 把正则编译成 FSM 后，把“只有一条出边”的连续状态压缩成一条边：解码到这里时直接把整段字符串追加进去（Jump Forward），再做一次重新分词保证 token 边界自然。JSON 解码吞吐提升约 1.6×；FSM 跨请求复用，否则吞吐低 2.4×。</p>
+<h3 id="c-api">3.2 API 投机执行</h3>
+<p>对 OpenAI 这类黑盒 API，一个程序里连续几个 <code>gen</code>（例如抽取三个字段）本来要三次调用。SGLang 让第一次调用多生成几个 token 越过停止条件，后续的 <code>gen</code> 若能匹配上这段输出就直接复用。三字段抽取任务上输入 token 成本降约 3 倍。</p>
+<h3 id="c-frontend">3.3 前端语言</h3>
+<p>嵌入 Python 的原语：<code>gen</code>（可带 <code>regex</code>）、<code>select</code>、<code>extend / +=</code>、<code>fork</code>、<code>join</code>、<code>image</code>、<code>video</code>。编译器 / 解释器把程序翻译成带共享前缀信息的请求流，运行时据此调度。这一层让“程序结构”（哪些调用共享前缀、哪些可以并行）对运行时可见。</p>
+<div class="code-title">sglang_program.py（论文风格示例）</div>
+<pre><code class="lang-py">@sgl.function
+def multi_branch(s, question):
+    s += sgl.system("You are a helpful assistant.")      # 共享前缀 → 树的上层
+    s += sgl.user(question)
+    forks = s.fork(3)                                     # 三条分支共享到此为止的 KV
+    for i, f in enumerate(forks):
+        f += sgl.assistant(sgl.gen("ans", max_tokens=128, temperature=0.7))
+    s += sgl.assistant(sgl.gen("final", regex=r'\{"best": [0-2]\}'))  # 压缩 FSM 约束</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="results">4. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>指标</th><th class="num">数字</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>吞吐</td><td class="num">最高 6.4×</td><td>vs Guidance、vLLM、LMQL，开源模型上的多种 LM 程序基准</td></tr>
+    <tr><td>延迟</td><td class="num">最低 3.7×</td><td>同上</td></tr>
+    <tr><td>缓存命中率</td><td class="num">50–99%</td><td>各基准；生产（Chatbot Arena 一个月）LLaVA-Next-34B 52.4%、Vicuna-33B 74.1%</td></tr>
+    <tr><td>调度</td><td class="num">≈96% 最优</td><td>缓存感知调度相对最优命中率</td></tr>
+    <tr><td>树开销</td><td class="num">&lt; 0.3%</td><td>无复用机会的 ShareGPT 负载上 0.2 s / 74.3 s</td></tr>
+    <tr><td>JSON 解码</td><td class="num">≈1.6×</td><td>压缩 FSM</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="questions">5. 简答题</h2>
+<div class="qa">
+  <h3 id="q7"><span class="qid">Q7</span>vLLM 与 SGLang 的设计出发点有何不同？两者前缀缓存的粒度差异从何而来？</h3>
+  <div class="ans">
+    <p class="short">同一代、同一批作者圈子（Berkeley / LMSYS）的两个引擎，出发点不同：vLLM 解决显存碎片（PagedAttention），SGLang 解决 LM 程序的前缀复用与结构化输出（RadixAttention + 压缩 FSM + 前端语言）。今天二者在功能上已高度趋同，差异主要在实现细节与默认策略。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>维度</th><th>vLLM（论文时期 → 现在）</th><th>SGLang（论文时期 → 现在）</th></tr></thead>
+      <tbody>
+        <tr><td>核心抽象</td><td>固定大小 KV 块 + 块表（分页）</td><td>基数树上的 KV 前缀（每页 1 token）</td></tr>
+        <tr><td>前缀复用</td><td>显式共享（并行采样 / beam）→ 自动前缀缓存：整块内容哈希</td><td>逐 token 基数树匹配 + LRU + 缓存感知调度，天生多级共享</td></tr>
+        <tr><td>调度</td><td>FCFS 连续批处理，抢占（swap / recompute）</td><td>按最长前缀匹配等策略排序（lpm / fcfs / dfs-weight…），CPU 调度与 GPU 执行重叠的“零开销”调度器（后期版本）</td></tr>
+        <tr><td>结构化输出</td><td>后来集成 outlines / xgrammar 等后端</td><td>压缩 FSM 跳跃解码（论文原创），后来也接入 xgrammar</td></tr>
+        <tr><td>前端</td><td>OpenAI 兼容 API 为主</td><td>OpenAI 兼容 API + SGLang DSL（gen / select / fork）</td></tr>
+        <tr><td>注意力后端</td><td>FlashAttention、FlashInfer、Triton 等可选</td><td>FlashInfer（早期默认）、FA3、Triton 等可选</td></tr>
+        <tr><td>论文数字</td><td>vs Orca / FasterTransformer 吞吐 2–4×</td><td>vs vLLM / Guidance / LMQL 吞吐最高 6.4×（基于早期 vLLM）</td></tr>
+        <tr><td>后续共同演进</td><td colspan="2">都支持投机解码（EAGLE / MTP）、PD 分离（NIXL / Mooncake 传输后端）、DeepSeek 的 MLA / DSA、FP8 / INT4 量化、多模态、DP 注意力 + EP 等；RadixAttention 思想进入 vLLM，PagedAttention 的分页布局被 SGLang 借 FlashInfer 的块稀疏抽象统一</td></tr>
+      </tbody>
+    </table></div>
+    <p>一句话概括：<b>vLLM 的论文是关于“存”（怎么不浪费显存），SGLang 的论文是关于“算”（怎么不重复计算、怎么少走解码步）</b>；工程上今天选哪个更多看具体模型 / 硬件的支持成熟度与基准测试。</p>
+    <p class="cite">依据：SGLang 论文 §3.1–3.3、§5（含对 vLLM 比较的说明）；vLLM 论文 §4；两者当前文档。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zheng et al. <i>SGLang: Efficient Execution of Structured Language Model Programs.</i> NeurIPS 2024. <a href="https://arxiv.org/abs/2312.07104">arXiv:2312.07104</a></li>
+  <li>SGLang 文档：Server Arguments（<code>--page-size</code>、<code>--schedule-policy</code>）。</li>
+  <li>Kwon et al. <i>vLLM / PagedAttention.</i> SOSP 2023.（见 <a href="03-vllm.html">上一篇</a>）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

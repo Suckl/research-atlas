@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LCT / MoC：跨镜头上下文与内部检索</title>
+<meta name="description" content="LCT 的 scene-level 全注意力、交错位置与异步噪声；MoC 用内容路由选择历史块，比较具体证据、活跃预算与漏检索风险。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<!-- widgets used on this page, e.g. <script defer src="../../../assets/js/widgets/cem.js"></script> -->
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="video-memory" data-node="lct">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：同一个场景，为什么换镜头就忘了</h2>
+<p>单镜头模型只需维持连续运动；多镜头叙事却会切换景别、视角和人物组合。人物暂时离开镜头后再出现，生成器需要找到较早镜头里的身份和环境证据，最近一帧未必有这些信息。LCT 将单镜头的全注意力扩展到整个 scene，让跨镜头关系直接参与生成；MoC 再把这个昂贵的全量读取改为内容路由。<span class="src">LCT §1、§3.2；MoC §1、§3</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  LCT 先让各镜头有共同的上下文与可辨认的位置；MoC 在这份上下文中先找相关块，再细读块内 token。它改变的是读取路径，并没有把所有历史压成一个固定大小的摘要。
+</div>
+<p>记视频时间为 \(t\)，扩散时间为 \(\tau\)，当前 latent 为 \(x_t\)，近期窗口为 \(H_t\)，文本为 \(c_t\)，记忆为 \(M_t\)，查询与读出为 \(q_t,r_t\)。本页的 \(t\) 可按镜头或块计数；\(M_t\) 是被保留的文本／视频 token 与相应 K/V。它没有动作 \(a_t\) 或相机位姿 \(p_t\) 的专门索引；镜头描述是文本条件。<span class="src">LCT §3.2；MoC §3.1–3.2</span></p>
+
+<h2 id="architecture">2. 全局架构：生成一个新镜头时怎样读历史</h2>
+<div class="legend">
+  <span><i class="sw data"></i>观测帧 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结网络（VAE 等）</span><span><i class="sw pred"></i>记忆模块可训练部分</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>文本 / 动作 / 相机条件</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="LCT 和 MoC 的历史写入、注意力读取与上下文选择">
+    <g class="act" data-part="caption" data-step="1 3">
+      <rect class="box" x="20" y="35" width="180" height="64" rx="10"/>
+      <text class="t-c t-b" x="110" y="60">全局与镜头文本</text>
+      <text class="t-c t-sm" x="110" y="82">mandatory caption</text>
+    </g>
+    <g class="data" data-part="current" data-step="1">
+      <rect class="box" x="20" y="180" width="180" height="80" rx="10"/>
+      <text class="t-c t-b" x="110" y="208">当前镜头 xₜ(τ)</text>
+      <text class="t-c t-sm" x="110" y="233">独立噪声水平</text>
+    </g>
+    <g class="reg" data-part="bank" data-step="1 2 6">
+      <rect class="box" x="250" y="35" width="250" height="80" rx="10"/>
+      <text class="t-c t-b" x="375" y="60">历史文本 / 视频块 Mₜ</text>
+      <text class="t-c t-sm" x="375" y="84">原 token + 层内 K/V</text>
+      <text class="t-c t-sm" x="375" y="102">低噪声条件 / 已完成镜头</text>
+    </g>
+    <path class="edge act" d="M200,67 H246" data-step="1"/>
+    <path class="edge reg" d="M375,115 V170" data-step="2"/>
+    <g class="pred" data-part="router" data-step="2">
+      <rect class="box" x="250" y="175" width="250" height="90" rx="10"/>
+      <text class="t-c t-b" x="375" y="201">MoC：mean K → top-k</text>
+      <text class="t-c t-sm" x="375" y="225">先限制跨块候选方向</text>
+      <text class="t-c t-sm" x="375" y="247">LCT：直接选全上下文</text>
+    </g>
+    <path class="edge idx" d="M200,220 H246" data-step="2"/>
+    <text class="t-c t-xs" x="222" y="205" data-step="2">qₜ</text>
+    <path class="edge pred" d="M500,220 H545" data-step="3"/>
+    <g class="reg" data-part="read" data-step="3">
+      <rect class="box" x="550" y="175" width="180" height="90" rx="10"/>
+      <text class="t-c t-b" x="640" y="201">选中块的 K/V</text>
+      <text class="t-c t-sm" x="640" y="225">加文本与镜头内锚</text>
+      <text class="t-c t-sm" x="640" y="247">块内细粒度注意力</text>
+    </g>
+    <path class="edge act" d="M110,35 V18 H640 V170" data-step="3"/>
+    <path class="edge reg" d="M730,220 H775" data-step="4"/>
+    <g class="enc" data-part="generator" data-step="4">
+      <rect class="box" x="780" y="175" width="160" height="90" rx="10"/>
+      <text class="t-c t-b" x="860" y="205">MMDiT 去噪</text>
+      <text class="t-c t-sm" x="860" y="233">跨镜头证据 rₜ</text>
+    </g>
+    <path class="edge enc" d="M860,265 V325" data-step="5"/>
+    <g class="data" data-part="output" data-step="5">
+      <rect class="box" x="780" y="330" width="160" height="65" rx="10"/>
+      <text class="t-c t-b" x="860" y="355">完成镜头 xₜ₊₁</text>
+      <text class="t-c t-sm" x="860" y="378">加入历史候选池</text>
+    </g>
+    <path class="edge reg" d="M780,363 H730" data-step="6"/>
+    <g class="reg" data-part="update" data-step="6">
+      <rect class="box" x="300" y="330" width="425" height="65" rx="10"/>
+      <text class="t-c t-b" x="512" y="355">写入 / 下一轮选择上下文</text>
+      <text class="t-c t-sm" x="512" y="378">未选中 ≠ 删除；外层选 shot 是额外策略</text>
+    </g>
+    <path class="edge reg" d="M300,363 H225 V135 H320 V119" data-step="6"/>
+    <text class="t-c t-sm" x="480" y="442">图示为有历史条件的生成；联合生成时，各镜头都可能处于带噪状态</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="caption"><h4>文本锚点</h4><p>全局文本描述共享人物／环境；每镜头文本描述局部事件。MoC 强制视觉 query 读取文本，避免稀疏路由把条件完全漏掉。<span class="src">LCT §3.2.1；MoC §3.2</span></p></div>
+    <div data-note="current"><h4>异步噪声</h4><p>低噪声镜头可以充当视觉条件，高噪声镜头接受指导；也可同步噪声联合生成。图中的当前镜头不是单个 RGB 帧。<span class="src">LCT §3.2.3</span></p></div>
+    <div data-note="bank"><h4>仍保留具体证据</h4><p>mean-pooled K 仅用于选块，细读时仍使用块内原 K/V；它不是替代全块内容的压缩记忆。双向模型的 K/V 随去噪前向重算，只有因果历史才适合复用缓存。<span class="src">LCT §3.3；MoC Eq. 2–3</span></p></div>
+    <div data-note="router"><h4>路由没有独立参数</h4><p>每层、每头、每 query 的相似度来自可训练的 Q/K 投影；离散 top-k 不可微，学习通过选中块的注意力梯度间接进行。<span class="src">MoC §3.1</span></p></div>
+    <div data-note="read"><h4>先检索，再注意</h4><p>动态跨块候选先做因果限制；文本与镜头内连边强制保留。细粒度 softmax 只在合并后的 token 集上计算。<span class="src">MoC §3.2–3.3</span></p></div>
+    <div data-note="generator"><h4>生成器负责采纳证据</h4><p>检索得到某镜头不意味着必须逐像素复制它；生成器仍需把外观证据与新动作、景别和描述结合。后一句是机制解释。</p></div>
+    <div data-note="output"><h4>写入单位</h4><p>自回归模式把完成镜头保留为后续条件；联合模式处理整个场景，不存在唯一的在线写入顺序。<span class="src">LCT §3.4；MoC §4</span></p></div>
+    <div data-note="update"><h4>选择与淘汰要分开</h4><p>LCT 的长叙事方案含人工相关性选择；MoC 附录还描述外层 shot 预筛选。内层 top-k 未选中某块，只代表本 query 不读它。<span class="src">LCT §3.4；MoC §14</span></p></div>
+    <div data-step-note="1"><h4>① 建立条件</h4><p>为历史与当前镜头提供文本、位置和噪声水平。</p></div>
+    <div data-step-note="2"><h4>② 选历史块</h4><p>LCT 全读；MoC 用当前 Q 与各块 mean K 的内积挑选跨块来源。</p></div>
+    <div data-step-note="3"><h4>③ 加强制锚点</h4><p>合并文本与本镜头 token，不把它们重复占用动态路由预算。</p></div>
+    <div data-step-note="4"><h4>④ 细读与去噪</h4><p>选中的原始 K/V 参与注意力，生成器预测当前更新。</p></div>
+    <div data-step-note="5"><h4>⑤ 完成镜头</h4><p>重复扩散步骤，得到可作为视觉条件的镜头。</p></div>
+    <div data-step-note="6"><h4>⑥ 更新候选池</h4><p>保留生成结果；下一镜头再选择相关历史。外层池管理不等同于内层稀疏注意力。</p></div>
+  </div>
+  <figcaption>图 1　跨镜头读取的一次计算与完成镜头后的写入。<span class="src">依据 LCT §3.2–3.4；MoC §3、§14。流程图为机制归纳。</span></figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-lct">3.1 LCT：扩大的是 scene-level 信息交换</h3>
+<p>LCT 把同一 scene 的全部文本与视频 token 合入 MMDiT 注意力序列，沿用原模型权重，不增加专门的身份网络。全局描述规定共享内容，逐镜头描述引用一致的人物 ID，使“本镜头该出现谁”与“这个人长什么样”有共同上下文。训练还混合单镜头数据以保留基座能力。<span class="src">LCT §3.2.1–3.2.2、§3.4</span></p>
+<p>这份记忆首先是<b>可见上下文</b>：只要相关镜头进入窗口，其所有 token 都有参与注意力的机会。论文对更长故事提出历史池加人工选择；因此长演示同时受益于用户选对参考，不能解释成自动检索能力。<span class="src">LCT §3.4</span></p>
+
+<h3 id="c-position">3.2 Interleaved 3D RoPE：不让不同镜头共用地址</h3>
+<p>直接拼接镜头会混淆“哪段文本属于哪个视频”。LCT 为文本赋予三个轴相同的坐标，把对应视频放到文本结束后的空间对角线位置；后续 text–video 对沿对角线继续排列。这样不同镜头有不同绝对坐标，而每对内部的相对布局与单镜头阶段保持兼容。全局 prompt 配 dummy video token，按同一规则放置。<span class="src">LCT §3.2.2、Fig. 3</span></p>
+<p>这是模型内部的位置地址，不是世界坐标地图：相同人物换视角以后，仍要由注意力识别内容关联。它不能直接回答“相机现在回到了哪个三维位置”。<span class="src">由 LCT Fig. 3 的位置规则推断</span></p>
+
+<h3 id="c-asynchronous">3.3 异步噪声与 context-causal 微调</h3>
+<p>训练时每个镜头独立采样 \(\tau\)，同一个接口同时处理低噪声条件和待生成样本。联合采样可以同步各镜头的去噪进度；条件采样让部分镜头保持低噪声。历史来自真实镜头的训练，与历史来自自生成镜头的推理，应分别说明。<span class="src">LCT §3.2.3–3.4</span></p>
+<p>接着，context-causal 版本保留镜头内双向注意力，只允许读取前面的 context。已完成历史不会被后面的新镜头反向改变，历史 K/V 因而可以缓存。<b>缓存资格来自因果结构</b>，不能仅凭“当前镜头的噪声更高”就复用双向模型中所有中间表示。<span class="src">LCT §3.3、Fig. 4；后一句为计算依赖解释</span></p>
+
+<h3 id="moc">3.4 MoC：路由怎样把注意力变成检索</h3>
+<p>MoC 从 LCT 权重初始化，把 dense attention 换成 sparse routing。块的边界对齐帧、镜头和模态；先取块内 K 的均值作为 descriptor，query 根据内积选择 top-k 块，再读取这些块的<b>全部细粒度 K/V</b>。检索 key 是 descriptor，返回内容是选中块的 token；两者不应混为一个压缩向量。<span class="src">MoC §3.1–3.2、§4</span></p>
+<div class="formula">$$\bar K_j=\frac{1}{|C_j|}\sum_{u\in C_j}K_u,\quad J(q_t)=\operatorname{TopK}_{j\in\mathcal C_{\mathrm{allowed}}}(q_t^\top\bar K_j),\quad \Omega(q_t)=\bigcup_{j\in J(q_t)}C_j\ \cup\ \mathcal A_t$$</div>
+<div class="formula">$$r_t=\operatorname{softmax}\!\left(\frac{q_tK_{\Omega(q_t)}^\top}{\sqrt d}\right)V_{\Omega(q_t)}$$</div>
+<p>\(C_j\) 是候选块，\(\mathcal A_t\) 是强制锚点集合：文本，以及属于当前镜头的局部视觉 token。因果限制作用于<b>动态跨块路由</b>，不取消镜头内强制读取。多层多头分别选择，覆盖的历史并非一个全局固定 top-k 清单。<span class="src">MoC §3.1–3.3</span></p>
+<p>“可学习”不表示新增一个检索打分 MLP。Q/K 投影会训练，mean pooling 没有参数；hard top-k 的离散索引本身不可微。选中块经注意力接受梯度，context drop-in 增加被忽视块获得学习信号的机会，drop-off 训练模型应对漏路由。<span class="src">MoC §3.1</span></p>
+
+<h3 id="c-routing-failures">3.5 可能漏掉什么，为什么还要强制锚点</h3>
+<ul>
+  <li><b>小而重要的细节：</b>块均值可能突出背景而淡化短暂动作、文字或道具。内容仍在 K/V 中，但若路由没选中，本 query 就读不到它。这是机制风险，不能当作论文已证明的全部失败原因。</li>
+  <li><b>闭合路由圈：</b>论文无因果约束的消融观察到镜头互相选择、与更早上下文脱离，出现停滞／重复。动态边只指向前序候选可排除此类路由环；这里的 loop closure 指路由关系中的互选环，不是相机回访任务。<span class="src">MoC §3.2、Fig. 2</span></li>
+  <li><b>局部运动被路由挤掉：</b>强制镜头内连接提供稳定的短程通路，文本锚保持条件。过小块或过少路由会提升表观一致性，却让运动不足；高 consistency 不能单独算作记忆胜利。<span class="src">MoC Tab. 3–4</span></li>
+</ul>
+
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>LCT</th><th>MoC</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>各镜头文本与视频 latent token；因果版历史 K/V。</td><td>保留块内 K/V，并计算 mean K 路由 descriptor；不是只存均值。</td></tr>
+    <tr><td>何时写（GT / generated，clean / noisy）</td><td>训练：真实镜头独立加噪；联合推理：各镜头带噪；AR：完成的生成镜头作为低噪声历史。</td><td>沿用 LCT 输入／噪声协议；在各层前向构造 K/V 与描述符。</td></tr>
+    <tr><td>如何寻址</td><td>interleaved 3D 位置 + 文本／视觉 Q/K；长故事历史池可人工选参考。</td><td>内容内积 top-k + 跨块因果候选；caption 与镜头内块强制加入。</td></tr>
+    <tr><td>如何读</td><td>整个选定 context 的全注意力；context-causal 版读历史缓存。</td><td>先 gather 被选块，再在原 token 上做 softmax attention。</td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>有限窗口／外层历史选择；论文未给统一的自动档案淘汰器。</td><td>内层未选中不等于淘汰；附录外层预筛 shot 缩小本次 context。</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">表中协议依据 <span class="src">LCT §3.2–3.4；MoC §3、§6、§14</span>。本页“写入”包含上下文准备，不声称联合生成是逐镜头在线记忆系统。</p>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<p>以下形状是对论文计算的符号化整理：batch 为 \(B\)，头数为 \(h\)，每头宽度为 \(d\)，总 token 为 \(N\)，块数为 \(J\)，选块平均长度为 \(m\)。不把某个演示分辨率推广为所有模型的固定输入。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 成本</th><th>解释</th></tr></thead>
+  <tbody>
+    <tr><td>层内 Q/K/V</td><td>各 [B, N, h, d]</td><td>两方法都要表示完整的当前输入上下文。<span class="src">LCT §3.2；MoC Eq. 1</span></td></tr>
+    <tr><td>块描述符</td><td>[B, J, h, d]</td><td>MoC 路由摘要额外占 O(Jd)，原 K/V 仍是 O(Nd)。<span class="src">MoC §6；形状为推导</span></td></tr>
+    <tr><td>路由 logits / 索引</td><td>[B, h, N, J] / [B, h, N, k]</td><td>全 query–chunk 打分仍有 O(NJ) 项；实际实现控制中间张量峰值。<span class="src">MoC §3.3、§6</span></td></tr>
+    <tr><td>细读</td><td>每 query：约 km + 锚点 token</td><td>读取预算受块大小和强制镜头内连接共同决定。<span class="src">MoC Eq. 4；锚点项为补充解释</span></td></tr>
+    <tr><td>主实验 context</td><td>8 shot × 8 s；约 180k token</td><td>480p、12 FPS，共 64 s。是 MoC 的对照协议。<span class="src">MoC §4</span></td></tr>
+  </tbody>
+</table></div>
+<div class="callout code-note"><span class="callout-title">“近线性”需要保留条件</span>
+  固定细读预算可以大幅降低注意力成本，但全候选路由有 query × chunk 的打分，K/V 总存储仍随输入长度增长。论文附录也列出路由矩阵 O(N²/C)（C 为块长度）；极长序列另用外层预选 shot。不能把实测近线性曲线解释成任意长历史的严格常数总内存。<span class="src">MoC §3.3、§6–7、§14</span>
+</div>
+
+<h2 id="objective">5. 训练目标与路由怎样学会读</h2>
+<p>LCT 使用 flow matching，令 \(x_t(\tau)=(1-\tau)x_t+\tau\epsilon_t\)，\(\tau=0\) 为 clean、\(\tau=1\) 为噪声。每个镜头独立采样噪声水平，预测速度 \(\epsilon_t-x_t\)，镜头损失先计算再平均。<span class="src">LCT Eq. 1、§3.4</span></p>
+<div class="formula">$$\mathcal L=\mathbb E_{\{\tau_t,x_t,\epsilon_t\}}\frac{1}{S}\sum_{t=1}^{S}\left\|v_\theta\big(\{x_j(\tau_j),c_j\}_{j=1}^{S}\big)_t-(\epsilon_t-x_t)\right\|_2^2$$</div>
+<p>这是以统一记号重写的镜头平均目标，\(S\) 为镜头数。MoC 沿用 LCT 的训练方案，改动可被访问的 K/V 集合，逐渐缩小块以提高稀疏度；没有单独的“检索命中标签”或事件正确性损失。训练信号首先是生成去噪误差，记忆读取能力由这个目标间接塑造。<span class="src">MoC §3.1、§4、§11</span></p>
+
+<h2 id="pseudocode">6. 伪代码：内部路由与外层历史池</h2>
+<div class="code-title">lct_moc_context.py（机制示意；层内路由每次前向重新计算）</div>
+<pre><code class="lang-py">def context_attention(X, meta, mode, k):
+    Q, K, V = project_qkv(X)             # 每层、每头独立
+    Q, K = interleaved_rope(Q, K, meta)
+    if mode == "LCT":
+        return full_attention(Q, K, V, meta.context_mask)
+    chunks = partition_by_content(meta)  # 不跨 shot / modality 边界
+    key_desc = segment_mean(K, chunks)
+    outputs = []
+    for q, q_meta in queries(Q, meta):
+        mandatory = caption_and_intra_shot(q_meta, chunks)
+        allowed = earlier_chunks(q_meta, chunks) - mandatory
+        chosen = topk(dot(q, key_desc[allowed]), k)
+        token_ids = union(chosen, mandatory).all_token_ids()
+        outputs.append(attention(q, K[token_ids], V[token_ids]))
+    return stack(outputs)
+
+pool = []                               # 外层池不是固定大小 TTT state
+for shot_text in story:
+    selected = select_history(pool, shot_text)
+    # LCT 可人工选择；MoC 极长设置还有独立 outer-loop 预选
+    history = low_noise_conditions(selected)
+    current = sample_noise_for_shot()
+    for tau in noise_schedule:
+        X, meta = pack_interleaved(history, current, shot_text)
+        velocity = dit(X, meta, attention=context_attention)
+        current = flow_step(current, velocity, tau)
+    pool.append(current)                # 保存生成镜头供后来选择
+    # 双向模式不能假设历史 K/V 一直不变
+    # context-causal 模式可缓存不依赖未来的历史表示
+    emit(current)</code></pre>
+
+<h2 id="hyperparams">7. 与记忆有关的关键设置</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>设置</th><th>影响</th></tr></thead>
+  <tbody>
+    <tr><td>LCT</td><td>3B MMDiT，最多 9 shot；causal 版额外微调。<span class="src">LCT §4</span></td><td>这是原论文训练上限；MoC 对照采用另一组镜头数，不能混用。</td></tr>
+    <tr><td>MoC 多镜头</td><td>块长 10240 → 5120 → 2560 → 1280，top-k = 5；强制文本与镜头内连接。<span class="src">MoC §11</span></td><td>先保留较宽通信，再逐步压缩动态读取。</td></tr>
+    <tr><td>MoC 单镜头</td><td>块长 256、top-k = 3，不开启因果路由。<span class="src">MoC §11</span></td><td>不能把多镜头防环策略写成所有实验都启用。</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="results">8. 结果：跨镜头证据与画质指标的边界</h2>
+<p>这里的数值均为作者报告。LCT 原论文缺少专门的 scene-level 自动指标，人工评估要求优先考虑跨镜头一致性；VBench 的 consistency 平均则来自主体与背景指标。两者测的范围不同。<span class="src">LCT §4.1、Tab. 1</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>LCT 原论文比较</th><th>Consistency avg. ↑</th><th>人工 AHR ↑</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>VideoStudio</td><td>95.25</td><td>2.14</td><td><span class="src">LCT Tab. 1</span></td></tr>
+    <tr><td>StoryDiffusion + Kling</td><td>96.57</td><td>2.50</td><td><span class="src">LCT Tab. 1</span></td></tr>
+    <tr><td>IC-LoRA + Kling</td><td>96.27</td><td>1.57</td><td><span class="src">LCT Tab. 1</span></td></tr>
+    <tr class="hl"><td>LCT</td><td>95.65</td><td>3.79</td><td><span class="src">LCT Tab. 1</span></td></tr>
+  </tbody>
+</table></div>
+<p>自动 consistency 并未把 LCT 排在首位；人工结果和 Fig. 5 的人物再出现案例更直接涉及跨镜头使用历史，但不能证明所有离屏事件都被正确更新。</p>
+<p>下一张表只比较 MoC 论文内的同基座协议：8 个镜头、每镜头 8 秒、480p、12 FPS；没有与上一表拼接排名。<span class="src">MoC §4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>MoC 主实验</th><th>Subject ↑</th><th>Background ↑</th><th>Dynamic ↑</th><th>Image ↑</th><th>稀疏率</th></tr></thead>
+  <tbody>
+    <tr><td>LCT dense <span class="src">MoC Tab. 1</span></td><td>0.9378</td><td>0.9526</td><td>0.4583</td><td>0.5140</td><td>0%</td></tr>
+    <tr class="hl"><td>MoC <span class="src">MoC Tab. 1</span></td><td>0.9421</td><td>0.9535</td><td>0.5625</td><td>0.5003</td><td>85%</td></tr>
+  </tbody>
+</table></div>
+<p class="muted"><span class="src">全部值：MoC Tab. 1。</span>注意力 FLOPs 从 1.7×10¹³ 到 2.3×10¹²，端到端加速 2.2×；减少乘加并不按同比例减少全部运行时间。<span class="src">MoC Tab. 1、§4</span></p>
+<p>消融更能说明取舍：单镜头 top-k 从 1 增至 3 时，Dynamic Degree 从 0.1313 增至 0.4612，而 Subject Consistency 从 0.9994 降至 0.9916。它揭示几乎静止的输出也能获得很高一致性，不能只选一个 consistency 列判断路由成功。<span class="src">MoC Tab. 3（chunk = 256）</span></p>
+
+<h2 id="evolution">9. 承上启下：压缩、检索与故事规划</h2>
+<div class="diff">
+  <div class="was"><h4>可见历史与全量读取</h4><ul>
+    <li><a href="02-history-compression.html">历史压缩</a>缩减输入 token；LCT 扩大跨镜头通信，代价是密集注意力。</li>
+    <li>LCT → MoC 是明确的权重继承，MoC 从 LCT 初始化。</li>
+  </ul></div>
+  <div class="now"><h4>选择读取什么</h4><ul>
+    <li>MoC 保留具体块内容，动态选择通信路径；没有独立世界状态更新器。</li>
+    <li><a href="04-recurrent-state.html">循环状态</a>把历史压入状态，改变存储对象而非只改变读取路径。</li>
+    <li><a href="16-story-keyframes.html">Captain Cinema</a>采用 LCT 视频骨干，另由 planner／GoldenMem 组织关键帧和镜头计划。<span class="src">Captain Cinema §3.3、§4</span></li>
+  </ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q5"><span class="qid">Q5</span>把全注意力扩到多个镜头，为什么还需要位置设计、异步噪声和因果微调？</h3>
+  <div class="ans">
+    <p class="short">全注意力提供通信机会；位置设计区分镜头与对应文本；异步噪声让已有镜头可成为低噪声条件；因果微调才使历史表示不依赖未来，从而能够复用 KV。它们分别解决通信、地址、条件接口和缓存资格，不能互相替代。</p>
+    <ul><li>保留 text–video 对内部相对位置有助于沿用单镜头对齐。</li><li>联合生成仍能读取其他待生成镜头；在线 AR 则只读取已提供的前序 context。</li><li>人工从历史池选参考的能力，应与模型自动寻址分开。</li></ul>
+    <p class="cite">依据：LCT §3.2.2–3.4、Fig. 3–4。</p>
+  </div>
+</div>
+<div class="qa">
+  <h3 id="q6"><span class="qid">Q6</span>MoC 为什么可以称为内部检索？如果相关块没入选，记忆是真的被删除了吗？</h3>
+  <div class="ans">
+    <p class="short">query 先用块 descriptor 选来源，再读取选中块内原 K/V，这就是“定位证据—细读证据”的检索结构。未入选只表示本层本头的这个 query 没读到该块；原内容可能仍被保留，也可能被其他头选择。若外层 context 管理已经排除了它，内层路由才无从访问。</p>
+    <ul><li>mean K 可能漏掉小而重要的特征；这是寻址风险，与只存摘要造成的信息损失不同。</li><li>文本与镜头内强制链接保留基本条件和局部运动，不保证远程事件全部命中。</li><li>因果路由避免动态路由关系中的互选环；它不是显式的事件更新或删除规则。</li></ul>
+    <p class="cite">依据：MoC Eq. 2–3、§3.1–3.3、§6、§14；细节遗漏为机制推断。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Guo et al. <i>Long Context Tuning for Video Generation.</i> ICCV 2025；本页依据 arXiv v1。<a href="https://arxiv.org/abs/2503.10589">arXiv:2503.10589</a> · <a href="https://guoyww.github.io/projects/long-context-video/">项目</a></li>
+  <li>Cai et al. <i>Mixture of Contexts for Long Video Generation.</i> ICLR 2026；本页依据 arXiv v3。<a href="https://arxiv.org/abs/2508.21058">arXiv:2508.21058</a> · <a href="https://primecai.github.io/moc/">项目</a>。官方项目未提供可核查的模型代码链接。</li>
+  <li>Guo et al. <i>Captain Cinema: Towards Short Movie Generation.</i> <a href="https://arxiv.org/abs/2507.18634">arXiv:2507.18634</a>；骨干与规划分工见 <a href="16-story-keyframes.html">关键帧与故事页</a>。</li>
+</ol>
+
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="#references">参考与逐项引用</a></footer>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashInfer 拆解</title>
+<meta name="description" content="FlashInfer（MLSys 2025 最佳论文）：块稀疏 KV 统一格式、JIT 注意力模板、plan/run 负载均衡调度，以及它与 FlashAttention 的分工。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="flashinfer">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：服务场景的注意力和训练不一样</h2>
+<p>FlashAttention 假设输入是整齐的张量。推理服务里却是：</p>
+<ul>
+  <li><b>KV 布局多样</b>：vLLM 的分页块、SGLang 的基数树、投机解码的树状草稿、StreamingLLM 的滑动窗口 + sink……每种都要单独写内核。</li>
+  <li><b>长度参差</b>：同一批里有 50 token 的请求也有 50K token 的请求，按最长的切 tile 会让大多数线程块空转。</li>
+  <li><b>解码是一次一个 query</b>：Q 只有一行，FlashAttention 为训练调的 tile 形状并不合适；CUDAGraph 又要求 grid 形状固定。</li>
+  <li><b>注意力变体层出不穷</b>：ALiBi、softcap、滑窗、自定义掩码、去 softmax 的 Sigmoid 注意力……</li>
+</ul>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  FlashInfer 把“各种 KV 布局”统一成<b>块稀疏矩阵</b>，把“各种注意力变体”统一成<b>一个可 JIT 的模板</b>，把“各种长度分布”交给一个<b>先规划再执行</b>的调度器。内核内部仍是 FA2/FA3 的算法。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>KV 存储布局</span><span><i class="sw enc"></i>统一格式</span><span><i class="sw pred"></i>内核</span><span><i class="sw act"></i>调度（CPU）</span><span><i class="sw reg"></i>JIT 编译</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 440" role="img" aria-label="FlashInfer 架构">
+    <!-- layouts -->
+    <g data-part="layouts" data-step="1">
+      <rect class="box data" x="20" y="30" width="130" height="50" rx="8"/><text class="t-c t-b" x="85" y="50">分页 KV</text><text class="t-c t-xs" x="85" y="68">vLLM 块表</text>
+      <rect class="box data" x="20" y="92" width="130" height="50" rx="8"/><text class="t-c t-b" x="85" y="112">基数树</text><text class="t-c t-xs" x="85" y="130">SGLang 前缀共享</text>
+      <rect class="box data" x="20" y="154" width="130" height="50" rx="8"/><text class="t-c t-b" x="85" y="174">树状 / 掩码</text><text class="t-c t-xs" x="85" y="192">投机解码、重要性掩码</text>
+      <rect class="box data" x="20" y="216" width="130" height="50" rx="8"/><text class="t-c t-b" x="85" y="236">变长批</text><text class="t-c t-xs" x="85" y="254">ragged tensor</text>
+    </g>
+    <path class="edge" d="M150,55 C190,55 190,148 226,148" data-step="1"/><path class="edge" d="M150,117 C190,117 190,148 226,148" data-step="1"/><path class="edge" d="M150,179 C190,179 190,148 226,148" data-step="1"/><path class="edge" d="M150,241 C190,241 190,148 226,148" data-step="1"/>
+    <g class="enc" data-part="bsr" data-step="1">
+      <rect class="box" x="230" y="100" width="190" height="96" rx="10"/>
+      <text class="t-c t-b" x="325" y="124">块稀疏矩阵（BSR）</text>
+      <text class="t-c t-sm" x="325" y="146">行 = query，列 = KV 位置</text>
+      <text class="t-c t-sm" x="325" y="164">非零块 = “这些 q 看这些 kv”</text>
+      <text class="t-c t-xs" x="325" y="184">块大小 (B_r, B_c) 可按段组合</text>
+    </g>
+    <g data-part="composable" data-step="2">
+      <rect class="box" x="230" y="220" width="190" height="60" rx="10" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-dasharray:5 3"/>
+      <text class="t-c t-b" x="325" y="243">可组合格式</text>
+      <text class="t-c t-xs" x="325" y="262">共享前缀用大块，私有部分用小块</text>
+    </g>
+    <path class="edge" d="M325,196 V216" style="stroke:var(--c-enc)" data-step="2"/>
+
+    <!-- JIT -->
+    <g class="reg" data-part="jit" data-step="3">
+      <rect class="box" x="470" y="30" width="220" height="110" rx="10"/>
+      <text class="t-c t-b" x="580" y="54">JIT 注意力模板</text>
+      <text class="t-c t-xs" x="580" y="74">QueryTransform · KeyTransform</text>
+      <text class="t-c t-xs" x="580" y="90">ValueTransform · LogitsTransform</text>
+      <text class="t-c t-xs" x="580" y="106">LogitsMask · OutputTransform</text>
+      <text class="t-c t-xs" x="580" y="126">可关闭 softmax（Sigmoid 注意力）</text>
+    </g>
+    <!-- kernel -->
+    <g class="pred" data-part="kernel" data-step="4">
+      <rect class="box" x="470" y="170" width="220" height="110" rx="10"/>
+      <text class="t-c t-b" x="580" y="194">块稀疏注意力内核</text>
+      <text class="t-c t-sm" x="580" y="214">FA2 / FA3 算法 + gather 访存</text>
+      <text class="t-c t-sm" x="580" y="232">tile 形状按 query 数选择</text>
+      <text class="t-c t-xs" x="580" y="252">（解码 1 行 / 投机 若干行 / prefill 多行）</text>
+      <text class="t-c t-xs" x="580" y="268">分块后归并（contraction）</text>
+    </g>
+    <path class="edge" d="M580,140 V166" style="stroke:var(--c-reg);marker-end:url(#ah-reg)" data-step="4"/>
+    <path class="edge" d="M420,148 C440,148 440,225 466,225" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="4"/>
+
+    <!-- scheduler -->
+    <g class="act" data-part="plan" data-step="3">
+      <rect class="box" x="740" y="30" width="200" height="110" rx="10"/>
+      <text class="t-c t-b" x="840" y="54">plan（CPU）</text>
+      <text class="t-c t-xs" x="840" y="74">读本批每条请求的长度</text>
+      <text class="t-c t-xs" x="840" y="90">把长序列切成多段、短序列合并</text>
+      <text class="t-c t-xs" x="840" y="106">均分给固定数量的线程块</text>
+      <text class="t-c t-xs" x="840" y="126">不进 CUDAGraph，输出工作队列</text>
+    </g>
+    <g class="act" data-part="run" data-step="4">
+      <rect class="box" x="740" y="170" width="200" height="110" rx="10"/>
+      <text class="t-c t-b" x="840" y="194">run（GPU，可捕获）</text>
+      <text class="t-c t-xs" x="840" y="214">grid 大小编译期固定</text>
+      <text class="t-c t-xs" x="840" y="230">每个线程块按队列取任务</text>
+      <text class="t-c t-xs" x="840" y="246">无原子累加 → 结果确定</text>
+      <text class="t-c t-xs" x="840" y="266">工作区偏移固定 → CUDAGraph 安全</text>
+    </g>
+    <path class="edge" d="M840,140 V166" style="stroke:var(--c-act)" data-step="4"/>
+    <path class="edge" d="M740,225 H694" style="stroke:var(--c-act)" data-step="4"/>
+
+    <!-- outputs / engines -->
+    <g data-part="engines" data-step="5">
+      <rect class="box" x="230" y="330" width="710" height="70" rx="10"/>
+      <text class="t-c t-b" x="585" y="354">集成：SGLang · vLLM · MLC-Engine（通过 Python / PyTorch 接口）</text>
+      <text class="t-c t-sm" x="585" y="378">同一套内核服务 prefill、decode、投机解码、前缀共享、滑窗与各种注意力变体</text>
+    </g>
+    <path class="edge" d="M580,280 V326" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="5"/>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="layouts"><h4>五花八门的 KV 布局</h4><p>vLLM 的分页块（固定大小的块 + 块表）、SGLang 的基数树（前缀共享、每页 1 token）、投机解码的树状注意力（一个 query 只看树上自己祖先的 KV）、重要性掩码、变长批……它们在内存中是不同的数据结构，但<b>在“哪个 query 该看哪个 KV”这个层面上都是一个稀疏矩阵</b>。</p></div>
+    <div data-note="bsr"><h4>块稀疏矩阵</h4><p>FlashInfer 的核心抽象：把注意力的“谁看谁”写成一个 query × KV 的块稀疏矩阵（BSR 格式）。分页 KV 对应“每行一组列块”，基数树对应“多行共享同一列块”，树状解码对应“下三角 + 分支掩码”。内核只需要会算块稀疏注意力。</p></div>
+    <div data-note="composable"><h4>可组合格式</h4><p>把 KV 拆成多个块稀疏矩阵、各用不同块大小：共享前缀部分用大块（一次装进共享内存与寄存器给多个 query 复用），每个请求的私有部分用小块（细粒度、低浪费）。论文强调这不需要在 KV cache 里搬动任何数据。</p></div>
+    <div data-note="jit"><h4>JIT 注意力模板</h4><p>一个 CUDA 模板留出 6 个“钩子”：对 Q / K / V 的变换、对 logits 的变换与掩码、对输出的变换。用户用小段 CUDA 代码描述变体（如 ALiBi 偏置、softcap、滑窗掩码），JIT 编译器生成专用内核；还能去掉 softmax，支持 FlashSigmoid 这类变体。</p></div>
+    <div data-note="kernel"><h4>内核</h4><p>内部是 FA2 / FA3 的分块在线 softmax，但访存是 gather 式的（按块稀疏索引取 KV）。tile 形状按本批的 query 行数选：解码只有 1 行、投机解码几行、prefill 几百行，各用不同 tile 以充分利用 Tensor Core。附录 B 指出 FA3 的 TMA 只支持定步长访问，稀疏 gather 要退回 Ampere 风格的异步拷贝，prefill 比稠密慢约 10%。</p></div>
+    <div data-note="plan"><h4>plan：CPU 上规划</h4><p>调度器读本批所有请求的长度，把长请求切成多段、短请求打包，使每个线程块分到的工作量接近相等（受 Stream-K 启发，但不用原子累加以保证确定性）。因为依赖本批的具体长度，plan 不能被 CUDAGraph 捕获，它产出的是一张工作队列。</p></div>
+    <div data-note="run"><h4>run：GPU 上执行</h4><p>grid 大小在编译期固定、工作区各段偏移固定，所以 run 可以被 CUDAGraph 捕获与重放——对小 batch 解码（内核启动开销占比大）至关重要。注意力与归并（contraction）两个阶段都满足这一点。</p></div>
+    <div data-note="engines"><h4>集成</h4><p>通过 PyTorch 接口被 SGLang、vLLM、MLC-Engine 调用。论文的端到端数字：相对 SGLang 的 Triton 后端 ITL 降 29–69%，长上下文（StreamingLLM）降 28–30%，并行生成（n=4）快 13–17%。</p></div>
+    <div data-step-note="1"><h4>① 统一布局</h4><p>把分页 / 基数树 / 树状 / 变长的“谁看谁”关系表达成块稀疏矩阵。</p></div>
+    <div data-step-note="2"><h4>② 选择块大小</h4><p>共享前缀用大块、私有部分用小块，拆成多个块稀疏矩阵组合。</p></div>
+    <div data-step-note="3"><h4>③ JIT 生成内核 + CPU 规划</h4><p>按注意力变体编译专用内核；调度器按本批长度切分工作并负载均衡。</p></div>
+    <div data-step-note="4"><h4>④ 执行</h4><p>固定 grid 的内核按工作队列取任务，分块算注意力再归并；可被 CUDAGraph 重放。</p></div>
+    <div data-step-note="5"><h4>⑤ 返回引擎</h4><p>引擎（SGLang / vLLM / MLC）拿到输出继续采样与调度。</p></div>
+  </div>
+  <figcaption>图 1　FlashInfer 的三层：统一的 KV 抽象、可定制的内核、负载均衡的调度。依据论文 §3.1–3.4。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-bsr">3.1 为什么“块稀疏”能统一一切</h3>
+<p>注意力的本质是：第 i 个 query 对一组 KV 位置做加权求和。任何 KV 管理方案最终都落到“i 看哪些位置”这张表：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方案</th><th>作为块稀疏矩阵</th><th>合适的块大小</th></tr></thead>
+  <tbody>
+    <tr><td>分页 KV（vLLM）</td><td>每个请求一行块，列块 = 它的物理块</td><td>= page size（16 等）</td></tr>
+    <tr><td>基数树（SGLang）</td><td>多个请求的行共享同一些列块（前缀）</td><td>前缀段大块、尾部 1</td></tr>
+    <tr><td>树状投机解码</td><td>每个草稿 token 只看祖先：块内再加掩码</td><td>小块 + LogitsMask</td></tr>
+    <tr><td>StreamingLLM</td><td>sink 列块 + 最近窗口列块</td><td>任意</td></tr>
+  </tbody>
+</table></div>
+<h3 id="c-sched">3.2 负载均衡为什么重要</h3>
+<p>一批里一条 32K 的请求和 63 条 200 token 的请求：如果一个线程块处理一整条请求，那个 32K 的块会拖住所有人（长尾）。FlashInfer 把 32K 切成多段分给多个线程块，每段算出局部的 (O, m, ℓ) 后再用 FlashAttention 同样的在线 softmax 归并（contraction）——这正是 FlashDecoding 的 split-KV 思路，但 split 的数量由 plan 按本批长度分布决定。论文 §4.2 显示，对均匀和偏斜两种长度分布，FlashInfer 内核都快于 FlashAttention，原因正是这个调度器（以及 FA 在解码时 tile 不最优）。</p>
+
+<!-- ================================================================== -->
+<h2 id="results">4. 关键结果</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>场景</th><th>基线</th><th class="num">提升</th></tr></thead>
+  <tbody>
+    <tr><td>LLM 服务基准（SGLang）</td><td>SGLang 的 Triton 注意力后端</td><td class="num">ITL 降 29–69%</td></tr>
+    <tr><td>长上下文（StreamingLLM，Vicuna-13B）</td><td>未融合 RoPE 的实现</td><td class="num">延迟降 28–30%；融合 RoPE 内核带宽利用 1.6–3.7×</td></tr>
+    <tr><td>并行生成（MLC-Engine，Llama 3.1 8B / 70B，n=4）</td><td>无前缀共享优化</td><td class="num">ITL 降 13.7% / 17.4%，TTFT 降 16.4% / 22.9%</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="questions">5. 简答题</h2>
+<div class="qa">
+  <h3 id="q4"><span class="qid">Q4</span>FlashInfer 与 FlashAttention 分别解决什么层面的问题？FlashInfer 用什么抽象统一了分页、基数树、树状等 KV 布局？</h3>
+  <div class="ans">
+    <p class="short">层级不同：FlashAttention 是“一个注意力算子的最优实现”，FlashInfer 是“推理服务的注意力引擎”，内部复用 FA2/FA3 的算法，外面包了布局抽象、内核定制和调度。</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>维度</th><th>FlashAttention</th><th>FlashInfer</th></tr></thead>
+      <tbody>
+        <tr><td>定位</td><td>训练 + 推理的通用算子（前向 + 反向）</td><td>只做推理服务（前向）</td></tr>
+        <tr><td>输入布局</td><td>稠密 / varlen 连续张量；分页支持是后加的单一路径</td><td>块稀疏统一抽象，分页 / 基数树 / 树状 / 掩码一套内核</td></tr>
+        <tr><td>注意力变体</td><td>固定几种（因果、滑窗、ALiBi、softcap）</td><td>JIT 模板，用户自定义 6 个钩子，可去 softmax</td></tr>
+        <tr><td>长度不均</td><td>按序列分配线程块，长尾拖慢整批；解码 tile 不最优</td><td>plan/run 负载均衡，固定 grid，兼容 CUDAGraph，输出确定</td></tr>
+        <tr><td>前缀共享</td><td>无专门优化</td><td>可组合块大小：共享前缀驻留共享内存被多 query 复用</td></tr>
+        <tr><td>硬件特性</td><td>FA3 充分用 Hopper TMA / wgmma</td><td>基于 FA2/FA3；稀疏 gather 不能用 TMA，prefill 慢约 10%</td></tr>
+      </tbody>
+    </table></div>
+    <p>补充一点：vLLM、SGLang 都同时提供 FlashAttention 和 FlashInfer 后端，前者在 prefill / 稠密场景常更快，后者在复杂 KV 布局、投机解码、确定性需求下更有优势。</p>
+    <p class="cite">依据：FlashInfer 论文 §2.1、§3.1–3.4、§4.2、附录 B；FA3 §3。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Ye et al. <i>FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving.</i> MLSys 2025. <a href="https://arxiv.org/abs/2501.01005">arXiv:2501.01005</a></li>
+  <li>Dao et al. <i>FlashAttention</i> 系列（见 <a href="01-flash-attention.html">上一篇</a>）。</li>
+  <li>Dao et al. <i>Flash-Decoding for long-context inference.</i> 2023.（split-KV 归并思路）</li>
+  <li>Osama et al. <i>Stream-K: Work-centric Parallel Decomposition for Dense Matrix-Matrix Multiplication on the GPU.</i> PPoPP 2023.（负载均衡调度的来源）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

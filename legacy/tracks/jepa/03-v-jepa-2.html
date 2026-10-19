@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V-JEPA 2 架构拆解</title>
+<meta name="description" content="V-JEPA 2：两阶段——规模化的无动作视频预训练 + 冻结编码器上的动作条件预测器（V-JEPA 2-AC），用 CEM 在潜空间里做零样本机器人规划。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/attnmask.js"></script>
+<script defer src="../../../assets/js/widgets/cem.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="jepa" data-node="v-jepa-2">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram (keep in sync with templates/model-page.html) -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：从“看懂视频”到“预测动作的后果”</h2>
+<p>V-JEPA 学到的是一个好的视频<b>表征</b>，但它还不是<b>世界模型</b>：世界模型要回答“如果我做动作 a，世界会变成什么样”，并能用来<b>规划</b>。难点在于：</p>
+<ul>
+  <li>带动作标注的交互数据（机器人轨迹）很贵、很少；而无动作的互联网视频几乎无限。</li>
+  <li>直接在像素空间做动作条件视频生成（如 Cosmos 这类视频世界模型）规划起来极慢。</li>
+</ul>
+<p>V-JEPA 2 的策略是<b>两阶段</b>：先用海量无动作视频把“世界如何运动”的常识学进编码器；再<b>冻结编码器</b>，只用不到 62 小时的机器人视频训练一个动作条件预测器。规划时，在潜空间里搜索能让“预测的未来表征”接近“目标图像表征”的动作。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  阶段一学“世界长什么样、怎么动”（观察）；阶段二学“我的动作会怎样改变它”（交互）。两者都发生在同一个表征空间里。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：两个阶段</h2>
+<div class="legend">
+  <span><i class="sw data"></i>数据</span><span><i class="sw enc"></i>可训练编码器</span>
+  <span><i class="sw tgt"></i>EMA / 冻结编码器</span><span><i class="sw pred"></i>预测器</span>
+  <span><i class="sw act"></i>动作 / 本体状态</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-overview">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="V-JEPA 2 两阶段总览">
+    <rect class="panel" x="8" y="8" width="452" height="314" rx="12"/>
+    <text class="t-lg" x="24" y="32">阶段一 · 无动作预训练</text>
+    <text class="t-sm" x="24" y="52">VideoMix22M：&gt;100 万小时视频 + 100 万图像</text>
+    <rect class="panel" x="500" y="8" width="452" height="314" rx="12"/>
+    <text class="t-lg" x="516" y="32">阶段二 · 动作条件后训练（V-JEPA 2-AC）</text>
+    <text class="t-sm" x="516" y="52">Droid：&lt;62 小时机器人视频 + 动作 + 末端状态</text>
+
+    <!-- stage 1 -->
+    <g data-part="s1-data"><rect class="box data" x="24" y="80" width="100" height="56" rx="8"/><text class="t-c t-b" x="74" y="101">视频片段</text><text class="t-c t-sm" x="74" y="120">16→64 帧</text></g>
+    <path class="edge" d="M124,108 H154"/>
+    <g class="enc" data-part="s1-enc"><rect class="box" x="158" y="72" width="130" height="72" rx="10"/><text class="t-c t-b" x="223" y="96">编码器 ViT-g</text><text class="t-c t-sm" x="223" y="117">≈1B · 3D-RoPE</text></g>
+    <path class="edge" d="M288,108 H318" style="stroke:var(--c-enc);marker-end:url(#ah-enc)"/>
+    <g class="pred" data-part="s1-pred"><rect class="box" x="322" y="72" width="122" height="72" rx="10"/><text class="t-c t-b" x="383" y="96">预测器</text><text class="t-c t-sm" x="383" y="117">ViT-S · 22M</text></g>
+    <g class="tgt" data-part="s1-tgt"><rect class="box" x="158" y="190" width="130" height="62" rx="10"/><text class="t-c t-b" x="223" y="213">EMA 目标编码器</text><text class="t-c t-sm" x="223" y="234">看完整片段</text></g>
+    <path class="edge ema" d="M210,144 V186"/>
+    <g class="loss" data-part="s1-loss"><rect class="box" x="322" y="190" width="122" height="62" rx="10"/><text class="t-c t-b" x="383" y="213">L1</text><text class="t-c t-sm" x="383" y="234">掩码位置的特征</text></g>
+    <path class="edge" d="M383,144 V186" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/>
+    <path class="edge sg" d="M288,221 H318" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text class="t-sm" x="24" y="290">= V-JEPA 的掩码特征预测，</text>
+    <text class="t-sm" x="24" y="308">但数据 ×11、模型 ×3、训练更长、分辨率与时长更高</text>
+
+    <!-- hand-over -->
+    <path class="edge" d="M223,72 V62 H480 V178 H562" style="stroke:var(--c-tgt);stroke-width:2.4;marker-end:url(#ah-tgt)"/>
+    <text class="t-sm" x="360" y="54" style="fill:var(--c-tgt);font-weight:650">编码器权重 → 冻结</text>
+
+    <!-- stage 2 -->
+    <g data-part="s2-data"><rect class="box data" x="516" y="78" width="96" height="56" rx="8"/><text class="t-c t-b" x="564" y="99">帧 xₖ</text><text class="t-c t-sm" x="564" y="118">4 fps · 256²</text></g>
+    <g class="tgt" data-part="s2-enc"><rect class="box frozen" x="566" y="150" width="110" height="56" rx="10"/><text class="t-c t-b" x="621" y="172">编码器 E</text><text class="t-c t-sm" x="621" y="191">冻结 · 逐帧</text></g>
+    <path class="edge" d="M590,134 V146"/>
+    <g class="act" data-part="s2-act"><rect class="box" x="516" y="232" width="150" height="56" rx="8"/><text class="t-c t-b" x="591" y="253">动作 aₖ · 状态 sₖ</text><text class="t-c t-sm" x="591" y="272">各 7 维</text></g>
+    <g class="pred" data-part="s2-pred"><rect class="box" x="712" y="150" width="130" height="138" rx="10"/><text class="t-c t-b" x="777" y="196">动作条件</text><text class="t-c t-b" x="777" y="216">预测器 P<tspan font-size="10" dy="3">φ</tspan></text><text class="t-c t-sm" x="777" y="240">300M · 24 层</text><text class="t-c t-sm" x="777" y="258">块因果注意力</text></g>
+    <path class="edge" d="M676,178 H708" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text class="t-c t-sm" x="692" y="166">zₖ</text>
+    <path class="edge act" d="M666,260 H708"/>
+    <g class="loss" data-part="s2-loss"><rect class="box" x="866" y="182" width="78" height="74" rx="10"/><text class="t-c t-b" x="905" y="208">L1</text><text class="t-c t-xs" x="905" y="228">TF + rollout</text></g>
+    <path class="edge" d="M842,219 H862" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/>
+    <text class="t-c t-sm" x="852" y="207">ẑₖ₊₁</text>
+    <path class="edge sg" d="M676,198 C760,120 900,120 905,178" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text class="t-sm" x="790" y="118">目标：E(xₖ₊₁)</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="s1-data"><h4>阶段一数据：VideoMix22M</h4><p>SSv2（168 小时）、Kinetics（614 小时）、HowTo100M（13.4 万小时）、经过筛选的 YT-Temporal-1B（约 140–160 万小时）以及 ImageNet（100 万张图，在时间上复制成 16 帧片段）。总计约 2200 万个样本、超过 100 万小时视频。见 <a href="#c-scaling">§3.1</a>。</p></div>
+    <div data-note="s1-enc"><h4>编码器 ViT-g/16</h4><p>约 10 亿参数（宽 1408），tubelet 2×16×16，位置编码改为 3D-RoPE。训练完成后这是 V-JEPA 2 的“视觉主干”，被冻结用于所有下游：理解、预判、视频问答、机器人规划。</p></div>
+    <div data-note="s1-pred"><h4>阶段一预测器</h4><p>ViT-S 规模（22M 参数，12 层，宽 384，12 头）。所有尺寸的编码器都共用这个预测器配置。任务与 V-JEPA 完全一样：在被遮的时空位置预测目标编码器的特征。</p></div>
+    <div data-note="s1-tgt"><h4>EMA 目标编码器</h4><p>沿用 V-JEPA 的 EMA + stop-gradient。V-JEPA 2 中 EMA 系数在主训练阶段固定为 0.99925，不再使用逐步增大的调度。</p></div>
+    <div data-note="s1-loss"><h4>L1 损失</h4><p>与 V-JEPA 相同：只在被遮 token 上计算 L1。掩码仍为时空多块掩码（空间尺度 0.15–0.7，贯穿时间）。</p></div>
+    <div data-note="s2-data"><h4>阶段二数据</h4><p>Droid 数据集中时长 ≥ 4 秒的片段（不到 62 小时）。每个片段 4 秒、4 fps → 16 帧、256²。不需要任务标签或奖励。</p></div>
+    <div data-note="s2-enc"><h4>冻结编码器 E</h4><p>阶段一训好的 ViT-g，完全冻结。每一帧单独编码（实现上把一帧复制成 2 帧以匹配 tubelet），得到 16×16 = 256 个 1408 维 token。</p></div>
+    <div data-note="s2-act"><h4>动作与本体状态</h4><p>状态 sₖ：末端执行器相对机器人基座的位姿（3 维位置 + 3 维欧拉角 + 1 维夹爪）。动作 aₖ：相邻两帧之间状态的变化量（同样 7 维）。</p></div>
+    <div data-note="s2-pred"><h4>动作条件预测器 P<sub>φ</sub></h4><p>约 300M 参数的 Transformer：24 层、16 头、宽 1024、GELU。动作、状态、帧特征各经独立线性层投影到 1024 维，按时间交错成序列，使用<b>块因果</b>注意力。见 <a href="#fig-ac">图 2</a> 与 <a href="#c-attn">§3.4</a>。</p></div>
+    <div data-note="s2-loss"><h4>阶段二损失</h4><p>teacher-forcing 损失（T = 15）+ rollout 损失（T = 2），均为 L1。只训练预测器。因为编码器冻结，目标不会被“拉向常数”，不存在坍塌问题。</p></div>
+  </div>
+  <figcaption>图 1　V-JEPA 2 两阶段总览。点击组件查看说明。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+
+<h3 id="c-scaling">3.1 阶段一：规模化的四个配方</h3>
+<p>论文以 ViT-L/16 + VideoMix2M 的 V-JEPA 为起点，逐项加料，在 6 个理解任务的平均准确率上测量收益<span class="src">论文 §2 / Fig. 2</span>：</p>
+<figure>
+  <svg class="dg" viewBox="0 0 880 250" role="img" aria-label="规模化配方收益">
+    <line class="axis" x1="200" y1="210" x2="860" y2="210"/>
+    <text class="t-xs" x="200" y="226">84</text><text class="t-xs t-c" x="530" y="226">86</text><text class="t-xs t-r" x="860" y="226">88.5</text>
+    <!-- scale: 84 -> x=200, 88.5 -> x=860 : 146.7 px/pt -->
+    <g><text class="t-r t-sm" x="190" y="34">起点 V-JEPA（ViT-L, 2M）</text><rect x="200" y="24" width="29" height="20" rx="3" style="fill:var(--c-data)"/><text class="t-sm" x="236" y="34">84.2</text></g>
+    <g><text class="t-r t-sm" x="190" y="72">+ 数据 2M → 22M</text><rect x="229" y="62" width="147" height="20" rx="3" style="fill:var(--c-act)"/><text class="t-sm" x="384" y="72">+1.0 → 85.2</text></g>
+    <g><text class="t-r t-sm" x="190" y="110">+ 模型 300M → 1B（ViT-g）</text><rect x="376" y="100" width="220" height="20" rx="3" style="fill:var(--c-enc)"/><text class="t-sm" x="604" y="110">+1.5 → 86.7</text></g>
+    <g><text class="t-r t-sm" x="190" y="148">+ 训练 90K → 252K 迭代</text><rect x="596" y="138" width="117" height="20" rx="3" style="fill:var(--c-tgt)"/><text class="t-sm" x="721" y="148">+0.8 → 87.5</text></g>
+    <g><text class="t-r t-sm" x="190" y="186">+ 分辨率 384、64 帧</text><rect x="713" y="176" width="103" height="20" rx="3" style="fill:var(--c-pred)"/><text class="t-sm" x="822" y="186">88.2</text></g>
+  </svg>
+  <figcaption>图 3　逐项累加的收益（6 个理解任务平均）。论文正文与图注对“模型”一项的增益分别写作 +1.5 与 +1.7；最后一步按总增益 +4.0 推算。</figcaption>
+</figure>
+
+<h3 id="c-progressive">3.2 渐进分辨率训练</h3>
+<p>直接用 64 帧 × 384² 从头训练 ViT-g 估计要约 60 GPU-年。V-JEPA 2 改用“预热-恒定-冷却”的学习率调度，并且<b>只在冷却阶段</b>提高分辨率和帧数：</p>
+<figure>
+  <svg class="dg" viewBox="0 0 880 200" role="img" aria-label="渐进分辨率训练调度">
+    <line class="axis" x1="60" y1="150" x2="860" y2="150"/>
+    <line class="axis" x1="60" y1="30" x2="60" y2="150"/>
+    <text class="t-xs" x="20" y="40">lr</text>
+    <!-- 252K over 800px: 12K=38px -->
+    <path d="M60,150 L98,50 L822,50 L860,140" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <rect x="60" y="160" width="762" height="22" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+    <text class="t-c t-sm" x="441" y="172">16 帧 × 256²（预热 12K + 恒定 228K）</text>
+    <rect x="822" y="160" width="38" height="22" rx="4" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+    <text class="t-r t-sm" x="815" y="120">冷却 12K：64 帧 × 384²，lr 线性衰减 →</text>
+    <text class="t-xs" x="60" y="196">0</text><text class="t-xs t-r" x="860" y="196">252K 迭代</text>
+    <text class="t-xs" x="104" y="40">预热</text><text class="t-xs" x="420" y="40">恒定学习率</text>
+  </svg>
+  <figcaption>图 4　训练调度示意（横轴按比例）。论文报告相对“全程高分辨率”节省约 8.4× GPU 时间。</figcaption>
+</figure>
+<p>好处有二：大部分迭代在低成本设置下完成；恒定学习率阶段的检查点可以随时接一个冷却阶段，便于做规模化实验。</p>
+
+<h3 id="c-rope">3.3 3D-RoPE</h3>
+<p>V-JEPA 使用加性的 3D sin-cos 绝对位置编码。V-JEPA 2 换成<b>旋转位置编码（RoPE）的 3D 版本</b>：把每个注意力头的特征维平均切成三段，分别按 token 的时间 t、高 h、宽 w 坐标做一维旋转：</p>
+<figure>
+  <svg class="dg" viewBox="0 0 880 120" role="img" aria-label="3D-RoPE 示意">
+    <rect x="40" y="30" width="240" height="40" rx="6" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/><text class="t-c t-b" x="160" y="50">d/3：按 t 旋转</text>
+    <rect x="290" y="30" width="240" height="40" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text class="t-c t-b" x="410" y="50">d/3：按 h 旋转</text>
+    <rect x="540" y="30" width="240" height="40" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text class="t-c t-b" x="660" y="50">d/3：按 w 旋转</text>
+    <text class="t-sm" x="40" y="96">q、k 的每一段 [x₂ᵢ, x₂ᵢ₊₁] 乘以 2×2 旋转矩阵 R(pos·ωᵢ)，使注意力分数只依赖相对位置差 Δt、Δh、Δw。</text>
+  </svg>
+</figure>
+<p>论文指出 3D-RoPE 能<b>稳定最大模型的训练</b>。相对位置编码也让模型更容易处理训练时没见过的分辨率与时长（渐进分辨率训练正需要这一点）。</p>
+
+<h3 id="c-ac">3.4 阶段二：动作条件预测器 V-JEPA 2-AC</h3>
+<p>这是 V-JEPA 2 中真正的“世界模型”。点「逐步讲解」按训练时的计算顺序看一遍：</p>
+<figure class="arch" id="fig-ac">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="V-JEPA 2-AC 训练架构">
+    <!-- frames row -->
+    <g data-part="frames" data-step="1">
+      <rect class="box data" x="150" y="20" width="84" height="56" rx="4"/><text class="t-c t-sm" x="192" y="48">x₁</text>
+      <rect class="box data" x="330" y="20" width="84" height="56" rx="4"/><text class="t-c t-sm" x="372" y="48">x₂</text>
+      <rect class="box data" x="510" y="20" width="84" height="56" rx="4"/><text class="t-c t-sm" x="552" y="48">x₃</text>
+      <rect class="box data" x="690" y="20" width="84" height="56" rx="4"/><text class="t-c t-sm" x="732" y="48">x₄</text>
+      <text class="t-sm" x="20" y="48">机器人视频</text>
+    </g>
+    <g class="tgt" data-part="encoder" data-step="1">
+      <rect class="box frozen" x="140" y="96" width="644" height="40" rx="8"/>
+      <text class="t-c t-b" x="462" y="116">冻结编码器 E（V-JEPA 2 ViT-g）· 逐帧编码 · 每帧 16×16 = 256 个 token</text>
+    </g>
+    <g data-step="1"><path class="edge" d="M192,76 V92"/><path class="edge" d="M372,76 V92"/><path class="edge" d="M552,76 V92"/><path class="edge" d="M732,76 V92"/></g>
+
+    <!-- action/state input -->
+    <g class="act" data-part="act-in" data-step="2">
+      <rect class="box" x="10" y="170" width="112" height="76" rx="8"/>
+      <text class="t-c t-b" x="66" y="192">aₖ, sₖ</text>
+      <text class="t-c t-xs" x="66" y="211">7D Δ位姿+夹爪</text>
+      <text class="t-c t-xs" x="66" y="228">→ 线性投影</text>
+    </g>
+    <!-- token sequence row: for k=1..3 : [a][s][z z z z] -->
+    <g data-part="sequence" data-step="2">
+      <g transform="translate(140,186)">
+        <rect class="tk act" x="0" y="0" width="16" height="22"/><rect class="tk act" x="18" y="0" width="16" height="22" style="opacity:.7"/>
+        <rect class="tk tgt" x="38" y="0" width="16" height="22"/><rect class="tk tgt" x="56" y="0" width="16" height="22"/><rect class="tk tgt" x="74" y="0" width="16" height="22"/><rect class="tk tgt" x="92" y="0" width="16" height="22"/>
+        <text class="t-c t-xs" x="8" y="34">a₁</text><text class="t-c t-xs" x="26" y="34">s₁</text><text class="t-c t-xs" x="73" y="34">z₁（256）</text>
+      </g>
+      <g transform="translate(320,186)">
+        <rect class="tk act" x="0" y="0" width="16" height="22"/><rect class="tk act" x="18" y="0" width="16" height="22" style="opacity:.7"/>
+        <rect class="tk tgt" x="38" y="0" width="16" height="22"/><rect class="tk tgt" x="56" y="0" width="16" height="22"/><rect class="tk tgt" x="74" y="0" width="16" height="22"/><rect class="tk tgt" x="92" y="0" width="16" height="22"/>
+        <text class="t-c t-xs" x="8" y="34">a₂</text><text class="t-c t-xs" x="26" y="34">s₂</text><text class="t-c t-xs" x="73" y="34">z₂</text>
+      </g>
+      <g transform="translate(500,186)">
+        <rect class="tk act" x="0" y="0" width="16" height="22"/><rect class="tk act" x="18" y="0" width="16" height="22" style="opacity:.7"/>
+        <rect class="tk tgt" x="38" y="0" width="16" height="22"/><rect class="tk tgt" x="56" y="0" width="16" height="22"/><rect class="tk tgt" x="74" y="0" width="16" height="22"/><rect class="tk tgt" x="92" y="0" width="16" height="22"/>
+        <text class="t-c t-xs" x="8" y="34">a₃</text><text class="t-c t-xs" x="26" y="34">s₃</text><text class="t-c t-xs" x="73" y="34">z₃</text>
+      </g>
+      <text class="t-sm" x="640" y="198">… 共 15 步</text>
+      <text class="t-xs" x="140" y="240">交错顺序：(aₖ, sₖ, zₖ)；patch 用 3D-RoPE，a/s 只用时间 RoPE</text>
+    </g>
+    <path class="edge act" d="M122,197 H136" data-step="2"/>
+    <g data-step="2"><path class="edge" d="M192,136 V182" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><path class="edge" d="M372,136 V182" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><path class="edge" d="M552,136 V182" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/></g>
+
+    <!-- predictor -->
+    <g class="pred" data-part="predictor" data-step="3">
+      <rect class="box" x="140" y="258" width="560" height="62" rx="10"/>
+      <text class="t-c t-b" x="420" y="281">动作条件预测器 P<tspan font-size="10" dy="3">φ</tspan></text>
+      <text class="t-c t-sm" x="420" y="303">24 层 · 宽 1024 · 16 头 · 块因果注意力：第 k 步只能看 ≤ k 步的 a、s、z</text>
+    </g>
+    <g data-step="3"><path class="edge" d="M200,226 V254"/><path class="edge" d="M380,226 V254"/><path class="edge" d="M560,226 V254"/></g>
+
+    <!-- outputs -->
+    <g data-part="outputs" data-step="4">
+      <g transform="translate(316,348)"><rect class="tk pred" x="0" y="0" width="16" height="22"/><rect class="tk pred" x="18" y="0" width="16" height="22"/><rect class="tk pred" x="36" y="0" width="16" height="22"/><rect class="tk pred" x="54" y="0" width="16" height="22"/></g>
+      <g transform="translate(496,348)"><rect class="tk pred" x="0" y="0" width="16" height="22"/><rect class="tk pred" x="18" y="0" width="16" height="22"/><rect class="tk pred" x="36" y="0" width="16" height="22"/><rect class="tk pred" x="54" y="0" width="16" height="22"/></g>
+      <g transform="translate(676,348)"><rect class="tk pred" x="0" y="0" width="16" height="22"/><rect class="tk pred" x="18" y="0" width="16" height="22"/><rect class="tk pred" x="36" y="0" width="16" height="22"/><rect class="tk pred" x="54" y="0" width="16" height="22"/></g>
+      <text class="t-c t-sm" x="351" y="386">ẑ₂</text><text class="t-c t-sm" x="531" y="386">ẑ₃</text><text class="t-c t-sm" x="711" y="386">ẑ₄</text>
+      <text class="t-xs" x="140" y="362">zₖ 位置的输出</text><text class="t-xs" x="140" y="376">→ 预测下一帧</text>
+    </g>
+    <g data-step="4"><path class="edge" d="M240,320 C240,336 340,330 346,344" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/><path class="edge" d="M420,320 C420,336 520,330 526,344" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/><path class="edge" d="M600,320 C600,336 700,330 706,344" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/></g>
+
+    <!-- targets -->
+    <g data-part="targets" data-step="5">
+      <path class="edge sg" d="M784,116 H860 V398" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+      <g class="sg-badge"><rect x="866" y="170" width="26" height="18" rx="4"/><text class="t-c" x="879" y="179.5">sg</text></g>
+      <text class="t-sm" x="866" y="214">目标</text><text class="t-sm" x="866" y="230">E(x₂..x₄)</text>
+    </g>
+    <g class="loss" data-part="loss" data-step="5">
+      <rect class="box" x="320" y="402" width="600" height="56" rx="10"/>
+      <text class="t-c t-b" x="620" y="422">L = L<tspan font-size="10" dy="3">teacher-forcing</tspan><tspan dy="-3"> (T=15) + L</tspan><tspan font-size="10" dy="3">rollout</tspan><tspan dy="-3"> (T=2)，均为 L1</tspan></text>
+      <text class="t-c t-sm" x="620" y="443">只更新预测器 φ；编码器冻结 → 无坍塌</text>
+    </g>
+    <g data-step="5"><path class="edge" d="M351,392 V398" style="stroke:var(--c-pred)"/><path class="edge" d="M531,392 V398" style="stroke:var(--c-pred)"/><path class="edge" d="M711,392 V398" style="stroke:var(--c-pred)"/></g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="frames"><h4>机器人视频</h4><p>Droid 中 4 秒的片段，4 fps 采样 16 帧，分辨率 256²。</p></div>
+    <div data-note="encoder"><h4>冻结编码器</h4><p>阶段一的 ViT-g。每帧单独编码：实现里把一帧在时间上复制成 2 帧（凑成一个 2×16×16 tubelet），输出 16×16×1408 的特征图，并做 LayerNorm。</p></div>
+    <div data-note="act-in"><h4>动作与状态</h4><p>sₖ = 末端执行器位姿（位置 3 + 欧拉角 3 + 夹爪 1），aₖ = sₖ₊₁ − sₖ。两者各自经过一个可学习的线性层投影到 1024 维，变成一个 token。</p></div>
+    <div data-note="sequence"><h4>交错 token 序列</h4><p>每个时间步贡献 1 个动作 token + 1 个状态 token + 256 个 patch token（同样线性投影到 1024 维），按 (a₁, s₁, z₁, a₂, s₂, z₂, …) 排列。训练时 15 步 × 258 ≈ 3.9K 个 token。</p></div>
+    <div data-note="predictor"><h4>块因果预测器</h4><p>同一时间步内的 token 互相全可见；跨时间只能看过去。这样一次前向就能对所有时间步并行地“预测下一帧”（teacher forcing），推理时又能自回归地 rollout。下方 <a href="#c-attn">交互演示</a>。</p></div>
+    <div data-note="outputs"><h4>预测输出</h4><p>取第 k 步 patch token 位置的输出，投影回 1408 维，作为对下一帧表征 zₖ₊₁ 的预测。</p></div>
+    <div data-note="targets"><h4>目标</h4><p>冻结编码器对真实下一帧的编码 E(xₖ₊₁)。由于编码器不更新，目标是固定的“真值”，预测器无法通过让目标变简单来作弊。</p></div>
+    <div data-note="loss"><h4>两项损失</h4><p>teacher-forcing：输入真实的 z₁..z₁₅，并行预测 z₂..z₁₆；rollout：从 z₁ 出发，把自己的预测喂回去再预测，使模型适应推理时的误差累积。详见 <a href="#objective">§5</a>。</p></div>
+    <div data-step-note="1"><h4>① 逐帧编码</h4><p>16 帧各自经过冻结的 ViT-g，得到每帧 256 个 1408 维 token（不求梯度）。</p></div>
+    <div data-step-note="2"><h4>② 构造交错序列</h4><p>动作、状态、帧特征分别线性投影到 1024 维，按 (aₖ, sₖ, zₖ) 交错。</p></div>
+    <div data-step-note="3"><h4>③ 块因果 Transformer</h4><p>24 层预测器。第 k 步的 token 只能注意到第 1..k 步的所有 token。</p></div>
+    <div data-step-note="4"><h4>④ 预测下一帧表征</h4><p>第 k 步 patch 位置的输出 → ẑₖ₊₁。</p></div>
+    <div data-step-note="5"><h4>⑤ 与真实下一帧比较</h4><p>L1(ẑₖ₊₁, E(xₖ₊₁))，再加上 2 步 rollout 的 L1；只更新预测器。</p></div>
+  </div>
+  <figcaption>图 2　V-JEPA 2-AC 的训练（图中只画了 3 步、每帧 4 个 token；实际 15 步、每帧 256 个）。依据论文 §3 与 <code>app/vjepa_droid/train.py</code>。</figcaption>
+</figure>
+
+<h3 id="c-attn">3.5 块因果注意力</h3>
+<p>悬停任意一行，看这个 token 能“看到”谁。切到 LeWM 模式可以对比后来的极简设计：</p>
+<div data-widget="attn-mask" data-mode="vjepa2ac" data-steps="3" data-patches="4"></div>
+
+<h3 id="c-planning">3.6 用世界模型规划：能量最小化 + CEM + MPC</h3>
+<p>给定当前观测 \(x_k\)、当前状态 \(s_k\) 和一张<b>目标图像</b> \(x_g\)，规划就是找一串动作，使预测的未来表征尽量接近目标表征：</p>
+<div class="formula">$$\hat a^\star_{1:T} = \arg\min_{\hat a_{1:T}}\ \mathcal E(\hat a_{1:T};\ z_k, s_k, z_g) = \Big\lVert P_\phi\big(\hat a_{1:T};\ s_k, z_k\big) - z_g \Big\rVert_1,\qquad z_k = E(x_k),\ z_g = E(x_g)$$</div>
+<figure>
+  <svg class="dg" viewBox="0 -44 900 274" role="img" aria-label="规划循环">
+    <g><rect class="box data" x="10" y="30" width="110" height="50" rx="8"/><text class="t-c t-b" x="65" y="55">当前帧 xₖ</text></g>
+    <g><rect class="box data" x="10" y="140" width="110" height="50" rx="8"/><text class="t-c t-b" x="65" y="165">目标图像 x_g</text></g>
+    <g class="tgt"><rect class="box frozen" x="160" y="30" width="80" height="50" rx="8"/><text class="t-c t-b" x="200" y="55">E</text></g>
+    <g class="tgt"><rect class="box frozen" x="160" y="140" width="80" height="50" rx="8"/><text class="t-c t-b" x="200" y="165">E</text></g>
+    <path class="edge" d="M120,55 H156"/><path class="edge" d="M120,165 H156"/>
+    <g class="act"><rect class="box" x="290" y="96" width="150" height="52" rx="8"/><text class="t-c t-b" x="365" y="114">CEM 采样动作</text><text class="t-c t-xs" x="365" y="133">800 条 · |a|₁ ≤ 0.075</text></g>
+    <g class="pred"><rect class="box" x="290" y="20" width="150" height="62" rx="8"/><text class="t-c t-b" x="365" y="44">P_φ rollout</text><text class="t-c t-xs" x="365" y="64">潜空间里预测 ẑₖ₊ₜ</text></g>
+    <path class="edge" d="M240,55 H286" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge act" d="M365,96 V86"/>
+    <g class="loss"><rect class="box" x="490" y="80" width="150" height="62" rx="8"/><text class="t-c t-b" x="565" y="104">能量 ‖ẑ − z_g‖₁</text><text class="t-c t-xs" x="565" y="124">选 top-k，重估均值/方差</text></g>
+    <path class="edge" d="M440,50 C480,50 520,60 540,76" style="stroke:var(--c-pred);marker-end:url(#ah-pred)"/>
+    <path class="edge" d="M240,165 C330,212 560,212 590,146" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge" d="M520,142 C500,180 420,190 400,152" />
+    <text class="t-c t-xs" x="462" y="163">迭代 10 次</text>
+    <g class="act"><rect class="box" x="690" y="80" width="190" height="62" rx="8"/><text class="t-c t-b" x="785" y="104">只执行第一个动作</text><text class="t-c t-xs" x="785" y="124">机械臂移动 → 新观测（MPC）</text></g>
+    <path class="edge" d="M640,111 H686"/>
+    <path class="edge" d="M785,80 V-24 H65 V26" style="stroke-dasharray:4 4"/>
+    <text class="t-c t-xs" x="425" y="-33">新观测 → 重新规划（receding horizon）</text>
+  </svg>
+  <figcaption>图 5　V-JEPA 2-AC 的规划循环。论文设置：每次规划 800 个样本、10 轮 CEM、规划视野 1 步；每个动作被限制在半径 0.075 的 L1 球内（末端最大位移约 13 cm）；每个动作约 16 秒。</figcaption>
+</figure>
+<p>下面是 CEM + MPC 本身在一个玩具二维环境里的样子（动力学已知，便于观察算法；在 V-JEPA 2-AC 里，动力学换成 P<sub>φ</sub>、代价换成表征距离）：</p>
+<div data-widget="cem" data-samples="300" data-elites="30" data-horizon="5" data-caption="V-JEPA 2-AC 的真实设置是 800 个样本、10 轮、视野 1 步——每一步都重新规划一个动作。这里为了能在“两房间”里绕过墙，用了 5 步视野（与 LeWM 一致）。"></div>
+<div class="callout warn">
+  <span class="callout-title">长程任务需要子目标</span>
+  “抓取并放置”这类多阶段任务，单张最终目标图像不足以引导短视野规划。论文为其提供了两张子目标图像（物体被抓起、物体到达目标附近）再加最终目标图像，依次规划。论文也指出：模型推断出的坐标轴<b>对相机位置敏感</b>，更长视野的任务需要新的建模方法，目前只支持图像目标（不支持语言目标）。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪</h2>
+<h3 id="shapes-s1">阶段一（ViT-g/16，宽 1408）</h3>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>主训练片段</td><td>[B, 3, 16, 256, 256]</td><td>预热 + 恒定阶段</td></tr>
+    <tr><td>Tubelet 2×16×16</td><td>[B, 2048, 1408]</td><td>8 × 16 × 16 token</td></tr>
+    <tr><td>冷却阶段片段</td><td>[B, 3, 64, 384, 384]</td><td>只在最后 12K 迭代</td></tr>
+    <tr><td>Tubelet 2×16×16</td><td>[B, 18432, 1408]</td><td>32 × 24 × 24 token</td></tr>
+    <tr><td>预测器（ViT-S）</td><td>[B, K_ctx + K_tgt, 384]</td><td>与 V-JEPA 相同的掩码预测</td></tr>
+  </tbody>
+</table></div>
+<h3 id="shapes-s2">阶段二（V-JEPA 2-AC）</h3>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>机器人片段</td><td>[B, 3, 16, 256, 256]</td><td>4 秒 @ 4 fps</td></tr>
+    <tr><td>逐帧复制成 tubelet</td><td>[B·16, 3, 2, 256, 256]</td><td><code>unsqueeze(2).repeat(1,1,2,1,1)</code></td></tr>
+    <tr><td>冻结编码器 + LN</td><td>[B, 16·256, 1408]</td><td>每帧 256 token</td></tr>
+    <tr><td>动作 / 状态</td><td>[B, 15, 7] / [B, 16, 7]</td><td>状态取前 15 步</td></tr>
+    <tr><td>投影 + 交错</td><td>[B, 15·258, 1024]</td><td>每步 1 + 1 + 256 token</td></tr>
+    <tr><td>预测器 24 层 → 取 patch 位 → 投回 1408</td><td>[B, 15·256, 1408]</td><td>预测第 2..16 帧</td></tr>
+    <tr><td>teacher-forcing 目标</td><td>[B, 15·256, 1408]</td><td><code>h[:, 256:]</code></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标</h2>
+<p><b>阶段一</b>与 V-JEPA 相同：掩码时空 token 上的 L1 特征回归，EMA 目标编码器 + stop-gradient。</p>
+<p><b>阶段二</b>只训练预测器 \(P_\phi\)，编码器 \(E\) 冻结：</p>
+<div class="formula">$$\mathcal L_\text{tf}(\phi) = \frac{1}{T}\sum_{k=1}^{T}\Big\lVert P_\phi\big((a_t, s_t, E(x_t))_{t\le k}\big) - E(x_{k+1})\Big\rVert_1,\qquad T = 15$$</div>
+<div class="formula">$$\mathcal L_\text{rollout}(\phi) = \Big\lVert P_\phi\big(a_{1:T}, s_1, z_1\big) - z_{T+1}\Big\rVert_1,\qquad T = 2$$</div>
+<div class="formula">$$\mathcal L(\phi) = \mathcal L_\text{tf}(\phi) + \mathcal L_\text{rollout}(\phi)$$</div>
+<ul>
+  <li><b>teacher forcing</b>：每一步都喂真实的历史表征，块因果掩码让 15 个“预测下一帧”的任务在一次前向中并行完成。</li>
+  <li><b>rollout</b>：从第一帧出发，把模型自己的预测 ẑ₂ 当作输入再预测 ẑ₃（T = 2，只反向传播一个递归步）。它让模型适应推理时“吃自己输出”的分布偏移。</li>
+</ul>
+<div class="callout info">
+  <span class="callout-title">防坍塌：冻结即是答案</span>
+  阶段二不存在坍塌问题：目标 \(E(x_{k+1})\) 由冻结的编码器给出，预测器无论怎么学都改变不了目标。代价是编码器不能根据控制任务调整——这正是 <a href="04-le-world-model.html">LeWM</a> 想重新端到端训练的原因之一。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">ac_train_step.py（按 app/vjepa_droid/train.py 结构整理，有简化）</div>
+<pre><code class="lang-py">TPF = (256 // 16) ** 2                                  # tokens_per_frame = 256
+
+def ac_train_step(clips, actions, states):              # clips [B,3,16,256,256]; actions [B,15,7]; states [B,16,7]
+    with torch.no_grad():                               # 编码器冻结
+        c = clips.permute(0, 2, 1, 3, 4).flatten(0, 1)  # [B*16, 3, 256, 256]  逐帧
+        c = c.unsqueeze(2).repeat(1, 1, 2, 1, 1)        # 每帧复制成 2 帧 → 一个 tubelet
+        h = encoder(c)                                  # [B*16, 256, 1408]
+        h = h.view(B, 16, TPF, -1).flatten(1, 2)        # [B, 16*256, 1408]
+        h = F.layer_norm(h, (h.size(-1),))
+    z = h
+
+    # 1) teacher forcing：输入真实 z_1..z_15，并行预测 z_2..z_16
+    z_tf = predictor(z[:, :-TPF], actions, states[:, :-1])
+    loss_tf = (z_tf - h[:, TPF:]).abs().mean()
+
+    # 2) rollout（T=2）：[z_1, ẑ_2] → ẑ_3，把自己的预测喂回去
+    z_ar = torch.cat([z[:, :TPF], z_tf[:, :TPF]], dim=1)
+    z_3 = predictor(z_ar, actions[:, :2], states[:, :2])[:, -TPF:]
+    loss_ro = (z_3 - h[:, 2 * TPF:3 * TPF]).abs().mean()
+
+    loss = loss_tf + loss_ro
+    loss.backward(); optimizer.step(); optimizer.zero_grad()   # 只有 predictor 的参数</code></pre>
+<div class="code-title">plan.py（CEM，示意）</div>
+<pre><code class="lang-py">def plan_one_action(x_now, s_now, x_goal, n=800, iters=10, T=1, k=...):
+    z_now, z_goal = E(x_now), E(x_goal)
+    mu, sigma = torch.zeros(T, 7), torch.ones(T, 7)
+    for _ in range(iters):
+        a = mu + sigma * torch.randn(n, T, 7)
+        a = project_l1_ball(a, radius=0.075)            # 每步末端位移不超过约 13 cm
+        z_pred = rollout(P, z_now, s_now, a)            # 潜空间 rollout，不生成像素
+        energy = (z_pred[:, -1] - z_goal).abs().mean(dim=(-2, -1))
+        elite = a[energy.topk(k, largest=False).indices]
+        mu, sigma = elite.mean(0), elite.std(0)
+    return mu[0]                                        # MPC：执行第一步后重新规划</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>阶段</th><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="7">一</td><td>编码器</td><td>ViT-L（300M）/ ViT-H（600M）/ ViT-g（≈1B，宽 1408）；tubelet 2×16×16；3D-RoPE</td></tr>
+    <tr><td>预测器</td><td>ViT-S：12 层、宽 384、12 头（22M）</td></tr>
+    <tr><td>掩码</td><td>空间尺度 0.15–0.7，时间贯穿，长宽比 0.75–1.5（多块掩码）</td></tr>
+    <tr><td>EMA</td><td>0.99925（固定）</td></tr>
+    <tr><td>调度</td><td>预热 12K → 恒定 228K → 冷却 12K（共 252K）</td></tr>
+    <tr><td>分辨率</td><td>16 帧 × 256² → 冷却阶段 64 帧 × 384²</td></tr>
+    <tr><td>数据</td><td>VideoMix22M（SSv2、Kinetics、HowTo100M、YT-Temporal-1B 筛选子集、ImageNet）</td></tr>
+    <tr><td rowspan="5">二</td><td>数据</td><td>Droid，&lt;62 小时；4 秒片段，4 fps，256²</td></tr>
+    <tr><td>预测器</td><td>≈300M：24 层、16 头、宽 1024、GELU；块因果注意力</td></tr>
+    <tr><td>动作 / 状态</td><td>各 7 维（位置 3 + 欧拉角 3 + 夹爪 1）</td></tr>
+    <tr><td>损失</td><td>L1：teacher-forcing（T=15）+ rollout（T=2）</td></tr>
+    <tr><td>规划</td><td>CEM：800 样本、10 轮、视野 1；L1 球半径 0.075；MPC；约 16 s/动作</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<h3 id="r-understanding">理解与预判（冻结编码器 + attentive probe）</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>任务</th><th class="num">V-JEPA 2（ViT-g<sub>384</sub>）</th><th>备注</th></tr></thead>
+  <tbody>
+    <tr><td>SSv2（运动理解）</td><td class="num">77.3</td><td>256² 的 ViT-g 为 75.3</td></tr>
+    <tr><td>Diving-48</td><td class="num">90.2</td><td></td></tr>
+    <tr><td>Jester</td><td class="num">97.8</td><td></td></tr>
+    <tr><td>Kinetics-400</td><td class="num">87.3</td><td></td></tr>
+    <tr><td>COIN</td><td class="num">91.1</td><td></td></tr>
+    <tr><td>ImageNet</td><td class="num">85.1</td><td></td></tr>
+    <tr class="hl"><td>EK100 动作预判（R@5）</td><td class="num">39.7</td><td>此前最佳 PlausiVL 27.6，相对提升约 44%</td></tr>
+  </tbody>
+</table></div>
+<p><b>视频问答</b>：把冻结的 V-JEPA 2 编码器按 LLaVA 方式（可学习投影 + 三阶段指令微调）接到 8B 语言模型（Llama 3.1 8B）上：PerceptionTest 84.0、TempCompass 76.9、MVP 44.5、TemporalBench 36.7、TOMATO 40.3。</p>
+
+<h3 id="r-robot">零样本机器人操作</h3>
+<p>在两个实验室的 Franka 机械臂上零样本部署（没有在这些环境中采集任何训练数据），每个任务 10 次试验、两个实验室取平均<span class="src">论文 §4 机器人实验</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">到达</th><th class="num">抓杯</th><th class="num">抓盒</th><th class="num">持物到达·杯</th><th class="num">持物到达·盒</th><th class="num">抓放·杯</th><th class="num">抓放·盒</th></tr></thead>
+  <tbody>
+    <tr><td>Octo（行为克隆）</td><td class="num">100%</td><td class="num">15%</td><td class="num">0%</td><td class="num">15%</td><td class="num">70%</td><td class="num">15%</td><td class="num">10%</td></tr>
+    <tr class="hl"><td>V-JEPA 2-AC</td><td class="num">100%</td><td class="num">65%</td><td class="num">25%</td><td class="num">75%</td><td class="num">75%</td><td class="num">80%</td><td class="num">65%</td></tr>
+  </tbody>
+</table></div>
+<p>与视频生成式世界模型 Cosmos 比较（仅实验室 2）：Cosmos 每个动作规划约 <b>4 分钟</b>，V-JEPA 2-AC 约 <b>16 秒</b>；成功率上 Cosmos 在抓放任务为 0%，V-JEPA 2-AC 为 80%（杯）/ 50%（盒）。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was">
+    <h4>V-JEPA 2 做到了</h4>
+    <ul>
+      <li>JEPA 训练可以规模化到 1B 参数、百万小时视频；</li>
+      <li>同一个冻结编码器同时服务于理解、预判、问答与控制；</li>
+      <li>只用几十小时无标注交互数据就得到能零样本规划的潜空间世界模型，比像素级世界模型快一个数量级以上。</li>
+    </ul>
+  </div>
+  <div class="now">
+    <h4>留下的问题 → <a href="04-le-world-model.html">LeWorldModel</a></h4>
+    <ul>
+      <li><b>重</b>：1B 编码器 + 300M 预测器，每帧 256 个 1408 维 token，规划一步约 16 秒；</li>
+      <li><b>不端到端</b>：编码器冻结，表征不针对控制优化；</li>
+      <li><b>启发式</b>：阶段一的防坍塌仍靠 EMA + stop-grad。能否用一个有理论依据的正则，从像素开始稳定地端到端训练一个小而快的世界模型？</li>
+    </ul>
+  </div>
+</div>
+
+<div class="callout info next-read">
+  <span class="callout-title">后续节点</span>
+  这条线之后的发展：<a href="08-v-jepa-2-1.html">V-JEPA 2.1</a>（可见 token 也监督，稠密特征大幅提升）→ <a href="11-robojepa.html">RoboJEPA</a>（以 2.1-G 为底座、8B 预测器、多本体缩放律）；<a href="10-hierarchical-wm.html">HWM</a> 在 2-AC 上加高层预测器做层级规划；<a href="07-vl-jepa.html">VL-JEPA</a> 把冻结的 V-JEPA 2 用作视觉-语言模型的编码器。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Assran et al. <i>V-JEPA 2: Self-Supervised Video Models Enable Understanding, Prediction and Planning.</i> 2025. <a href="https://arxiv.org/abs/2506.09985">arXiv:2506.09985</a></li>
+  <li>官方实现：<a href="https://github.com/facebookresearch/vjepa2">facebookresearch/vjepa2</a>（<code>app/vjepa/train.py</code>、<code>app/vjepa_droid/train.py</code>）</li>
+  <li>Khazatsky et al. <i>DROID: A Large-Scale In-The-Wild Robot Manipulation Dataset.</i> 2024.</li>
+  <li>Su et al. <i>RoFormer: Enhanced Transformer with Rotary Position Embedding.</i> 2021.（RoPE）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

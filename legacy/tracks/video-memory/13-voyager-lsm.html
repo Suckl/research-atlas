@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voyager 与 Latent Spatial Memory</title>
+<meta name="description" content="联合 RGB-D 点缓存与原生 latent 空间缓存的读写对照：点剔除、动态过滤、闭环回访，以及缓存显存与整机预算的区别。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="video-memory" data-node="voyager">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<h2 id="motivation">1. 动机：把缓存接到生成器前，为什么还要走一遍 RGB？</h2>
+<p><a href="12-geometry-cache.html">几何缓存</a>为旧内容提供持久空间地址，却引入另一条计算链：渲染地图得到 RGB，再经 VAE 编码成生成器的条件。Voyager 改善写入端，让生成器同时产生对齐的 RGB-D，直接重建点缓存；Latent Spatial Memory 改变保存的内容，把原生 VAE 特征放到空间地址上，直接读取 latent 条件。<span class="src">Voyager §4；LSM §4</span></p>
+<p>两篇论文在同一页，是为了比较<b>缓存表示与读写开销</b>。Voyager 使用 Hunyuan-Video；LSM 使用 Wan2.2。LSM 把 Voyager 作为主要基线对照，没有使用 Voyager 的模型权重。<span class="src">Voyager §3；LSM §5.1、App. C</span></p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  Voyager 让“生成颜色”和“生成几何”共同完成；LSM 让“保存场景”和“读取生成条件”留在原生 latent 网格。后者减少的是缓存读条件的像素往返，仍需要解码输出和估计写回几何。
+</div>
+
+<h2 id="architecture">2. 全局架构：同样是点，存的东西不同</h2>
+<p>记视频时间为 \(t\)、flow 时间为 \(\tau\)，当前 latent 为 \(x_t\)，近期窗口为 \(H_t\)，相机为 \(p_t\)，文本为 \(c_t\)，记忆为 \(M_t\)，相机查询为 \(q_t\)，读出为 \(r_t\)。本页核心控制是相机轨迹，通用骨架中的动作 \(a_t\) 不代表系统已经建模了任意物体交互。</p>
+<div class="formula">$$r_t=\mathrm{Read}(M_t,q_t),\quad x_{t+1}\sim G(H_t,r_t,a_t,c_t),\quad M_{t+1}=\mathrm{Write}(M_t,x_{t+1},a_t,p_{t+1})$$</div>
+<p>Voyager 的 \(M_t\) 是有颜色的世界点缓存，\(r_t\) 包括 partial RGB-D 条件；LSM 的 \(M_t\) 是带 VAE 特征的空间点，\(r_t\) 直接是目标视角 latent 与可见性 mask。图中分别注明两套实现，不把两条路线拼成一套联合模型。<span class="src">Voyager §4.1–4.3；LSM §4.2–4.4</span></p>
+<div class="legend">
+  <span><i class="sw data"></i>观测 / latent / 噪声</span><span><i class="sw enc"></i>生成器主干（可训练）</span>
+  <span><i class="sw tgt"></i>冻结 VAE / 几何估计</span><span><i class="sw pred"></i>可训练记忆模块</span>
+  <span><i class="sw reg"></i>记忆本身</span><span><i class="sw act"></i>相机 / 动作 / 文本</span><span><i class="sw loss"></i>损失</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 390" role="img" aria-label="Voyager 与 Latent Spatial Memory 的表示对照；示意共同读写骨架，不表示共享权重。依据 Voyager §4；LSM §4、App. C。">
+    <path class="edge tgt" d="M190,77 H216" data-step="1"/>
+    <path class="edge reg" d="M420,77 H456" data-step="2"/>
+    <path class="edge reg" d="M570,109 V156" data-step="3"/>
+    <path class="edge act" d="M827,109 V132 H650 V156" data-step="3"/>
+    <path class="edge reg" d="M680,192 H716" data-step="4"/>
+    <path class="edge pred" d="M420,192 H440 V242 H780 V228" data-step="4"/>
+    <path class="edge enc" d="M827,224 V276" data-step="5"/>
+    <path class="edge reg" d="M720,312 H684" data-step="6"/>
+    <path class="edge reg" d="M570,280 V250 H700 V128 H570 V113" data-step="7"/>
+    <g class="data" data-part="source" data-step="1 6">
+      <rect class="box" x="20" y="45" width="170" height="64" rx="10"/>
+      <text class="t-c t-b" x="105" y="69">输入 / 新 chunk</text>
+      <text class="t-c t-sm" x="105" y="91">RGB、latent</text>
+    </g>
+    <g class="tgt" data-part="lift" data-step="1 6">
+      <rect class="box" x="220" y="45" width="200" height="64" rx="10"/>
+      <text class="t-c t-b" x="320" y="69">深度引导抬升</text>
+      <text class="t-c t-sm" x="320" y="91">相机 → 世界地址</text>
+    </g>
+    <g class="reg" data-part="cache" data-step="2 7">
+      <rect class="box" x="460" y="45" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="570" y="69">世界坐标缓存 Mₜ</text>
+      <text class="t-c t-sm" x="570" y="91">RGB 点 / latent 点</text>
+    </g>
+    <g class="act" data-part="pose" data-step="2">
+      <rect class="box" x="720" y="45" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="69">目标相机 / 文本</text>
+      <text class="t-c t-sm" x="827.5" y="91">pₜ₊₁、cₜ</text>
+    </g>
+    <g class="reg" data-part="read" data-step="3">
+      <rect class="box" x="460" y="160" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="570" y="184">目标视图读出</text>
+      <text class="t-c t-sm" x="570" y="206">RGB-D / native latent</text>
+    </g>
+    <g class="enc" data-part="net" data-step="4">
+      <rect class="box" x="720" y="160" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="184">条件视频生成器</text>
+      <text class="t-c t-sm" x="827.5" y="206">Hunyuan / Wan2.2</text>
+    </g>
+    <g class="data" data-part="bridge" data-step="4">
+      <rect class="box" x="20" y="160" width="400" height="64" rx="10"/>
+      <text class="t-c t-b" x="220" y="184">近期上下文 Hₜ</text>
+      <text class="t-c t-sm" x="220" y="206">边界连续性 / clean preceding</text>
+    </g>
+    <g class="data" data-part="out" data-step="5">
+      <rect class="box" x="720" y="280" width="215" height="64" rx="10"/>
+      <text class="t-c t-b" x="827.5" y="304">完成生成</text>
+      <text class="t-c t-sm" x="827.5" y="326">Voyager RGB-D / LSM RGB</text>
+    </g>
+    <g class="reg" data-part="write" data-step="6 7">
+      <rect class="box" x="460" y="280" width="220" height="64" rx="10"/>
+      <text class="t-c t-b" x="570" y="304">缓存管理</text>
+      <text class="t-c t-sm" x="570" y="326">点剔除 / 动态过滤</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="source"><h4>来源与时间</h4><p>初始化来自输入图像；写回来自已完成生成的 chunk。LSM 将输出 RGB 重编码后更新缓存，不能把全部像素操作说成已经消失。</p></div>
+    <div data-note="lift"><h4>保持原生网格</h4><p>Voyager 在像素网格反投影 RGB-D。LSM 将深度降采样并缩放内参，使每个 native VAE latent 单元对应一个空间点，不把 latent 先上采样成像素点。</p></div>
+    <div data-note="cache"><h4>相同地址，不同内容</h4><p>Voyager 的点保存颜色；LSM 的点保存 VAE 特征。两者缓存都可随探索增长，低分辨率并不等于定长。</p></div>
+    <div data-note="pose"><h4>几何读地址</h4><p>目标内外参确定投影和前后遮挡；文本仍是生成条件。读出的条件只覆盖已经保存、当前可见的空间位置。</p></div>
+    <div data-note="read"><h4>读环路的关键差异</h4><p>Voyager 渲染 partial RGB-D，再经 VAE 编码；LSM 在 latent 网格 z-buffer 投影，直接取对应特征与可见性 mask，省掉读条件的 RGB 渲染与再编码。</p></div>
+    <div data-note="net"><h4>不同基座</h4><p>Voyager 用 Hunyuan-Video，LSM 用 Wan2.2。Voyager 是 LSM 的主要比较基线，不是其权重初始化来源。</p></div>
+    <div data-note="bridge"><h4>局部边界与长期空间证据</h4><p>近期条件辅助 chunk 的时间连续性；图中读出到生成器的路径还包含各自的条件适配。Voyager 有轻量 Control blocks；LSM 先训练侧分支，再单独训练主干 LoRA。</p></div>
+    <div data-note="out"><h4>输出决定写入协议</h4><p>Voyager 联合生成 RGB-D，可直接反投影生成深度；LSM 解码后调用外部深度与分割，再以干净 latent 更新空间缓存。</p></div>
+    <div data-note="write"><h4>不同的取舍</h4><p>Voyager 仅增加新覆盖区域及法线检查允许的点以减少重复；LSM 排除动态物体与天空。过滤解决地图污染，同时不保存被过滤主体的跨 chunk 状态。</p></div>
+    <div data-step-note="1"><h4>1. 初始化</h4><p>从观测与深度建立像素点或原生 latent 点。</p></div>
+    <div data-step-note="2"><h4>2. 保存与查询</h4><p>缓存驻留世界坐标；由目标相机寻址。</p></div>
+    <div data-step-note="3"><h4>3. 读出</h4><p>分别走 RGB-D 渲染再编码，或直接 latent 投影。</p></div>
+    <div data-step-note="4"><h4>4. 生成</h4><p>将记忆条件与近期窗口送入各自的生成器。</p></div>
+    <div data-step-note="5"><h4>5. 解码</h4><p>得到可展示的 RGB；Voyager 同时提供生成深度。</p></div>
+    <div data-step-note="6"><h4>6. 筛选新证据</h4><p>准备反投影，执行各自的剔除或分割过滤。</p></div>
+    <div data-step-note="7"><h4>7. 写回</h4><p>扩展缓存，更新短期上下文，开始下一 chunk。</p></div>
+  </div>
+  <figcaption>图 1　Voyager 与 Latent Spatial Memory 的表示对照；示意共同读写骨架，不表示共享权重。依据 Voyager §4；LSM §4、App. C。</figcaption>
+</figure>
+
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-rgbd">3.1 Voyager：联合 RGB-D 生成是写入能力的一部分</h3>
+<p>初始图像估深度后反投影成世界点。目标相机读取缓存，形成对齐的 partial RGB、partial depth 和 mask。仅有 RGB 重投影时，模型可能在缺失区域误解遮挡关系；Voyager 把深度也作为生成目标，让颜色与几何共同参与 DiT 的注意力。<span class="src">Voyager §4.1–4.2</span></p>
+<p>它不是单纯给 RGB latent 增加一个深度输入 channel：RGB 与深度图沿<b>高度</b>拼接，中间放 placeholder row；对应的条件和 mask 也按相同空间布局排列，再由 VAE 编码。当前 noisy latent、条件 latent 和 mask 才在模型输入端沿 channel 拼接。此区别决定 RGB 与深度 token 可以互相注意。<span class="src">Voyager §4.2、Fig. 9</span></p>
+<p>轻量 Control blocks 将早层条件特征继续注入主干。生成完整 RGB-D 后，深度直接提供新点位置，省去“只生成 RGB，再运行多视图重建才能写图”的依赖；这不代表训练不需要几何标注，初始图像也仍需深度估计。<span class="src">Voyager §4.2、§4.4、App. A</span></p>
+
+<h3 id="c-culling">3.2 World cache：减少重复点，不能把世界压成无限定长</h3>
+<p>逐帧写入前先从已有 cache 渲染当前覆盖 mask。新露出的区域加入点；已覆盖区域还检查已有表面法线与当前视线的夹角，超过 <b>90°</b>时也纳入新视角的点，避免只按 mask 保留了当前看不见的旧表面。作者报告相较保留所有点约减少 <b>40%</b>存储。<span class="src">Voyager §4.3、§5.4 Fig. 8</span></p>
+<p>这里主要是<b>选择哪些新点进入 cache</b>，不是论文给出了任意地图增长下的严格固定容量上限。覆盖新空间仍会增加点数，错误 RGB-D 也可能进入持久条件。法线检查旨在减少视角冗余和噪声，不能替代“物体被搬走后删除旧状态”的一般机制。</p>
+<p>几何一致不等于 chunk 边界颜色完全一致。Voyager 的 smooth video sampling 让相邻段有半段 overlap，借上一段初始化重叠区域；合并时平均、注入轻噪声并再去噪，以减轻独立生成段的颜色跳变。它处理边界拼接，长期空间信息仍来自 world cache。<span class="src">Voyager §4.3</span></p>
+
+<h3 id="latent-spatial-memory">3.3 Latent Spatial Memory：原生网格抬升与直接读出</h3>
+<p>LSM 把初始帧编码为 \(f\in\mathbb R^{C\times h\times w}\)，将深度降采样到同一网格，并按 VAE stride 缩放内参 \(K^\ell\)。每个 latent 单元对应世界点及其特征：</p>
+<div class="formula">$$M_t=\{(P_i,f_i)\}_i,\qquad P_i=E_t^{-1}\!\begin{bmatrix}d_i(K_t^\ell)^{-1}[u_i+\tfrac12,v_i+\tfrac12,1]^\top\\1\end{bmatrix}$$</div>
+<p>\(E_t\) 是 world-to-camera 外参。保存的是 VAE 特征，不是 DiT 各层 KV，也不是网络学习出的动态体素状态。读时将空间点投影到目标 latent 网格，z-buffer 留下正深度中最前的点，直接取其特征；无点单元补零，并另给 binary mask，避免把“未知”误解为合法的零特征。<span class="src">LSM §4.2–4.3、App. A</span></p>
+<p>同一源视图读回在可见单元上可以保留原特征，仍受离散化和遮挡影响。侧分支将读出和 mask 注入生成器，不将投影条件当作永远正确的硬约束。原生网格原则是<b>让几何匹配 latent</b>，而非先上采样 latent 再把大量像素点降回去。<span class="src">LSM §4.3、§5.3</span></p>
+<p>写回仍要解码 chunk、估深度和相机、分割动态主体 / 天空、重编码 RGB，然后抬升有效 latent。动态过滤可防止旧移动主体反复投影，但也明确不保存这些主体的跨 chunk 状态；后续出现运动不能证明它们被长期记住。<span class="src">LSM §4.4、App. C、§6 Limitations</span></p>
+<div class="callout code-note">
+  <span class="callout-title">版本命名差异</span>
+  arXiv 摘要页的 v2 使用系统名 Mirage；本页核对的 v2 HTML 正文、图表与代码仓库仍使用 LSM-World。此处按正文称 LSM-World，节点保持 <code>lsm-world</code>，不把两种名称登记为两篇论文。<span class="src">arXiv:2606.09828v2 摘要页与 HTML §1、Fig. 3</span>
+</div>
+
+<h3 id="mem-ops">记忆的四个操作</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>操作</th><th>Voyager</th><th>LSM-World</th></tr></thead>
+  <tbody>
+    <tr><td>存什么（内容与粒度）</td><td>像素级 XYZ + RGB 世界点。<span class="src">§4.1、§4.3</span></td><td>native VAE 网格的 XYZ + C 维特征点；保留近期 latent。<span class="src">§4.2、§4.4</span></td></tr>
+    <tr><td>何时写（GT / generated；clean / noisy）</td><td>输入图像初始化；完成生成的 RGB-D 逐帧反投影。训练条件由标注的 source RGB-D 构造。<span class="src">§4</span></td><td>输入帧初始化；clean chunk 解码、重编码和几何估计后增量写；训练用预处理 GT clips。<span class="src">§4.4、App. C</span></td></tr>
+    <tr><td>如何寻址</td><td>目标相机内外参、可见性和遮挡。<span class="src">§4.1</span></td><td>目标相机在 latent 网格投影与 z-buffer。<span class="src">§4.3</span></td></tr>
+    <tr><td>如何读</td><td>partial RGB-D + mask → VAE → DiT / Control blocks。<span class="src">§4.2</span></td><td>直接取可见点特征 + mask → 侧分支，不重编码渲染 RGB。<span class="src">§4.3</span></td></tr>
+    <tr><td>何时淘汰或覆盖</td><td>覆盖 mask + 法线检查抑制冗余写入；没有固定 cache 容量声明。<span class="src">§4.3</span></td><td>更新排除动态 / 天空，追加有效空间点；没有将 cache 定义成定长张量。<span class="src">§4.4、Eq. 6</span></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="shapes">4. 记忆预算与张量形状</h2>
+<p>省略 batch，\(L\) 是当前 chunk 长度、\(N_t\) 是缓存点数、\(H,W\) 是像素尺寸、\(h,w\) 是 native latent 网格。Voyager 的 RGB-D 高度拼接形状为示意，placeholder 高度没有在此填一个估计值。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 配置</th><th>与记忆的关系</th></tr></thead>
+  <tbody>
+    <tr><td>Voyager 点缓存</td><td>[Nₜ, 6] = XYZ + RGB</td><td>随新覆盖增大；剔除减少冗余。<span class="src">§4.1、§4.3</span></td></tr>
+    <tr><td>Voyager RGB-D</td><td>[L, 3, 2H + HΦ, W]</td><td>深度以图像形式与 RGB 沿高度排布。<span class="src">§4.2</span></td></tr>
+    <tr><td>LSM 记忆点</td><td>[Nₜ, 3] + [Nₜ, 48]</td><td>减少点数，单点特征更宽。<span class="src">§4.2、§5.1</span></td></tr>
+    <tr><td>LSM chunk</td><td>[9, 48, 44, 80] ↔ 33 RGB 帧，704 × 1280</td><td>Wan2.2 VAE 压缩 4 × 16 × 16。<span class="src">LSM §5.1、App. C</span></td></tr>
+    <tr><td>LSM 单视图 readout</td><td>[48, 44, 80] + [1, 44, 80]</td><td>原生特征与可见性 mask 直接进入条件分支。<span class="src">§4.3、§5.1</span></td></tr>
+  </tbody>
+</table></div>
+<p>由网格尺寸推导，stride 为 \(s\) 时，单帧 latent 地址数约为像素地址数的 \(1/s^2\)；但每点还需 XYZ 和特征，投影有中间 buffer，且 cache 随探索增长。因此点数比例不能直接用作整机显存节省比例。更完整的账本还包含模型权重、attention 激活、VAE、深度 / 分割模型与保存的历史。</p>
+
+<h2 id="objective">5. 训练目标与读写的监督</h2>
+<p>Voyager 沿用 Hunyuan-Video 的 flow matching：目标是 RGB-D 联合 latent 的速度场。为了统一本 track 的符号，\(\tau\) 表示 flow 时间，\(t\) 仅表示视频进程：</p>
+<div class="formula">$$\mathcal L_{\mathrm{flow}}=\mathbb E\!\left[\left\|v_\theta(x_{t+1}^{\tau},\tau,H_t,r_t,c_t)-v_{\mathrm{target}}\right\|_2^2\right]$$</div>
+<p>Voyager 先训练 RGB，再加入深度，最后冻结 DiT 只训练 Control blocks。真实视频的相机 / 深度由 VGGT、MoGE 与 Metric3D 标注和对齐；最终控制阶段采用有 GT 深度的 UE 数据。这些几何标注也是系统能力的来源。<span class="src">Voyager §3、§4.4、App. A–C</span></p>
+<p>LSM 的点写入与几何投影没有单独学习一个 writer。先冻结 VAE 和主干、训练条件侧分支，再冻结侧分支、训练主干 LoRA；两阶段均以 target flow matching 监督。缓存中的 latent 来自冻结 VAE，避免将“特征缓存”说成端到端学出的 3D 动力学状态。<span class="src">LSM §4.5、App. C</span></p>
+<p>LSM 训练几何由预处理 ViPE 得到，默认重建器为 Depth Anything 3；动态 / 天空 mask 由实体抽取与视频分割生成。推理仍需要这些外部感知步骤，免去的是<b>每次读取条件</b>的 RGB render → VAE encode。<span class="src">LSM §5.3、App. C</span></p>
+
+<h2 id="pseudocode">6. 伪代码：把读条件与写缓存的成本拆开</h2>
+<p>下面是语义示意，smooth sampling 和 segment-aware RoPE 由相应函数封装；没有声称是官方代码逐行转写。</p>
+<pre><code class="lang-py">rgb = seed_image
+depth, pose = initial_geometry(rgb)
+M = lift_rgb(rgb, depth, pose) if mode == "voyager" else \
+    lift_native_latent(vae_encode(rgb), depth, pose)
+H = initial_context(rgb)
+
+for target_poses, text in requests:
+    if mode == "voyager":
+        partial_rgb, partial_depth, mask = render_rgbd(M, target_poses)
+        condition = vae_encode(stack_height(partial_rgb, partial_depth))
+        x = denoise_rgbd(noise(), condition, mask, H, text)
+        rgb, depth = decode_rgbd(x)
+        rgb, depth = smooth_overlap_and_refine(rgb, depth, H)
+        for image, d, p in zip(rgb, depth, target_poses):
+            covered = render_coverage(M, p)
+            keep = unseen(covered) | normal_backface_check(M, p)
+            M.add(lift_rgb(image, d, p, keep))
+    else:
+        condition, mask = project_latent_zbuffer(M, target_poses)
+        x = denoise_with_side_branch(noise(), condition, mask, H, text)
+        rgb = vae_decode(x)                    # pixel operations remain
+        depth, estimated_poses = reconstruct(rgb)
+        dynamic, sky = segment_for_update(rgb)
+        clean_latents = vae_encode(rgb)         # chunk-level re-encoding
+        depth_l = resize_depth_to_native_grid(depth)
+        K_l = scale_intrinsics_to_latent_grid()
+        valid = valid_depth(depth_l) &amp; ~resize_mask(dynamic | sky)
+        points = lift_native_latent(clean_latents, depth_l,
+                                    estimated_poses, K_l, valid)
+        M.add(points)                           # cache can grow
+
+    H = recent_clean_context(x, rgb)
+    yield rgb</code></pre>
+
+<h2 id="hyperparams">7. 关键配置：空间粒度与训练适配</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>配置</th><th>预算解释</th></tr></thead>
+  <tbody>
+    <tr><td>Voyager</td><td>单次 49 帧；相邻段半段 overlap。<span class="src">App. A、§4.3</span></td><td>smooth sampling 增加边界处理，cache 提供远期几何。</td></tr>
+    <tr><td>LSM / backbone</td><td>Wan2.2-TI2V-5B；VAE C = 48，空间 stride 16。<span class="src">§5.1</span></td><td>原生网格减少地址数，特征宽度仍要计入。</td></tr>
+    <tr><td>LSM / 适配</td><td>LoRA rank 32、α = 32；两阶段 lr 10⁻⁵ / 10⁻⁴。<span class="src">§4.5、App. C</span></td><td>侧分支先稳定，再适配主干。</td></tr>
+    <tr><td>LSM / 推理</td><td>UniPC，40 steps；效率用单张 H100。<span class="src">§5.1、App. C</span></td><td>采样速度与 cache 读速度要分开。</td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="results">8. 关键结果：闭环分数与资源口径</h2>
+<h3 id="r-revisit">8.1 LSM 主表：同篇论文中的 RealEstate10K 闭环</h3>
+<p>采用 Spatia 的 return 轨迹，用结束帧与输入帧比较。下表均来自 <b>LSM Tab. 2</b>；不要拿 Voyager 原论文 NVS 数字或 Honeycomb 的 WorldScore 闭环数字混排。闭环相似性支持回访恢复，不能单独证明离屏主体的动态状态更新。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th>PSNR<sub>C</sub> ↑</th><th>SSIM<sub>C</sub> ↑</th><th>LPIPS<sub>C</sub> ↓</th></tr></thead>
+  <tbody>
+    <tr><td>ViewCrafter <span class="src">LSM Tab. 2</span></td><td>14.79</td><td>0.481</td><td>0.365</td></tr>
+    <tr><td>Voyager <span class="src">LSM Tab. 2</span></td><td>17.66</td><td>0.540</td><td>0.380</td></tr>
+    <tr><td>Spatia <span class="src">LSM Tab. 2</span></td><td>19.38</td><td>0.579</td><td>0.213</td></tr>
+    <tr class="hl"><td>LSM-World <span class="src">LSM Tab. 2</span></td><td>20.05</td><td>0.825</td><td>0.228</td></tr>
+  </tbody>
+</table></div>
+<p>LSM 在此表的 PSNR / SSIM 更好，LPIPS 仍次于 Spatia。标准 NVS 中 Voyager 为 <b>17.79 / 0.636 / 0.297</b>，LSM 为 <b>18.38 / 0.779 / 0.250</b>（PSNR / SSIM / LPIPS）；这也是 LSM 的评测，不是重写 Voyager 原论文的主表。<span class="src">LSM Tab. 2</span></p>
+
+<h3 id="r-ablation">8.2 表示消融：是否只是换了更强的生成器？</h3>
+<p>跨系统排名包含基座与数据差异；同 backbone、同训练配方的缓存替换消融更接近表示问题。下面使用论文的 WorldScore split，所有数值均来自同一消融表。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>缓存变体</th><th>Average ↑</th><th>3D Consistency ↑</th><th>Photometric ↑</th></tr></thead>
+  <tbody>
+    <tr><td>显式 RGB cache <span class="src">LSM Tab. 3</span></td><td>67.71</td><td>90.75</td><td>91.10</td></tr>
+    <tr><td>latent 上采样后像素抬升 <span class="src">LSM Tab. 3</span></td><td>60.85</td><td>84.90</td><td>79.81</td></tr>
+    <tr><td>无动态物体过滤 <span class="src">LSM Tab. 3</span></td><td>61.20</td><td>80.88</td><td>76.10</td></tr>
+    <tr class="hl"><td>native latent 完整方法 <span class="src">LSM Tab. 3</span></td><td>70.36</td><td>92.21</td><td>93.95</td></tr>
+  </tbody>
+</table></div>
+<p>这支持原生网格与过滤的作用，不能用完整方法与无过滤变体的差值证明“长期动态主体记忆”已经解决；动态主体本来就被排除在 cache 之外。<span class="src">LSM §5.3、§6</span></p>
+
+<h3 id="r-budget">8.3 “10.57× / 55×”具体节省哪部分？</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>作者报告</th><th>资源范围与比较对象</th><th>不能推出</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>端到端生成最高快 10.57× <span class="src">LSM §5.2 Efficiency</span></td><td>同 rollout 长度的 latent 与代表性 RGB-cache pipeline；H100 效率协议。</td><td>不能推广到任意基座 / 分辨率的固定加速比。</td></tr>
+    <tr class="hl"><td>3D cache GPU memory 低 55× <span class="src">LSM §5.2、Fig. 6</span></td><td>缓存维护 / 读取的 footprint；包含像素读条件路径带来的开销。</td><td>不是生成器 + VAE + 几何 / 分割模型的整机 peak memory。</td></tr>
+    <tr><td>读出约 0.25 s / frame <span class="src">LSM Fig. 6</span></td><td>一次性 setup 后，五个 rollout chunks 的 cache-read profiling。</td><td>不是视频生成 FPS，也不包含所有 denoising。</td></tr>
+  </tbody>
+</table></div>
+<p>实验曲线显示 cache footprint 仍随 chunk 增加；“更小的增长缓存”与“常数容量”是不同承诺。Voyager 原论文约 <b>40%</b>的 point-culling 节省，以保留全部点为参照，也不能直接与 LSM 的缓存 pipeline 显存倍率作同一指标比较。<span class="src">LSM Fig. 6；Voyager §4.3</span></p>
+
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>像素几何条件</h4><ul>
+    <li><a href="12-geometry-cache.html">GEN3C / Spatial Memory</a>：地图渲染后再编码，几何证据与生成先验协作。</li>
+    <li>Voyager：生成 aligned RGB-D，直接写 world cache；新点选择降低重复。</li>
+  </ul></div>
+  <div class="now"><h4>表示开销与容量是两个问题</h4><ul>
+    <li>LSM 直接投影 native latent；Voyager → LSM 是主要基线对照关系。</li>
+    <li><a href="14-persistent-state.html#honeycomb">Honeycomb</a> 把增长的点特征压进定长平面；扩域时进一步面对分辨率取舍。</li>
+    <li><a href="14-persistent-state.html">PERSIST</a> 主动预测三维状态，目标超出静态 cache 的观测追加。</li>
+  </ul></div>
+</div>
+
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q25"><span class="qid">Q25</span>Voyager 和 LSM 都有 3D 点缓存，为什么读写路径仍有本质区别？</h3>
+  <div class="ans">
+    <p class="short">Voyager 缓存颜色点，读时渲染 partial RGB-D 再编码，并联合生成完整 RGB-D 后写回；LSM 缓存 native VAE 特征点，按目标相机直接投影成 latent 条件。LSM 省掉每次读条件的像素往返，但 chunk 写入仍需输出 RGB、外部深度 / 分割与重编码。</p>
+    <ul>
+      <li>RGB-D 高度拼接让 Voyager 的视觉与几何共同参与注意力。</li>
+      <li>LSM 将深度与内参缩放到 native 网格，不把特征先放大到像素分辨率。</li>
+      <li>Voyager 是 LSM 的 baseline；两者使用不同生成基座，没有权重继承证据。</li>
+    </ul>
+    <p class="cite">依据：Voyager §4.2–4.3；LSM §4.2–4.5、§5.1、App. C。</p>
+  </div>
+</div>
+<div class="qa">
+  <h3 id="q26"><span class="qid">Q26</span>为什么不能把 LSM 的缓存显存节省解释为整个系统显存同倍率下降？</h3>
+  <div class="ans">
+    <p class="short">论文的显存倍率针对 3D cache pipeline。更少的空间点和更小的读出 buffer 不会同步缩小生成器权重、denoising 激活、VAE、深度与分割模型；而且 latent cache 仍随探索增长。必须先确定账本边界，才能解释“memory saving”。</p>
+    <ul>
+      <li>每点从颜色变成更宽的特征，点数压缩比例并非字节比例。</li>
+      <li>读出计时、端到端生成时间和 GPU peak memory 是不同指标。</li>
+      <li>若要证明整机收益，应报告相同模型、轨迹和部署策略下所有驻留模块的峰值。</li>
+    </ul>
+    <p class="cite">依据：LSM §5.1–5.2、Fig. 6、App. B；Voyager §4.3。</p>
+  </div>
+</div>
+
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Huang et al. <i>Voyager: Long-Range and World-Consistent Video Diffusion for Explorable 3D Scene Generation.</i> arXiv preprint. <a href="https://arxiv.org/abs/2506.04225v1">arXiv v1</a> · <a href="https://voyager-world.github.io/">项目页</a> · <a href="https://github.com/Tencent-Hunyuan/HunyuanWorld-Voyager">代码</a>。</li>
+  <li>Wang et al. <i>Latent Spatial Memory for Video World Models.</i> arXiv preprint. <a href="https://arxiv.org/abs/2606.09828v2">arXiv v2</a> · <a href="https://arxiv.org/html/2606.09828v2">本页核对的 HTML</a> · <a href="https://aka.ms/latent-spatial-memory">项目页</a> · <a href="https://github.com/microsoft/LatentSpatialMemory">代码</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="#references">参考</a></footer>
+</body>
+</html>

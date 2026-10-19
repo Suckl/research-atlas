@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>任意顺序的利与弊：Token Ordering、ParallelBench 与 Flexibility Trap</title>
+<meta name="description" content="掩码扩散“训练最坏、推理最好”：自适应顺序绕开难子问题；并行解码的条件独立误差有信息论下界，阈值采样无法按难度自适应；RL 中任意顺序绕开高熵分叉、压缩解空间，左到右 GRPO 反而更好。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<!-- data-node must match a node id in registry.js; the hero/TOC/pager are generated from it -->
+<body data-root="../../../" data-page-kind="model" data-track="dllm" data-node="train-worst">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：把“并行”和“任意顺序”两个卖点拆开检验</h2>
+<p>dLLM 的解码自由度其实有两层：<b>选哪些位置</b>（顺序）和<b>一步选几个</b>（并行度）。前几页默认这两层都是优势。本页三篇分别检验：</p>
+<ul>
+  <li><b>Token Ordering（“Train for the Worst, Plan for the Best”）</b>：掩码扩散在训练时要解指数多个填空子问题，其中不少在计算上不可解；但推理时可以按置信度自适应选位置，绕开这些难子问题。Sudoku 上解题率从 &lt;7% 升到约 90%。<span class="src">Token Ordering 摘要、§3–4</span></li>
+  <li><a href="#parallelbench">ParallelBench</a>：同一步内多个位置独立采样，即使模型完美也有误差，下界是各步的条件总相关；阈值类采样器无法按任务难度调节并行度。<span class="src">ParallelBench §3–4、§6</span></li>
+  <li><a href="#flexibility-trap">Flexibility Trap</a>：在数学 / 代码的 RL 中，任意顺序让模型绕开高熵的“分叉 token”，导致 Pass@k 更低；训练阶段改用左到右顺序，直接用标准 GRPO（JustGRPO），GSM8K 达 89.1%。<span class="src">Flexibility Trap 摘要、§3–5</span></li>
+</ul>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  顺序自由能让模型先做容易的部分、绕开训练没学好的难子问题，这在答案唯一的谜题上收益很大；但同一机制在需要探索的推理里会提前收缩解空间。并行度另有一个与模型好坏无关的下界：同一步定稿的位置之间相关性越强，误差越大。
+</div>
+<p>记号同本 track：画布 \(x_t\)，\(t=1\) 全掩码，\([\mathrm M]\)，去噪网络 \(p_{\theta}(x_0^i\mid x_t)\)，提示 \(c\)，步数 \(N\)，阈值 \(\tau\)；第 \(k\) 步同步定稿的位置集合记 \(S_k\)。Token Ordering 用 \(\alpha_t\) 表示保留概率、用 0 表示 mask token；ParallelBench 用 \(T\) 表示步数、\(\gamma\) 表示阈值、\(X,Y\) 表示输入与输出；Flexibility Trap 用 \(q\) 表示问题、\(o\) 表示回答。</p>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：一步解码里的两个决定，以及 RL 时的取舍</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 画布 / 采样结果</span><span><i class="sw enc"></i>去噪网络（可训练）</span>
+  <span><i class="sw act"></i>条件：提示、奖励</span><span><i class="sw loss"></i>误差下界 / RL 损失</span><span><i class="sw mask"></i>[M]</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="一步掩码扩散解码：网络给出逐位置边缘分布，规则选出位置集合并独立采样，相关位置同步定稿产生因子分解误差；下方为 JustGRPO 用左到右顺序做 RL">
+    <g class="data" data-part="canvas" data-step="1">
+      <rect class="box" x="20" y="40" width="360" height="96" rx="10"/>
+      <text class="t-sm" x="36" y="58">画布 x_t（提示 + 回答）</text>
+      <rect class="tk act" x="40" y="70" width="20" height="20" rx="3"/><rect class="tk act" x="64" y="70" width="20" height="20" rx="3"/><rect class="tk act" x="88" y="70" width="20" height="20" rx="3"/>
+      <rect class="tk enc" x="124" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="148" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="172" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="196" y="70" width="20" height="20" rx="3"/><rect class="tk enc" x="220" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="244" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="268" y="70" width="20" height="20" rx="3"/><rect class="tk mask" x="292" y="70" width="20" height="20" rx="3"/>
+      <text class="t-c t-xs" x="182" y="102">i</text><text class="t-c t-xs" x="206" y="102">i+1</text>
+      <text class="t-sm" x="36" y="122">已定稿 / [M] 待定；i 与 i+1 强相关</text>
+    </g>
+    <path class="edge" d="M380,88 H416" data-step="1"/>
+    <g class="enc" data-part="denoiser" data-step="1">
+      <rect class="box" x="420" y="52" width="160" height="72" rx="10"/>
+      <text class="t-c t-b" x="500" y="80">去噪网络 p<tspan font-size="10" dy="3">θ</tspan></text>
+      <text class="t-c t-sm" x="500" y="104">一次前向：全部 [M]</text>
+    </g>
+    <path class="edge enc" d="M580,88 H616" data-step="2"/>
+    <g class="data" data-part="marginals" data-step="2">
+      <rect class="box" x="620" y="40" width="320" height="96" rx="10"/>
+      <text class="t-c t-b" x="780" y="60">逐位置边缘分布</text>
+      <text class="t-sm" x="640" y="86">i：New 0.5 · Mexico 0.5</text>
+      <text class="t-sm" x="640" y="110">i+1：York 0.5 · City 0.5</text>
+    </g>
+    <path class="edge" d="M780,136 V166" data-step="3"/>
+    <g data-part="order" data-step="3">
+      <rect class="box" x="620" y="170" width="320" height="80" rx="10"/>
+      <text class="t-c t-b" x="780" y="194">选哪些位置：规则 F(θ, x_t)</text>
+      <text class="t-c t-sm" x="780" y="218">置信度 · margin · 熵 · 阈值 · 左到右</text>
+      <text class="t-c t-xs" x="780" y="238">Token Ordering：margin 绕开难子问题</text>
+    </g>
+    <path class="edge" d="M620,210 H574" data-step="4"/>
+    <g class="data" data-part="commit" data-step="4">
+      <rect class="box" x="330" y="170" width="240" height="80" rx="10"/>
+      <text class="t-c t-b" x="450" y="194">同步定稿集合 S<tspan font-size="10" dy="3">k</tspan></text>
+      <text class="t-c t-sm" x="450" y="220">各位置按边缘独立采样</text>
+    </g>
+    <path class="edge" d="M450,170 V150 H200 V140" data-step="4"/>
+    <text class="t-c t-xs" x="262" y="161" data-step="4">下一步：揭开后的画布</text>
+    <path class="edge loss" d="M330,210 H294" data-step="5"/>
+    <g class="loss" data-part="bound" data-step="5">
+      <rect class="box" x="20" y="170" width="270" height="80" rx="10"/>
+      <text class="t-c t-b" x="155" y="192">因子分解误差</text>
+      <text class="t-c t-sm" x="155" y="214">KL ≥ Σ 各步条件总相关 C</text>
+      <text class="t-c t-xs" x="155" y="236">New City：边缘都合理，组合非法</text>
+    </g>
+    <text class="t-b" x="36" y="288" data-step="6">RL 训练（Flexibility Trap → JustGRPO）</text>
+    <g class="data" data-part="rl-rollout" data-step="6">
+      <rect class="box" x="20" y="300" width="300" height="84" rx="10"/>
+      <text class="t-c t-b" x="170" y="324">AR 顺序 rollout：π<tspan font-size="9" dy="-5">AR</tspan></text>
+      <text class="t-c t-sm" x="170" y="348">前缀可见、之后全 [M]，取第 k 位</text>
+      <text class="t-c t-xs" x="170" y="368">任意顺序会绕开高熵分叉 token</text>
+    </g>
+    <path class="edge act" d="M320,342 H356" data-step="6"/>
+    <g class="act" data-part="rl-reward" data-step="6">
+      <rect class="box" x="360" y="300" width="180" height="84" rx="10"/>
+      <text class="t-c t-b" x="450" y="330">可验证奖励 r</text>
+      <text class="t-c t-sm" x="450" y="354">组内标准化优势</text>
+    </g>
+    <path class="edge loss" d="M540,342 H576" data-step="6"/>
+    <g class="loss" data-part="rl-grpo" data-step="6">
+      <rect class="box" x="580" y="300" width="360" height="84" rx="10"/>
+      <text class="t-c t-b" x="760" y="324">标准 GRPO：精确 log π<tspan font-size="9" dy="-5">AR</tspan></text>
+      <text class="t-c t-sm" x="760" y="348">每个位置一次前向，比值逐 token 精确</text>
+      <text class="t-c t-xs" x="760" y="368">推理时仍可并行解码（EB-sampler）</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="canvas"><h4>画布与相关位置</h4><p>掩码扩散每步从部分揭开的画布出发。若两个位置强相关（如城市名的两半），它们是否在同一步定稿决定了是否会出现非法组合。<span class="src">ParallelBench §3、Fig. 1</span></p></div>
+    <div data-note="denoiser"><h4>一次前向给出全部边缘</h4><p>网络对所有 \([\mathrm M]\) 位置输出 \(p_{\theta}(x_0^i\mid x_t)\)。最优网络学到的是每个“填空子问题”的后验边缘；训练损失等于对所有掩码模式（等价地，所有排列下的 π-learner）取平均。<span class="src">Token Ordering Prop. 2.1、§2.1</span></p></div>
+    <div data-note="marginals"><h4>边缘不含联合信息</h4><p>“New York / Mexico City”各占一半时，两个位置的边缘都是 0.5 / 0.5；只看边缘无法知道 New 必须配 York。<span class="src">ParallelBench §3、Fig. 1</span></p></div>
+    <div data-note="order"><h4>选位置是自由度一</h4><p>Top-k（固定个数，按随机、置信度、margin 或熵排序）或阈值（自适应个数，没有位置过阈值时至少选 1 个）。Token Ordering 提出 top probability margin：用前两名概率之差衡量把握，比 top probability 更能识别“两值接近”的位置。<span class="src">Token Ordering §4.1；ParallelBench §3</span></p></div>
+    <div data-note="commit"><h4>一步选几个是自由度二</h4><p>选出的位置各自独立采样，即 \(P_{\theta}(S_k\mid c,S_{&lt;k})=\prod_{i\in S_k}P_{\theta}(y_i\mid c,S_{&lt;k})\)。这是并行带来速度的来源，也是误差的来源。<span class="src">ParallelBench §3</span></p></div>
+    <div data-note="bound"><h4>与模型好坏无关的下界</h4><p>Theorem 1：任何分 \(N\) 步、每步独立采样的模型，与数据分布的 KL 至少为各步条件总相关之和；即使每个边缘都完全正确也无法消除。<span class="src">ParallelBench Thm. 1、Eq. 2</span></p></div>
+    <div data-note="rl-rollout"><h4>训练时放弃任意顺序</h4><p>把“前缀已知、之后全 \([\mathrm M]\)”时第 \(k\) 位的预测定义为 AR 策略 \(\pi^{\mathrm{AR}}\)，rollout 严格左到右。不加因果掩码，网络结构不变。<span class="src">Flexibility Trap §4.2、Eq. 5–7</span></p></div>
+    <div data-note="rl-reward"><h4>可验证奖励</h4><p>数学：答案等价得 1；代码：格式奖励（0 / 0.5 / 1）加单元测试通过率。<span class="src">Flexibility Trap App. A.3</span></p></div>
+    <div data-note="rl-grpo"><h4>精确似然换来的代价</h4><p>序列似然按位置连乘可精确计算，比值逐 token 有定义，直接套用标准 GRPO；但每个位置都要一次单独前向。JustGRPO-Fast 只在熵最高的 25% 位置计算比值。<span class="src">Flexibility Trap Eq. 7–8、§5.3</span></p></div>
+    <div data-step-note="1"><h4>① 一次前向</h4><p>网络读入当前画布，对所有掩码位置给出预测。</p></div>
+    <div data-step-note="2"><h4>② 得到逐位置边缘</h4><p>每个位置一个分布；相关性不在输出里。</p></div>
+    <div data-step-note="3"><h4>③ 选位置（顺序）</h4><p>自适应规则先做“有把握”的位置，可以绕开训练中没学好的难子问题。</p></div>
+    <div data-step-note="4"><h4>④ 同步定稿（并行）</h4><p>被选位置独立采样后写回画布，进入下一步。</p></div>
+    <div data-step-note="5"><h4>⑤ 误差来源</h4><p>同一步内相关位置越多，下界越高；步数越多，下界越低（单调）。</p></div>
+    <div data-step-note="6"><h4>⑥ RL 时的选择</h4><p>Flexibility Trap：RL 训练阶段只用左到右顺序，推理时仍可用并行采样器。</p></div>
+  </div>
+  <figcaption>图 1　一步解码中的“顺序”和“并行度”两个决定，以及 JustGRPO 在 RL 中的取舍。示例取自 ParallelBench Fig. 1；依据 Token Ordering §2、§4，ParallelBench §3–4，Flexibility Trap §4。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-hard">3.1 训练最坏：掩码扩散要解指数多个子问题</h3>
+<p>在时间无关参数化下，掩码扩散的损失可以写成所有掩码集合 \(M\) 上填空损失的加权和，也等于在均匀随机排列 \(\pi\) 下做“任意顺序自回归”（π-learner）的平均损失；AR 只是其中恒等排列这一项。子问题数是 \(\Theta(L2^L)\) 对 \(L\)。<span class="src">Token Ordering Prop. 2.1、§2.1、§3.2</span></p>
+<p>理论上，作者构造了“潜变量 + 观测”（L&amp;O）分布：按某个已知顺序做 AR 时每一步都容易（潜变量独立、观测是可学函数），但在一段掩码率区间内，随机掩码产生的子问题以常数概率在计算上不可解——稀疏谓词观测（基于 1RSB cavity 猜想）、稀疏带噪奇偶（基于 Sparse LPN 假设）与随机 slab 三个例子。<span class="src">Token Ordering Def. 3.1、Prop. 3.3、App. B.1–B.2</span>实验上，在 SlimPajama（\(L=2048\)、可学习位置编码以去掉 RoPE 的左到右偏置）上做 IsoFLOP 扩展律：随机排列的 π-learner 明显差于 AR，排列越接近恒等（\(L/10\)、\(\sqrt L\) 次随机交换）越接近 AR。<span class="src">Token Ordering §3.2、Fig. 2、App. C.1</span>误差也是不均衡的：L&amp;O-NAE-SAT 上，潜变量位置的预测误差明显大于观测位置。<span class="src">Token Ordering §3.3、Fig. 2</span></p>
+<h3 id="c-adaptive">3.2 推理最好：让模型自己挑容易的先做</h3>
+<p>若模型对每个子问题都完美，任意解码顺序给出同一个分布；模型不完美时，不同路径的质量不同，于是用 oracle \(\mathcal F(\theta,x_t)\) 选位置，代替随机选。两种 oracle：top probability（最大概率）与 top probability margin（前两名概率之差）。<span class="src">Token Ordering §4、§4.1</span>结果：6M 参数的 MDM 在 Sudoku 上随机顺序 6.88%、top probability 18.51%、margin 89.49%，超过 42M 参数、训练时给出正确求解顺序的 ARM（87.18%）；在更难、需回溯或新策略的 Sudoku 上，margin 49.88% vs 有序 ARM 32.57%。<span class="src">Token Ordering Tab. 2、Tab. 5</span>文本生成上，自适应推理在熵相近时显著降低生成困惑度。<span class="src">Token Ordering Fig. 3</span></p>
+<div class="callout code-note">
+  <span class="callout-title">“哪个 MDM”：论文内部不一致（SURVEY ⚠）</span>
+  摘要里“预训练 MDM 在 Sudoku 上 &lt;7% → ≈90%”中的 MDM 是在 Shah et al. 谜题数据上从头训练的 6M GPT-2 结构模型（300 epoch），不是文本预训练模型。文本实验方面：Fig. 3 图注写“预训练 170M MDM + LLaMA-7B 评测”，App. D.1.2 写“1.1B MDM + LLama2-7B”，App. C.2.2 的误差不均衡实验又用 170M。π-learner 扩展律复用了 SMDM（Nie et al. 2024）的代码与配置，但正文与附录都<span class="unverified">没有说明 170M / 1.1B 检查点是否就是 SMDM 发布的权重</span>。LLaDA 8B 实验（Tab. 4）<span class="unverified">未说明是 Base 还是 Instruct</span>。<span class="src">Token Ordering §4.2、Fig. 3、App. C.1–C.2、D.1–D.3</span>
+</div>
+
+<h3 id="parallelbench">3.3 ParallelBench：并行度的信息论下界与采样器的“失明”</h3>
+<p>把输出 \(Y\) 分成 \(N\) 个不相交集合依次生成，每步集合内独立采样。Theorem 1 给出：</p>
+<div class="formula">$$\min_{\theta} \mathrm{KL}\big(P_{\mathrm{data}}(Y\mid X)\,\|\,P_{\theta}(Y\mid X)\big)\ \ge\ \sum_{k=1}^{N}\mathbb E_{S_{&lt;k}}\big[\mathcal C(S_k\mid X,S_{&lt;k})\big],\qquad \mathcal C(Y\mid X)=\sum_{y_i\in Y}H(y_i\mid X)-H(Y\mid X).$$</div>
+<p>\(N=1\) 时下界是整段的条件总相关；逐个解码（\(N=|Y|\)）时为 0；最优划分下的下界随步数单调不增。<span class="src">ParallelBench Thm. 1–2、Remark 1–2</span>用可解析的列表操作量化：Copy 与 Replace Index 的 \(\mathcal C=0\)；Replace Random（随机替换恰好一项）\(\mathcal C=(n-1)[\log_2 n-\log_2(n-1)]\to\log_2 e\approx1.44\)；Shuffle \(\mathcal C=n\log_2 n-\log_2 n!\to\infty\)，且每步只并行 2 个时下界 \(\log_2\frac{n!!}{(n-1)!!}\) 也发散。<span class="src">ParallelBench §4.1、Eq. 3–4</span></p>
+<p>采样器方面：随机 Top-k 在 Shuffle 上的成功率是 \(n!/n^n\)（\(k=n\)）或 \((n-1)!!/n!!\)（\(k=2\)），都随 \(n\) 趋于 0。置信度阈值 \(\tau&gt;0.5\) 在 Shuffle 上每个位置置信度只有 \(1/m\)，永远不过阈值，自动退化为逐个解码、成功率 1；但在 Replace Random 上每个位置“保持原样”的置信度高达 \((n-1)/n\)，只要 \(\tau&lt;(n-1)/n\) 就会一步全部定稿、一个都不替换，成功率 0。<span class="src">ParallelBench §4.2、Tab. 1</span>逐位置置信度看不到位置间的依赖，所以同一个阈值无法同时适合两种任务，这是“不能按难度自适应”的机制。在这些列表任务上微调 LLaDA 1.5 后，Replace Index 的并行精度恢复，Replace Random 与 Shuffle 仍随并行度下降，与“理想模型也无法越过 \(\mathcal C&gt;0\)”一致。<span class="src">ParallelBench §4.2.3、§7、Fig. 8</span></p>
+<p>基准本身：17 个任务、3 类——Waiting Line（10 个排队操作，\(n\) 控制难度）、Text Writing（5 个，含摘要、改写与 Words-to-Sentence 三档，用语法分数而非 ROUGE）、Puzzles（Sudoku 唯一解 \(\mathcal C=0\)，Latin Square 多解 \(\mathcal C&gt;0\)）。<span class="src">ParallelBench §5、Tab. 2</span>半自回归块长对两类任务作用相反：Text Writing 的依赖是局部的，小块反而伤质量；Waiting Line 的依赖分散在全句，左到右有利。<span class="src">ParallelBench §6</span>按样本选最优阈值的 oracle 能同时取得最高精度与显著加速，说明自适应还有很大空间；CoT 能缓解但输出 token 多 8 倍，ReMDM、RCR 等免训练重掩码在 Waiting Line 上无改善。<span class="src">ParallelBench §6、§7、App. F.2</span></p>
+<p>下面的演示是一个确定性的小画布：其中几对相邻 token 完全相关（例如一个两词的地名），其余 token 互相独立。步数越少、每步定稿越多，相关的两个位置越容易在同一步被分别采样，拼出“两半各自合理、合在一起不存在”的组合；而独立的位置并行采样没有代价。</p>
+<div data-widget="dllm-decode" data-focus="steps"></div>
+
+<h3 id="flexibility-trap">3.4 Flexibility Trap：任意顺序在 RL 里绕开了该探索的地方</h3>
+<p><b>现象。</b>以 Pass@k 作为 RL 可达能力的代理（RL 主要锐化基础模型已能采到的解；这一假设来自 Yue et al. 2025），在 LLaDA-Instruct、Dream-Instruct、LLaDA 1.5 上比较“任意顺序”（置信度低者重掩码，块 32）与“AR 顺序”（总是揭开最左位置），统一 256 token、256 步、温度 0.6。任意顺序 Pass@1 常常不差甚至更好，但 Pass@k 曲线更平。<span class="src">Flexibility Trap §2.3、§3、Fig. 3</span>HumanEval 上用 1024 个样本统计，21.3% 的题只有 AR 顺序能解出，只有任意顺序能解出的仅 0.6%；块大小从 1 增大时，Pass@8/32/128 单调下降。<span class="src">Flexibility Trap §3.1、Fig. 4–5</span></p>
+<p><b>机制：熵退化。</b>置信度驱动的采样器系统性地推迟“Therefore / Thus / Since”这类连接词；这些位置在 AR 顺序下解码时熵较高，是推理路线分叉的地方。推迟后再回来填，后文已定，熵被压低——模型不再在分叉处选择方向，而是事后补一个连接词去衔接已经写好的结论。整体平均熵与 AR 相近，分叉处的熵明显下降。<span class="src">Flexibility Trap §3.2、Fig. 6–7、App. C</span>随机顺序也不是出路：Pass@1 崩溃（GSM8K 43.3% vs 置信度 78.6%），固定随机排列做 RL 只到 82.2%。<span class="src">Flexibility Trap App. D、Tab. 4–5</span></p>
+<p><b>JustGRPO。</b>RL 阶段把 dLLM 当成 AR 策略：\(\pi^{\mathrm{AR}}_{\theta}(\cdot\mid o_{&lt;k},c)=\mathrm{softmax}\,f_{\theta,k}([c,o_1,\dots,o_{k-1},[\mathrm M],\dots,[\mathrm M]])\)，序列似然按位置连乘、可精确计算，于是不用 ELBO、不用均场近似，也不存在“采样器与被优化分布不一致”的问题。<span class="src">Flexibility Trap §4.1–4.2、Eq. 5–8</span>代价是每个位置需要一次单独前向；作者称在 16×H100 上墙钟仍优于 ESPO，并用只算前 25% 高熵位置的 JustGRPO-Fast 进一步提速。<span class="src">Flexibility Trap §5.3、Fig. 9</span>训练后的模型仍兼容 EB-sampler 并行解码：MBPP 上相对原 LLaDA-Instruct 的增益从每步 1 token 时的 +10.6 扩大到约每步 5 token 时的 +25.5。<span class="src">Flexibility Trap §5.2、Fig. 8</span></p>
+<div class="callout code-note">
+  <span class="callout-title">标题与编号（verify title）</span>
+  arXiv v1–v3 标题为 <i>The Flexibility Trap: Why Arbitrary Order Limits Reasoning Potential in Diffusion Language Models</i>；v4（2026-06-08）与 ICML 2026 Oral 页面改为 <i>…: Rethinking the Value of Arbitrary Order in Diffusion Language Models</i>。v4 正文按“Table 3”引用系统级对比、按“Table 5”引用超参表，而 HTML 中两表分别编号为 Table 1、Table 3；本页按表格内容引用。<span class="src">arXiv 2601.15165 v1/v3/v4 元数据；v4 §5、App. A</span>
+</div>
+
+<h3 id="vs-ar">与自回归模型对照</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>Token Ordering（MDM + 自适应顺序）</th><th>ParallelBench（被测的并行解码）</th><th>Flexibility Trap（JustGRPO）</th><th>同规模 AR（参照）</th></tr></thead>
+  <tbody>
+    <tr><td>训练目标</td><td>标准掩码扩散 ELBO = 所有排列下 π-learner 损失的平均。<span class="src">§2.1</span></td><td>不训练；评测 LLaDA、LLaDA 1.5、Dream、DiffuCoder、Mercury 原模型（另做微调实验）。<span class="src">§6–7</span></td><td>预训练不变；RL 阶段对 \(\pi^{\mathrm{AR}}\) 做标准 GRPO（KL 系数 0）。<span class="src">§4.2、App. A</span></td><td>只训恒等排列（下一 token）。</td></tr>
+    <tr><td>注意力与 KV cache</td><td>全双向，不用缓存。</td><td>附录另测 Fast-dLLM KV cache 的影响。<span class="src">§6</span></td><td>保留双向注意力，不加因果掩码；求比值时每位置一次前向。<span class="src">§4.2、§5.3</span></td><td>因果 + 精确 KV cache，一次前向得到全部 token 的条件概率。</td></tr>
+    <tr><td>每次前向定稿多少 token</td><td>Sudoku / Zebra 用 50 步反向采样。<span class="src">App. D.2</span></td><td>扫描每步 k 个或阈值 τ∈{0.5,…,1.0}；H.1 对比固定 k=2。<span class="src">§6、App. H.1</span></td><td>评测每步 1 个（256 步）；EB-sampler 可到约 5 个 / 步。<span class="src">§5、§5.2</span></td><td>1。</td></tr>
+    <tr><td>能做而 AR 难做的</td><td>按样本决定求解顺序：6M MDM 在 Sudoku 上胜过训练时给出顺序的 42M ARM。<span class="src">Tab. 2</span></td><td>暴露数学 / 代码基准看不到的并行退化。</td><td>训练时得到精确似然，推理时保留并行解码。</td><td>—</td></tr>
+    <tr><td>代价与失效情形</td><td>训练时要解大量难子问题，似然扩展律差于 AR。<span class="src">§3.2</span></td><td>\(\mathcal C&gt;0\) 的任务有不可消除的误差；阈值无法按难度调整。<span class="src">Thm. 1、§4.2</span></td><td>任意顺序的灵活性在训练中放弃；RL 计算量随长度线性增加。<span class="src">§5.3</span></td><td>顺序固定：不给顺序信息时 Sudoku 只有 9.73%。<span class="src">Token Ordering Tab. 2</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 画布、子问题数与计算量</h2>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>规模</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>掩码扩散 vs AR 的子问题数</td><td>Θ(L·2^L) vs L</td><td>文本实验 \(L=2048\)。<span class="src">Token Ordering §3.2</span></td></tr>
+    <tr><td>Sudoku / Zebra 模型</td><td>MDM 6M / 19M；ARM 42M</td><td>谜题数据从头训练。<span class="src">Token Ordering Tab. 2–3、App. D.2</span></td></tr>
+    <tr><td>ParallelBench Waiting Line</td><td>n∈{3,…,6}，最多 32 token</td><td>H.1 对比用 n=15、128 token。<span class="src">ParallelBench §6、App. C、H.1</span></td></tr>
+    <tr><td>JustGRPO rollout</td><td>每题 G=16 条、最长 256 token，全局 batch 64</td><td>125 步；GSM8K 约 50 步即到约 89%。<span class="src">Flexibility Trap App. A.2</span></td></tr>
+    <tr><td>JustGRPO 比值计算</td><td>每条回答约 |o| 次前向（Fast 版约 25%）</td><td>AR 只需 1 次因果前向；按 256 token 推算约 256 次 vs 64 次（推算）。<span class="src">Flexibility Trap §5.3</span></td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 目标与关键量</h2>
+<p><b>任意顺序损失（Token Ordering）：</b></p>
+<div class="formula">$$\mathcal L_{\theta}=-\mathbb E_{x_0,\ \pi\sim\mathrm{Unif}(\mathbb S_L)}\Big[\sum_{i=0}^{L-1}\log p_{\theta}\big(x_0^{\pi(i)}\,\big|\,x_0[\pi\{i,\dots,L-1\}]\big)\Big]\ \ge\ -\mathbb E\log p_{\theta}(x_0),$$</div>
+<p>其中 \(x_0[M]\) 表示把 \(M\) 中位置置为 \([\mathrm M]\)；只取恒等排列就是 AR 损失。<span class="src">Token Ordering Prop. 2.1、Eq. 1–2</span>自适应 oracle 中 margin 定义为 \(|p_{\theta}(x^i=j_1\mid x_t)-p_{\theta}(x^i=j_2\mid x_t)|\)，\(j_1,j_2\) 为前两名取值。<span class="src">Token Ordering §4.1</span></p>
+<p><b>Pass@k（Flexibility Trap 的“推理潜力”代理）：</b>\(n\) 个样本中 \(c\) 个正确时，\(\mathrm{Pass@}k=\mathbb E\big[1-\binom{n-c}{k}/\binom{n}{k}\big]\)。<span class="src">Flexibility Trap Eq. 4</span></p>
+<p><b>JustGRPO：</b>\(\rho_{i,k}=\pi^{\mathrm{AR}}_{\theta}(o_{i,k}\mid o_{i,&lt;k},c)/\pi^{\mathrm{AR}}_{\theta_{\mathrm{old}}}(o_{i,k}\mid o_{i,&lt;k},c)\)，\(\hat A_i=(r_i-\mu_G)/\sigma_G\)，目标为标准裁剪替代目标。与 <a href="17-rl.html">d1 等 dLLM 专用 RL</a> 相比，差别只在似然怎么算。<span class="src">Flexibility Trap Eq. 3、Eq. 8</span></p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">order_and_parallel.py（机制示意；Token Ordering §4.1、ParallelBench §3、Flexibility Trap Eq. 5–8）</div>
+<pre><code class="lang-py">@torch.no_grad()
+def unmask_step(model, x, K=2, rule="margin", tau=None):
+    m = x == MASK
+    p = softmax(model(x), dim=-1)                    # [L, V] 逐位置边缘
+    top2 = p.topk(2, dim=-1).values
+    score = {"prob": top2[:, 0],
+             "margin": top2[:, 0] - top2[:, 1],      # Token Ordering
+             "neg_entropy": (p * log(p)).sum(-1)}[rule]
+    score = where(m, score, -inf)
+    if tau is not None:                               # 阈值：个数自适应
+        S = m &amp; (top2[:, 0] &gt;= tau)
+        if not S.any():
+            S[score.argmax()] = True
+    else:                                             # Top-k：个数固定
+        S = zeros_like(m)
+        S[score.topk(K).indices] = True
+    x[S] = Categorical(p[S]).sample()                 # 独立采样 → 因子分解误差
+    return x
+
+def ar_logprob(model, c, o):                          # JustGRPO 的 π^AR
+    lp = []
+    for k in range(len(o)):                           # 每个位置一次前向
+        x = cat([c, o[:k], full((len(o) - k,), MASK)])
+        lp.append(log_softmax(model(x)[len(c) + k], -1)[o[k]])
+    return stack(lp)                                  # 精确 log π^AR(o_k | o_&lt;k, c)
+
+def justgrpo_loss(model, old, c, G=16, eps=0.2):
+    outs = [ar_rollout(old, c, temperature=1.0) for _ in range(G)]   # 严格左到右
+    r = tensor([reward(c, o) for o in outs])
+    A = (r - r.mean()) / (r.std() + 1e-6)
+    loss = 0.0
+    for o, a in zip(outs, A):
+        ratio = (ar_logprob(model, c, o) - ar_logprob(old, c, o).detach()).exp()
+        loss -= minimum(ratio * a, ratio.clamp(1 - eps, 1 + eps) * a).mean() / G
+    return loss                                       # KL 系数 0（App. A.2）</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键设置</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>论文</th><th>设置</th><th>出处</th></tr></thead>
+  <tbody>
+    <tr><td>Token Ordering · 谜题</td><td>Ye et al. 代码库；lr 0.001、batch 128、300 epoch；推理 50 步，oracle 加系数 0.5 的 Gumbel 噪声</td><td>App. D.2</td></tr>
+    <tr><td>Token Ordering · 文本</td><td>SMDM / TinyLlama 配置，AdamW，lr 4e-4 → 4e-5 余弦，\(L=2048\)，可学习位置编码</td><td>App. C.1</td></tr>
+    <tr><td>ParallelBench</td><td>贪心解码（填空任务温度 1.0）；Waiting Line 最多 32 token，Puzzle / Text 64 token；阈值 0.5–1.0</td><td>§6、App. C</td></tr>
+    <tr><td>Flexibility Trap · 分析</td><td>256 token、256 步、块 32、温度 0.6；HumanEval 覆盖分析 k=1024</td><td>§3、Fig. 4</td></tr>
+    <tr><td>JustGRPO · 训练</td><td>LLaDA 8B Instruct 全参数；lr 5e-6 常数、batch 64、G=16、125 步、温度 1.0、KL 0、16×H100</td><td>App. A.2 表</td></tr>
+    <tr><td>JustGRPO · 评测</td><td>低置信度重掩码 + 块 32 半自回归，每步 1 token，温度 0；长度 128 / 256 / 512</td><td>§5</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>Token Ordering · 谜题</b>（各模型在谜题数据上从头训练；解题率 %）：<span class="src">Token Ordering Tab. 2、3、5</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">参数</th><th class="num">Sudoku</th><th class="num">Zebra</th><th class="num">难 Sudoku</th></tr></thead>
+  <tbody>
+    <tr><td>ARM（无顺序信息）</td><td class="num">42M</td><td class="num">9.73</td><td class="num">80.31</td><td class="num">—</td></tr>
+    <tr><td>ARM（训练时给出求解顺序）</td><td class="num">42M</td><td class="num">87.18</td><td class="num">91.17</td><td class="num">32.57</td></tr>
+    <tr><td>MDM 随机顺序</td><td class="num">6M / 19M</td><td class="num">6.88</td><td class="num">76.9</td><td class="num">3.62</td></tr>
+    <tr><td>MDM top probability</td><td class="num">6M / 19M</td><td class="num">18.51</td><td class="num">98.5</td><td class="num">9.44</td></tr>
+    <tr class="hl"><td>MDM top probability margin</td><td class="num">6M / 19M</td><td class="num">89.49</td><td class="num">98.3</td><td class="num">49.88</td></tr>
+  </tbody>
+</table></div>
+<p>LLaDA 8B 上 margin 相对随机顺序：HumanEval 多行填空 16.5 → 25.4、拆分行填空 14.2 → 22.3、Math 28.5 → 34.3；MMLU 上 top probability 更好（36.5 vs 35.4）。<span class="src">Token Ordering Tab. 4</span>Token Ordering 的论文作者在附注中指出，Ye et al. 报告的 6M MDM 用 Top-K 达到 100% 的 Sudoku 数据集比本文所用的容易得多。<span class="src">Token Ordering §4.2 脚注 2</span></p>
+<p><b>ParallelBench · Waiting Line</b>（n=15、128 输出 token；开源 dLLM 每步固定 2 个、不用半自回归，<span class="unverified">该表未注明选位置规则</span>；Mercury 的并行设置不可控）：<span class="src">ParallelBench App. H.1、Tab. 7</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th class="num">Copy</th><th class="num">Reverse</th><th class="num">Shuffle</th><th class="num">Replace Index</th><th class="num">Replace Random</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>LLaDA 1.5（k=2）</td><td class="num">100</td><td class="num">99</td><td class="num">18</td><td class="num">15</td><td class="num">70</td></tr>
+    <tr><td>Dream 7B（k=2）</td><td class="num">100</td><td class="num">91</td><td class="num">87</td><td class="num">27</td><td class="num">99</td></tr>
+    <tr><td>Mercury（闭源 dLLM）</td><td class="num">100</td><td class="num">100</td><td class="num">92</td><td class="num">28</td><td class="num">98</td></tr>
+    <tr><td>Qwen2.5 7B（AR）</td><td class="num">100</td><td class="num">65</td><td class="num">85</td><td class="num">16</td><td class="num">88</td></tr>
+    <tr><td>Llama 3.1 8B（AR）</td><td class="num">100</td><td class="num">100</td><td class="num">96</td><td class="num">23</td><td class="num">88</td></tr>
+    <tr><td>Claude Haiku 3.5（AR）</td><td class="num">100</td><td class="num">100</td><td class="num">100</td><td class="num">32</td><td class="num">100</td></tr>
+  </tbody>
+</table></div>
+<p>Replace Index 对所有模型都难，作者归因于模型能力（\(\mathcal C=0\)），不是并行误差。正文 Fig. 4（\(n\) 取 5–20）称 Mercury 的 Shuffle 精度随 \(n\) 急剧下降、Reverse 接近满分，与 AR 模型趋势相反；表中 n=15 时 Mercury Shuffle 为 92，<span class="unverified">急剧下降的具体数值只在图中</span>。<span class="src">ParallelBench §6、Fig. 4、Tab. 7</span></p>
+<p><b>Flexibility Trap</b> · 覆盖与单次精度（LLaDA-Instruct）：<span class="src">Flexibility Trap App. D、Tab. 4</span></p>
+<div class="table-wrap"><table>
+  <thead><tr><th>解码顺序</th><th class="num">GSM8K P@128</th><th class="num">HumanEval P@128</th><th class="num">GSM8K P@1</th><th class="num">HumanEval P@1</th></tr></thead>
+  <tbody>
+    <tr><td>置信度（任意顺序）</td><td class="num">97.0</td><td class="num">67.1</td><td class="num">78.6</td><td class="num">40.5</td></tr>
+    <tr><td>完全随机</td><td class="num">97.5</td><td class="num">64.9</td><td class="num">43.3</td><td class="num">12.4</td></tr>
+    <tr class="hl"><td>AR（左到右）</td><td class="num">99.0</td><td class="num">83.0</td><td class="num">78.0</td><td class="num">34.5</td></tr>
+  </tbody>
+</table></div>
+<p>RL 后（LLaDA-Instruct，生成长 256）：JustGRPO 在 GSM8K / MATH-500 / HumanEval / MBPP 上为 89.1 / 45.1 / 49.4 / 52.4；论文自报的基线中 d1 81.1 / 38.6、SPG 86.1 / 40.0、ESPO 82.3 / 39.0 / 42.1 / 44.6。各基线设置不一致（每步 1 或 2 token、LoRA 或全参数），作者在统一协议（全参数、每步 1 token、长 256）下复现：d1* 83.8 / 39.2、ESPO* 84.7 / 40.3、SPG* 86.9 / 41.8。<span class="src">Flexibility Trap v4 系统级对比表、统一协议复现表</span>HumanEval 上 JustGRPO 不是最高：LLaDOU（附加可训练的位置选择模块）长 256 时 59.1；LLaDA-1.5（规模更大的私有数据）长 512 时 51.9，高于 JustGRPO 的 48.7。<span class="src">同上</span></p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前的默认假设</h4><ul><li><a href="06-llada.html">LLaDA</a> 的低置信度重掩码与 <a href="14-kv-cache.html">Fast-dLLM</a> 的阈值并行，默认“按置信度选位置”和“多定几个”都是免费的。</li><li><a href="15-learned-parallel.html">dParallel / d3LLM / CDLM</a> 训练模型更早变确定，但评测集中在低熵的数学 / 代码。</li><li><a href="01-foundations.html">基础页</a>的两 token 例子说明了因子分解误差的来源。</li></ul></div>
+  <div class="now"><h4>本页的修正 → 下一步</h4><ul><li>顺序：自适应顺序在答案唯一的约束问题上收益很大（Token Ordering），在需要探索的推理 RL 中则压缩解空间（Flexibility Trap）。</li><li>并行：条件总相关给出与模型无关的下界；需要能感知位置间依赖的采样器，或像<a href="13-hybrid.html">扩散起草 + AR 验证</a>那样用验证保证分布。</li><li>RL 的似然估计：<a href="17-rl.html">d1、LLaDA 1.5、TraceRL</a> 都保留任意顺序；JustGRPO 用左到右的精确似然作对照。代码场景的“草图优先”顺序见 <a href="18-code.html">代码页</a>。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q31"><span class="qid">Q31</span>Token Ordering 说任意顺序是资产，Flexibility Trap 说它是陷阱。两者矛盾吗？分别在什么条件下成立？</h3>
+  <div class="ans"><p class="short">不矛盾，两篇讨论的是同一机制（按置信度先做容易的位置）在不同目标下的效果。Sudoku、Zebra 这类谜题答案唯一，正确的求解顺序因题而异，评价的是单次能否解对：先填有把握的格子，等于绕开训练中没学好的难子问题，6M MDM 用 margin 选位置达到 89.49%，超过训练时给出顺序的 42M ARM（87.18%）。数学 / 代码的 RL 需要探索：Pass@k 衡量模型能采到多少条不同的正确路线，置信度优先会推迟高熵的连接词，等后文写好再补，分叉处的熵被压低，覆盖面变窄（HumanEval Pass@128 67.1 vs AR 顺序 83.0），尽管 Pass@1 并不差（40.5 vs 34.5）。<span class="src">Token Ordering Tab. 2；Flexibility Trap §3、Tab. 4</span></p>
+    <ul><li>条件一：目标是单次精度还是覆盖（RL 可达上限）。条件二：任务是否有唯一解或天然的非左到右顺序。</li><li>两者都依赖“选位置规则”：随机顺序在两篇里都最差（Sudoku 6.88%；GSM8K Pass@1 43.3%）。</li><li>Flexibility Trap 用的 Pass@k 代理来自“RL 主要锐化已有分布”的假设，属于经验判断。</li></ul>
+    <p class="cite">依据：Token Ordering §4、Tab. 2、Tab. 5；Flexibility Trap §2.3、§3、App. D。</p>
+  </div>
+  <h3 id="q32"><span class="qid">Q32</span>如果模型对每个位置的边缘分布都完全正确，并行解码还会出错吗？为什么置信度阈值无法按任务难度调节并行度？</h3>
+  <div class="ans"><p class="short">会。同一步定稿的位置是按各自边缘独立采样的，而数据的联合分布里位置之间存在依赖；ParallelBench 的 Theorem 1 证明，任何每步独立采样的 \(N\) 步模型，与数据分布的 KL 都不小于各步条件总相关之和，这个下界与模型好坏无关，只由数据和划分决定。阈值只看每个位置自己的最大概率，看不到位置之间的依赖：Shuffle 中每个位置置信度只有 \(1/m\)，阈值不触发、自动逐个解码，反而全对；Replace Random 中每个位置“保持不变”的置信度高达 \((n-1)/n\)，阈值一过就整段同时定稿、一个都不替换，精度为 0。<span class="src">ParallelBench Thm. 1、§4.2、Tab. 1</span></p>
+    <ul><li>微调实验：Replace Index（\(\mathcal C=0\)）微调后可以高并行；Replace Random、Shuffle 微调后仍随并行度下降。</li><li>按样本挑最优阈值的 oracle 远好于固定阈值，说明需要能估计“联合风险”的信号，而不只是逐位置置信度。</li><li>下方演示中，相关的两个位置一旦在同一步被分别采样，就可能拼出不存在的组合。</li></ul>
+    <p class="cite">依据：ParallelBench §3–4、§6–7、Fig. 8、App. F.2。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Kim, Shah, Kontonis, Kakade, Chen. <i>Train for the Worst, Plan for the Best: Understanding Token Ordering in Masked Diffusions.</i> ICML 2025（Outstanding Paper）；本页读 arXiv v3。<a href="https://arxiv.org/abs/2502.06768">论文</a>。</li>
+  <li>Kang, Galim, Oh, Lee, Zeng, Zhang, Hooper, Hu, Koo, Cho, Lee. <i>ParallelBench: Understanding the Trade-offs of Parallel Decoding in Diffusion LLMs.</i> ICLR 2026；本页读 arXiv v2。<a href="https://arxiv.org/abs/2510.04767">论文</a> · <a href="https://parallelbench.github.io">项目 / 榜单</a> · <a href="https://github.com/furiosa-ai/ParallelBench">代码</a>。</li>
+  <li>Ni, Wang, Yue, Yu, Zhao, Hua, Chen, Song, Yu, Zheng, Huang. <i>The Flexibility Trap: Rethinking the Value of Arbitrary Order in Diffusion Language Models</i>（v1–v3 题为 <i>…: Why Arbitrary Order Limits Reasoning Potential in Diffusion Language Models</i>）. ICML 2026 Oral；本页读 arXiv v4。<a href="https://arxiv.org/abs/2601.15165">论文</a> · <a href="https://github.com/LeapLabTHU/JustGRPO">代码与权重</a> · <a href="https://nzl-thu.github.io/the-flexibility-trap">项目页</a>。</li>
+  <li>相关：Feng et al. <i>Theoretical Benefit and Limitation of Diffusion Language Model</i>（困惑度 vs 序列错误率所需步数）。<a href="https://arxiv.org/abs/2502.09622">论文</a>；Ben-Hamu et al. <i>EB-Sampler</i>（熵界并行去掩码，JustGRPO 的推理采样器）。<a href="https://arxiv.org/abs/2505.24857">论文</a>。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见各节引用与<a href="#references">参考</a></footer>
+</body>
+</html>

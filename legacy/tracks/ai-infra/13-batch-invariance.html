@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>批不变性与训推一致</title>
+<meta name="description" content="Defeating Nondeterminism in LLM Inference：温度 0 也不确定的真正原因（内核缺乏批不变性）、三类内核的修复、代价，以及 RL 训推不一致与 TIS 修正。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="batch-invariance">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：温度 0、同一个 prompt，为什么两次答案不一样</h2>
+<p>流行的解释是“GPU 并发 + 浮点加法不满足结合律”：线程完成顺序随机 → 归约顺序随机 → 结果随机。Thinking Machines 的文章指出这个解释<b>不完整</b>：LLM 前向里几乎没有原子加（atomic add），同一个内核对同一输入<b>逐次运行是确定的</b>。真正的原因是：</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  内核对一条请求的计算方式<b>取决于同批里还有多少别的请求</b>——batch 小的时候矩阵乘用 split-K、注意力把 KV 切更多段来填满 SM，归约顺序就变了。服务器的负载决定 batch 大小，用户看到的就是“随机”。修复办法是让每条请求的归约策略<b>与 batch 大小无关</b>：批不变性。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 同一条请求在不同 batch 下走了不同的归约路径</h2>
+<div class="legend">
+  <span><i class="sw data"></i>请求</span><span><i class="sw pred"></i>内核的工作划分</span><span><i class="sw loss"></i>归约顺序</span><span><i class="sw act"></i>批不变版本</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="批不变性">
+    <!-- scenario A: batch 1 -->
+    <rect class="panel" x="10" y="10" width="460" height="190" rx="12"/>
+    <text class="t-lg" x="24" y="36">同一请求，batch = 1</text>
+    <g data-part="req" data-step="1"><rect class="box data" x="24" y="52" width="90" height="40" rx="8"/><text class="t-c t-b" x="69" y="72">请求 X</text></g>
+    <g class="pred" data-part="splitk" data-step="1"><rect class="box" x="130" y="48" width="320" height="56" rx="8"/><text class="t-c t-b" x="290" y="68">matmul：行太少 → split-K 填满 SM</text><text class="t-c t-xs" x="290" y="88">K 维切 4 段，各段部分和最后相加：(a+b)+(c+d)</text></g>
+    <g class="pred" data-part="splitkv" data-step="1"><rect class="box" x="130" y="114" width="320" height="56" rx="8"/><text class="t-c t-b" x="290" y="134">attention：KV 切成 8 段并行</text><text class="t-c t-xs" x="290" y="154">8 个部分 (m, ℓ, O) 归并</text></g>
+    <path class="edge" d="M114,72 H126" data-step="1"/><path class="edge" d="M69,92 C69,140 110,142 126,142" data-step="1"/>
+    <text class="t-xs" x="24" y="190" data-step="1">浮点：((a+b)+c)+d ≠ (a+b)+(c+d)，差在最后几位</text>
+    <!-- scenario B: batch 64 -->
+    <rect class="panel" x="490" y="10" width="460" height="190" rx="12"/>
+    <text class="t-lg" x="504" y="36">同一请求，batch = 64（服务器忙）</text>
+    <g data-part="req2" data-step="2"><rect class="box data" x="504" y="52" width="90" height="40" rx="8"/><text class="t-c t-b" x="549" y="72">请求 X + 63</text></g>
+    <g class="pred" data-part="nosplit" data-step="2"><rect class="box" x="610" y="48" width="320" height="56" rx="8"/><text class="t-c t-b" x="770" y="68">matmul：行够多 → 不 split-K，换 tile</text><text class="t-c t-xs" x="770" y="88">K 维顺序累加：((a+b)+c)+d</text></g>
+    <g class="pred" data-part="nosplitkv" data-step="2"><rect class="box" x="610" y="114" width="320" height="56" rx="8"/><text class="t-c t-b" x="770" y="134">attention：KV 切 2 段</text><text class="t-c t-xs" x="770" y="154">不同的归并树</text></g>
+    <path class="edge" d="M594,72 H606" data-step="2"/><path class="edge" d="M549,92 C549,140 590,142 606,142" data-step="2"/>
+    <text class="t-xs" x="504" y="190" data-step="2">X 的 logits 与左边差 1e-6 → argmax 偶尔翻转 → 之后全变</text>
+    <!-- fix -->
+    <g class="act" data-part="fix" data-step="3">
+      <rect class="box" x="10" y="230" width="940" height="120" rx="12"/>
+      <text class="t-c t-b" x="480" y="254">批不变内核：每条请求的归约策略只取决于它自己的形状，不取决于 batch</text>
+      <text class="t-c t-xs" x="480" y="278">RMSNorm：一个 batch 元素交给一个核心整行归约，小 batch 时宁可空闲也不拆行</text>
+      <text class="t-c t-xs" x="480" y="296">matmul：禁用 split-K；所有形状用同一套 tile / 指令配置（放弃为小 M 调优）</text>
+      <text class="t-c t-xs" x="480" y="314">attention：先把 KV 写入 cache 再算（布局一致）；split-KV 用“固定段长”而非“固定段数”，段数随长度变但每段的归约边界固定</text>
+      <text class="t-c t-xs" x="480" y="336">代价：Qwen3-8B 1000 条序列 26 s → 55 s（未优化注意力）→ 42 s（优化后）</text>
+    </g>
+    <g data-part="result" data-step="4">
+      <rect class="note-bg" x="10" y="370" width="940" height="46" rx="8"/>
+      <text class="t-sm" x="24" y="388" style="font-weight:650">实验：</text>
+      <text class="t-sm" x="80" y="388">Qwen3-235B，温度 0，同一 prompt 采样 1000 次 —— 默认 vLLM：80 种不同输出（前 102 个 token 相同，之后分叉）；批不变内核：1000 次完全一致</text>
+      <text class="t-xs" x="24" y="408">分叉点：某一步两个候选的 logit 极接近，归约顺序带来的 ulp 级差异翻转了 argmax</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="req"><h4>请求 X 单独跑</h4><p>batch 很小时，矩阵乘的 M 维（token 数）只有几行，按常规 tile 划分只能启动很少的线程块，GPU 大部分 SM 空闲。</p></div>
+    <div data-note="splitk"><h4>split-K</h4><p>为了填满 SM，内核库会沿 K（归约）维把一次矩阵乘拆成多段并行，各段算部分和再合并。合并的顺序 / 树形与段数有关，而段数由“当前 batch 下有多少工作”决定。</p></div>
+    <div data-note="splitkv"><h4>split-KV（FlashDecoding）</h4><p>解码时 query 只有 1 行，注意力内核把 KV 切成多段并行、最后归并 (m, ℓ, O)。段数常按“把 SM 填满”来定，于是取决于同批有多少请求、各有多长。</p></div>
+    <div data-note="req2"><h4>同一请求在大 batch 里</h4><p>还是请求 X，但同批多了 63 条。内核看到的是一个 64 行的矩阵乘和 64 条序列的注意力——于是选了不同的 tile、不再 split-K、KV 切段数不同。</p></div>
+    <div data-note="nosplit"><h4>不同的 tile 配置</h4><p>cuBLAS / CUTLASS 按形状选最快的内核；不同内核的累加顺序不同。数学上相等，浮点上差几个 ulp。</p></div>
+    <div data-note="nosplitkv"><h4>不同的归并树</h4><p>2 段 vs 8 段的归并，累加顺序不同。</p></div>
+    <div data-note="fix"><h4>批不变内核</h4><p>三类算子的修复都遵循同一原则：<b>归约的切法只能依赖这条请求自己的维度</b>。RMSNorm 不拆行；matmul 固定一套配置并禁用 split-K（代价是小 batch 时性能下降，但 N 通常很大所以仍可接受）；注意力把“段数固定”改成“段长固定”——序列更长就多几段，但每段的边界与 batch 无关，归并顺序也就固定了。</p></div>
+    <div data-note="result"><h4>结果</h4><p>1000 次采样从 80 种输出变成 1 种。性能损失不到 2×，且作者认为还有优化空间。</p></div>
+    <div data-step-note="1"><h4>① 小 batch 的归约路径</h4><p>split-K、多段 KV：为填满 GPU 而拆分归约。</p></div>
+    <div data-step-note="2"><h4>② 大 batch 的归约路径</h4><p>同一请求被不同的 tile / 段数处理，浮点结果略有不同。</p></div>
+    <div data-step-note="3"><h4>③ 批不变修复</h4><p>让每条请求的归约策略只依赖自身形状。</p></div>
+    <div data-step-note="4"><h4>④ 验证</h4><p>温度 0 下 1000 次采样完全一致。</p></div>
+  </div>
+  <figcaption>图 1　同一请求在不同 batch 下的归约路径，以及批不变内核的修法。依据 Thinking Machines 博客（2025-09）。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 从推理确定性到 RL 的训推一致</h2>
+<h3 id="c-rl">3.1 为什么 RL 在乎这个</h3>
+<p>LLM 的 RL（GRPO / PPO 类）用推理引擎（vLLM / SGLang）采样，用训练引擎（FSDP / Megatron）算梯度。两边同一套参数，但内核不同、精度不同、batch 不同——同一个 token 的概率 π_sampler(y) 与 π_trainer(y) 不相等。Yao 等（TIS 工作）实测两者差异显著，个别 token 甚至预测相反。于是名义上的 on-policy 训练实际是 off-policy：梯度用的是训练器的概率，样本却来自采样器的分布。Thinking Machines 的实验：不做修正时 reward 在训练中途崩溃。</p>
+<h3 id="c-fixes">3.2 两种解法</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th></th><th>修正法：截断重要性采样（TIS）</th><th>根治法：逐位一致的采样器与训练器</th></tr></thead>
+  <tbody>
+    <tr><td>做法</td><td>在策略梯度里乘 min(π_trainer(y)/π_sampler(y), C)：把隐式的 off-policy 当作 off-policy 来校正，上限 C 截断防止方差爆炸</td><td>推理与训练用同一套批不变内核（同样的归约顺序、精度），使 π_sampler ≡ π_trainer，KL 恒为 0</td></tr>
+    <tr><td>代价</td><td>有界偏差；需要采样器返回 logprob</td><td>内核性能损失；两套引擎要共享内核实现</td></tr>
+    <tr><td>落地</td><td>VeRL、slime、OAT 已集成；NeurIPS 2025 论文《On the Rollout-Training Mismatch in Modern RL Systems》</td><td>Thinking Machines 的 Tinker；vLLM 的批不变模式</td></tr>
+  </tbody>
+</table></div>
+<div class="formula">$$\nabla J \approx \mathbb E_{y\sim\pi_{\text{sampler}}}\Big[\min\Big(\frac{\pi_{\text{trainer}}(y)}{\pi_{\text{sampler}}(y)},\ C\Big)\,\nabla\log\pi_{\text{trainer}}(y)\,A(y)\Big]$$</div>
+<p>相关的工程经验：MiniMax-M1 发现 LM head 的精度差异是训推概率不一致的主要来源之一，把 LM head 改为 FP32 后相关性显著改善；MoE 模型里路由的微小差异会让 token 走到不同专家，是另一大来源。</p>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">4. 伪代码</h2>
+<div class="code-title">batch_invariant_attention_decode.py（固定段长的 split-KV）</div>
+<pre><code class="lang-py">def decode_attention(q, K, V, split_len=256):            # 段长固定，段数随序列长度变
+    L = K.shape[0]
+    parts = []
+    for s in range(0, L, split_len):                      # 边界只依赖 L，不依赖 batch
+        Ks, Vs = K[s:s+split_len], V[s:s+split_len]
+        m = (q @ Ks.T).max(); p = exp(q @ Ks.T - m)
+        parts.append((m, p.sum(), p @ Vs))                # (m, ℓ, O) 局部结果
+    m_all = max(m for m, _, _ in parts)                   # 固定顺序归并
+    l_all = sum(exp(m - m_all) * l for m, l, _ in parts)
+    o_all = sum(exp(m - m_all) * o for m, _, o in parts)
+    return o_all / l_all</code></pre>
+<div class="code-title">tis_loss.py</div>
+<pre><code class="lang-py">def tis_policy_loss(logp_trainer, logp_sampler, advantage, C=2.0):
+    ratio = exp(logp_trainer - logp_sampler).detach()      # 训推概率比，不回传
+    w = minimum(ratio, C)                                  # 单侧截断：只限制上调
+    return -(w * logp_trainer * advantage).mean()</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="questions">5. 简答题</h2>
+<div class="qa">
+  <h3 id="q27"><span class="qid">Q27</span>温度为 0 时，同一个 prompt 为什么仍可能得到不同输出？</h3>
+  <div class="ans">
+    <p class="short">内核<b>缺乏批不变性</b>：同一条请求在不同 batch 大小下被分到不同的 tile 配置 / split-K 段数 / 注意力 KV 切段数，浮点归约的顺序随之改变，logits 相差几个 ulp；当两个候选 token 的 logit 极接近时 argmax 翻转，后面的生成全部分叉。服务器负载决定 batch，所以用户看到的是“随机”。</p>
+    <ul>
+      <li>不是“并发 + 原子加”：LLM 前向几乎不用原子加，单个内核逐次运行是确定的；是<b>策略随形状变化</b>导致的“确定但依赖他人”。</li>
+      <li>三类元凶：RMSNorm（小 batch 拆行归约）、matmul（split-K 与形状相关的 tile 选择）、attention（split-KV 的段数、prefill 与 decode 走不同路径）。</li>
+      <li>修法：固定归约策略——不拆行、禁 split-K + 单一 tile 配置、固定段长的 split-KV；实验 1000 次采样 80 种 → 1 种，速度损失约 1.6–2×。</li>
+      <li>其他来源（非本文重点）：MoE 路由在 batch 间的微小差异、投机解码的接受判定、多卡时 all-reduce 的顺序。</li>
+    </ul>
+    <p class="cite">依据：Thinking Machines《Defeating Nondeterminism in LLM Inference》（2025-09）。</p>
+  </div>
+  <h3 id="q28"><span class="qid">Q28</span>RL 训练中采样器与训练器的概率不一致从何而来？有哪两类处理办法？</h3>
+  <div class="ans">
+    <p class="short">来自<b>两者之间的差异</b>，而不能归咎于某一边“错了”：两套引擎各自是确定的（或各自在自己的 batch 规律下变化），但内核实现、精度（FP8/BF16 的矩阵乘、LM head 精度）、归约顺序、MoE 路由都不同，于是 π_sampler ≠ π_trainer。影响在<b>训练</b>端显现——梯度按训练器概率算、样本按采样器分布来，RL 变成隐式 off-policy，可能崩溃。</p>
+    <ul>
+      <li>若一定要说“谁的责任更大”：推理引擎为吞吐做了更激进的优化（FP8 KV、投机解码、与 batch 相关的内核选择、更低精度的 LM head），通常是偏离“参考数值”更多的一方；但训练器用的 FSDP / Megatron 内核也并不是“真值”。</li>
+      <li>两种对策：① 把差异当 off-policy 校正——TIS 的截断重要性权重（VeRL 等已集成）；② 消除差异——采样器与训练器共用批不变内核，Thinking Machines 实现了采样与训练逐位一致，KL 恒为 0。</li>
+      <li>排查顺序：先对齐 LM head 与 logprob 计算精度（MiniMax-M1 的经验），再对齐 MoE 路由，再看注意力 / matmul 内核。</li>
+    </ul>
+    <p class="cite">依据：Thinking Machines 博客的 RL 实验；Yao et al.《Your Efficient RL Framework Secretly Brings You Off-Policy RL Training》/ NeurIPS 2025《On the Rollout-Training Mismatch in Modern RL Systems》；MiniMax-M1 技术报告。</p>
+  </div>
+</div>
+
+<div class="callout info next-read">
+  <span class="callout-title">后续节点</span>
+  RL 训练系统本身（verl 的数据流编排、AReaL 的异步训练与解耦 PPO）见 <a href="18-rl-systems.html">RL 训练系统</a>。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>He et al. (Thinking Machines Lab). <i>Defeating Nondeterminism in LLM Inference.</i> 2025-09. <a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/">链接</a></li>
+  <li>Yao et al. <i>Your Efficient RL Framework Secretly Brings You Off-Policy RL Training.</i> 2025-08（博客）；<i>On the Rollout-Training Mismatch in Modern RL Systems.</i> NeurIPS 2025.</li>
+  <li>MiniMax. <i>MiniMax-M1 Technical Report.</i> 2025.（FP32 LM head）</li>
+  <li>vLLM：batch-invariant 模式文档。</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

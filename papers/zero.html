@@ -1,0 +1,985 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeRO 精读</title>
+<meta name="description" content="ZeRO（SC 2020）逐节精读：混合精度 Adam 训练每个参数为什么要 16 字节，数据并行为什么把它们复制 N 份，ZeRO-DP 三个阶段各省多少显存、多花多少通信，ZeRO-R 怎么处理激活和碎片，100B 模型与超线性加速的实验，以及 DeepSpeed、ZeRO-Offload / Infinity、PyTorch FSDP 等后续。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/collectives.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="zero-fsdp">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · SC 2020</div>
+  <h1>ZeRO：为训练万亿参数模型而做的显存优化</h1>
+  <p class="en-title">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</p>
+  <div class="paper-authors">Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He</div>
+  <div class="paper-affil">四位作者均来自 Microsoft（论文只以 @microsoft.com 邮箱署名，没有单位上标；SC20 会议页写作 Microsoft Corporation）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">arXiv 1910.02054 ↗</a>
+    <a class="pill" href="https://doi.org/10.1109/SC41405.2020.00024" target="_blank" rel="noopener">SC 2020 ↗</a>
+    <a class="pill" href="https://github.com/deepspeedai/DeepSpeed" target="_blank" rel="noopener">Code: deepspeedai/DeepSpeed ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/16-zero-fsdp.html">结构拆解：显存账本与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>43.2k</b><span>GitHub star（deepspeedai/DeepSpeed，截至 2026-10-19）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-19 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文在 arXiv 上采用默认的非独占分发许可，不允许转载原图，所以本页的图都是本站自己画的示意图，或者根据论文给出的数字重画的简图，旁边附有原图链接。标“推算”的数字是本站根据论文数据算出来的，标“读图”的数字是从原图上估读的近似值，都不是论文原话。本页依据 arXiv 第 3 版（2020-05-13）。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>2019 年前后，语言模型的参数量从 BERT-large 的 3 亿涨到 T5 的 110 亿，大家普遍相信模型继续变大还会继续变好。可是训练一个模型时，显存里要放的远不止参数本身。当时最常见的训练方式是“混合精度 + Adam 优化器”，在这种方式下，<b>每个参数平均要占 16 字节</b>：参数和梯度各有一份 16 位的副本，优化器还要维护三份 32 位的数据。一个 15 亿参数的 GPT-2，参数本身只有 3 GB，训练时光这些“模型状态”就要 24 GB，再加上中间结果（激活），一张 32 GB 的 V100 就装不下了。</p>
+<p>当时把训练扩展到多张 GPU，主要有两条路，各有一个硬伤。<b>数据并行</b>让每张卡都放一份完整的模型、各算一部分数据，计算效率高、用起来简单，但多加卡并不省显存：64 张卡上就是 64 份一模一样的模型状态。<b>模型并行</b>把每一层切开分到几张卡上，省了显存，可每算一层都要通信，一旦跨出一台机器就慢得没法用。</p>
+<p>ZeRO（Zero Redundancy Optimizer，直译“零冗余优化器”）的想法是两头的好处都要：计算方式保持数据并行，但模型状态不再每张卡存一整份，而是<b>切成 N 份、每张卡只存一份</b>，用到别人那份时再通过通信临时拿过来。按切分的对象分三个阶段：先切优化器状态，再切梯度，最后切参数。作者证明，前两个阶段的通信量和普通数据并行完全一样，第三个阶段只多 50%。另一部分叫 ZeRO-R，处理激活、临时缓冲区和显存碎片这些“剩余”的显存开销。</p>
+<p>论文实际实现了前两个阶段加 ZeRO-R（称为 ZeRO-100B），配合机器内部的模型并行，在 400 张 V100 上训练了 1000 亿参数的模型，平均每秒完成 15 千万亿次浮点运算（15 PFLOPS）。和只用 Megatron-LM 模型并行相比，能高效训练的模型大了 8 倍，速度快了 10 倍。不用模型并行时，单靠 ZeRO 就能训练 130 亿参数的模型，而 PyTorch 自带的数据并行在 14 亿参数时就显存不足。这套实现后来成了 DeepSpeed 的核心，“ZeRO-1 / 2 / 3”也成了大模型训练的通用说法；PyTorch 官方的 FSDP 就是受 ZeRO 第三阶段启发的原生实现。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>混合精度 + Adam 训练时，每个参数为什么要 16 字节？7.5B 参数的模型为什么需要 120 GB？</li>
+  <li>数据并行为什么加卡不省显存？模型并行为什么一跨机器就变慢？</li>
+  <li>all-reduce 为什么可以拆成 reduce-scatter 加 all-gather？ZeRO 怎样利用这一点，“不花额外通信”就切掉优化器状态和梯度？</li>
+  <li>第三阶段连参数都切了，为什么通信只多 50%？</li>
+  <li>激活、临时缓冲区、碎片这些剩余的显存开销，ZeRO-R 分别怎么处理？</li>
+  <li>“超线性加速”是怎么来的？它说明了什么，又不说明什么？</li>
+  <li>论文的实验到底实现了哪几个阶段？哪些结论是分析出来的，哪些是实测的？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#Sx1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：数据并行和模型并行为什么都不够用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>模型越大越准，但几十亿参数的模型连一张卡的显存都放不下，简单地多加几张卡也不解决问题。当时已经有数据并行、模型并行、流水线并行、把数据挪到 CPU 内存等办法，它们各自卡在哪里？ZeRO 打算怎么做、做到了什么程度？这一节是全文的提要，后面所有的概念几乎都在这里第一次出现，所以先把一次训练做了什么、几种并行方式分别怎么切，讲清楚。</div>
+
+<div class="note-pre"><b>先补一点背景：一次训练迭代做了哪几件事，显存里要放什么。</b>
+<p>训练神经网络是一轮一轮地重复同一个过程，每一轮叫一次迭代，处理一批样本（一个 batch）。每次迭代分三步：</p>
+<ul>
+  <li><b>前向</b>：把这批样本输进模型，从第一层算到最后一层，得到损失（衡量预测有多差的一个数）。每一层的输出叫<b>激活</b>，它们要留着，因为下一步要用。</li>
+  <li><b>反向</b>：从损失出发，一层一层往回算，得到损失对每个参数的导数，也就是<b>梯度</b>。梯度告诉我们“把这个参数往哪个方向改一点，损失会下降”。算某一层的梯度时要用到这一层前向时的激活。</li>
+  <li><b>更新</b>：<b>优化器</b>根据梯度修改参数。最简单的 SGD 直接用“参数减去学习率乘梯度”；Adam 这类优化器还要为每个参数额外记住一些历史统计量（第 3 节详细讲）。</li>
+</ul>
+<p>所以训练时显存里要同时放：参数、梯度、优化器的统计量，论文把这三样合称<b>模型状态</b>；此外还有激活、临时缓冲区等，论文合称<b>剩余状态</b>。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：数据并行。</b>
+<p>假设有 N 张 GPU。数据并行（data parallelism，DP）的做法是：每张卡上都放一份<b>完整</b>的模型；每次迭代把一批样本平均分成 N 份，每张卡用自己那份样本做前向和反向，得到“在自己那份数据上的梯度”。各张卡看到的数据不同，算出的梯度也不同，所以反向结束后要做一次通信，把 N 份梯度加起来求平均，再发回每张卡（这个通信操作叫 all-reduce，第 5 节详细讲）。之后每张卡用同一个平均梯度做一模一样的参数更新，于是下一次迭代开始时，N 份模型仍然完全相同。</p>
+<p>数据并行的优点有三个：每张卡算的都是完整的层，矩阵很大，GPU 效率高；每次迭代只在最后通信一次梯度，而且可以和反向计算同时进行；几乎不用改模型代码。它的缺点只有一个，但很致命：<b>每张卡都存了一整份模型状态</b>。多加卡只会让每张卡分到的数据变少，每张卡的显存负担一点不减。论文说，在 32 GB 的 GPU 上，参数超过 14 亿的模型用数据并行就会显存不足。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：模型并行与流水线并行。</b>
+<p><b>模型并行</b>（model parallelism，MP，本文专指 Megatron-LM 那种层内切分，今天多叫“张量并行”）把每一层的权重矩阵按列或按行切开，分给几张卡，每张卡只算这一层的一部分，算完之后用通信把各部分结果拼起来，才能进入下一层。Megatron-LM 的 Transformer 层在前向时每层要做 2 次 all-reduce。这样每张卡只存 \(1/N_m\) 的模型状态（\(N_m\) 是模型并行的卡数），显存省下来了，但有两个代价：一是每张卡上的矩阵变窄了，计算“粒度”变细，GPU 效率下降；二是每一层都要通信，通信既频繁、量又大。在一台机器内部，GPU 之间有 NVSwitch 高速互联（论文给出的数字是每条链路 300 GB/s），还撑得住；跨机器就只能走 InfiniBand（每条链路 12.5 GB/s），带宽差了 24 倍（推算），速度一落千丈。论文实测：用 Megatron-LM 把一个 400 亿参数的模型切到两台 DGX-2 上，每张 V100 只有约 5 TFLOPS，不到硬件峰值的 5%。</p>
+<p><b>流水线并行</b>（pipeline parallelism，PP）按层切：第 1–10 层放在卡 1，第 11–20 层放在卡 2，依此类推，数据像流水线一样从前往后流过。为了不让后面的卡一直干等，要把一批数据切成很多“微批”（micro-batch）依次送进去。第 2 节会讲它的代价。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：同样 4 张卡、一个 4 层的模型，三种切法下每张卡持有什么</div>
+  <div class="dia-flow"><b style="width:86px">数据并行</b><span class="dia-box enc">GPU 0<small>第 1–4 层全部<br>全部模型状态<br>1/4 的样本</small></span><span class="dia-box enc">GPU 1<small>第 1–4 层全部<br>全部模型状态<br>1/4 的样本</small></span><span class="dia-box enc">GPU 2<small>同上</small></span><span class="dia-box enc">GPU 3<small>同上</small></span></div>
+  <div class="dia-flow"><b style="width:86px">模型并行</b><span class="dia-box tgt">GPU 0<small>每一层的第 1/4 列<br>1/4 模型状态<br>全部样本</small></span><span class="dia-box tgt">GPU 1<small>每一层的第 2/4 列</small></span><span class="dia-box tgt">GPU 2<small>每一层的第 3/4 列</small></span><span class="dia-box tgt">GPU 3<small>每一层的第 4/4 列</small></span><span class="dia-arrow">每层都要 all-reduce</span></div>
+  <div class="dia-flow"><b style="width:86px">流水线并行</b><span class="dia-box act">GPU 0<small>第 1 层</small></span><span class="dia-arrow">→</span><span class="dia-box act">GPU 1<small>第 2 层</small></span><span class="dia-arrow">→</span><span class="dia-box act">GPU 2<small>第 3 层</small></span><span class="dia-arrow">→</span><span class="dia-box act">GPU 3<small>第 4 层</small></span><span class="dia-arrow">微批依次流过</span></div>
+  <div class="dia-note">怎么看：数据并行切的是<b>数据</b>，模型状态被复制了 4 份；模型并行和流水线并行切的是<b>模型</b>，模型状态只有 1 份，但前者每层都要通信，后者要靠微批填满流水线。ZeRO 想要的是第一行的计算方式，加上后两行的显存占用。本站示意图。</div>
+</div>
+
+<p>论文先把训练时的显存分成两类，再分别处理。第一类是<b>模型状态</b>：优化器状态（比如 Adam 的动量和方差）、梯度和参数。对大模型来说，这是显存的大头。第二类是<b>剩余状态</b>：激活、临时缓冲区，以及因为碎片化而用不上的显存。针对这两类，ZeRO 分成 ZeRO-DP 和 ZeRO-R 两部分。</p>
+
+<h4 id="n-1-1">1.1 ZeRO-DP：保留数据并行的算法，去掉它的冗余</h4>
+<p>作者对比了数据并行和模型并行：数据并行计算和通信效率好，显存效率差；模型并行反过来。而且两者有一个共同点：<b>在整个训练过程中，所有模型状态一直待在显存里</b>，哪怕某些状态在大部分时间里根本用不到。比如第 5 层的参数，只在前向算到第 5 层、反向算到第 5 层的那两个时刻被用到。</p>
+<p>基于这些观察，ZeRO-DP 的做法是：计算方式完全照搬数据并行（每张卡都完整地算前向和反向），但模型状态<b>切分</b>（partition）而不是<b>复制</b>（replicate）；某张卡需要别的卡上的那部分时，按一个精心安排的时间表通过通信拿过来。它有三个可以逐级叠加的阶段：</p>
+<ol>
+  <li><b>切优化器状态</b>（记作 P<sub>os</sub>，后来 DeepSpeed 称为 ZeRO stage 1）：显存降到约 1/4，通信量与数据并行相同；</li>
+  <li><b>再切梯度</b>（P<sub>os+g</sub>，stage 2）：显存降到约 1/8，通信量仍与数据并行相同；</li>
+  <li><b>再切参数</b>（P<sub>os+g+p</sub>，stage 3）：显存与卡数成反比下降，比如 64 张卡就降到 1/64，通信量增加 50%。</li>
+</ol>
+<p>三个阶段全开以后，整个集群的显存就像拼成了一块大显存。论文算了一笔账：用 Adam 做 16 位混合精度训练，一个万亿参数的模型需要约 16 TB 来存模型状态；平分到 1024 张卡上，每张约 16 GB（精确值是 15.6 GB，推算），放进 32 GB 的 GPU 绰绰有余。</p>
+
+<h4 id="n-1-2">1.2 ZeRO-R：剩下的显存开销</h4>
+<p>模型状态的冗余去掉以后，激活、临时缓冲区和碎片就成了新的瓶颈。ZeRO-R 分别对付这三样：对激活，先用常规的“激活检查点”（第 3 节解释），再把模型并行时被重复保存的检查点切分开，必要时挪到 CPU 内存；对临时缓冲区，把大小固定下来，不随模型变大；对碎片，根据张量“活多久”主动安排它们放在哪里。</p>
+
+<h4 id="n-1-3">1.3 有了 ZeRO，还要模型并行吗</h4>
+<p>作者的回答是：如果只是为了把模型塞进显存，ZeRO-DP 至少和模型并行一样有效（模型并行有时还没法把模型切得均匀），扩展效率也相当或更好，而且数据并行几乎不用改模型代码；模型并行则需要模型开发者改写模型，Megatron-LM 也只支持有限的几种算子和模型。但在两种情况下仍然值得用模型并行：一是超大模型的激活太大，模型并行配合 ZeRO-R 能把激活也分摊掉；二是模型不大时，全用数据并行会让总批量（每张卡的批量 × 卡数）太大，可能拖慢收敛（论文脚注提到，对给定的模型和数据存在一个“临界批大小”，超过它再增大批量反而收敛更慢），这时用一部分卡做模型并行，可以减少数据并行的份数。两者也可以叠加：数据并行 \(N_d\) 份、模型并行 \(N_m\) 路，每张卡的模型状态理论上最多降到 \(1/(N_d\times N_m)\)。比如每台 DGX-2 机器内部 16 路模型并行，机器之间 64 路数据并行，共 1024 张卡，就能放下万亿参数的模型。</p>
+
+<h4 id="n-1-4">1.4 实现了什么，结果如何</h4>
+<p>论文没有实现全部设计。作者指出，即使能在 1000 张 V100 上放下万亿参数的模型，算力也不够，训练要一年以上（第 9 节有账）。所以实现的目标定在“比当时最大的模型大 10 倍”，即约 1000 亿参数。为此只实现了 P<sub>os+g</sub> 加 ZeRO-R，称为 <b>ZeRO-100B</b>。主要结果（第 10 节逐一展开）：</p>
+<ul>
+  <li><b>模型规模</b>：配合模型并行，能高效训练 1700 亿参数的模型；只用 Megatron-LM 超过 400 亿参数就扩展不动了。论文称这是 8 倍以上的提升。</li>
+  <li><b>速度</b>：在 400 张 V100 上训练 1000 亿参数模型，每卡超过 38 TFLOPS，总计超过 15 PFLOPS，同样规模下比当时最好的系统快 10 倍以上。</li>
+  <li><b>扩展性</b>：在 64 到 400 张卡的范围内观察到<b>超线性加速</b>，卡数翻倍、性能超过翻倍。</li>
+  <li><b>易用性</b>：不用模型并行和流水线并行就能训练 130 亿参数的模型（比当时最大的 T5-11B 还大），而 PyTorch 的分布式数据并行在 14 亿参数时就显存不足。</li>
+  <li><b>新模型</b>：微软用它训练了 170 亿参数的 Turing-NLG，当时最大的语言模型。</li>
+</ul>
+<p>代码作为 DeepSpeed 库的一部分开源，作者计划在 2020 年 5 月底前放出全部实现，并加入第三阶段（切参数），以支持万亿参数。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>论文里的 “MP” 专指 Megatron 式的层内切分（今天的张量并行），不包括流水线并行，后者论文单独叫 PP。</li>
+  <li>“万亿参数”和第三阶段 P<sub>os+g+p</sub> 在这篇论文里都是<b>分析结论</b>，实验里没有实现。所有实测数字都来自 ZeRO-100B，即前两个阶段加 ZeRO-R，而且大模型实验都同时开了机器内部的模型并行。</li>
+  <li>“8 倍”“10 倍”比的是 Megatron-LM 单独使用的情况，比较时两边的批量大小相差很大，第 10 节会具体说。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron-LM 拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：其他省显存的办法和 ZeRO 是什么关系</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>除了数据并行和模型并行，流水线并行、激活压缩、CPU 卸载、省内存的优化器也都能降低显存。ZeRO 和它们是互相替代，还是可以叠加使用？作者为什么认为 ZeRO 比流水线并行更好？</div>
+<p><b>流水线并行。</b>按层切分以后，每张卡只存一部分层的参数和激活，显存确实省了。但流水线有一个固有问题：第一个微批进入第一张卡时，后面的卡都在空等；最后一个微批离开时，前面的卡又都空了。这些空闲时间叫<b>流水线气泡</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：4 级流水线、4 个微批，只看前向（每格是一个时间片）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th></tr>
+    <tr><td class="lbl">GPU 0（第 1 段）</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="q"></td><td class="q"></td><td class="q"></td></tr>
+    <tr><td class="lbl">GPU 1（第 2 段）</td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="q"></td><td class="q"></td></tr>
+    <tr><td class="lbl">GPU 2（第 3 段）</td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="q"></td></tr>
+    <tr><td class="lbl">GPU 3（第 4 段）</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">怎么看：蓝格是在计算某个微批，斜纹格是空闲（气泡）。7 个时间片里每张卡只忙了 4 个。微批数越多，气泡占的比例越小，所以流水线需要大批量。本站示意图。</div>
+</div>
+<p>要让气泡变小，就得送进更多的微批，也就是让总批量随流水线级数成比例地变大。GPipe 就是这样做的，它同时切分了参数和激活，但大批量会影响收敛，存大量微批的激活也要显存。PipeDream 换了个思路：保留几份旧版本的参数来填满流水线，不必增大批量，可这样一来显存效率变差，而且它的训练过程和标准训练并不等价，会影响收敛。此外，按层切分让“权重共享”（比如输入和输出的词嵌入共用一个矩阵）不好实现，微批又让批归一化（batch normalization）难做。作者认为，ZeRO 能达到与流水线并行相同或更好的显存效率，又没有这些功能、性能和收敛上的限制。</p>
+<p><b>不靠并行的省显存办法</b>有三类，作者认为都和 ZeRO 互补或正交：</p>
+<ul>
+  <li><b>减少激活显存</b>：压缩、激活检查点、活跃度分析等。它们可以和 ZeRO 一起用，ZeRO-R 的激活优化本身就是在激活检查点的基础上做的。</li>
+  <li><b>CPU 卸载</b>：利用 CPU 内存存放模型状态。但 GPU 和 CPU 之间走 PCIe 总线，带宽有限，已有工作中最多一半的训练时间花在 GPU 与 CPU 之间来回搬数据上。ZeRO 不把模型状态放到 CPU，只在极大的模型上把激活检查点卸载到 CPU（第 6、8 节）。</li>
+  <li><b>省内存的优化器</b>：比如只维护更粗粒度的统计量，从而减少优化器状态，但可能影响收敛。ZeRO 不改优化算法，只改变数据存放的位置，所以不影响收敛。</li>
+</ul>
+<p>最后，作者强调 Adam 这类自适应优化器对训练大模型很关键，但它要为每个参数维护一阶和二阶统计量，显存开销大。ZeRO 能把这部分开销降低几个数量级，因此也让更复杂、更费显存但可能收敛更好的优化器变得可行。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>“ZeRO 不影响收敛”的意思是，它和普通数据并行在数学上做的是同一件事：同样的梯度求和、同样的 Adam 更新，只是每张卡只负责其中一部分。这和改变优化器（如用更省内存的近似统计量）有本质区别。不过，ZeRO 让每张卡能放更大的批量，如果真把总批量调大了，那是另一回事，会影响收敛的是批量，不是 ZeRO 本身。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 显存都去哪了</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个 15 亿参数的 GPT-2，16 位的参数只有 3 GB，为什么 32 GB 的 GPU 用 TensorFlow 或 PyTorch 都训练不了它？多出来的显存被谁占了？这一节逐项算账，后面每一个设计都针对这里列出的某一项。</div>
+
+<h4 id="n-3-1">3.1 模型状态：参数、梯度和优化器状态</h4>
+<div class="note-pre"><b>先补一点背景：浮点精度与混合精度训练。</b>
+<p>计算机里的小数常用两种格式：32 位浮点数（fp32，每个数 4 字节）和 16 位浮点数（fp16，每个数 2 字节）。fp16 省一半显存，而且 NVIDIA V100 这类 GPU 上有专门做 16 位矩阵乘法的 Tensor Core，速度比 fp32 快得多。但 fp16 能表示的数很“稀疏”：在 1 附近，相邻两个 fp16 数相差约 0.001（\(2^{-10}\)）。如果一个参数等于 1，而这一步的更新量是 0.00001，那么在 fp16 里做加法，结果还是 1，这次更新就被“吞掉”了。</p>
+<p><b>混合精度训练</b>（Micikevicius 等人 2018 年提出）的解决办法是：前向和反向都用 fp16 的参数和激活，享受 Tensor Core 的速度；同时优化器另外保存一份 fp32 的参数，叫<b>主参数</b>（master weights），每次更新都加在这份 fp32 主参数上，加完再转成 fp16 给下一次迭代用。这样小的更新量能在 fp32 里一点点累积起来，不会丢。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：Adam 优化器要记住什么。</b>
+<p>Adam 为每个参数维护两个统计量。<b>动量</b> \(m\) 是梯度的滑动平均，表示“这个参数最近一直往哪个方向走”；<b>方差</b> \(v\) 是梯度平方的滑动平均，表示“这个参数的梯度通常有多大”。每一步用它们算出更新量（下式省略了偏差修正）：</p>
+<div class="formula">$$m\leftarrow\beta_1 m+(1-\beta_1)\,g,\qquad v\leftarrow\beta_2 v+(1-\beta_2)\,g^2,\qquad \theta\leftarrow\theta-\eta\,\frac{m}{\sqrt{v}+\epsilon}$$</div>
+<p>这里 \(g\) 是梯度，\(\theta\) 是参数，\(\eta\) 是学习率。直观地说，梯度一贯很大的参数会被“压”着走小步，梯度一贯很小的参数会被“放”大步，这让大模型的训练稳定得多。代价是 \(m\) 和 \(v\) 都和参数一样多，而且在混合精度训练里也用 fp32 存。</p>
+</div>
+<p>把上面两件事放在一起，就能算出用 Adam 做混合精度训练时，一个有 \(\Psi\) 个参数的模型需要多少显存来存模型状态：</p>
+<div class="formula">$$\underbrace{2\Psi}_{\text{fp16 参数}}+\underbrace{2\Psi}_{\text{fp16 梯度}}+\underbrace{4\Psi+4\Psi+4\Psi}_{\text{fp32 主参数、动量、方差}\;=\;K\Psi}=16\Psi\ \text{字节}$$</div>
+<p>论文把优化器额外需要的部分记作 \(K\Psi\) 字节，\(K\) 叫“优化器状态的显存倍数”，混合精度 Adam 的 \(K=12\)。注意 fp32 主参数也被算进了优化器状态，因为只有优化器用它。三份 fp32 数据加起来占了 16 字节里的 12 字节，所以<b>优化器状态是模型状态里最大的一块</b>，这也是 ZeRO 第一刀切在这里的原因。</p>
+<div class="dia">
+  <div class="dia-title">示意图：混合精度 + Adam 的一次迭代里，每个参数对应哪几份数据</div>
+  <div class="legend"><span><i class="sw enc"></i>fp16 参数</span><span><i class="sw act"></i>fp16 梯度</span><span><i class="sw tgt"></i>优化器状态（fp32）</span></div>
+  <div class="dia-flow"><span class="dia-box tgt">fp32 主参数<small>4 字节 / 参数</small></span><span class="dia-arrow">→ 转成 16 位 →</span><span class="dia-box enc">fp16 参数<small>2 字节 / 参数</small></span><span class="dia-arrow">→ 前向、反向 →</span><span class="dia-box act">fp16 梯度<small>2 字节 / 参数</small></span></div>
+  <div class="dia-flow"><span class="dia-box act">fp16 梯度</span><span class="dia-arrow">→ 送进 Adam →</span><span class="dia-box tgt">动量 m、方差 v<small>各 4 字节 / 参数</small></span><span class="dia-arrow">→ 算出更新量，加到 →</span><span class="dia-box tgt">fp32 主参数</span><span class="dia-arrow">→ 再转成 16 位，下一次迭代用</span></div>
+  <div class="dia-note">怎么看：第一行是前向和反向，只用到 16 位的数据；第二行是更新，只用到 32 位的数据。紫色的三份合计 12 字节 / 参数，就是 \(K=12\)。本站示意图。</div>
+</div>
+<p><b>算两个例子。</b>15 亿参数的 GPT-2：16 位参数 \(2\times1.5=3\) GB，模型状态却是 \(16\times1.5=24\) GB，后者是前者的 8 倍。论文图 1 用的 75 亿参数模型：</p>
+<div class="dia">
+  <div class="dia-title">示意图：75 亿参数的模型，模型状态共 120 GB（条长与字节数成比例）</div>
+  <div class="dia-row"><span class="lbl">模型状态 16Ψ</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">fp16 参数 15</span><span class="dia-seg cmp" style="flex:15">fp16 梯度 15</span><span class="dia-seg w" style="flex:30">fp32 主参数 30</span><span class="dia-seg w" style="flex:30">动量 30</span><span class="dia-seg w" style="flex:30">方差 30</span></div></div>
+  <div class="dia-row"><span class="lbl">一张 V100</span><div class="dia-track"><span class="dia-seg oth" style="flex:32">32 GB</span><span style="flex:88"></span></div></div>
+  <div class="dia-out">单位 GB。120 GB 是一张 32 GB 显卡的近 4 倍，还没算激活。数据并行时，每张卡都要放下这完整的 120 GB。</div>
+  <div class="dia-note">推算：2 × 7.5 = 15，4 × 7.5 = 30，合计 16 × 7.5 = 120 GB，与原文图 1 的 120 GB 一致。本站示意图，对应 <a href="https://arxiv.org/html/1910.02054#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a> 的第一行。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>\(\Psi\) 是参数的<b>个数</b>，不是字节数。“16Ψ 字节”里的 16 是每个参数平均占的字节数。论文把 1B 参数乘 1 字节记作 1 GB（按 \(10^9\) 计）。</li>
+  <li>\(K=12\)、16 字节都只对“fp16 + fp32 主参数 + Adam”这套组合成立。换一种组合就要重算：比如 NVIDIA Megatron-LM 的文档列出，bf16 参数、fp32 梯度累加时，不做切分是每参数 18 字节；参数和梯度都是 fp32 时是 16 字节（2026 年查阅的版本）。</li>
+  <li>这本账只算了模型状态，没算激活。激活随批量和序列长度增长，下一小节讲。</li>
+</ul></div>
+
+<h4 id="n-3-2">3.2 剩余状态：激活、临时缓冲区和碎片</h4>
+<p><b>激活。</b>反向计算要用到前向时每一层的中间结果，所以这些激活必须一直留到反向用完。它们的大小和层数、隐藏维度、序列长度、批量都成正比。论文脚注给了一个 GPT-2 类模型的估算式：激活总量约为 \(12\times\text{隐藏维度}\times\text{批量}\times\text{序列长度}\times\text{层数}\) 个数。以 15 亿参数的 GPT-2（48 层、隐藏维度 1600）为例，序列长度 1024、批量 32 时约需 60 GB。</p>
+<div class="formula">$$12\times1600\times32\times1024\times48\approx3.0\times10^{10}\ \text{个数}\ \times\ 2\ \text{字节}\approx 60\ \text{GB}\quad(\text{推算})$$</div>
+<div class="note-pre"><b>先补一点背景：激活检查点（也叫激活重计算）。</b>
+<p>既然激活这么占地方，能不能不存？激活检查点的办法是：前向时只保存少数几个位置的激活（比如每个 Transformer 层的输入），叫做“检查点”，其余的算完就扔；反向算到某一层时，从最近的检查点出发把这一段的前向<b>重新算一遍</b>，临时恢复需要的激活，用完再扔。这是用计算换显存。一次训练迭代里，反向的计算量大约是前向的 2 倍，所以多算一遍前向，总计算量大约多 1/3，这就是论文说的约 33% 重计算开销。</p>
+</div>
+<p>用了激活检查点，上面 GPT-2 的激活从约 60 GB 降到约 8 GB。但对更大的模型，这还不够：论文说一个 1000 亿参数的 GPT 类模型，即使用了检查点，批量 32 时激活仍要约 60 GB。</p>
+<p><b>临时缓冲区。</b>做梯度 all-reduce、计算梯度范数这类操作时，为了提高效率，程序常把所有梯度先拷进一个拉平的大缓冲区，再对整块数据一次性操作，因为一次传大消息比传许多小消息带宽利用率高得多。梯度本身是 fp16，但这个融合缓冲区可能是 fp32 的。模型一大，这块缓冲区就很可观：15 亿参数的模型，一个 fp32 的拉平缓冲区就要 6 GB（\(1.5\times4\)）。</p>
+<p><b>碎片。</b>前面说的都是“真正用掉的”显存。还有一种情况：明明空闲显存的总量够，申请却失败了。原因是申请一块显存必须是<b>连续的</b>一段，如果空闲的地方零零散散，凑不出足够大的一整段，申请就会失败。论文观察到，训练超大模型时碎片很严重，极端情况下还剩 30% 以上的空闲显存就报了显存不足。</p>
+<div class="dia">
+  <div class="dia-title">示意图：15 亿参数的 GPT-2（序列长度 1K、批量 32），各项显存与一张 32 GB V100 相比</div>
+  <div class="dia-row"><span class="lbl">模型状态</span><div class="dia-track"><span class="dia-seg kv" style="flex:3"></span><span class="dia-seg cmp" style="flex:3"></span><span class="dia-seg w" style="flex:18">24 GB</span><span style="flex:36"></span></div></div>
+  <div class="dia-row"><span class="lbl">激活（不做检查点）</span><div class="dia-track"><span class="dia-seg res" style="flex:60">约 60 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">激活（做检查点）</span><div class="dia-track"><span class="dia-seg res" style="flex:8">约 8</span><span style="flex:52"></span></div></div>
+  <div class="dia-row"><span class="lbl">fp32 融合缓冲区</span><div class="dia-track"><span class="dia-seg oth" style="flex:6">6</span><span style="flex:54"></span></div></div>
+  <div class="dia-row"><span class="lbl">V100 显存</span><div class="dia-track"><span class="dia-seg frag" style="flex:32">32 GB</span><span style="flex:28"></span></div></div>
+  <div class="dia-out">即使用了检查点，模型状态 24 + 激活约 8 + 缓冲区 6，已经超过 32 GB（推算），还没算碎片。</div>
+  <div class="dia-note">怎么看：每行的条长与 GB 数成比例（满格 = 60 GB）。数字来自原文 §3；模型状态一行里蓝、绿、紫分别是参数 3 GB、梯度 3 GB、优化器状态 18 GB。本站示意图。</div>
+</div>
+<div class="note-warn"><b>一个后面会反复用到的区别：</b>模型状态的大小只取决于参数量，和批量无关；激活的大小却和批量成正比。所以把模型状态省下来，省出的显存就可以用来放更大的批量。第 10 节的“超线性加速”就是从这里来的。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 ZeRO 的出发点：几个关键观察</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在进入细节之前，ZeRO 建立在哪些观察之上？作者特别强调“效率”这个约束：如果不在乎速度，把所有状态都挪到 CPU 内存、或者把模型并行开到很大，也能省显存。ZeRO 要的是既省显存又不慢，这一节说明为什么这有可能。</div>
+<h4 id="n-4-1">4.1 ZeRO-DP 的三个观察</h4>
+<p><b>观察一：数据并行比模型并行扩展得好。</b>原因有两个。第一是<b>计算粒度</b>：模型并行把每层的矩阵切窄，每张卡上的矩阵乘法变小，GPU 越来越难跑满；数据并行每张卡算的是完整的层，矩阵大，效率高。第二是<b>通信量</b>：模型并行每一层都要交换激活，数据并行每次迭代只交换一次梯度。超过一定规模以后，模型并行的单卡效率下降，通信开销又阻碍扩展，跨机器时尤其明显。</p>
+<p><b>观察二：数据并行的显存效率差</b>，因为模型状态在每个进程里都复制了一份；模型并行则把模型状态切开了，显存效率好。</p>
+<p><b>观察三：并不是所有状态都一直被需要。</b>数据并行和模型并行都把全部模型状态在整个训练过程中留在显存里。但以参数为例，某一层的参数只在这一层的前向和反向计算时用到，其余时间只是躺着占地方。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个 4 层模型的一次迭代里，每层参数在什么时候真正被用到</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>F1</th><th>F2</th><th>F3</th><th>F4</th><th>B4</th><th>B3</th><th>B2</th><th>B1</th><th>更新</th></tr>
+    <tr><td class="lbl">第 1 层参数</td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="r"></td><td class="p"></td></tr>
+    <tr><td class="lbl">第 2 层参数</td><td></td><td class="r"></td><td></td><td></td><td></td><td></td><td class="r"></td><td></td><td class="p"></td></tr>
+    <tr><td class="lbl">第 3 层参数</td><td></td><td></td><td class="r"></td><td></td><td></td><td class="r"></td><td></td><td></td><td class="p"></td></tr>
+    <tr><td class="lbl">第 4 层参数</td><td></td><td></td><td></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td class="p"></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">怎么看：横轴是时间，F<i>k</i> 是第 <i>k</i> 层的前向，B<i>k</i> 是第 <i>k</i> 层的反向。蓝格表示这一层的参数此刻必须在显存里；粉格是最后的优化器更新，它只需要参数、梯度和优化器状态，而且每一块可以由不同的卡分别完成。空格的时间里，这一层参数其实可以不在这张卡上。层数越多，空格越多。本站示意图。</div>
+</div>
+<p>基于这三点，ZeRO-DP 保留数据并行的计算方式（观察一），把模型状态切分而不是复制（观察二），再利用模型状态“用的时间很集中”这一特点（观察三），设计一个动态的通信时间表，在需要时把状态取来、用完就放掉。这样，每张卡的显存随数据并行的卡数<b>线性下降</b>，通信量却接近普通数据并行。</p>
+
+<h4 id="n-4-2">4.2 ZeRO-R 的观察</h4>
+<p><b>激活：</b>第一个观察是，模型并行虽然切开了模型状态，却常常要<b>复制</b>激活。比如把一个线性层的参数按列切到两张卡上并行计算，每张卡都需要完整的输入激活才能算出自己那一半输出，于是同一份激活在两张卡上各存了一份。第二个观察是，对 GPT-2 这样或更大的模型，<b>算术强度</b>很高：每次迭代的计算量与要保存的激活检查点数据量之比在 1 万以上，并且随隐藏维度线性增长。这意味着即使带宽很低，搬运检查点的时间也能被大量计算掩盖住。</p>
+<div class="note-pre"><b>先补一点背景：为什么这个比值随隐藏维度增长。</b>
+<p>一个 Transformer 层大约有 \(12h^2\) 个参数（\(h\) 是隐藏维度：注意力的 4 个 \(h\times h\) 矩阵，加上前馈网络的两个 \(h\times4h\) 矩阵）。每个 token 经过一个参数大约要做 2 次浮点运算，所以每层前向约 \(24\,b\,s\,h^2\) 次运算（\(b\) 是批量，\(s\) 是序列长度），前向加反向约 \(72\,b\,s\,h^2\)。而每层的激活检查点只是这一层的输入，\(b\,s\,h\) 个数。两者相除约为 \(72h\)：计算量按 \(h^2\) 长，检查点只按 \(h\) 长。\(h=1600\) 时这个比值约 11.5 万。以上是本站推算，只算了矩阵乘法，量级与论文“1 万以上”一致。</p>
+</div>
+<p>于是 ZeRO-R 把激活检查点也在模型并行的几张卡之间切分，每张卡只存一份，需要时用 all-gather 拼回来；激活显存按模型并行的路数成比例减少。对特别大的模型，甚至可以把切好的检查点挪到 CPU 内存，由于算术强度高，效率仍然不错。</p>
+<p><b>临时缓冲区：</b>用固定大小的缓冲区，不随模型变大而变大，同时保证它足够大，通信效率不受影响。</p>
+<p><b>碎片：</b>碎片来自“短命”和“长命”的显存交错出现。前向时，检查点要一直留到反向（长命），而被丢弃、待会儿重算的激活很快就释放（短命）；反向时，参数梯度要留到更新（长命），而激活的梯度用完即弃（短命）。ZeRO 在运行中把检查点和参数梯度挪进<b>预先分配好的连续缓冲区</b>，从源头上避免碎片；这样不但能用上更多显存，显存分配器找连续空间的时间也省了。</p>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 ZeRO-DP 详解：三个阶段各切什么、省多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>优化器状态、梯度、参数三样东西，具体怎么切到 \(N_d\) 张卡上？切完以后，每张卡怎么拿到它需要的数据，才能保证训练结果和普通数据并行一样？每个阶段每张卡要多少显存？回答这些问题要用到几种集合通信操作，所以先把它们讲清楚。</div>
+
+<div class="note-pre"><b>先补一点背景：集合通信——all-reduce、reduce-scatter 和 all-gather。</b>
+<p>设有 N 张卡，每张卡上都有一个长度为 \(\Psi\) 的向量（比如它算出的梯度）。把向量平均切成 N 块，第 \(j\) 块记作“块 \(j\)”。三种操作的含义是：</p>
+<ul>
+  <li><b>all-reduce</b>：操作结束后，每张卡都拿到所有卡的向量逐元素相加的结果。数据并行同步梯度用的就是它。</li>
+  <li><b>reduce-scatter</b>：操作结束后，第 \(i\) 张卡只拿到块 \(i\) 的总和，其余块它不负责。可以理解为“把求和的结果分散到各张卡上，每张卡保管一块”。</li>
+  <li><b>all-gather</b>：开始时每张卡各有一块（不同的块），操作结束后每张卡都有全部 N 块拼成的完整向量。</li>
+</ul>
+<p>关键的一点是：<b>all-reduce = reduce-scatter + all-gather</b>。先 reduce-scatter，让每张卡得到一块的总和；再 all-gather，把这些块互相发一遍，每张卡就都有了完整的总和。当时最好的实现（比如 NCCL 的环形算法）正是这样两步走的。环形算法里，N 张卡首尾相连成一个环，reduce-scatter 分 \(N-1\) 步，每步每张卡把一块（\(\Psi/N\) 个数）发给下一张卡，并把收到的块加到自己的对应块上；all-gather 也分 \(N-1\) 步，每步原样转发一块。所以每张卡在 reduce-scatter 中发出 \(\frac{N-1}{N}\Psi\approx\Psi\) 个数，在 all-gather 中也发出约 \(\Psi\) 个数，一次 all-reduce 共约 \(2\Psi\)，而且几乎与卡数无关。论文分析通信量时就用这个近似：reduce-scatter 和 all-gather 各算 \(\Psi\)，all-reduce 算 \(2\Psi\)。</p>
+</div>
+<p>下面的演示可以一步一步看这三种操作在 4 张卡上怎么进行。先选 Reduce-Scatter，再选 All-Gather，最后选 All-Reduce（环），对比一下就能看出后者正是前两者连起来。</p>
+<div data-widget="collectives" data-ranks="4"></div>
+
+<p>有了这些工具，ZeRO-DP 的思路就很清楚了：普通数据并行用一次 all-reduce 同步梯度，而 all-reduce 本来就是两步。ZeRO 在这两步<b>之间</b>插入了“每张卡只更新自己负责的那一块参数”，于是第一步之后不需要每张卡都有完整的梯度，第二步传的也不再是梯度，而是更新好的参数。下面的示意图先给出三个阶段的最终效果，接下来逐个解释。</p>
+<div class="dia">
+  <div class="dia-title">示意图：75 亿参数、64 张卡数据并行时，一张卡上的模型状态（条长与 GB 数成比例，满格 = 120 GB）</div>
+  <div class="legend"><span><i class="sw enc"></i>fp16 参数 2Ψ</span><span><i class="sw act"></i>fp16 梯度 2Ψ</span><span><i class="sw tgt"></i>优化器状态 12Ψ</span><span><i class="sw" style="background:var(--surface-2);border-color:var(--border)"></i>省下来的显存</span></div>
+  <div class="dia-row"><span class="lbl">普通数据并行</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">15</span><span class="dia-seg cmp" style="flex:15">15</span><span class="dia-seg w" style="flex:90">90</span></div></div>
+  <div class="dia-out">\(2\Psi+2\Psi+12\Psi\) = 120 GB</div>
+  <div class="dia-row"><span class="lbl">P<sub>os</sub>（ZeRO-1）</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">15</span><span class="dia-seg cmp" style="flex:15">15</span><span class="dia-seg w" style="flex:1.41"></span><span style="flex:88.6"></span></div></div>
+  <div class="dia-out">\(2\Psi+2\Psi+12\Psi/N_d\) = 30 + 1.41 = 31.4 GB</div>
+  <div class="dia-row"><span class="lbl">P<sub>os+g</sub>（ZeRO-2）</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">15</span><span class="dia-seg cmp" style="flex:0.23"></span><span class="dia-seg w" style="flex:1.41"></span><span style="flex:103.4"></span></div></div>
+  <div class="dia-out">\(2\Psi+14\Psi/N_d\) = 15 + 1.64 = 16.6 GB</div>
+  <div class="dia-row"><span class="lbl">P<sub>os+g+p</sub>（ZeRO-3）</span><div class="dia-track"><span class="dia-seg kv" style="flex:0.23"></span><span class="dia-seg cmp" style="flex:0.23"></span><span class="dia-seg w" style="flex:1.41"></span><span style="flex:118.1"></span></div></div>
+  <div class="dia-out">\(16\Psi/N_d\) = 1.9 GB</div>
+  <div class="dia-note">怎么看：每一行是同一张卡在不同阶段下的模型状态。每开一个阶段，就有一种颜色从“整份”缩成“1/64 份”。第一刀切掉了最大的紫色块，所以效果最显著；第二刀切绿色；第三刀切蓝色，之后只剩下 1/64。四个总数（120、31.4、16.6、1.9 GB）都是原文的数字，各段的拆分是本站推算。本站示意图，对应 <a href="https://arxiv.org/html/1910.02054#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</div>
+</div>
+
+<h4 id="n-5-1">5.1 P<sub>os</sub>：切优化器状态</h4>
+<p>把优化器状态（fp32 主参数、动量、方差）平均分成 \(N_d\) 份，第 \(i\) 个数据并行进程只保存、只更新第 \(i\) 份。因为优化器状态和参数是一一对应的，这也意味着第 \(i\) 个进程只负责更新第 \(i\) 份参数。每次迭代结束时，各进程更新完自己那份参数，再做一次 all-gather，于是每个进程又都有了完整的、更新过的 fp16 参数，下一次迭代可以照常完整地做前向和反向。</p>
+<p>每张卡的显存从 \(4\Psi+K\Psi\) 降到 \(4\Psi+K\Psi/N_d\)。以 75 亿参数、64 张卡为例：\(30+90/64\approx31.4\) GB，而普通数据并行要 120 GB。当 \(N_d\) 很大时，第二项趋近于 0，显存从 \(16\Psi\) 降到约 \(4\Psi\)，也就是约 1/4。</p>
+<p>这一步之所以“不花额外通信”，是因为梯度这一侧可以用 reduce-scatter 代替 all-reduce：第 \(i\) 个进程反正只更新第 \(i\) 份参数，只需要第 \(i\) 份梯度的总和。reduce-scatter 加上更新后参数的 all-gather，恰好等于原来一次 all-reduce 的通信量（第 7 节细算）。不过在这一阶段，每张卡仍然保存着完整的 fp16 梯度。</p>
+
+<h4 id="n-5-2">5.2 P<sub>g</sub>：再切梯度</h4>
+<p>既然每个进程只更新自己那份参数，它其实只需要自己那份参数对应的、已经求和过的梯度，别人那份梯度对它没用。所以在反向过程中，每一层的梯度一算出来，就只把它求和到负责这部分参数的那个进程上；求和完成后，其他进程上的这部分梯度就可以释放了。这实际上就是一次 reduce-scatter：不同参数的梯度被求和到不同的进程上。梯度占的显存从 \(2\Psi\) 降到 \(2\Psi/N_d\)。</p>
+<p>实际实现时还用了<b>分桶</b>（bucketization）：把属于同一个分区的梯度攒成一个桶，整桶一起做归约，而不是每算出一个梯度就通信一次。这和 NVIDIA AMP 优化器给 all-reduce 分桶、让通信和反向计算重叠的做法是同一个思路，区别只是在分区边界上做归约（reduce），而不是 all-reduce。</p>
+<p>切掉梯度以后，每张卡的显存降到 \(2\Psi+14\Psi/N_d\approx2\Psi\)：75 亿参数、64 张卡时只要 16.6 GB。当 \(N_d\) 很大时，从 \(16\Psi\) 降到约 \(2\Psi\)，约 1/8。</p>
+<div class="dia">
+  <div class="dia-title">示意图：P<sub>os+g</sub> 下一次迭代的通信流程（4 张卡，向量切成 4 块，块号 0–3）</div>
+  <svg class="dg" viewBox="0 0 960 350" role="img" aria-label="ZeRO-DP 前两个阶段的一步训练：reduce-scatter、只更新自己的一块、all-gather">
+<text class="t-c t-b" x="306.0" y="20">GPU 0</text>
+<text class="t-c t-b" x="486.0" y="20">GPU 1</text>
+<text class="t-c t-b" x="666.0" y="20">GPU 2</text>
+<text class="t-c t-b" x="846.0" y="20">GPU 3</text>
+<text class="t-b" x="8" y="52">① 反向结束</text>
+<text class="t-xs" x="8" y="70">每卡有一整份梯度（各自数据上算的）</text>
+<rect class="tk act" x="230" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="249.0" y="58" style="fill:var(--surface)">0</text>
+<rect class="tk act" x="268" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="287.0" y="58" style="fill:var(--surface)">1</text>
+<rect class="tk act" x="306" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="325.0" y="58" style="fill:var(--surface)">2</text>
+<rect class="tk act" x="344" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="363.0" y="58" style="fill:var(--surface)">3</text>
+<rect class="tk act" x="410" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="429.0" y="58" style="fill:var(--surface)">0</text>
+<rect class="tk act" x="448" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="467.0" y="58" style="fill:var(--surface)">1</text>
+<rect class="tk act" x="486" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="505.0" y="58" style="fill:var(--surface)">2</text>
+<rect class="tk act" x="524" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="543.0" y="58" style="fill:var(--surface)">3</text>
+<rect class="tk act" x="590" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="609.0" y="58" style="fill:var(--surface)">0</text>
+<rect class="tk act" x="628" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="647.0" y="58" style="fill:var(--surface)">1</text>
+<rect class="tk act" x="666" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="685.0" y="58" style="fill:var(--surface)">2</text>
+<rect class="tk act" x="704" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="723.0" y="58" style="fill:var(--surface)">3</text>
+<rect class="tk act" x="770" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="789.0" y="58" style="fill:var(--surface)">0</text>
+<rect class="tk act" x="808" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="827.0" y="58" style="fill:var(--surface)">1</text>
+<rect class="tk act" x="846" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="865.0" y="58" style="fill:var(--surface)">2</text>
+<rect class="tk act" x="884" y="42" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="903.0" y="58" style="fill:var(--surface)">3</text>
+<path class="edge" d="M306,78 L306,116"/>
+<path class="edge" d="M486,78 L486,116"/>
+<path class="edge" d="M666,78 L666,116"/>
+<path class="edge" d="M846,78 L846,116"/>
+<text class="t-b" x="8" y="130">② reduce-scatter</text>
+<text class="t-xs" x="8" y="148">第 i 块梯度的总和只留在 GPU i</text>
+<rect class="tk act" x="230" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="249.0" y="136" style="fill:var(--surface)">0</text>
+<rect class="tk off" x="268" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="287.0" y="136" style="fill:var(--text-3)">1</text>
+<rect class="tk off" x="306" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="325.0" y="136" style="fill:var(--text-3)">2</text>
+<rect class="tk off" x="344" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="363.0" y="136" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="410" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="429.0" y="136" style="fill:var(--text-3)">0</text>
+<rect class="tk act" x="448" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="467.0" y="136" style="fill:var(--surface)">1</text>
+<rect class="tk off" x="486" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="505.0" y="136" style="fill:var(--text-3)">2</text>
+<rect class="tk off" x="524" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="543.0" y="136" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="590" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="609.0" y="136" style="fill:var(--text-3)">0</text>
+<rect class="tk off" x="628" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="647.0" y="136" style="fill:var(--text-3)">1</text>
+<rect class="tk act" x="666" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="685.0" y="136" style="fill:var(--surface)">2</text>
+<rect class="tk off" x="704" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="723.0" y="136" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="770" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="789.0" y="136" style="fill:var(--text-3)">0</text>
+<rect class="tk off" x="808" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="827.0" y="136" style="fill:var(--text-3)">1</text>
+<rect class="tk off" x="846" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="865.0" y="136" style="fill:var(--text-3)">2</text>
+<rect class="tk act" x="884" y="120" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="903.0" y="136" style="fill:var(--surface)">3</text>
+<path class="edge" d="M306,156 L306,194"/>
+<path class="edge" d="M486,156 L486,194"/>
+<path class="edge" d="M666,156 L666,194"/>
+<path class="edge" d="M846,156 L846,194"/>
+<text class="t-b" x="8" y="208">③ 优化器更新</text>
+<text class="t-xs" x="8" y="226">GPU i 只更新第 i 块参数</text>
+<rect class="tk tgt" x="230" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="249.0" y="214" style="fill:var(--surface)">0</text>
+<rect class="tk off" x="268" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="287.0" y="214" style="fill:var(--text-3)">1</text>
+<rect class="tk off" x="306" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="325.0" y="214" style="fill:var(--text-3)">2</text>
+<rect class="tk off" x="344" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="363.0" y="214" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="410" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="429.0" y="214" style="fill:var(--text-3)">0</text>
+<rect class="tk tgt" x="448" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="467.0" y="214" style="fill:var(--surface)">1</text>
+<rect class="tk off" x="486" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="505.0" y="214" style="fill:var(--text-3)">2</text>
+<rect class="tk off" x="524" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="543.0" y="214" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="590" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="609.0" y="214" style="fill:var(--text-3)">0</text>
+<rect class="tk off" x="628" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="647.0" y="214" style="fill:var(--text-3)">1</text>
+<rect class="tk tgt" x="666" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="685.0" y="214" style="fill:var(--surface)">2</text>
+<rect class="tk off" x="704" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="723.0" y="214" style="fill:var(--text-3)">3</text>
+<rect class="tk off" x="770" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="789.0" y="214" style="fill:var(--text-3)">0</text>
+<rect class="tk off" x="808" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="827.0" y="214" style="fill:var(--text-3)">1</text>
+<rect class="tk off" x="846" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="865.0" y="214" style="fill:var(--text-3)">2</text>
+<rect class="tk tgt" x="884" y="198" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="903.0" y="214" style="fill:var(--surface)">3</text>
+<path class="edge" d="M306,234 L306,272"/>
+<path class="edge" d="M486,234 L486,272"/>
+<path class="edge" d="M666,234 L666,272"/>
+<path class="edge" d="M846,234 L846,272"/>
+<text class="t-b" x="8" y="286">④ all-gather</text>
+<text class="t-xs" x="8" y="304">更新后的 fp16 参数发给所有卡</text>
+<rect class="tk enc" x="230" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="249.0" y="292" style="fill:var(--surface)">0</text>
+<rect class="tk enc" x="268" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="287.0" y="292" style="fill:var(--surface)">1</text>
+<rect class="tk enc" x="306" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="325.0" y="292" style="fill:var(--surface)">2</text>
+<rect class="tk enc" x="344" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="363.0" y="292" style="fill:var(--surface)">3</text>
+<rect class="tk enc" x="410" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="429.0" y="292" style="fill:var(--surface)">0</text>
+<rect class="tk enc" x="448" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="467.0" y="292" style="fill:var(--surface)">1</text>
+<rect class="tk enc" x="486" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="505.0" y="292" style="fill:var(--surface)">2</text>
+<rect class="tk enc" x="524" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="543.0" y="292" style="fill:var(--surface)">3</text>
+<rect class="tk enc" x="590" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="609.0" y="292" style="fill:var(--surface)">0</text>
+<rect class="tk enc" x="628" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="647.0" y="292" style="fill:var(--surface)">1</text>
+<rect class="tk enc" x="666" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="685.0" y="292" style="fill:var(--surface)">2</text>
+<rect class="tk enc" x="704" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="723.0" y="292" style="fill:var(--surface)">3</text>
+<rect class="tk enc" x="770" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="789.0" y="292" style="fill:var(--surface)">0</text>
+<rect class="tk enc" x="808" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="827.0" y="292" style="fill:var(--surface)">1</text>
+<rect class="tk enc" x="846" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="865.0" y="292" style="fill:var(--surface)">2</text>
+<rect class="tk enc" x="884" y="276" width="38" height="32" rx="3"/>
+<text class="t-c t-xs" x="903.0" y="292" style="fill:var(--surface)">3</text>
+</svg>
+  <div class="dia-note">怎么看：每一行是流程中的一个时刻，每张卡上的 4 个方格对应参数的 4 个分区。绿色是梯度，紫色表示用 fp32 主参数和 Adam 状态做更新，蓝色是 fp16 参数，灰色是已经释放或不需要的部分。② 到 ③ 是 ZeRO 插进 all-reduce 中间的那一步：GPU <i>i</i> 只拿着第 <i>i</i> 块梯度，只更新第 <i>i</i> 块参数。实际实现中，① 和 ② 是在反向过程中按桶逐层交错进行的，图里为了清楚画成了先后两步。本站示意图。</div>
+</div>
+
+<h4 id="n-5-3">5.3 P<sub>p</sub>：再切参数</h4>
+<p>最后一步，连 fp16 参数也只存自己那一份。前向和反向时，如果要用到不在自己分区里的参数，就从负责它的那个进程那里接收过来（论文的描述是由持有者广播），用完立刻丢掉。乍看之下，每一层都要临时取参数，通信量似乎会大很多；但第 7 节会证明，总通信量只是普通数据并行的 1.5 倍，换来的是显存随 \(N_d\) 成比例下降。</p>
+<p>每张卡的显存从 \(16\Psi\) 降到 \(16\Psi/N_d\)：75 亿参数、64 张卡时只要 1.9 GB。这个结论的意思很深远：<b>只要卡足够多，数据并行就能放下任意大的模型</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：P<sub>os+g+p</sub> 下一次迭代的时间线（4 层模型；每格一个时间片）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th></tr>
+    <tr><td class="lbl">取参数（all-gather）</td><td class="q">1</td><td class="q">2</td><td class="q">3</td><td class="q">4</td><td class="q">4</td><td class="q">3</td><td class="q">2</td><td class="q">1</td><td></td><td></td></tr>
+    <tr><td class="lbl">计算</td><td></td><td class="r" style="color:var(--surface)">F1</td><td class="r" style="color:var(--surface)">F2</td><td class="r" style="color:var(--surface)">F3</td><td class="r" style="color:var(--surface)">F4</td><td class="r" style="color:var(--surface)">B4</td><td class="r" style="color:var(--surface)">B3</td><td class="r" style="color:var(--surface)">B2</td><td class="r" style="color:var(--surface)">B1</td><td></td></tr>
+    <tr><td class="lbl">交梯度（reduce-scatter）</td><td></td><td></td><td></td><td></td><td></td><td></td><td class="p">4</td><td class="p">3</td><td class="p">2</td><td class="p">1</td></tr>
+  </table>
+  </div>
+  <div class="dia-note">怎么看：第一行的数字表示正在从各张卡收集第几层的参数，斜纹表示通信；第二行是计算，F 是前向、B 是反向；第三行是把第几层的梯度归约到负责它的卡上。每一层的参数在前向前取一次、算完就丢，反向前再取一次；梯度算出来就交出去，自己只留 1/N。理想情况下，取第 <i>k</i>+1 层参数和算第 <i>k</i> 层同时进行，通信被计算掩盖。任何时刻，卡上只有一两层是完整的。本站示意图（论文没有给出时间线图，这是按 §5.3 和 §7.2.2 的描述画的）。</div>
+</div>
+
+<h4 id="n-5-4">5.4 对能训练的模型规模意味着什么</h4>
+<p>三个阶段分别把每张卡的模型状态降到原来的约 1/4、1/8 和 \(1/N_d\)。原文表 1 列出了几个模型在不同数据并行度下每张卡需要的模型状态显存（单位 GB），这里照录数字：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th class="num">DP 卡数</th><th class="num">7.5B：P<sub>os</sub></th><th class="num">P<sub>os+g</sub></th><th class="num">P<sub>os+g+p</sub></th><th class="num">128B：P<sub>os</sub></th><th class="num">P<sub>os+g</sub></th><th class="num">P<sub>os+g+p</sub></th><th class="num">1T：P<sub>os</sub></th><th class="num">P<sub>os+g</sub></th><th class="num">P<sub>os+g+p</sub></th></tr></thead>
+  <tbody>
+    <tr><td class="num">1</td><td class="num">120</td><td class="num">120</td><td class="num">120</td><td class="num">2048</td><td class="num">2048</td><td class="num">2048</td><td class="num">16000</td><td class="num">16000</td><td class="num">16000</td></tr>
+    <tr><td class="num">4</td><td class="num">52.5</td><td class="num">41.3</td><td class="num"><b>30</b></td><td class="num">896</td><td class="num">704</td><td class="num">512</td><td class="num">7000</td><td class="num">5500</td><td class="num">4000</td></tr>
+    <tr><td class="num">16</td><td class="num">35.6</td><td class="num"><b>21.6</b></td><td class="num">7.5</td><td class="num">608</td><td class="num">368</td><td class="num">128</td><td class="num">4750</td><td class="num">2875</td><td class="num">1000</td></tr>
+    <tr><td class="num">64</td><td class="num"><b>31.4</b></td><td class="num">16.6</td><td class="num">1.88</td><td class="num">536</td><td class="num">284</td><td class="num"><b>32</b></td><td class="num">4187</td><td class="num">2218</td><td class="num">250</td></tr>
+    <tr><td class="num">256</td><td class="num">30.4</td><td class="num">15.4</td><td class="num">0.47</td><td class="num">518</td><td class="num">263</td><td class="num">8</td><td class="num">4046</td><td class="num">2054</td><td class="num">62.5</td></tr>
+    <tr><td class="num">1024</td><td class="num">30.1</td><td class="num">15.1</td><td class="num">0.12</td><td class="num">513</td><td class="num">257</td><td class="num">2</td><td class="num">4011</td><td class="num">2013</td><td class="num"><b>15.6</b></td></tr>
+  </tbody>
+</table></div>
+<p>表中加粗的格子是原表加粗的位置：每种组合第一次能放进 32 GB V100 时所需的最小卡数。不开 ZeRO 时，无论多少张卡，每张卡都是第一行的数。由此可以读出：64 张卡时，三个阶段能训练的最大模型分别约为 75 亿、140 亿和 1280 亿参数；1024 张卡全开时，可以训练万亿参数的模型。而单靠数据并行，最大只能训练不到 15 亿参数的模型。</p>
+<div class="dia">
+  <div class="dia-title">简图：75 亿参数模型，每张卡的模型状态随数据并行卡数的变化（按论文公式重画）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="7.5B 模型每张卡的模型状态显存随数据并行度变化">
+<line class="grid-ln" x1="80" y1="46.3" x2="860" y2="46.3"/>
+<text class="t-r t-xs" x="72" y="46.3">100</text>
+<line class="grid-ln" x1="80" y1="120.3" x2="860" y2="120.3"/>
+<text class="t-r t-xs" x="72" y="120.3">10</text>
+<line class="grid-ln" x1="80" y1="194.3" x2="860" y2="194.3"/>
+<text class="t-r t-xs" x="72" y="194.3">1</text>
+<line class="grid-ln" x1="80" y1="268.3" x2="860" y2="268.3"/>
+<text class="t-r t-xs" x="72" y="268.3">0.1</text>
+<line class="grid-ln" x1="80.0" y1="24.0" x2="80.0" y2="268.3"/>
+<text class="t-c t-xs" x="80.0" y="282.3">1</text>
+<line class="grid-ln" x1="158.0" y1="24.0" x2="158.0" y2="268.3"/>
+<text class="t-c t-xs" x="158.0" y="282.3">2</text>
+<line class="grid-ln" x1="236.0" y1="24.0" x2="236.0" y2="268.3"/>
+<text class="t-c t-xs" x="236.0" y="282.3">4</text>
+<line class="grid-ln" x1="314.0" y1="24.0" x2="314.0" y2="268.3"/>
+<text class="t-c t-xs" x="314.0" y="282.3">8</text>
+<line class="grid-ln" x1="392.0" y1="24.0" x2="392.0" y2="268.3"/>
+<text class="t-c t-xs" x="392.0" y="282.3">16</text>
+<line class="grid-ln" x1="470.0" y1="24.0" x2="470.0" y2="268.3"/>
+<text class="t-c t-xs" x="470.0" y="282.3">32</text>
+<line class="grid-ln" x1="548.0" y1="24.0" x2="548.0" y2="268.3"/>
+<text class="t-c t-xs" x="548.0" y="282.3">64</text>
+<line class="grid-ln" x1="626.0" y1="24.0" x2="626.0" y2="268.3"/>
+<text class="t-c t-xs" x="626.0" y="282.3">128</text>
+<line class="grid-ln" x1="704.0" y1="24.0" x2="704.0" y2="268.3"/>
+<text class="t-c t-xs" x="704.0" y="282.3">256</text>
+<line class="grid-ln" x1="782.0" y1="24.0" x2="782.0" y2="268.3"/>
+<text class="t-c t-xs" x="782.0" y="282.3">512</text>
+<line class="grid-ln" x1="860.0" y1="24.0" x2="860.0" y2="268.3"/>
+<text class="t-c t-xs" x="860.0" y="282.3">1024</text>
+<line class="axis" x1="80" y1="268.3" x2="860" y2="268.3"/>
+<line class="axis" x1="80" y1="24.0" x2="80" y2="268.3"/>
+<text class="t-c t-sm" x="470" y="302.3">数据并行的卡数（对数坐标）</text>
+<text class="t-c t-sm" x="22" y="146.1" transform="rotate(-90 22 146.1)">每卡模型状态 GB（对数）</text>
+<line x1="80" y1="82.9" x2="860" y2="82.9" style="stroke:var(--c-loss);stroke-width:1.4;stroke-dasharray:6 4"/>
+<text class="t-xs" x="84" y="74.9" style="fill:var(--c-loss)">V100 显存 32 GB</text>
+<polyline points="80.0,40.4 158.0,40.4 236.0,40.4 314.0,40.4 392.0,40.4 470.0,40.4 548.0,40.4 626.0,40.4 704.0,40.4 782.0,40.4 860.0,40.4" style="fill:none;stroke:var(--text-3);stroke-width:2.4;stroke-dasharray:3 3"/>
+<polyline points="80.0,40.4 158.0,55.5 236.0,67.0 314.0,74.7 392.0,79.4 470.0,82.1 548.0,83.5 626.0,84.2 704.0,84.6 782.0,84.8 860.0,84.9" style="fill:none;stroke:var(--c-tgt);stroke-width:2.4"/>
+<circle cx="80.0" cy="40.4" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="158.0" cy="55.5" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="236.0" cy="67.0" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="314.0" cy="74.7" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="392.0" cy="79.4" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="470.0" cy="82.1" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="548.0" cy="83.5" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="626.0" cy="84.2" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="704.0" cy="84.6" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="782.0" cy="84.8" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="860.0" cy="84.9" r="3" style="fill:var(--c-tgt)"/>
+<polyline points="80.0,40.4 158.0,58.9 236.0,74.7 314.0,87.0 392.0,95.6 470.0,100.9 548.0,103.9 626.0,105.5 704.0,106.4 782.0,106.8 860.0,107.0" style="fill:none;stroke:var(--c-pred);stroke-width:2.4"/>
+<circle cx="80.0" cy="40.4" r="3" style="fill:var(--c-pred)"/>
+<circle cx="158.0" cy="58.9" r="3" style="fill:var(--c-pred)"/>
+<circle cx="236.0" cy="74.7" r="3" style="fill:var(--c-pred)"/>
+<circle cx="314.0" cy="87.0" r="3" style="fill:var(--c-pred)"/>
+<circle cx="392.0" cy="95.6" r="3" style="fill:var(--c-pred)"/>
+<circle cx="470.0" cy="100.9" r="3" style="fill:var(--c-pred)"/>
+<circle cx="548.0" cy="103.9" r="3" style="fill:var(--c-pred)"/>
+<circle cx="626.0" cy="105.5" r="3" style="fill:var(--c-pred)"/>
+<circle cx="704.0" cy="106.4" r="3" style="fill:var(--c-pred)"/>
+<circle cx="782.0" cy="106.8" r="3" style="fill:var(--c-pred)"/>
+<circle cx="860.0" cy="107.0" r="3" style="fill:var(--c-pred)"/>
+<polyline points="80.0,40.4 158.0,62.7 236.0,85.0 314.0,107.2 392.0,129.5 470.0,151.8 548.0,174.1 626.0,196.4 704.0,218.6 782.0,240.9 860.0,263.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<circle cx="80.0" cy="40.4" r="3" style="fill:var(--c-enc)"/>
+<circle cx="158.0" cy="62.7" r="3" style="fill:var(--c-enc)"/>
+<circle cx="236.0" cy="85.0" r="3" style="fill:var(--c-enc)"/>
+<circle cx="314.0" cy="107.2" r="3" style="fill:var(--c-enc)"/>
+<circle cx="392.0" cy="129.5" r="3" style="fill:var(--c-enc)"/>
+<circle cx="470.0" cy="151.8" r="3" style="fill:var(--c-enc)"/>
+<circle cx="548.0" cy="174.1" r="3" style="fill:var(--c-enc)"/>
+<circle cx="626.0" cy="196.4" r="3" style="fill:var(--c-enc)"/>
+<circle cx="704.0" cy="218.6" r="3" style="fill:var(--c-enc)"/>
+<circle cx="782.0" cy="240.9" r="3" style="fill:var(--c-enc)"/>
+<circle cx="860.0" cy="263.2" r="3" style="fill:var(--c-enc)"/>
+<text class="t-xs" x="866" y="40.4" style="fill:var(--text-2)">DP 120</text>
+<text class="t-xs" x="866" y="84.9" style="fill:var(--c-tgt)">ZeRO-1 → 30</text>
+<text class="t-xs" x="866" y="107.0" style="fill:var(--c-pred)">ZeRO-2 → 15</text>
+<text class="t-xs" x="866" y="263.2" style="fill:var(--c-enc)">ZeRO-3</text>
+<text class="t-xs" x="553.0" y="94.5" style="fill:var(--c-tgt)">31.4</text>
+<text class="t-xs" x="553.0" y="115.0" style="fill:var(--c-pred)">16.6</text>
+<text class="t-xs" x="553.0" y="185.1" style="fill:var(--c-enc)">1.88</text>
+</svg>
+  <div class="dia-note">怎么看：横轴是卡数（1 到 1024，每格翻一倍），纵轴是每张卡的模型状态（GB，对数坐标），红色虚线是 V100 的 32 GB。灰色虚线是普通数据并行，永远是 120 GB。紫色（ZeRO-1）和橙色（ZeRO-2）一开始下降很快，但很快就“触底”，分别停在 \(4\Psi=30\) 和 \(2\Psi=15\) GB，因为它们没有切 fp16 参数（和梯度）这一块；蓝色（ZeRO-3）在对数坐标上是一条直线，卡数翻倍、显存减半，没有下限。曲线上的点与原文表 1 的 7.5B 一栏一致。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>“1/4”“1/8”是卡数很多时的极限。卡数少时省得少：比如 4 张卡时，P<sub>os</sub> 只把 120 GB 降到 52.5 GB。</li>
+  <li>表 1 只算了模型状态。“能放进 32 GB”指的是模型状态本身不超过 32 GB，实际训练还要给激活、缓冲区留地方，所以真正能训练的模型要小一些。第 9 节的表 2 给出了实测值。</li>
+  <li>前两个阶段有一个下限：每张卡始终保留完整的 fp16 参数（\(2\Psi\)），P<sub>os</sub> 还保留完整的 fp16 梯度。这就是第一、二阶段曲线“触底”的原因，也是第三阶段存在的理由。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/1910.02054#S5.T1" target="_blank" rel="noopener">原文表 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 ZeRO-R 详解：激活、缓冲区和碎片</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>模型状态的冗余去掉以后，激活、临时缓冲区和碎片成了新的瓶颈。ZeRO-R 用三个手段分别对付它们：分区激活检查点（P<sub>a</sub>）、固定大小缓冲区（C<sub>B</sub>）和显存碎片整理（M<sub>D</sub>）。它们各自怎么做、能省多少？</div>
+
+<h4 id="n-6-1">6.1 P<sub>a</sub>：把激活检查点切开存</h4>
+<p>第 4 节说过，模型并行按设计就要复制激活：同一层的几张卡都需要完整的输入激活，于是每张卡上都存着一模一样的一份。ZeRO 的做法是：某一层的前向算完以后，把这一层的输入激活（也就是激活检查点）切成 \(N_m\) 份，模型并行组里的每张卡只留一份，一直留到反向需要它的时候；那时用一次 all-gather 把它拼回完整的一份，用来重算这一层的前向，用完再丢。这样，完整的激活只在马上要用之前、一次一层地短暂存在。这个优化叫 P<sub>a</sub>，它和激活检查点配合使用：只保存切开后的检查点，而不是复制的整份。</p>
+<p>对特别大的模型、显存又特别紧的情况，还可以把这些切好的检查点再搬到 CPU 内存里，激活几乎不占显存，代价是额外的数据搬运（第 8 节分析），这叫 P<sub>a+cpu</sub>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：4 路模型并行时，某一层的激活检查点存在哪里（一格 = 1/4 份检查点）</div>
+  <div class="dia-flow"><b style="width:110px">不切分</b><div class="dia-box">GPU 0<div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span></div></div><div class="dia-box">GPU 1<div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span></div></div><div class="dia-box">GPU 2<div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span></div></div><div class="dia-box">GPU 3<div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span></div></div></div>
+  <div class="dia-flow"><b style="width:110px">P<sub>a</sub>：平时</b><div class="dia-box">GPU 0<div class="cells"><span class="cell a">1</span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div><div class="dia-box">GPU 1<div class="cells"><span class="cell"></span><span class="cell a">2</span><span class="cell"></span><span class="cell"></span></div></div><div class="dia-box">GPU 2<div class="cells"><span class="cell"></span><span class="cell"></span><span class="cell a">3</span><span class="cell"></span></div></div><div class="dia-box">GPU 3<div class="cells"><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell a">4</span></div></div></div>
+  <div class="dia-flow"><b style="width:110px">P<sub>a</sub>：重算这一层前</b><div class="dia-box">每张卡<div class="cells"><span class="cell b">1</span><span class="cell b">2</span><span class="cell b">3</span><span class="cell b">4</span></div></div><span class="dia-arrow">all-gather 临时拼回整份，用完即丢；同一时刻只有一层是完整的</span></div>
+  <div class="dia-flow"><b style="width:110px">P<sub>a+cpu</sub></b><div class="dia-box">GPU 上<div class="cells"><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div><span class="dia-arrow">→</span><div class="dia-box reg">CPU 内存<div class="cells"><span class="cell c">1</span><span class="cell c">2</span><span class="cell c">3</span><span class="cell c">4</span></div></div><span class="dia-arrow">反向时先搬回 GPU，再 all-gather</span></div>
+  <div class="dia-note">怎么看：蓝格是常驻 GPU 的检查点分片，绿格是临时拼起来的完整副本，橙格是放在 CPU 内存里的分片。不切分时 4 张卡共存了 4 整份；P<sub>a</sub> 之后合起来只存 1 整份，每张卡的激活显存降到 1/4。本站示意图。</div>
+</div>
+<p><b>能省多少。</b>P<sub>a</sub> 让激活显存按模型并行的路数成比例下降。论文的例子：训练表 4 中的 1000 亿参数模型（125 层、隐藏维度 8192），批量 32、序列长度 1024、模型并行 16 路。如果每个 Transformer 层保存一个激活检查点，光是检查点每张卡就要约 33 GB；用了 P<sub>a</sub>，降到每张卡约 2 GB（33 ÷ 16 ≈ 2.1，推算）；再把这 2 GB 搬到 CPU，激活显存就几乎为零。</p>
+<div class="note-warn"><b>原文数字有一处对不上（本站核算）：</b>按上面的配置，每层一个检查点共有 \(8192\times32\times1024\times125\approx3.4\times10^{10}\) 个数，用 fp16 存约 67 GB。这与 §3.2 说的“1000 亿参数模型批量 32、用了检查点仍要约 60 GB”相符，却是 §6.1 “约 33 GB”的两倍。33 GB 可能对应批量 16，也可能是按每个数 1 字节算的，原文没有说明。无论哪种，除以 16 这个比例关系不受影响。</div>
+
+<h4 id="n-6-2">6.2 C<sub>B</sub>：固定大小的缓冲区</h4>
+<p>很多操作的效率强烈依赖输入的大小：一次大的 all-reduce 能达到的带宽远高于许多次小的 all-reduce。所以 NVIDIA Apex、Megatron 这类高性能库，会先把所有参数（或梯度）拷进一个融合的大缓冲区，再对它整体操作。问题在于这块缓冲区和模型一样大：一个 30 亿参数的模型，32 位的融合缓冲区就要 12 GB。ZeRO 的办法很简单：模型大到一定程度后，改用一个大小固定、但仍然足够大的融合缓冲区，把数据分几批放进去处理。这样缓冲区的大小不再随模型增长，而因为每批都足够大，通信效率也不受影响。打个比方，搬家时不必准备一个能装下全部家当的大箱子，用几个标准大小的箱子多跑几趟就行，只要每个箱子装得够满，趟数就不会太多。</p>
+
+<h4 id="n-6-3">6.3 M<sub>D</sub>：显存碎片整理</h4>
+<p>训练中的碎片主要来自激活检查点和梯度计算。前向时，只有被选为检查点的激活要留到反向（长命），其余激活算完就丢、反向时再重算（短命），长命和短命的显存块交错着分配，释放短命的块以后就留下一个个小空洞。反向时也一样：参数梯度要留到更新（长命），激活的梯度和计算参数梯度用到的临时缓冲区很快释放（短命）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：长命和短命的显存交错分配，为什么会产生碎片（一格 = 一块显存）</div>
+  <div class="dia-row"><span class="lbl">前向进行中</span><div class="cells"><span class="cell a">检</span><span class="cell c">临</span><span class="cell c">临</span><span class="cell a">检</span><span class="cell c">临</span><span class="cell c">临</span><span class="cell a">检</span><span class="cell c">临</span><span class="cell c">临</span><span class="cell a">检</span></div></div>
+  <div class="dia-row"><span class="lbl">短命的释放后</span><div class="cells"><span class="cell a">检</span><span class="cell"></span><span class="cell"></span><span class="cell a">检</span><span class="cell"></span><span class="cell"></span><span class="cell a">检</span><span class="cell"></span><span class="cell"></span><span class="cell a">检</span></div></div>
+  <div class="dia-out">空闲 6 格，但最长的连续空闲只有 2 格：申请 3 格的连续显存会失败。</div>
+  <div class="dia-row"><span class="lbl">M<sub>D</sub>：检查点拷进预留区</span><div class="cells"><span class="cell a">检</span><span class="cell a">检</span><span class="cell a">检</span><span class="cell a">检</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-out">长命的数据集中在一段预先分配好的连续区域里，剩下的 6 格空闲显存连成一片。</div>
+  <div class="dia-note">怎么看：“检”是激活检查点（长命），“临”是用完就丢的临时激活（短命）。上两行是不做整理时的情况；最后一行是 M<sub>D</sub> 的做法。梯度一侧同理：参数梯度一产生就拷进预留的连续缓冲区。本站示意图。</div>
+</div>
+<p>显存富余时，少量碎片无所谓；但在显存很紧的大模型训练中，碎片会带来两个问题：一是明明总的空闲显存够，却因为凑不出连续的一段而显存不足；二是显存分配器要花大量时间去找一块够大的连续空间，拖慢训练。ZeRO 的做法是在运行中整理：为激活检查点和参数梯度<b>预先分配好连续的大块显存</b>，它们一产生就拷进去。这样既能训练更大的模型、用更大的批量，在显存紧张时也提高了效率。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>P<sub>a</sub> 只在开了模型并行时才有意义，因为它消除的是“模型并行组内部”的激活冗余；只用 ZeRO-DP 而不开模型并行时，每张卡的激活本来就只属于自己那份数据，没有冗余可消。C<sub>B</sub> 和 M<sub>D</sub> 则与是否开模型并行无关。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 通信量分析：切得这么碎，通信会不会变多</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>ZeRO 去掉冗余、放大了能训练的模型，很自然的疑问是：是不是拿通信换了显存？和普通数据并行相比，ZeRO-DP 每次迭代要多传多少数据？论文的答案分两部分：前两个阶段一点不多，第三阶段多 50%。</div>
+<h4 id="n-7-1">7.1 基准：普通数据并行传多少</h4>
+<p>数据并行在反向结束、更新参数之前，要用 all-reduce 把各进程的梯度求平均。对大模型来说，这次 all-reduce 完全受带宽限制（数据量大，固定的启动延迟可以忽略），所以只需要比较每个进程收发的数据总量。第 5 节讲过，all-reduce 由 reduce-scatter 和 all-gather 两步组成，用流水化的环形实现时，每一步每个进程传约 \(\Psi\) 个数，所以普通数据并行每次迭代的通信量是 \(2\Psi\)。</p>
+<h4 id="n-7-2">7.2 P<sub>os+g</sub>：与数据并行完全相同</h4>
+<p>切了梯度以后，每个进程只保存更新自己那份参数所需的梯度，所以梯度这边只需要一次 reduce-scatter，通信量 \(\Psi\)。每个进程更新完自己那份参数以后，再做一次 all-gather 把更新好的参数收集到所有进程上，通信量也是 \(\Psi\)。合计 \(\Psi+\Psi=2\Psi\)，和普通数据并行一模一样。换句话说，ZeRO 并没有多传任何东西，它只是把 all-reduce 的两个半步拆开，在中间插入了“只更新自己那一份”，并且第二个半步传的是参数而不是梯度。</p>
+<h4 id="n-7-3">7.3 P<sub>os+g+p</sub>：多 50%</h4>
+<p>切了参数以后，每个进程只保存自己负责更新的那部分参数，所以前向时要从别的进程那里拿到其余所有分区的参数。这可以流水化地进行，不必一次占用大量显存：在算到模型中属于某个分区的那一部分之前，由持有这个分区的进程把参数广播给所有进程；这部分前向算完，参数就丢掉。每个进程从 \(N_d\) 个持有者那里各收到 \(\Psi/N_d\) 个数，合计 \(\Psi\times N_d/N_d=\Psi\)。也就是说，原本一次性的参数 all-gather 被拆散、摊到了整个前向过程中，总量仍是 \(\Psi\)。不过反向时还要按相反的顺序再来一遍，又是 \(\Psi\)。再加上梯度的 reduce-scatter \(\Psi\)，总共 \(3\Psi\)，是普通数据并行的 1.5 倍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每次迭代每个进程的通信量（单位 Ψ 个数，条长成比例）</div>
+  <div class="dia-row"><span class="lbl">普通数据并行</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">梯度 reduce-scatter Ψ</span><span class="dia-seg cmp" style="flex:1">梯度 all-gather Ψ</span><span style="flex:1"></span></div></div>
+  <div class="dia-out">= 一次 all-reduce，2Ψ</div>
+  <div class="dia-row"><span class="lbl">P<sub>os</sub> / P<sub>os+g</sub></span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">梯度 reduce-scatter Ψ</span><span class="dia-seg kv" style="flex:1">参数 all-gather Ψ</span><span style="flex:1"></span></div></div>
+  <div class="dia-out">2Ψ，与数据并行相同；第二段传的是更新好的参数</div>
+  <div class="dia-row"><span class="lbl">P<sub>os+g+p</sub></span><div class="dia-track"><span class="dia-seg kv" style="flex:1">参数 all-gather（前向）Ψ</span><span class="dia-seg kv" style="flex:1">参数 all-gather（反向）Ψ</span><span class="dia-seg cmp" style="flex:1">梯度 reduce-scatter Ψ</span></div></div>
+  <div class="dia-out">3Ψ，是数据并行的 1.5 倍</div>
+  <div class="dia-note">怎么看：绿色是梯度的通信，蓝色是参数的通信。第三阶段多出来的正好是“反向时再取一次参数”。本站示意图，依据原文 §7。</div>
+</div>
+<p>两类切分利用的是同一个观察：梯度和参数并不是每时每刻都需要，所以可以只在需要的时候、有选择地通信。</p>
+<div class="note-warn"><b>读这一节时要补上的几点（本站补充）：</b>
+<ul>
+  <li>论文的通信量都略去了 \((N-1)/N\) 这个因子，只比较数据量，不考虑延迟。通信量相同不等于通信时间相同：第三阶段的参数 all-gather 是逐层的小消息，而且位于前向和反向的关键路径上（拿不到参数就算不了），必须靠提前取下一层（预取）来和计算重叠；每张卡的批量太小、计算太快时，这部分通信就藏不住。后来的 ZeRO++ 正是针对这个问题。</li>
+  <li>每次迭代的通信量只取决于参数量 \(\Psi\)，与批量无关；而计算量与批量成正比。所以每张卡的批量越大，通信占的比例越小。这一点在第 8、10 节会再出现。</li>
+  <li>只开 P<sub>os</sub> 时，每张卡仍保存完整的 fp16 梯度，但通信同样可以是“梯度 reduce-scatter + 参数 all-gather”。NVIDIA Megatron-LM 的“分布式优化器”就是这样做的，它的文档明确引用了 ZeRO 论文。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 通信量分析：ZeRO-R 的激活切分值不值</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>分区激活检查点（P<sub>a</sub>）每层要多做一次 all-gather，这笔通信开销和模型并行本来的通信相比有多大？在什么情况下，它反而能让整体变快？什么时候值得进一步把检查点搬到 CPU？</div>
+<p>这笔账取决于模型大小、检查点策略和模型并行的方式。作者以 Megatron-LM 的 Transformer 实现为例来算。用了激活检查点以后，每个 Transformer 层在前向时做 2 次 all-reduce，反向前重算前向时又做 2 次，反向本身再做 2 次，每次的消息大小是 \(\text{批量}\times\text{序列长度}\times\text{隐藏维度}\)。一次 all-reduce 的通信量是消息大小的 2 倍，所以每层合计 \(12\times\text{序列长度}\times\text{隐藏维度}\)（论文这里省略了批量这个公共因子）。</p>
+<p>P<sub>a</sub> 在每个检查点被用来重算之前，要多做一次 all-gather。通常每个 Transformer 层只保存它的输入作为检查点，所以每层多一次 all-gather；all-gather 的通信量等于消息大小，即 \(\text{序列长度}\times\text{隐藏维度}\)。两者一比，P<sub>a</sub> 额外的通信不到模型并行原有通信的 10%（\(1/12\approx8.3\%\)，推算）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每个 Transformer 层的模型并行通信量（单位：序列长度 × 隐藏维度，条长成比例）</div>
+  <div class="dia-row"><span class="lbl">Megatron-LM 原有</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">前向 2 次 all-reduce：4</span><span class="dia-seg kv" style="flex:4">重算 2 次：4</span><span class="dia-seg kv" style="flex:4">反向 2 次：4</span><span style="flex:1"></span></div></div>
+  <div class="dia-row"><span class="lbl">加上 P<sub>a</sub></span><div class="dia-track"><span class="dia-seg kv" style="flex:12">原有 12</span><span class="dia-seg res" style="flex:1">+1</span></div></div>
+  <div class="dia-note">怎么看：P<sub>a</sub> 只多了一小段（每层一次 all-gather），约占原来的 1/12。本站示意图，依据原文 §8。</div>
+</div>
+<p><b>为什么它反而可能让整体变快。</b>当模型并行和数据并行一起用时，P<sub>a</sub> 把激活显存按模型并行的路数缩小，省出来的显存可以放成比例增大的批量。对大模型来说，模型并行可以开到 16 路（一台 DGX-2 里的 GPU 数），批量最多能增大到 16 倍。上一节说过，数据并行每次迭代的通信量是固定的，与批量无关，所以每处理一个样本摊到的数据并行通信与批量成反比。批量增大一个数量级，数据并行通信的相对开销就下降一个数量级。用模型并行通信多 10% 的代价，换来数据并行通信相对少一个数量级；当数据并行通信是瓶颈时，这笔交易非常划算。</p>
+<p><b>什么时候还要搬到 CPU。</b>P<sub>a+cpu</sub> 把切好的检查点放到 CPU 内存，激活显存几乎降为零，代价是比 P<sub>a</sub> 多出 2 倍的数据搬运（搬过去、再搬回来）。在极端情况下，即使用了 P<sub>a</sub>，批量还是很小，数据并行通信仍是主要瓶颈；这时只要 CPU 搬运的开销小于数据并行通信的开销（批量小的时候一般成立），P<sub>a+cpu</sub> 就能通过进一步增大批量来提高效率。作者根据模型和硬件的特点，用上面的分析决定是否以及何时开启 P<sub>a</sub> 和 P<sub>a+cpu</sub>。</p>
+<div class="note-warn"><b>这一节的逻辑链条值得记住：</b>省显存 → 每张卡能放更大的批量 → 每个样本分摊的固定通信更少、矩阵更大更高效 → 吞吐提高。ZeRO 的很多性能收益，包括第 10 节的超线性加速，都不是直接来自“通信更少”，而是来自这条链条。反过来，如果批量已经受收敛的限制、不能再增大，这部分收益就拿不到。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 迈向万亿参数：放得下，但算得完吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>当时最大的公开模型在百亿参数量级，万亿参数要大三个数量级。ZeRO 从系统角度解决了其中最基本的一个问题：在现有硬件上放得下、而且能高效扩展。具体能放下多大？实测和理论差多少？放得下之后，算力够不够？</div>
+<p><b>和当时最好的系统比。</b>作者说，Megatron-LM 在一台 DGX-2 内部能以可接受的吞吐训练的最大模型是 160 亿到 200 亿参数；再大就得让模型并行跨出机器，受限于机器间带宽，效率大幅下降。ZeRO 不需要让细粒度的模型并行跨出机器，就能运行大得多的模型：按表 1，三个阶段全开、只用数据并行，1024 张卡就能放下超过 1 万亿参数；或者按表 2，机器内 16 路模型并行、机器间 64 路数据并行，同样 1024 张卡也能放下超过 1 万亿参数。</p>
+<p>原文表 2 把理论上限和实测值放在一起（左边是按模型状态显存算出的理论最大模型，右边是只开 P<sub>os</sub> 时实际跑起来的最大模型）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th class="num">MP 路数</th><th class="num">GPU 数</th><th class="num">理论：基线</th><th class="num">理论：P<sub>os</sub></th><th class="num">理论：P<sub>os+g</sub></th><th class="num">理论：P<sub>os+g+p</sub></th><th class="num">实测：基线</th><th class="num">实测：P<sub>os</sub></th></tr></thead>
+  <tbody>
+    <tr><td class="num">1</td><td class="num">64</td><td class="num">2B</td><td class="num">7.6B</td><td class="num">14.4B</td><td class="num">128B</td><td class="num">1.3B</td><td class="num">6.2B</td></tr>
+    <tr><td class="num">2</td><td class="num">128</td><td class="num">4B</td><td class="num">15.2B</td><td class="num">28.8B</td><td class="num">256B</td><td class="num">2.5B</td><td class="num">12.5B</td></tr>
+    <tr><td class="num">4</td><td class="num">256</td><td class="num">8B</td><td class="num">30.4B</td><td class="num">57.6B</td><td class="num">0.5T</td><td class="num">5B</td><td class="num">25B</td></tr>
+    <tr><td class="num">8</td><td class="num">512</td><td class="num">16B</td><td class="num">60.8B</td><td class="num">115.2B</td><td class="num">1T</td><td class="num">10B</td><td class="num">50B</td></tr>
+    <tr><td class="num">16</td><td class="num">1024</td><td class="num">32B</td><td class="num">121.6B</td><td class="num">230.4B</td><td class="num">2T</td><td class="num">20B</td><td class="num">100B</td></tr>
+  </tbody>
+</table></div>
+<p>怎么读这张表：每一行的数据并行都是 64 份，模型并行路数从 1 加到 16，卡数随之从 64 加到 1024。理论值的算法是“32 GB 除以每个参数在一张卡上占的字节数”：基线是 \(16/N_m\) 字节，所以 1 路时 32 ÷ 16 = 2B；P<sub>os</sub> 是 \((4+12/64)/N_m\) 字节，1 路时约 7.6B；依此类推（推算，与原表一致）。右边两列是实测：只开 P<sub>os</sub> 时，实际能跑的模型是理论值的约 82%（6.2 ÷ 7.6，100 ÷ 121.6），基线约 63–65%（1.3 ÷ 2，20 ÷ 32）。剩下的差距被激活、缓冲区等剩余状态占去了。原文图注说“实测值与理论上限吻合，说明分析给出的上界是现实的”，更准确的说法是两者在同一量级、比例稳定。</p>
+<p><b>算力的差距。</b>放得下不等于训得完。作者拿 BERT-Large 做参照：在 1024 张 GPU 的 DGX-2H 集群上，BERT-Large 能在 67 分钟内训完。一个万亿参数的模型，每个样本的计算量轻松就是 BERT-Large（3.3 亿参数）的 3000 倍。即使假设序列长度和训练样本总数都不变，在同样的硬件、同样的计算效率下也要训练 140 天（67 分钟 × 3000 ≈ 140 天，推算）。实际上模型越大，需要的数据和序列长度往往也越多，训练时间会超过一年。要在合理时间内训练万亿参数模型，需要百亿亿次（exaflop）级别的系统。作者希望到那时，ZeRO 能提供运行这种模型的系统技术。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“1024 张卡放得下万亿参数”只算了模型状态；激活、缓冲区等要另算，表 2 的实测说明实际能跑的规模会打个八折左右。而且这里的“放得下”是第三阶段的理论分析，本文的实验没有实现第三阶段。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a> · <a href="https://arxiv.org/html/1910.02054#S7.T2" target="_blank" rel="noopener">原文表 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 实现与实验：100B 模型、10 倍速度和超线性加速</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者实际实现了什么，在什么硬件上、和谁比？“8 倍模型规模”“10 倍速度”“超线性加速”“不用模型并行训练 13B”这几个结论分别是怎么测出来的？ZeRO-R 的各个组件分别贡献了多少？读这一节时要特别注意实验配置，因为很多结论的成立条件就藏在配置里。</div>
+
+<h4 id="n-10-1">10.1 实现了什么，和谁比</h4>
+<p><b>实现。</b>ZeRO-100B 用 PyTorch 实现，包含 P<sub>os+g</sub> 和 ZeRO-R 的全部优化，<b>不包含</b> P<sub>p</sub>（切参数）。它的接口兼容任何 <code>torch.nn.Module</code>：用户只需把模型包一层，就能像用普通数据并行一样用上 ZeRO，不用改模型本身。它也可以和任何形式的模型并行组合，包括 Megatron-LM。</p>
+<p><b>硬件。</b>400 张 V100（25 台 DGX-2，每台 16 张卡），机器之间的通信带宽为 800 Gbps。</p>
+<p><b>对照组。</b>不用模型并行的实验，以 PyTorch 的分布式数据并行（DDP）为基线；用模型并行的实验，以 Megatron-LM 为基线（NVIDIA 2019 年 9 月的开源版本），作者认为这是当时最好的系统。当时 Megatron-LM 最新的结果是在 32 台 DGX-2（共 512 张 32 GB V100）上扩展到 160 亿参数。ZeRO 一方的实验：不用模型并行时，只用 ZeRO-100B 的数据并行；用模型并行时，ZeRO 数据并行加 Megatron-LM 的模型并行。</p>
+<p><b>模型。</b>都是 GPT-2 类的 Transformer，通过改变隐藏维度和层数得到不同的参数量（原文表 4 与附录表 5–10 给出每个实验的具体配置）。</p>
+<p><b>附录里的一个细节。</b>作者特别说明：总卡数必须是模型并行路数的整数倍，而他们只有 400 张卡，所以基线的有些实验只用了 384 或 256 张卡（基线取能放下模型的、最小的 2 的幂次的模型并行路数）。例如 1700 亿参数时，基线用 256 路模型并行、256 张卡，数据并行只有 1 份，完全没有数据并行通信。作者认为卡数少、通信更顺畅，这对基线反而有利；由于比较的是<b>每卡</b>吞吐而非总吞吐，比较仍然公平。</p>
+
+<h4 id="n-10-2">10.2 速度与模型规模（原文图 2）</h4>
+<p>ZeRO-100B 在 400 张卡上能高效运行 1700 亿参数的模型，比 Megatron-LM 单独能高效运行的大 8 倍以上。对 80 亿到 1000 亿参数的模型，它平均维持了 15 PFLOPS 的总吞吐，超过硬件峰值的 30%。基线的性能随着模型变大迅速下降：模型并行本身通信量大，模型大到一台机器放不下后，模型并行必须跨机器，通信带宽从每条链路 300 GB/s（NVSwitch）掉到 12.5 GB/s（InfiniBand EDR），性能随之大跌。ZeRO-100B 最多比基线快 10 倍，模型越大优势越明显。</p>
+<div class="dia">
+  <div class="dia-title">简图：不同模型规模下的每卡吞吐（TFLOPS，读图近似值）</div>
+  <div class="legend"><span><i class="sw enc"></i>ZeRO-100B（模型并行始终在一台机器内）</span><span><i class="sw pred"></i>Megatron-LM 基线，模型并行在机器内</span><span><i class="sw loss"></i>基线，模型并行跨机器</span></div>
+  <svg class="dg" viewBox="0 0 960 310" role="img" aria-label="不同模型规模下 ZeRO 与 Megatron 基线的每卡吞吐（读图近似值）">
+<line class="grid-ln" x1="70" y1="262.0" x2="930" y2="262.0"/><text class="t-r t-xs" x="64" y="262.0">0</text>
+<line class="grid-ln" x1="70" y1="210.4" x2="930" y2="210.4"/><text class="t-r t-xs" x="64" y="210.4">10</text>
+<line class="grid-ln" x1="70" y1="158.9" x2="930" y2="158.9"/><text class="t-r t-xs" x="64" y="158.9">20</text>
+<line class="grid-ln" x1="70" y1="107.3" x2="930" y2="107.3"/><text class="t-r t-xs" x="64" y="107.3">30</text>
+<line class="grid-ln" x1="70" y1="55.8" x2="930" y2="55.8"/><text class="t-r t-xs" x="64" y="55.8">40</text>
+<line class="axis" x1="70" y1="262" x2="930" y2="262"/>
+<line x1="70" y1="68.7" x2="930" y2="68.7" style="stroke:var(--c-act);stroke-width:1.4;stroke-dasharray:5 4"/>
+<text class="t-xs t-r" x="930" y="35.2" style="fill:var(--c-act)">虚线：每卡 37.5（= 400 卡共 15 PFLOPS）</text>
+<rect x="89.8" y="105.8" width="26" height="156.2" rx="2" style="fill:var(--c-enc)"/>
+<rect x="119.8" y="125.4" width="26" height="136.6" rx="2" style="fill:var(--c-pred)"/>
+<text class="t-c t-xs" x="102.8" y="97.8">30.3</text>
+<text class="t-c t-xs" x="132.8" y="117.4">26.5</text>
+<text class="t-c t-sm" x="117.8" y="276">1.5B</text>
+<text class="t-c t-xs" x="117.8" y="292">×1.1</text>
+<rect x="185.3" y="71.2" width="26" height="190.8" rx="2" style="fill:var(--c-enc)"/>
+<rect x="215.3" y="142.4" width="26" height="119.6" rx="2" style="fill:var(--c-pred)"/>
+<text class="t-c t-xs" x="198.3" y="63.2">37</text>
+<text class="t-c t-xs" x="228.3" y="134.4">23.2</text>
+<text class="t-c t-sm" x="213.3" y="276">8B</text>
+<text class="t-c t-xs" x="213.3" y="292">×1.6</text>
+<rect x="280.9" y="76.4" width="26" height="185.6" rx="2" style="fill:var(--c-enc)"/>
+<rect x="310.9" y="236.2" width="26" height="25.8" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="293.9" y="68.4">36</text>
+<text class="t-c t-xs" x="323.9" y="228.2">5</text>
+<text class="t-c t-sm" x="308.9" y="276">40B</text>
+<text class="t-c t-xs" x="308.9" y="292">×7.2</text>
+<rect x="376.4" y="73.8" width="26" height="188.2" rx="2" style="fill:var(--c-enc)"/>
+<rect x="406.4" y="229.0" width="26" height="33.0" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="389.4" y="65.8">36.5</text>
+<text class="t-c t-xs" x="419.4" y="221.0">6.4</text>
+<text class="t-c t-sm" x="404.4" y="276">60B</text>
+<text class="t-c t-xs" x="404.4" y="292">×5.7</text>
+<rect x="472.0" y="68.2" width="26" height="193.8" rx="2" style="fill:var(--c-enc)"/>
+<rect x="502.0" y="234.7" width="26" height="27.3" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="485.0" y="60.2">37.6</text>
+<text class="t-c t-xs" x="515.0" y="226.7">5.3</text>
+<text class="t-c t-sm" x="500.0" y="276">80B</text>
+<text class="t-c t-xs" x="500.0" y="292">×7.1</text>
+<rect x="567.6" y="62.5" width="26" height="199.5" rx="2" style="fill:var(--c-enc)"/>
+<rect x="597.6" y="241.9" width="26" height="20.1" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="580.6" y="54.5">38.7</text>
+<text class="t-c t-xs" x="610.6" y="233.9">3.9</text>
+<text class="t-c t-sm" x="595.6" y="276">100B</text>
+<text class="t-c t-xs" x="595.6" y="292">×9.9</text>
+<rect x="663.1" y="116.6" width="26" height="145.4" rx="2" style="fill:var(--c-enc)"/>
+<rect x="693.1" y="242.4" width="26" height="19.6" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="676.1" y="108.6">28.2</text>
+<text class="t-c t-xs" x="706.1" y="234.4">3.8</text>
+<text class="t-c t-sm" x="691.1" y="276">120B</text>
+<text class="t-c t-xs" x="691.1" y="292">×7.4</text>
+<rect x="758.7" y="122.8" width="26" height="139.2" rx="2" style="fill:var(--c-enc)"/>
+<rect x="788.7" y="241.9" width="26" height="20.1" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="771.7" y="114.8">27</text>
+<text class="t-c t-xs" x="801.7" y="233.9">3.9</text>
+<text class="t-c t-sm" x="786.7" y="276">140B</text>
+<text class="t-c t-xs" x="786.7" y="292">×6.9</text>
+<rect x="854.2" y="153.7" width="26" height="108.3" rx="2" style="fill:var(--c-enc)"/>
+<rect x="884.2" y="250.1" width="26" height="11.9" rx="2" style="fill:var(--c-loss)"/>
+<text class="t-c t-xs" x="867.2" y="145.7">21</text>
+<text class="t-c t-xs" x="897.2" y="242.1">2.3</text>
+<text class="t-c t-sm" x="882.2" y="276">170B</text>
+<text class="t-c t-xs" x="882.2" y="292">×9.1</text>
+<text class="t-c t-sm" x="22" y="146.0" transform="rotate(-90 22 146.0)">每卡 TFLOPS</text>
+</svg>
+  <div class="dia-note">怎么看：每组左边的蓝柱是 ZeRO，右边是基线；柱顶数字是本站从原图读出的近似值，底下的 ×N 是两者之比（推算），与原图灰色柱表示的加速比基本一致。1.5B 和 8B 时两者差距不大，因为基线的模型并行还在一台机器内；从 40B 起，基线的模型并行跨出机器，每卡吞吐掉到 5 TFLOPS 上下，差距拉开到 6–10 倍。ZeRO 在 120B 以后也有所下降，原因下文解释。本站根据 <a href="https://arxiv.org/html/1910.02054#S1.F2" target="_blank" rel="noopener">原文图 2 ↗</a> 重画的简图，数值以原图为准。</div>
+</div>
+<p>ZeRO-100B 在 1000 亿参数以上性能略有下降，作者的解释是显存不够、批量开不大。他们预计卡数增加后这一点会改善，理由正是下一小节的超线性加速。</p>
+<div class="note-warn"><b>比较时两边的批量差别很大（本站据附录表 5 整理）：</b>以 1000 亿参数为例，ZeRO 用 16 路模型并行、每个数据并行副本批量 32、总批量 800；基线用 128 路模型并行、批量 2、总批量只有 6。ZeRO 之所以快，很大程度上正是因为省下的显存让它能用大得多的批量（第 8 节的链条）。这符合论文的主张，但也意味着：如果训练任务本身的总批量受收敛要求限制、不能开大，优势会缩小。另外，基线是 2019 年 9 月的 Megatron-LM，它当时还没有流水线并行；后来 Megatron-LM 加入了流水线并行，跨机器时不再只能靠层内切分。</div>
+
+<h4 id="n-10-3">10.3 超线性加速（原文图 3）</h4>
+<p>作者用一个 600 亿参数的模型，把卡数从 64 加到 400，观察总吞吐的变化。结果是<b>超线性</b>的：卡数翻倍，性能超过翻倍。通常扩展最多做到线性（卡数翻倍、吞吐翻倍），因为加卡会带来更多通信，很难更好。ZeRO 为什么能超过线性？下面一步一步推：</p>
+<ol>
+  <li><b>模型和模型并行不变，变的是数据并行份数。</b>600 亿参数的模型始终用 16 路模型并行（一台机器），卡数从 64 加到 400，数据并行份数就从 4 加到 25。</li>
+  <li><b>数据并行份数越多，每张卡的模型状态越少。</b>开了 P<sub>os+g</sub> 以后，每张卡的模型状态是 \((2+14/N_d)\times\Psi/16\)。600 亿参数时，从 4 份时的约 20.6 GB 降到 25 份时的约 9.6 GB（推算，见下表）。</li>
+  <li><b>省下的显存用来放更大的批量。</b>附录表 6 显示，每个数据并行副本的批量从 16 增加到 48、48、64。</li>
+  <li><b>批量越大，每张卡的效率越高。</b>每张卡每次迭代做的计算随批量增长，而数据并行的通信量是固定的，矩阵也更大、更容易跑满 GPU。论文的说法是“算术强度提高”。于是每卡吞吐从约 26 TFLOPS 升到约 37 TFLOPS（读图）。</li>
+  <li><b>总吞吐 = 卡数 × 每卡吞吐。</b>卡数增加的同时每卡吞吐也在增加，总吞吐自然超过线性。</li>
+</ol>
+<div class="table-wrap"><table>
+  <thead><tr><th class="num">GPU 数</th><th class="num">数据并行份数</th><th class="num">每卡模型状态（推算）</th><th class="num">每个副本的批量（表 6）</th><th class="num">总批量（表 6）</th><th class="num">每卡吞吐（读图）</th></tr></thead>
+  <tbody>
+    <tr><td class="num">64</td><td class="num">4</td><td class="num">≈ 20.6 GB</td><td class="num">16</td><td class="num">64</td><td class="num">≈ 26</td></tr>
+    <tr><td class="num">128</td><td class="num">8</td><td class="num">≈ 14.1 GB</td><td class="num">48</td><td class="num">384</td><td class="num">≈ 37.5</td></tr>
+    <tr><td class="num">256</td><td class="num">16</td><td class="num">≈ 10.8 GB</td><td class="num">48</td><td class="num">768</td><td class="num">≈ 39</td></tr>
+    <tr><td class="num">400</td><td class="num">25</td><td class="num">≈ 9.6 GB</td><td class="num">64</td><td class="num">1600</td><td class="num">≈ 36.5</td></tr>
+  </tbody>
+</table></div>
+<p>表中“每卡模型状态”按 \((2+14/N_d)\times60/16\) GB 计算：fp16 参数这一项 7.5 GB 固定不变，其余部分随数据并行份数摊薄。32 GB 减去它，就是留给激活和缓冲区的空间：从约 11 GB 增加到约 22 GB。</p>
+<div class="dia">
+  <div class="dia-title">简图：600 亿参数模型的总吞吐随卡数的变化（读图近似值）</div>
+  <svg class="dg" viewBox="0 0 960 310" role="img" aria-label="60B 模型从 64 卡到 400 卡的总吞吐与线性扩展的比较（读图近似值）">
+<line class="grid-ln" x1="80" y1="262.0" x2="860" y2="262.0"/><text class="t-r t-xs" x="74" y="262.0">0k</text>
+<line class="grid-ln" x1="80" y1="204.0" x2="860" y2="204.0"/><text class="t-r t-xs" x="74" y="204.0">4k</text>
+<line class="grid-ln" x1="80" y1="146.0" x2="860" y2="146.0"/><text class="t-r t-xs" x="74" y="146.0">8k</text>
+<line class="grid-ln" x1="80" y1="88.0" x2="860" y2="88.0"/><text class="t-r t-xs" x="74" y="88.0">12k</text>
+<line class="grid-ln" x1="80" y1="30.0" x2="860" y2="30.0"/><text class="t-r t-xs" x="74" y="30.0">16k</text>
+<line class="grid-ln" x1="198.9" y1="30" x2="198.9" y2="262"/><text class="t-c t-sm" x="198.9" y="276">64 卡</text>
+<line class="grid-ln" x1="317.7" y1="30" x2="317.7" y2="262"/><text class="t-c t-sm" x="317.7" y="276">128 卡</text>
+<line class="grid-ln" x1="555.4" y1="30" x2="555.4" y2="262"/><text class="t-c t-sm" x="555.4" y="276">256 卡</text>
+<line class="grid-ln" x1="822.9" y1="30" x2="822.9" y2="262"/><text class="t-c t-sm" x="822.9" y="276">400 卡</text>
+<line class="axis" x1="80" y1="262" x2="860" y2="262"/><line class="axis" x1="80" y1="30" x2="80" y2="262"/>
+<line x1="80.0" y1="262.0" x2="860.0" y2="106.1" style="stroke:var(--text-3);stroke-width:1.6;stroke-dasharray:6 4"/>
+<polyline points="198.9,238.2 317.7,192.4 555.4,117.2 822.9,50.3" style="fill:none;stroke:var(--c-act);stroke-width:2.6"/>
+<circle cx="198.9" cy="238.2" r="4" style="fill:var(--c-act)"/>
+<text class="t-xs" x="208.9" y="252.2">总 ≈1.6k，每卡 ≈25.6</text>
+<circle cx="317.7" cy="192.4" r="4" style="fill:var(--c-act)"/>
+<text class="t-xs t-r" x="309.7" y="180.4">总 ≈4.8k，每卡 ≈37.5</text>
+<circle cx="317.7" cy="214.5" r="3" style="fill:var(--text-3)"/>
+<text class="t-xs" x="325.7" y="224.5" style="fill:var(--text-3)">线性 ≈3.3k</text>
+<circle cx="555.4" cy="117.2" r="4" style="fill:var(--c-act)"/>
+<text class="t-xs t-r" x="547.4" y="105.2">总 ≈10.0k，每卡 ≈39</text>
+<circle cx="555.4" cy="167.0" r="3" style="fill:var(--text-3)"/>
+<text class="t-xs" x="563.4" y="177.0" style="fill:var(--text-3)">线性 ≈6.6k</text>
+<circle cx="822.9" cy="50.3" r="4" style="fill:var(--c-act)"/>
+<text class="t-xs t-r" x="814.9" y="38.3">总 ≈14.6k，每卡 ≈36.5</text>
+<circle cx="822.9" cy="113.5" r="3" style="fill:var(--text-3)"/>
+<text class="t-xs" x="830.9" y="123.5" style="fill:var(--text-3)">线性 ≈10.2k</text>
+<text class="t-c t-sm" x="24" y="146.0" transform="rotate(-90 24 146.0)">总吞吐 TFLOPS</text>
+<text class="t-c t-sm" x="470.0" y="296">GPU 数（横轴按真实数量等比例）</text>
+</svg>
+  <div class="dia-note">怎么看：横轴是卡数，按真实数量等比例排列，这样“线性扩展”就是一条过原点的直线（灰色虚线，从 64 卡的实测点按比例外推）。绿色折线是实测总吞吐，在 128 卡以后明显高于直线，这就是超线性。标注的每卡吞吐是本站从原图读出的近似值。原图用对数纵轴并把每卡吞吐画成柱子，本站改成了线性纵轴。本站根据 <a href="https://arxiv.org/html/1910.02054#S1.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 重画的简图。</div>
+</div>
+<div class="note-warn"><b>怎么看待“超线性”：</b>
+<ul>
+  <li>超线性是相对于 64 卡这个起点说的。64 卡时每张卡的显存最紧、批量最小、效率最低（约 26 TFLOPS）；从 128 卡到 400 卡，每卡吞吐基本持平（约 37–39，读图），这一段其实接近线性。所以更准确的理解是：起点被显存“卡住”了，加卡把它解放了出来。</li>
+  <li>卡数增加了 6.25 倍，总批量却增加了 25 倍（64 → 1600）。这不是“同一个训练任务加了卡就变快”，而是“加卡以后每张卡能处理更大的批量”。论文脚注说，在这个规模下批量仍然不算大、不影响收敛，但没有给出收敛实验。</li>
+  <li>这个效应来自“显存 → 批量 → 效率”的链条，不是 ZeRO 独有的魔法；当每张卡的批量已经足够把 GPU 跑满时，它就会消失。</li>
+</ul></div>
+
+<h4 id="n-10-4">10.4 不用模型并行训练大模型（原文图 4）</h4>
+<p>模型并行和流水线并行对很多数据科学家来说门槛很高，这是训练大模型的一个出名的障碍。ZeRO 不需要改模型，用起来和普通数据并行一样简单。在 128 张卡上不开模型并行，ZeRO-100B 能训练到 130 亿参数，论文说平均每卡吞吐超过 40 TFLOPS；不用 ZeRO 时，单靠数据并行最大只能训练 14 亿参数的模型，每卡吞吐不到 20 TFLOPS。而且没有模型并行的通信，这些模型可以在没有 NVLink、NVSwitch 这类高速机内互联的低端机器上训练，而模型并行要获得好的效率，离不开这类互联。</p>
+<div class="dia">
+  <div class="dia-title">简图：只用数据并行（128 张 V100）时，模型大小与每卡吞吐（读图近似值）</div>
+  <div class="legend"><span><i class="sw enc"></i>ZeRO-100B 的数据并行</span><span><i class="sw pred"></i>PyTorch DDP 基线</span></div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="不用模型并行时 ZeRO 与 DDP 的最大模型和每卡吞吐（读图近似值）">
+<line class="grid-ln" x1="70" y1="252.0" x2="900" y2="252.0"/><text class="t-r t-xs" x="64" y="252.0">0</text>
+<line class="grid-ln" x1="70" y1="207.6" x2="900" y2="207.6"/><text class="t-r t-xs" x="64" y="207.6">10</text>
+<line class="grid-ln" x1="70" y1="163.2" x2="900" y2="163.2"/><text class="t-r t-xs" x="64" y="163.2">20</text>
+<line class="grid-ln" x1="70" y1="118.8" x2="900" y2="118.8"/><text class="t-r t-xs" x="64" y="118.8">30</text>
+<line class="grid-ln" x1="70" y1="74.4" x2="900" y2="74.4"/><text class="t-r t-xs" x="64" y="74.4">40</text>
+<line class="grid-ln" x1="70" y1="30.0" x2="900" y2="30.0"/><text class="t-r t-xs" x="64" y="30.0">50</text>
+<text class="t-c t-xs" x="70.0" y="266">0B</text>
+<text class="t-c t-xs" x="188.6" y="266">2B</text>
+<text class="t-c t-xs" x="307.1" y="266">4B</text>
+<text class="t-c t-xs" x="425.7" y="266">6B</text>
+<text class="t-c t-xs" x="544.3" y="266">8B</text>
+<text class="t-c t-xs" x="662.9" y="266">10B</text>
+<text class="t-c t-xs" x="781.4" y="266">12B</text>
+<text class="t-c t-xs" x="900.0" y="266">14B</text>
+<line class="axis" x1="70" y1="252" x2="900" y2="252"/><line class="axis" x1="70" y1="30" x2="70" y2="252"/>
+<circle cx="158.9" cy="74.4" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="158.9" y="60.4">b=24</text>
+<circle cx="218.2" cy="65.5" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="218.2" y="51.5">b=24</text>
+<circle cx="307.1" cy="58.9" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="307.1" y="44.9">b=16</text>
+<circle cx="425.7" cy="43.3" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="425.7" y="29.3">b=12</text>
+<circle cx="544.3" cy="43.3" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="544.3" y="29.3">b=8</text>
+<circle cx="662.9" cy="70.0" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="662.9" y="56.0">b=6</text>
+<circle cx="722.1" cy="94.4" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="722.1" y="80.4">b=4</text>
+<circle cx="781.4" cy="105.5" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="781.4" y="91.5">b=4</text>
+<circle cx="840.7" cy="158.8" r="6" style="fill:var(--c-enc)"/>
+<text class="t-c t-xs" x="840.7" y="144.8">b=2</text>
+<rect x="132.8" y="70.6" width="12" height="12" style="fill:var(--c-pred)"/>
+<text class="t-xs t-r" x="128.8" y="77.6">b=8</text>
+<rect x="145.8" y="166.1" width="12" height="12" style="fill:var(--c-pred)"/>
+<text class="t-xs t-r" x="141.8" y="173.1">b=1</text>
+<text class="t-c t-sm" x="485.0" y="286">模型参数量（不开模型并行，128 张 V100）</text>
+<text class="t-c t-sm" x="22" y="141.0" transform="rotate(-90 22 141.0)">每卡 TFLOPS</text>
+</svg>
+  <div class="dia-note">怎么看：每个点是一个模型，横轴是参数量，纵轴是每卡吞吐（本站读图）；点上方的 b 是附录表 10 给出的每张卡批量。ZeRO 一直能训练到 13B；基线到 1.38B 时批量只能开到 1，吞吐跌到 18 左右。ZeRO 这一侧的吞吐在 6–8B 时最高，之后随着批量从 12 一路降到 2 而下降，再次说明吞吐跟着批量走。本站根据 <a href="https://arxiv.org/html/1910.02054#S9.F5.fig1" target="_blank" rel="noopener">原文图 4 ↗</a> 重画的简图。</div>
+</div>
+<div class="note-warn"><b>一处数字出入：</b>论文正文说这组实验“平均每卡超过 40 TFLOPS”，但微软 2020 年 5 月介绍同一结果的官方博客写的是“平均 37 TFLOPS”；本站读图得到的各点平均值也在 39 左右。可以把它理解为“约 40”。</div>
+
+<h4 id="n-10-5">10.5 各个优化分别贡献多少（原文图 6–8）</h4>
+<p>作者把各种优化组合成 5 种配置（原文表 3），逐个打开，观察最大模型规模、显存占用和吞吐的变化：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>配置</th><th>ZeRO-DP</th><th>ZeRO-R</th><th class="num">最大模型（图 6）</th><th class="num">40B 显存缓存（图 7，读图）</th><th class="num">100B 显存缓存（图 7，读图）</th><th class="num">60B 每卡吞吐（图 8，读图）</th><th class="num">170B 每卡吞吐（图 8，读图）</th></tr></thead>
+  <tbody>
+    <tr><td>C1</td><td>P<sub>os</sub></td><td>C<sub>B</sub> + M<sub>D</sub></td><td class="num">40B</td><td class="num">≈ 30 GB</td><td class="num">—</td><td class="num">≈ 12</td><td class="num">显存不足</td></tr>
+    <tr><td>C2</td><td>P<sub>os</sub></td><td>C<sub>B</sub> + M<sub>D</sub> + P<sub>a</sub></td><td class="num">60B</td><td class="num">≈ 24 GB</td><td class="num">—</td><td class="num">≈ 12</td><td class="num">显存不足</td></tr>
+    <tr><td>C3</td><td>P<sub>os+g</sub></td><td>C<sub>B</sub> + M<sub>D</sub></td><td class="num">≈ 50B</td><td class="num">≈ 25.5 GB</td><td class="num">—</td><td class="num">≈ 17</td><td class="num">显存不足</td></tr>
+    <tr><td>C4</td><td>P<sub>os+g</sub></td><td>C<sub>B</sub> + M<sub>D</sub> + P<sub>a</sub></td><td class="num">140B</td><td class="num">≈ 20 GB</td><td class="num">≈ 30 GB</td><td class="num">≈ 35</td><td class="num">显存不足</td></tr>
+    <tr><td>C5</td><td>P<sub>os+g</sub></td><td>C<sub>B</sub> + M<sub>D</sub> + P<sub>a+cpu</sub></td><td class="num">150B</td><td class="num">≈ 20 GB</td><td class="num">≈ 27 GB</td><td class="num">≈ 32</td><td class="num">≈ 21</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">“最大模型”一列中 40B、60B、140B、150B 是正文给出的数字，C3 的约 50B 读自原图；其余标“读图”的都是本站从原图估读的近似值。“—”表示原图没有这一项（原图中 100B 模型只有 C4、C5 两根柱子）。最大模型的实验固定每个副本批量 16、模型并行 16 路。</p>
+<ul>
+  <li><b>最大模型规模（图 6）。</b>从 C1 到 C2，最大模型从 40B 涨到 60B，原因是 P<sub>a</sub> 把激活显存降到 1/16（模型并行 16 路）；跳到 C4 的 140B，是因为 P<sub>os+g</sub> 比 P<sub>os</sub> 又把模型状态减半（卡数多时从约 \(4\Psi\) 降到约 \(2\Psi\)）；再到 C5 的 150B，完全来自把切好的检查点搬到 CPU，进一步减少了激活显存。</li>
+  <li><b>显存占用（图 7）。</b>这里看的是每次迭代中 PyTorch 缓存的最大显存。C1 到 C2 下降符合预期。C2 和 C3 谁更省，取决于模型状态和激活谁更大：激活越大，C2（切激活）越占优；模型状态越大，C3（切梯度）越占优。值得注意的是，40B 模型从 C4 到 C5 显存没有下降，100B 却下降了，原因是 100B 的激活大得多，搬走以后效果才明显。所以对非常大的模型，P<sub>a+cpu</sub> 是放进更大批量的有用工具；在图 8 中，170B 模型只有开了 P<sub>a+cpu</sub> 才能不爆显存。</li>
+  <li><b>吞吐（图 8）。</b>性能的提升与显存的下降一一对应，因为显存越省，批量就能开越大。唯一的例外是 60B 模型从 C4 到 C5 性能下降：C5 虽然更省显存，但要在 CPU 和 GPU 之间来回搬激活，大多数情况下得不偿失；只有模型大到不开 C5 就跑不起来、或者不开 C5 批量就极小时（比如 170B），C5 才划算。因此训练时只在有利的情况下才打开 P<sub>a+cpu</sub>。</li>
+</ul>
+<div class="note-warn"><b>原文的一处编号混乱：</b>附录表 5–10 的标题按旧的图号引用（例如表 7 说“对应图 4，不同 ZeRO 配置下的最大模型”，但正文里最大模型是图 6；表 10 说“对应图 7，只用数据并行”，正文里那是图 4）。本页按正文图号引用，附录表按内容对应。附录表 9（图 8 的配置）列出的 5 个 60B 批量（2、4、32、32、8）无法和 C1–C5 一一对上，本页没有使用。</div>
+
+<h4 id="n-10-6">10.6 Turing-NLG：170 亿参数的语言模型（原文图 5）</h4>
+<p>截至 2020 年 5 月 12 日，微软的 Turing-NLG 是世界上最大的语言模型，参数超过 170 亿，并在语言建模上刷新了纪录：困惑度 10.21（困惑度越低越好）。它是用 ZeRO-100B 端到端训练的。原文图 5 画出了 30 万次迭代中的验证集困惑度，与此前最好的 Megatron-LM 83 亿参数模型对比：Turing-NLG 的曲线从头到尾都在下方，结束时约低 0.4（读图）。ZeRO-100B 训练这个模型时持续每卡 41.4 TFLOPS。</p>
+<div class="note-warn"><b>一个疑似笔误：</b>论文写的数据集名是 “Webtext-103”，微软同期介绍 Turing-NLG 的官方博客写的是 WikiText-103。WikiText-103 是常用的语言建模基准，这里应当指它（本站判断）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S10" target="_blank" rel="noopener">英文原文 §10 ↗</a> · <a href="https://arxiv.org/html/1910.02054#S10.T3" target="_blank" rel="noopener">原文表 3 ↗</a> · <a href="https://arxiv.org/html/1910.02054#S10.F6" target="_blank" rel="noopener">原文图 6–8 ↗</a> · <a href="https://arxiv.org/html/1910.02054#A0.T5" target="_blank" rel="noopener">附录配置表 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">11 结论</h3>
+<p>作者从高性能计算和系统的角度认为，ZeRO 给大模型训练带来了根本性的变化。已经实现的 ZeRO-100B 让模型规模扩大 8 倍、吞吐提高 10 倍以上，在现代 GPU 集群上做到了超线性加速，并训练出了当时最大的语言模型；而完整的 ZeRO 还有潜力再把模型规模提高一个数量级，支撑未来万亿参数模型的训练。作者最看重的一点是，ZeRO 不给使用者设置任何障碍：不像模型并行和流水线并行那样需要重构模型，它和普通数据并行一样好用。他们计划通过开源和社区反馈，让 ZeRO 对整个深度学习社区可用。</p>
+<p>回头看，这篇论文最持久的贡献是一个简单的视角：<b>数据并行的显存问题不是计算方式的问题，而是存储方式的问题</b>。all-reduce 本来就是 reduce-scatter 加 all-gather，只要在两步之间插入“只更新自己那一份”，优化器状态和梯度的冗余就可以几乎免费地去掉；再多付 50% 的通信，参数的冗余也能去掉。这个视角后来被 DeepSpeed、PyTorch FSDP、Megatron-LM 等几乎所有大模型训练框架吸收。</p>
+<p class="note-links"><a href="https://arxiv.org/html/1910.02054#S11" target="_blank" rel="noopener">英文原文 §11 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>论文发表后，ZeRO 从一个研究原型变成了大模型训练的基础设施，“ZeRO-1 / 2 / 3”分别指本文的 P<sub>os</sub>、P<sub>os+g</sub>、P<sub>os+g+p</sub>。下面按时间列出可以查证的后续：</p>
+<ul>
+  <li><b>DeepSpeed 开源（2020 年 2 月）。</b>微软研究院 2020-02-13 的博客发布了 DeepSpeed，第一个版本只实现了 ZeRO 第一阶段（优化器状态切分，当时叫 ZeRO-OS），第二、三阶段列为计划。同一天发布的 Turing-NLG 博客说，借助 ZeRO，Turing-NLG 的模型并行度从 16 降到 4，每台机器的批量增大到约 4 倍，训练时间缩短约 3 倍。</li>
+  <li><b>ZeRO-2（2020 年 5 月）。</b>2020-05-19 的博客发布 “ZeRO-2”：梯度切分、激活切分和碎片管理，内容就是本文的 ZeRO-100B，博客给出的数字也与论文一致（约 1700 亿参数，400 张 V100 上每卡 38 TFLOPS 以上，总计 15 PFLOPS 以上）。</li>
+  <li><b>ZeRO-Offload（USENIX ATC 2021，arXiv 2021-01）。</b>把优化器状态和 Adam 的更新计算放到 CPU 上，同时尽量减少 GPU 与 CPU 之间的数据搬运。摘要称它能在单张 GPU 上训练 130 亿参数以上的模型，10B 模型在单张 V100 上达到 40 TFLOPS。有意思的是，本文第 2 节还因为 PCIe 带宽有限而不主张把模型状态放到 CPU；ZeRO-Offload 通过精心设计搬运的内容和时机，把这条路走通了。</li>
+  <li><b>ZeRO-3 正式可用（2021 年 3 月）。</b>DeepSpeed 2021-03-07 发布 ZeRO-3 Offload，第三阶段（切参数）在 DeepSpeed 中正式可用，并可与卸载结合。</li>
+  <li><b>ZeRO-Infinity（SC21，arXiv 2021-04）。</b>同一批作者把 GPU、CPU 内存和 NVMe 固态硬盘一起用起来，摘要称可以为几十甚至上百万亿参数的模型做训练，在单台 DGX-2 上微调万亿参数模型，并在 512 张 V100 上持续 25 PFLOPS 以上（约峰值的 40%），同样观察到超线性扩展。</li>
+  <li><b>ZeRO++（ICLR 2024，arXiv 2023-06）。</b>针对第 7 节提到的问题：带宽低或每卡批量小时，ZeRO 的通信藏不住。它把第三阶段每次迭代 \(3\Psi\) 的跨机器通信拆开逐项压缩：前向的参数 all-gather 用 INT8 量化，降到 \(0.5\Psi\)；在每台机器内多存一份参数分片，反向的参数 all-gather 只在机器内进行，跨机器部分降到 0；梯度改用 INT4 量化加 all-to-all 的方式归约，降到 \(0.25\Psi\)。合计从 \(3\Psi\) 降到 \(0.75\Psi\)，即 1/4，在 384 张卡上吞吐最高提升 2.16 倍。</li>
+  <li><b>PyTorch FSDP（VLDB 2023，arXiv 2023-04）。</b>PyTorch 官方的完全分片数据并行，文档说明它受 Xu 等人的工作和 DeepSpeed 的 ZeRO 第三阶段启发。默认的 FULL_SHARD 切分参数、梯度和优化器状态，前向和反向时临时拼回参数，对应 ZeRO-3；SHARD_GRAD_OP 在前向到反向结束之间保留完整参数，接近 ZeRO-2；HYBRID_SHARD 在机器内切分、机器间复制，把 all-gather 和 reduce-scatter 限制在机器内部。后来的 FSDP2（<code>fully_shard</code>）改为把每个参数单独按第 0 维切开，用 DTensor 表示，不再把参数拍平拼成一个大张量。</li>
+  <li><b>Google 的独立工作（arXiv 2020-04）。</b>Xu 等人的 “Automatic Cross-Replica Sharding of Weight Update in Data-Parallel Training” 在数据并行中把权重更新切分到各个副本上，思路与本文的 P<sub>os</sub> 相近，也是 FSDP 文档提到的灵感来源之一。</li>
+  <li><b>Megatron-LM 的分布式优化器。</b>NVIDIA Megatron-LM 的文档明确引用 ZeRO：把优化器状态切到数据并行的各张卡上，流程是梯度 reduce-scatter、各卡更新自己那份 fp32 主参数、再 all-gather 参数，正是 P<sub>os</sub> 的做法。</li>
+  <li><b>大规模预训练中的实际用法。</b>BLOOM-176B 用 Megatron-DeepSpeed 的三维并行（数据、张量、流水线），ZeRO 只开第一阶段；DeepSeek-V3 用 16 路流水线并行、64 路专家并行加 ZeRO-1 数据并行。超大规模预训练常常只用 ZeRO-1，一个常见的解释是：流水线并行要在多个微批之间累积梯度，第二、三阶段会让每个微批都触发梯度或参数的通信（本站解读）。而在不需要流水线的场景（比如微调、很多强化学习训练框架），ZeRO-3 / FSDP 是最省事的选择。</li>
+  <li><b>项目归属。</b>DeepSpeed 仓库现在位于 <code>deepspeedai/DeepSpeed</code>（原 <code>microsoft/DeepSpeed</code> 自动跳转）；2025 年 5 月 PyTorch 基金会扩展为伞形基金会时，DeepSpeed 和 vLLM 一起被接纳为基金会项目。</li>
+</ul>
+<p>在本站的 AI Infra 路线里，可以接着读：<a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron-LM 与三维并行</a>（ZeRO 的对照组和组合对象）、<a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3</a>（ZeRO-1 与专家并行、流水线并行的组合）、<a href="../legacy/tracks/ai-infra/18-rl-systems.html">强化学习训练系统</a>（FSDP 作为训练后端）、<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8</a> 与 <a href="../legacy/tracks/ai-infra/19-fp4-training.html">FP4 训练</a>（精度变了，16Ψ 这本账就要重算）。想看三个阶段的可交互显存图、FSDP 的工程细节和配套简答题，见<a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、机构页面与官方介绍。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Samyam Rajbhandari</b>（第一作者）<div class="aff">Microsoft（论文发表时）；现为 Snowflake Principal AI Architect</div>俄亥俄州立大学高性能计算方向博士。据 Snowflake 的作者介绍，他在微软时是 DeepSpeed 的共同创始人和系统架构师；ZeRO-Offload、ZeRO-Infinity、ZeRO++ 的作者之一。</div>
+  <div class="author-card"><b>Jeff Rasley</b><div class="aff">Microsoft（论文发表时）；现为 Snowflake AI Research 高级工程师</div>布朗大学分布式系统方向博士。据 Snowflake 的作者介绍，他在微软工作五年，是 DeepSpeed 训练与推理库的共同创始人；ZeRO-Infinity 的作者之一。</div>
+  <div class="author-card"><b>Olatunji (Tunji) Ruwase</b><div class="aff">Microsoft</div>卡内基梅隆大学计算机科学博士（导师 Todd Mowry）。2024 年卡内基梅隆大学的讲座介绍称他是微软 DeepSpeed 项目的负责人和共同创始人，研究背景涵盖编译器、操作系统和硬件加速器；ZeRO-Offload、ZeRO-Infinity、ZeRO++ 的作者之一。</div>
+  <div class="author-card senior"><b>Yuxiong He</b><div class="aff">Microsoft（论文发表时）；现为 Snowflake 软件工程高级总监</div>据 Snowflake 的作者介绍，她此前是微软的 Partner Research and Product Manager，共同创立并领导了 DeepSpeed；现在负责大语言模型相关工作。ZeRO-Offload、ZeRO-Infinity、ZeRO++ 的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：SC 2020（International Conference for High Performance Computing, Networking, Storage and Analysis，高性能计算领域的旗舰会议），DOI 10.1109/SC41405.2020.00024。arXiv 首版 2019-10（v1 已撤回，v2 为 2019-10-07），本页依据的 v3 为 2020-05-13。</li>
+  <li><b>开源</b>：实现收录在 <a href="https://github.com/deepspeedai/DeepSpeed" target="_blank" rel="noopener">deepspeedai/DeepSpeed</a>，43,242 个 star、5,045 个 fork（截至 2026-10-19），Apache-2.0 许可；仓库创建于 2020-01-23。2025 年 5 月成为 PyTorch 基金会项目。</li>
+  <li><b>采用</b>：Turing-NLG（17B）直接用 ZeRO 训练；BLOOM-176B 与 DeepSeek-V3 的预训练使用 ZeRO 第一阶段；NVIDIA Megatron-LM 的分布式优化器采用 P<sub>os</sub> 的做法；PyTorch FSDP 以 ZeRO 第三阶段为灵感之一。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="megatron-lm.html">Megatron-LM</a>、<a href="deepseek-v3.html">DeepSeek-V3</a>、<a href="hybridflow.html">HybridFlow / verl</a></li>
+  <li><a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP 结构拆解</a>：可点击的三阶段显存图、FSDP 工程细节、与张量 / 流水线并行的组合、简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron-LM</a>：本文的对照组；张量并行、流水线并行与集合通信原语。</li>
+  <li><a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3</a>：ZeRO-1 数据并行与专家并行、DualPipe 流水线的组合。</li>
+  <li><a href="../legacy/tracks/ai-infra/18-rl-systems.html">强化学习训练系统</a>：FSDP 与 Megatron 作为训练后端。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。原文：Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. <em>ZeRO: Memory Optimizations Toward Training Trillion Parameter Models.</em> SC 2020. <a href="https://arxiv.org/abs/1910.02054" target="_blank" rel="noopener">arXiv:1910.02054</a>，以 arXiv 非独占分发许可（arXiv.org perpetual, non-exclusive license）发布。本页没有使用原文图片：所有图都是本站绘制的示意图，或依据论文数字重画的简图（标“读图”的数值为估读）。数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

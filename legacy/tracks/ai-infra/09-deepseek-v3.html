@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V3 拆解</title>
+<meta name="description" content="DeepSeek-V3 技术报告的系统部分：64 路专家并行与 all-to-all、节点受限路由、DualPipe、细粒度 FP8 训练与高精度累加、MLA 的 KV 压缩。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/collectives.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="ai-infra" data-node="deepseek-v3">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：用 2048 张被限速的 H800 训一个 671B 的 MoE</h2>
+<p>H800 是 H100 的出口版：算力相同，但 NVLink 带宽被砍（报告用 160 GB/s 对比 IB 的 50 GB/s）。671B 参数、每 token 激活 37B 的 MoE 在这样的集群上训练，瓶颈不是算力而是<b>专家并行的 all-to-all 通信</b>与<b>显存</b>。V3 报告的系统部分围绕三件事：让通信藏进计算（DualPipe + 节点受限路由）、让 FP8 稳定可用（细粒度缩放 + 高精度累加）、让 KV 小到能大 batch 推理（MLA）。最终 2.788M H800 小时训完（按 $2/小时约 557 万美元）。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  MoE 的通信是 all-to-all；DeepSeek 把每个 token 限制在 ≤4 个节点内路由，用 IB 发一次到目标节点再用 NVLink 分发，并把这些通信与另一个 micro-batch 的计算流水重叠；FP8 则靠“小块各有缩放因子 + 每 128 个元素就把部分和提升到 FP32”把误差压到 0.25% 以内。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 专家并行的一层：dispatch → 专家 → combine</h2>
+<div class="legend">
+  <span><i class="sw data"></i>token 隐状态</span><span><i class="sw act"></i>路由 / 通信</span><span><i class="sw pred"></i>专家 FFN</span><span><i class="sw tgt"></i>共享专家</span><span><i class="sw reg"></i>FP8 路径</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 460" role="img" aria-label="DeepSeek-V3 MoE 层的专家并行">
+    <g data-part="tokens" data-step="1"><rect class="box data" x="20" y="30" width="170" height="60" rx="10"/><text class="t-c t-b" x="105" y="54">本卡的 token</text><text class="t-c t-xs" x="105" y="74">注意力输出 [T, 7168]</text></g>
+    <g class="act" data-part="gate" data-step="1"><rect class="box" x="20" y="120" width="170" height="90" rx="10"/><text class="t-c t-b" x="105" y="142">门控（BF16/FP32）</text><text class="t-c t-xs" x="105" y="160">sigmoid 亲和度 + 偏置</text><text class="t-c t-xs" x="105" y="176">每 token 选 8 / 256 个专家</text><text class="t-c t-xs" x="105" y="192">且最多落在 4 个节点</text></g>
+    <path class="edge" d="M105,90 V116" data-step="1"/>
+    <g class="tgt" data-part="shared" data-step="1"><rect class="box" x="20" y="240" width="170" height="60" rx="10"/><text class="t-c t-b" x="105" y="264">共享专家 ×1</text><text class="t-c t-xs" x="105" y="284">所有 token 都过，本地计算</text></g>
+    <path class="edge" d="M60,90 C60,110 40,230 50,236" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="1"/>
+    <!-- dispatch -->
+    <g class="act" data-part="dispatch" data-step="2">
+      <rect class="box" x="240" y="100" width="200" height="130" rx="10"/>
+      <text class="t-c t-b" x="340" y="124">Dispatch（all-to-all）</text>
+      <text class="t-c t-xs" x="340" y="144">token 以 FP8 发往目标专家所在卡</text>
+      <text class="t-c t-xs" x="340" y="160">跨节点：IB → 目标节点同号 GPU</text>
+      <text class="t-c t-xs" x="340" y="176">节点内：NVLink 转发到专家所在卡</text>
+      <text class="t-c t-xs" x="340" y="196">20 个 SM 专门跑通信内核</text>
+      <text class="t-c t-xs" x="340" y="212">IB 50 GB/s · NVLink 160 GB/s</text>
+    </g>
+    <path class="edge" d="M190,165 H236" style="stroke:var(--c-act)" data-step="2"/>
+    <!-- experts on other GPUs -->
+    <rect class="panel" x="470" y="20" width="470" height="220" rx="12"/>
+    <text class="t-lg" x="484" y="46">64 路 EP：256 个路由专家分布在 8 节点 × 8 卡</text>
+    <g class="pred" data-part="experts" data-step="3">
+      <rect class="box" x="484" y="60" width="140" height="60" rx="8"/><text class="t-c t-b" x="554" y="82">卡 k：专家 4k…4k+3</text><text class="t-c t-xs" x="554" y="102">分组 GEMM，FP8</text>
+      <rect class="box" x="640" y="60" width="140" height="60" rx="8"/><text class="t-c t-b" x="710" y="82">卡 k+1</text><text class="t-c t-xs" x="710" y="102">…</text>
+      <rect class="box" x="796" y="60" width="130" height="60" rx="8"/><text class="t-c t-b" x="861" y="82">卡 k+2</text><text class="t-c t-xs" x="861" y="102">…</text>
+    </g>
+    <path class="edge" d="M440,150 C460,150 460,90 480,90" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="3"/>
+    <text class="t-xs" x="484" y="148" data-step="3">每张卡收到来自全集群的、路由到它那 4 个专家的 token</text>
+    <text class="t-xs" x="484" y="166" data-step="3">专家 FFN：中间维 2048，SwiGLU；无辅助损失的负载均衡靠门控偏置动态调整</text>
+    <g class="reg" data-part="fp8" data-step="3">
+      <rect class="box" x="484" y="180" width="440" height="48" rx="8"/>
+      <text class="t-c t-b" x="704" y="200">FP8 GEMM：激活 1×128 tile 缩放，权重 128×128 块缩放</text>
+      <text class="t-c t-xs" x="704" y="218">每累加 128 个元素就把部分和提升到 CUDA core 的 FP32 累加器</text>
+    </g>
+    <!-- combine -->
+    <g class="act" data-part="combine" data-step="4">
+      <rect class="box" x="240" y="260" width="200" height="100" rx="10"/>
+      <text class="t-c t-b" x="340" y="284">Combine（all-to-all）</text>
+      <text class="t-c t-xs" x="340" y="304">专家输出以 BF16 发回原卡</text>
+      <text class="t-c t-xs" x="340" y="320">按门控权重加权求和</text>
+      <text class="t-c t-xs" x="340" y="340">+ 共享专家输出</text>
+    </g>
+    <path class="edge" d="M554,120 C554,160 480,250 444,300" style="stroke:var(--c-act);marker-end:url(#ah-act)" data-step="4"/>
+    <path class="edge" d="M190,270 C210,270 220,300 236,310" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="4"/>
+    <g data-part="out" data-step="4"><rect class="box data" x="20" y="330" width="170" height="60" rx="10"/><text class="t-c t-b" x="105" y="354">本卡 token 的输出</text><text class="t-c t-xs" x="105" y="374">+ 残差 → 下一层</text></g>
+    <path class="edge" d="M240,340 C220,340 210,350 194,352" data-step="4"/>
+    <!-- dualpipe -->
+    <g data-part="dualpipe" data-step="5">
+      <rect class="box" x="470" y="270" width="470" height="120" rx="10" style="stroke-dasharray:5 3"/>
+      <text class="t-c t-b" x="705" y="294">DualPipe：把 dispatch / combine 藏进计算</text>
+      <text class="t-c t-xs" x="705" y="314">每个 micro-batch 的前向、反向拆成“注意力 / dispatch / MLP / combine”四段</text>
+      <text class="t-c t-xs" x="705" y="330">与另一方向流过来的 micro-batch 交错：一个在算、另一个在传</text>
+      <text class="t-c t-xs" x="705" y="350">16 路 PP + 64 路 EP + ZeRO-1 DP；不用张量并行</text>
+      <text class="t-c t-xs" x="705" y="370">训练效果：通信几乎完全被掩盖；代价是两份参数副本（流水线两端各一份）</text>
+    </g>
+    <text class="t-xs" x="20" y="430" data-step="5">推理时：prefill 用 EP32 + DP，decode 用 EP320（每卡 1 个专家 + 冗余专家），attention 用 DP、不用 TP</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="tokens"><h4>本卡的 token</h4><p>注意力层用数据并行（每卡处理不同 token），所以 MoE 层的输入是本卡那一批 token 的隐状态，7168 维。</p></div>
+    <div data-note="gate"><h4>门控</h4><p>每个 token 对 256 个路由专家算 sigmoid 亲和度，加上一个可动态调整的偏置项选 top-8（偏置只影响选择，不影响加权）；负载不均时调偏置，不用辅助损失。<b>节点受限路由</b>：先按“每节点内最高亲和度之和”选 4 个节点，再在这些节点内选 8 个专家——这样每个 token 最多发往 4 个节点，IB 流量有上界。</p></div>
+    <div data-note="shared"><h4>共享专家</h4><p>1 个所有 token 都经过的专家，捕获通用知识，本地算，不参与路由与通信。</p></div>
+    <div data-note="dispatch"><h4>Dispatch</h4><p>all-to-all：每张卡把自己的 token（按路由结果）发到持有目标专家的卡。两跳：先经 IB 发到目标节点上与自己同序号的 GPU，再经 NVLink 转发到节点内真正持有专家的卡——因为 NVLink 比 IB 快约 3.2×，这样 IB 只需承担“到节点”的流量。token 以 FP8 发送，通信字节减半。专门划 20 个 SM 给通信内核（warp 专业化），其余 112 个做计算。</p></div>
+    <div data-note="experts"><h4>专家计算</h4><p>64 路 EP 意味着 256 个专家平均每卡 4 个。每张卡把收到的 token 按专家分组做 grouped GEMM（DeepGEMM）。无 TP：每个专家完整地在一张卡上。</p></div>
+    <div data-note="fp8"><h4>FP8 GEMM 的细节</h4><p>全部用 E4M3。激活按 1×128 的 tile（一个 token 的 128 个通道）各一个缩放因子，权重按 128×128 的块各一个——比逐张量缩放细得多，离群值只影响自己那一块。H800 的 FP8 Tensor Core 累加只有约 14 位精度（K=4096 时最大相对误差约 2%），所以每累加 128 个元素就把部分和搬到 CUDA core 的 FP32 寄存器里继续累加，并在此时乘上分块缩放因子。相对 BF16 训练的损失误差 &lt;0.25%。</p></div>
+    <div data-note="combine"><h4>Combine</h4><p>反向的 all-to-all：专家输出回到 token 原来所在的卡，按门控权重加权求和，再加上共享专家的输出。combine 用 BF16（加权求和对精度更敏感）。</p></div>
+    <div data-note="out"><h4>输出</h4><p>加残差进入下一层。61 层中前 3 层是稠密 FFN，其余都是 MoE。</p></div>
+    <div data-note="dualpipe"><h4>DualPipe</h4><p>流水并行的新调度：每个 micro-batch 的前向和反向各拆成四段（注意力、dispatch、MLP、combine，反向再拆输入梯度 / 权重梯度），从流水线两端同时喂 micro-batch，让一个 micro-batch 的 all-to-all 与另一个的计算重叠；手工调整 SM 分配让计算与通信的比例匹配。代价是模型参数在流水线两端各存一份。训练配置：16 PP × 64 EP × ZeRO-1 DP，<b>没有张量并行</b>——TP 的 all-reduce 在 H800 的 NVLink 上太贵。</p></div>
+    <div data-step-note="1"><h4>① 门控与共享专家</h4><p>每个 token 选 8 个专家（≤4 节点）；共享专家本地算。</p></div>
+    <div data-step-note="2"><h4>② Dispatch</h4><p>FP8 的 all-to-all：IB 到节点，NVLink 到卡。</p></div>
+    <div data-step-note="3"><h4>③ 专家 FFN</h4><p>分组 FP8 GEMM，细粒度缩放 + 高精度累加。</p></div>
+    <div data-step-note="4"><h4>④ Combine</h4><p>BF16 的 all-to-all 发回原卡，加权求和。</p></div>
+    <div data-step-note="5"><h4>⑤ 与计算重叠</h4><p>DualPipe 让 ②④ 藏在别的 micro-batch 的计算之后。</p></div>
+  </div>
+  <figcaption>图 1　DeepSeek-V3 一个 MoE 层的专家并行与 FP8 路径。依据报告 §2.1.2（路由）、§3.2（DualPipe 与 all-to-all）、§3.3（FP8）。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-ep">3.1 EP 的通信原语：all-to-all</h3>
+<p>与 TP 的 all-reduce（所有卡得到同一个和）不同，EP 的 dispatch 是“卡 i 的第 j 块发给卡 j”——一次转置。通信量 ∝ 被路由的 token 数 × 隐维 × 每 token 的专家数，与专家总数无关。节点受限路由把“每 token 最多 M=4 个节点”作为硬约束，IB 上每 token 最多发 4 份而非 8 份。下面用 4 卡演示 all-to-all 与 all-reduce 的差别：</p>
+<div data-widget="collectives" data-ranks="4"></div>
+
+<h3 id="c-fp8">3.2 FP8 训练框架</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>部分</th><th>精度</th><th>原因</th></tr></thead>
+  <tbody>
+    <tr><td>三个核心 GEMM（前向 Fprop、激活梯度 Dgrad、权重梯度 Wgrad）的输入</td><td>E4M3，分块缩放</td><td>算力 2×；细粒度缩放让 E4M3 的范围够用</td></tr>
+    <tr><td>GEMM 累加</td><td>Tensor Core 约 14 位 → 每 128 元素提升到 FP32</td><td>H800 的 FP8 累加精度不足</td></tr>
+    <tr><td>embedding、输出头、MoE 门控、归一化、注意力算子</td><td>BF16 / FP32</td><td>对精度敏感或计算占比小</td></tr>
+    <tr><td>主权重、权重梯度</td><td>FP32</td><td>优化器更新需要</td></tr>
+    <tr><td>Adam 一阶 / 二阶矩</td><td>BF16</td><td>省显存</td></tr>
+    <tr><td>反向用的激活缓存</td><td>FP8（部分用自定义 E5M6）</td><td>省显存；注意力后 Linear 的输入对精度敏感</td></tr>
+    <tr><td>MoE dispatch / combine</td><td>FP8 / BF16</td><td>通信减半 / 加权求和要精度</td></tr>
+  </tbody>
+</table></div>
+<p>缩放因子的粒度是关键：逐张量缩放时一个离群值会把整张量的分辨率拉低；1×128 的 tile 让离群值只影响同一 token 的 128 个通道。这就是 V3 能<b>全部用 E4M3</b>（包括梯度）的原因。</p>
+
+<h3 id="c-mla">3.3 MLA：每 token 只缓存 576 个数</h3>
+<p>多头潜在注意力把 K、V 的生成改成“先把隐状态压到 d_c = 512 维的潜向量 c，再由 c 上投影出各头的 K、V”，推理时只缓存 c；RoPE 不能和低秩投影交换顺序，于是另开一个 64 维的“解耦 RoPE key”单独缓存。每层每 token 缓存 512 + 64 = 576 个数，而同等规模的 MHA（128 头 × 128 维 × 2）是 32768 个——约 57×。query 也做低秩压缩（d_c' = 1536）以省训练激活。推理时上投影矩阵可以吸收进 W_Q / W_O（“MQA 模式”），这使得后来的 <a href="12-deepseek-sparse-attention.html">DSA</a> 能把 top-k 选择做在共享的潜向量上。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 关键数字</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td>模型</td><td>671B 总参 / 37B 激活；61 层（前 3 层稠密）；隐维 7168；256 路由专家 + 1 共享，每 token 8 个；专家中间维 2048</td></tr>
+    <tr><td>MLA</td><td>d_c = 512，d_c' = 1536，RoPE 维 64；每 token 每层缓存 576 个数</td></tr>
+    <tr><td>训练并行</td><td>16 PP（DualPipe）× 64 EP（8 节点）× ZeRO-1 DP；无 TP</td></tr>
+    <tr><td>路由约束</td><td>每 token ≤ 4 个节点；无辅助损失的偏置负载均衡；序列级辅助损失极小</td></tr>
+    <tr><td>通信</td><td>IB 50 GB/s、NVLink 160 GB/s；20 / 132 个 SM 做通信；dispatch FP8、combine BF16</td></tr>
+    <tr><td>FP8</td><td>全 E4M3；激活 1×128、权重 128×128 缩放；每 128 元素 FP32 累加；损失误差 &lt;0.25%</td></tr>
+    <tr><td>成本</td><td>2048 × H800；2.788M GPU 小时（预训练 2.664M + 上下文扩展 119K + 后训练 5K）</td></tr>
+    <tr><td>MTP</td><td>训练时多 token 预测模块；推理可做投机解码，第 2 个 token 接受率 85–90%</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="questions">5. 简答题</h2>
+<div class="qa">
+  <h3 id="q20"><span class="qid">Q20</span>E4M3 与 E5M2 的差别是什么？为什么前向路径选 E4M3，而 DeepSeek-V3 连梯度也用 E4M3？</h3>
+  <div class="ans">
+    <p class="short">因为缩放因子的粒度从“整张量”细化到 1×128 / 128×128 的块后，每块内部的动态范围很小，E4M3 的 18 个 binade 足够覆盖，于是可以用精度更高的 E4M3 替代原本推荐给梯度的 E5M2。报告原话：“为了更高精度，所有张量采用 E4M3 格式”，可行性来自细粒度量化策略。通用的 E4M3 vs E5M2 讨论见 <a href="08-fp8-formats.html#q20">FP8 页 Q20</a>。</p>
+    <p class="cite">依据：报告 §3.3.2。</p>
+  </div>
+  <h3 id="q21"><span class="qid">Q21</span>FP8 训练到底节省了什么、没有节省什么？前提是什么？</h3>
+  <div class="ans">
+    <p class="short">省的是三个核心 GEMM 的 Tensor Core 时间、反向缓存的激活显存和 dispatch 的通信字节；主权重 / 梯度 FP32、Adam 矩 BF16、敏感算子 BF16 都没省。代价是分块缩放与每 128 元素的 FP32 提升累加。通用解释见 <a href="08-fp8-formats.html#q21">FP8 页 Q21</a>。</p>
+  </div>
+  <h3 id="q22"><span class="qid">Q22</span>专家并行的通信原语是什么？DeepSeek-V3 用哪些办法压低 all-to-all 的代价？</h3>
+  <div class="ans">
+    <p class="short">EP 的通信原语是 <b>all-to-all</b>（dispatch 把 token 发到专家所在卡、combine 发回），这是 TP（all-reduce）、DP（all-reduce / reduce-scatter + all-gather）之外的第三种模式；DeepSeek-V3 在其上叠了三项“新做法”：节点受限路由、两跳（IB → NVLink）转发与专用通信 SM、DualPipe 重叠。</p>
+    <ul>
+      <li><b>为什么是 all-to-all</b>：每张卡的每个 token 要去不同的卡，每张卡又要从所有卡收 token——正好是一次矩阵转置式的交换；通信量 ∝ token 数 × 隐维 × top-k，与专家数无关。</li>
+      <li><b>节点受限路由</b>：先选 4 个节点再在其中选 8 个专家，使每 token 的跨节点流量有上界（最多 4 份而不是 8 份）。</li>
+      <li><b>两跳转发</b>：IB（50 GB/s）只负责“到目标节点的同号 GPU”，节点内再用 NVLink（160 GB/s）分发；DeepEP 库实现了这套内核，并用 20 个 SM 专跑通信。</li>
+      <li><b>重叠</b>：DualPipe 把一个 micro-batch 的 all-to-all 与另一个的注意力 / MLP 计算交错，使通信几乎完全被掩盖。</li>
+      <li><b>推理侧</b>：decode 用 EP320（每卡一个专家 + 冗余热门专家），注意力走 DP 而非 TP，避免 all-reduce；通信仍是 all-to-all。</li>
+    </ul>
+    <p class="cite">依据：报告 §2.1.2（路由）、§3.2.1–3.2.2（DualPipe、跨节点 all-to-all）、§3.4（推理部署）。</p>
+  </div>
+  <h3 id="q23"><span class="qid">Q23</span>线性注意力混合路线（Qwen3.5）与稀疏注意力路线（DeepSeek / GLM）各自的取舍是什么？</h3>
+  <div class="ans">
+    <p class="short">DeepSeek 的路线是“保留精确（softmax）注意力，但把它的内存和计算压下去”：MLA 压 KV（57×）、DSA 压注意力计算（O(L²) → O(Lk)）、V4 再压缩 KV 序列；配合 MoE + EP + FP8 把训练成本压到同规模的几分之一。优势是<b>长上下文下的精细检索能力不打折</b>（GLM-5 报告称 DSA“构造上无损”并因此弃用线性注意力）；代价是仍需 KV cache 与专用稀疏内核。线性注意力混合路线的取舍见 <a href="11-gated-deltanet.html#q23">Gated DeltaNet 页 Q23</a>，DSA 细节见 <a href="12-deepseek-sparse-attention.html#q23">DSA 页 Q23</a>。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>DeepSeek-AI. <i>DeepSeek-V3 Technical Report.</i> 2024. <a href="https://arxiv.org/abs/2412.19437">arXiv:2412.19437</a></li>
+  <li>DeepSeek-AI. <i>DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model.</i> 2024.（MLA 的来源）</li>
+  <li>DeepEP：<a href="https://github.com/deepseek-ai/DeepEP">github.com/deepseek-ai/DeepEP</a>；DeepGEMM；FlashMLA。</li>
+  <li>Lepikhin et al. <i>GShard.</i> ICLR 2021.（EP 与 all-to-all 的来源）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>

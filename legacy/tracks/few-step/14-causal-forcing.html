@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Causal Forcing：先让因果教师给出可学习的映射</title>
+<meta name="description" content="Causal Forcing：双向教师的 ODE 终点不是因果学生输入的函数；先用 teacher forcing 训练自回归教师，再做因果 ODE 初始化，最后沿用 Self Forcing 的 DMD。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="few-step" data-node="causal-forcing">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram. Keep verbatim. -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：自生成历史修好了，初始化为什么仍然模糊？</h2>
+<p><a href="09-causvid.html">CausVid</a> 用双向教师蒸馏因果学生；<a href="12-self-forcing.html">Self Forcing</a> 又让学生在训练时生成自己的历史，修复暴露偏差。Causal Forcing 追问另一处缺口：这些方法的 <b>ODE 初始化仍来自双向教师</b>，教师预测当前 chunk 时看得到未来，学生却只能看到过去。减少采样步数和更换注意力结构是不同的问题；自回归展开不能自动把一个输入信息不匹配的回归目标变成可学习的函数<span class="src">论文 §3.1–3.2、Fig. 1–3</span>。</p>
+<p>作者把一个已完成普通 DMD 的少步双向模型改成因果模型，再做 Self Forcing 式 DMD：即使起点已具备少步能力，仍落后于保持双向结构的 DMD。这是<b>该训练设置中</b>“后面的 DMD 没能补回架构缺口”的实验依据；不能据此推出任意训练预算下 DMD 都不可能做到因果适配<span class="src">论文 §3.2、Fig. 2</span>。</p>
+<div class="callout insight">
+  <span class="callout-title">一句话理解</span>
+  先把基座训练成以干净历史为条件的自回归扩散教师，让当前 chunk 的 ODE 终点对学生输入成为确定函数；再回归这个因果映射，最后沿用 Self Forcing 的自回归 DMD。改的是<b>初始化监督的来源</b>，DMD 阶段仍可用更强的双向教师<span class="src">论文 §3.3</span>。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构：先对齐轨迹，再匹配分布</h2>
+<div class="legend">
+  <span><i class="sw data"></i>噪声 / 数据 / 轨迹</span><span><i class="sw enc"></i>可训练生成器</span>
+  <span><i class="sw tgt"></i>冻结教师</span><span><i class="sw pred"></i>可训练 fake score</span>
+  <span><i class="sw act"></i>文本 / 历史 / KV</span><span><i class="sw loss"></i>损失</span><span><i class="ln sg"></i>stop-gradient</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 520" role="img" aria-label="Causal Forcing 的 teacher forcing、因果 ODE 初始化与自生成视频 DMD">
+    <text class="t-sm t-b" x="24" y="26">离线适配与初始化</text>
+    <g class="act" data-part="history" data-step="1 2">
+      <rect class="box" x="24" y="52" width="160" height="84" rx="10"/>
+      <text class="t-c t-b" x="104" y="78">干净历史 h</text><text class="t-c t-xs" x="104" y="102">来自双向基座生成数据</text><text class="t-c t-xs" x="104" y="122">同一历史固定在整条 ODE</text>
+    </g>
+    <path class="edge act" d="M184,94 H224" data-step="1"/>
+    <g data-part="ar-teacher" data-step="1 2">
+      <g class="enc"><rect class="box" x="228" y="52" width="178" height="84" rx="10"/></g>
+      <text class="t-c t-b" x="317" y="78">AR 扩散教师</text><text class="t-c t-xs" x="317" y="102">TF：学习当前 chunk 去噪</text><text class="t-c t-xs" x="317" y="122">训练后冻结，采样条件 ODE</text>
+    </g>
+    <path class="edge tgt" d="M406,94 H448" data-step="2"/>
+    <g class="data" data-part="trajectory" data-step="2">
+      <rect class="box" x="452" y="52" width="186" height="84" rx="10"/>
+      <text class="t-c t-b" x="545" y="78">因果轨迹配对</text><text class="t-c t-xs" x="545" y="102">(xᵢₜ, h) → xᵢ₀</text><text class="t-c t-xs" x="545" y="122">当前块噪声；没有未来输入</text>
+    </g>
+    <path class="edge" d="M638,94 H678" data-step="3"/>
+    <g class="enc" data-part="ode-student" data-step="3">
+      <rect class="box" x="682" y="52" width="254" height="84" rx="10"/>
+      <text class="t-c t-b" x="809" y="78">因果学生 G_θ · ODE 回归</text><text class="t-c t-xs" x="809" y="102">从 AR 教师权重初始化</text><text class="t-c t-xs" x="809" y="122">MSE：预测同一轨迹的干净终点</text>
+    </g>
+    <path class="edge enc" d="M809,136 V180 H317 V234" data-step="4"/>
+    <text class="t-c t-xs" x="566" y="174" data-step="4">权重进入后训练；不继续使用配对回归损失</text>
+    <text class="t-sm t-b" x="24" y="212">在线分布匹配</text>
+    <g class="data" data-part="rollout-input" data-step="4">
+      <rect class="box" x="24" y="238" width="160" height="82" rx="10"/>
+      <text class="t-c t-b" x="104" y="264">噪声 ε、文本 c</text><text class="t-c t-xs" x="104" y="289">逐 chunk 生成</text><text class="t-c t-xs" x="104" y="309">历史来自学生自身</text>
+    </g>
+    <path class="edge" d="M184,278 H224" data-step="4"/>
+    <g class="enc" data-part="self-rollout" data-step="4">
+      <rect class="box" x="228" y="238" width="178" height="82" rx="10"/>
+      <text class="t-c t-b" x="317" y="264">学生自回归展开</text><text class="t-c t-xs" x="317" y="288">随机退出 → 干净视频 x̂₀</text><text class="t-c t-xs" x="317" y="310">历史 KV 截断梯度</text>
+    </g>
+    <path class="edge sg" d="M317,320 V346 H210 V298 H228" data-step="4" style="stroke:var(--c-act)"/>
+    <path class="edge enc" d="M406,278 H428 V370 H448" data-step="5"/>
+    <text class="t-xs" x="430" y="344" data-step="5">共享 t 加噪</text>
+    <g data-part="scores" data-step="5 6">
+      <g class="tgt"><rect class="box frozen" x="452" y="238" width="190" height="64" rx="10"/></g>
+      <text class="t-c t-b" x="547" y="261">双向 real score</text><text class="t-c t-xs" x="547" y="286">冻结的更强教师</text>
+      <g class="pred"><rect class="box" x="452" y="402" width="190" height="64" rx="10"/></g>
+      <text class="t-c t-b" x="547" y="425">双向 fake score</text><text class="t-c t-xs" x="547" y="450">学生样本上学习去噪</text>
+      <path class="edge" d="M450,370 H442 V270 H452"/><path class="edge" d="M450,370 H442 V434 H452"/>
+    </g>
+    <path class="edge tgt" d="M642,270 H668 V338 H682" data-step="5"/>
+    <path class="edge pred" d="M642,434 H668 V374 H682" data-step="5"/>
+    <g class="loss" data-part="dmd" data-step="5 6">
+      <rect class="box" x="686" y="318" width="250" height="80" rx="10"/>
+      <text class="t-c t-b" x="811" y="345">DMD：匹配整段视频分布</text><text class="t-c t-xs" x="811" y="373">s_real − s_fake → 学生梯度</text>
+    </g>
+    <path class="edge grad" d="M811,398 V492 H317 V324" data-step="6"/>
+    <text class="t-c t-xs" x="552" y="512" data-step="6">仅更新选中退出步的生成器计算；fake score 另做去噪更新</text>
+  </svg>
+  </div>
+  <div class="arch-foot"><div class="arch-panel"></div><div class="controls"></div></div>
+  <div class="arch-notes">
+    <div data-note="history"><h4>历史是条件，不是回归标签</h4><p>论文所谓 ground truth history 来自内部合成数据，并非一定来自真实拍摄。当前 chunk 的目标是 AR 教师 ODE 的终点；固定历史下采样的新终点不必等于原数据中的当前 chunk<span class="src">论文 §3.3、App. D</span>。</p></div>
+    <div data-note="ar-teacher"><h4>两个阶段用不同教师</h4><p>初始化的 AR 教师由 Wan2.1-T2V-1.3B 适配而来；DMD 的 real score 是 Wan2.1-14B。前者提供因果条件轨迹，后者提供全片分布评价<span class="src">论文 §4.1、App. D</span>。</p></div>
+    <div data-note="trajectory"><h4>固定前缀的条件 PF-ODE</h4><p>用数据中的干净前缀固定条件，从当前 chunk 的高斯噪声采样并存储中间状态和终点；学生回归时读取完全相同的前缀<span class="src">论文式 (8)</span>。</p></div>
+    <div data-note="ode-student"><h4>回归先消除输入信息缺口</h4><p>学生从 AR 教师权重出发，学习的是相同条件下的 ODE flow map。后训练不需要维持这一逐样本对应关系<span class="src">论文 §3.3、App. D</span>。</p></div>
+    <div data-note="rollout-input"><h4>分布匹配用新噪声与提示词</h4><p>DMD 阶段使用 VidProM 提示词，不再把离线视频作为每个 chunk 的历史；按推理方式生成历史<span class="src">论文 §4.1</span>。</p></div>
+    <div data-note="self-rollout"><h4>沿用 Self Forcing</h4><p>生成、随机梯度截断和 KV cache 的逻辑延续 Self Forcing。Causal Forcing 的主要改进发生在它之前<span class="src">论文 §3.3；官方代码 <code>pipeline/self_forcing_training.py</code></span>。</p></div>
+    <div data-note="scores"><h4>大教师与在线 critic 仍然存在</h4><p>冻结 real score 是 14B；fake score 是 1.3B。公开 DMD 配置采用 critic : generator = 5 : 1，critic 学习率 4e-7<span class="src">论文 App. D；代码 <code>configs/causal_forcing_dmd_chunkwise.yaml</code></span>。</p></div>
+    <div data-note="dmd"><h4>双向教师在这里仍然合法</h4><p>DMD 比较生成视频的加噪分布，不要求当前 chunk 终点由教师和学生共有的输入确定。因果生成器也可匹配由双向网络估计的全片分布<span class="src">论文式 (2)、§3.3</span>。</p></div>
+    <div data-step-note="1"><h4>① 训练 AR 教师</h4><p>干净历史作为条件，当前 chunk 加噪，做普通流匹配。</p></div>
+    <div data-step-note="2"><h4>② 收集因果轨迹</h4><p>冻结 AR 教师，固定干净前缀，存储当前 chunk 的 ODE 配对。</p></div>
+    <div data-step-note="3"><h4>③ 回归少步映射</h4><p>学生以相同前缀和当前中间状态预测教师终点。</p></div>
+    <div data-step-note="4"><h4>④ 自生成历史</h4><p>使用初始化后的学生逐块生成视频；历史缓存停止梯度。</p></div>
+    <div data-step-note="5"><h4>⑤ 全片 score 差</h4><p>对视频加噪后用双向教师和 fake score 计算 DMD 更新方向。</p></div>
+    <div data-step-note="6"><h4>⑥ 交替更新</h4><p>DMD 更新学生，去噪目标更新 fake score；冻结 real score。</p></div>
+  </div>
+  <figcaption>图 1　训练管线；上半部的 AR 教师先训练后冻结，下半部的 real score 始终冻结。依据论文 §3.3、App. D。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+<h3 id="c-injectivity">3.1 “帧级单射性”：完整 ODE 可逆，投影后仍可能丢信息</h3>
+<p>整段双向 PF-ODE 给出确定的映射 \(F^{\mathrm{Bi}}(x_t^{1:N},t,c)=x_0^{1:N}\)。但“整段输入确定整段终点”不意味着“当前块加可见历史确定当前块终点”。保持因果学生可见的输入不变，只改变未来带噪块，双向教师仍可能改变当前块的终点；此时不可见未来是回归标签的隐变量<span class="src">论文 §3.2、Lemma 3.2、App. B.1</span>。</p>
+<p>论文把所需条件称为 <b>frame-level injectivity</b>。实际复现时应把历史与文本条件也写进输入：固定 \(h,c\) 后，\((x_t^i,t,h,c)\) 必须对应唯一终点；不能理解成“同一张带噪帧在任意不同历史下也应得到同一结果”。本文沿用论文术语，但强调它讨论的是<b>教师终点是否对学生可见输入构成良定义函数</b><span class="src">论文 Def. 3.1、式 (4) 的历史省略说明</span>。</p>
+<div class="formula">$$G_\theta^*(U)=\mathbb E[Y\mid U],\qquad \min_G\mathbb E\|G(U)-Y\|^2=\mathbb E\,\mathrm{tr}\,\mathrm{Cov}(Y\mid U),\quad Y=F^{\mathrm{Bi}}(x_t^{1:N},t,c)^i$$</div>
+<p>这里 \(U\) 是因果学生全部可见输入。条件方差非零时，MSE 最优解只能平均不可见未来对应的不同终点，产生模糊或保守动态；上式右侧是标准平方回归分解的<b>推导解释</b>，不是论文报告的实验数值<span class="src">论文式 (5)、Prop. 3.3、App. B.1</span>。这也不是说因果视频分布本身无法建模：问题出在用一个不匹配的教师逐样本映射做确定性回归。</p>
+
+<h3 id="c-tf">3.2 为什么这里 teacher forcing 优于 diffusion forcing？</h3>
+<p>TF 学习 \(p(x_0^i\mid x_0^{&lt;i},c)\)：只给当前块加噪，历史保持干净。DF 则训练当前块在<b>带噪历史</b>下的去噪；推理却以已经去噪的历史为条件。作者指出，在附录的正则性与信息损失条件下，噪声历史对应的条件去噪分布无法自动恢复干净前缀下的目标条件分布<span class="src">论文 §3.3、Prop. 3.4、App. B.2</span>。</p>
+<p>这与 Self Forcing 对 TF 的批评并不冲突：TF 避免了“历史干净还是带噪”的差异，却仍有“干净历史是真值还是学生生成”的暴露偏差。此处 TF 用于先建立可靠的 AR 教师；最终 DMD 再用自生成历史处理后一种差异。论文的结论针对其 AR 条件采样与训练设置，不等于否定所有 diffusion forcing 的去噪日程<span class="src">论文 App. C.1、§3.3</span>。</p>
+
+<h3 id="c-causal-ode">3.3 因果 ODE 配对：相同历史，教师的新终点</h3>
+<p>先从合成数据取 \(h=x_{\mathrm{gt}}^{&lt;i}\)，用 AR 教师在固定 \(h\) 下求解当前块的条件 PF-ODE；保存 \(x_t^i\) 与它的 \(x_0^i\)。学生从该 AR 教师初始化，读取同一 \(h\)，回归这个终点。历史来自数据，当前目标来自教师新采样，两者的对应关系需要随数据一起保存<span class="src">论文式 (8)、App. D</span>。</p>
+<p>仅用多步 AR 教师权重直接进入 DMD 也有改善，但少步生成时历史质量降低，容易出现 chunk 间突变；因果 ODE 蒸馏补上少步映射能力。其后 DMD 可进一步修复自生成前缀的分布差异<span class="src">论文 App. C.2、Fig. 7–8</span>。</p>
+
+<h3 id="c-causal-cd">3.4 因果一致性蒸馏：同一目标的另一种初始化</h3>
+<p>论文也用 AR 教师做相邻时刻的条件一致性蒸馏：教师向前积分时和学生预测时都使用同一干净前缀，EMA 学生提供停止梯度的相邻目标。它继承相同的因果 flow map 条件，避免把未来信息塞进学生不可见的标签<span class="src">论文 §3.4、式 (9)</span>。原论文把“用 causal CD 替代 ODE 初始化再接 DMD”留作后续方向；本文不把该替换当作其主表配方。</p>
+
+<h3 id="from-image">3.5 从图像到视频：ODE 标签必须是学生输入的函数</h3>
+<p><a href="02-trajectory-distillation.html">图像轨迹蒸馏</a> 的关键前提是：学生获得求解教师 ODE 所需的完整状态和条件，确定性 ODE 配对就给出确定的回归标签。搬到因果视频后，教师的完整状态包含未来块，而学生输入删掉了它们；<b>确定性教师并不保证对删减后的输入仍是确定性映射</b>。Causal Forcing 先训练条件 AR 教师，把配对变成 \((x_t^i,h,c)\mapsto x_0^i\)，恢复可学习性，再继承图像 DMD 的分布级优化与 Self Forcing 的时间展开<span class="src">论文 §2.3、§3.2–3.3</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状与时间约定</h2>
+<p>采用流匹配 \(x_t=(1-t)x_0+t\epsilon\)，\(v=\epsilon-x_0\)，时间从噪声端 \(t=1\) 走向数据端 \(t=0\)<span class="src">论文 §2.1、式 (1)</span>。论文为简洁写 frame，实际主实验按 chunk 生成。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>对象</th><th>形状 / 数量</th><th>信息与出处</th></tr></thead>
+  <tbody>
+    <tr><td>输出视频</td><td>81 帧，832×480</td><td>基座 Wan2.1-T2V-1.3B<span class="src">论文 §4.1</span></td></tr>
+    <tr><td>整片 latent（代码布局）</td><td>[B, 21, 16, 60, 104]</td><td><span class="src">代码 <code>configs/causal_forcing_dmd_chunkwise.yaml</code></span></td></tr>
+    <tr><td>当前 chunk</td><td>[B, 3, 16, 60, 104]</td><td>3 个 latent 帧；整片 7 块为推算<span class="src">论文 §4.1；上述配置</span></td></tr>
+    <tr><td>ODE 配对</td><td>当前块状态、固定历史、当前块终点</td><td>历史不随当前块 ODE 时间变动<span class="src">论文式 (8)</span></td></tr>
+    <tr><td>去噪时间表</td><td>1, 0.9375, 0.8333, 0.625</td><td>4 步；代码 [1000,750,500,250] 经 shift=5 扭曲<span class="src">论文 App. D；DMD 配置</span></td></tr>
+  </tbody>
+</table></div>
+<p>NFE 在这里指每个 chunk 的去噪网络求值数；缓存写入、文本编码和 VAE 解码还要额外计算，因此“4 步”不等于生成整片只调用网络 4 次<span class="src">论文 App. D；代码 <code>pipeline/self_forcing_training.py</code></span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标：三个阶段解决不同缺口</h2>
+<p>下式省略训练权重与采样测度，\(h\) 为固定干净历史、\(c\) 为文本，\(\phi\) 是 AR 教师参数；冻结特征编码器在本方法中不参与。TF 教师与 ODE 学生分别训练：</p>
+<div class="formula">$$\mathcal L_{\mathrm{TF}}(\phi)=\mathbb E\|v_\phi(x_t^i,t,h,c)-(\epsilon^i-x_0^i)\|^2,\qquad \mathcal L_{\mathrm{ODE}}(\theta)=\mathbb E\|G_\theta(x_t^i,t,h,c)-x_0^i\|^2$$</div>
+<p>第一项来自数据加噪，第二项来自 AR 教师条件 ODE 轨迹，两者的当前块标签来源不同<span class="src">论文 §2.1、§3.3、式 (8)</span>。后训练对学生自生成整片 \(\hat x_0\) 加噪，使用：</p>
+<div class="formula">$$\nabla_\theta\mathcal L_{\mathrm{DMD}}=-\mathbb E\left[(s_{\mathrm{real}}(\hat x_t,t,c)-s_{\mathrm{fake}}(\hat x_t,t,c))\frac{\partial\hat x_0}{\partial\theta}\right]$$</div>
+<p>这是分布 KL 梯度的 score 表达，实际实现还包含时间权重与归一化。real score 冻结；fake score 用停止梯度的学生视频做流匹配训练；DMD 更新学生时不通过两个 score 网络回传<span class="src">论文式 (2)、§3.3；代码 <code>model/dmd.py</code></span>。</p>
+<div class="callout code-note">
+  <span class="callout-title">论文 vs 官方代码 / 论文内部不一致</span>
+  <ul>
+    <li>App. D 写所有阶段 batch=64、Adam lr=2e-6；公开 chunk-wise TF 与 DMD 配置写 <code>total_batch_size: 8</code>，DMD 的 <code>lr_critic: 4e-7</code>、<code>dfake_gen_update_ratio: 5</code>。复现需区分论文实验配置与当前公开默认值<span class="src">论文 App. D；<code>configs/ar_diffusion_tf_chunkwise.yaml</code>、<code>configs/causal_forcing_dmd_chunkwise.yaml</code></span>。</li>
+    <li>Tab. 1 的 Self Forcing 总分为 83.74，Tab. 2 的“Self Forcing’s ODE + DMD”总分为 82.00；后者是作者合成数据上的受控初始化消融，不能当作前者的同一检查点。论文未完整说明这两个结果的所有差异<span class="src">论文 Tab. 1–2、§4.2、App. D</span>。</li>
+    <li>§3.4 将 asymmetric CD 定义为双向教师；App. D 的消融说明却说两个 CD 变体都由 TF AR 教师蒸馏。这处文字不一致尚不能仅凭论文消除<span class="src">论文 §3.4、App. D</span>。</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">causal_forcing.py（据论文 §3.3、App. D 整理；rollout 沿用 Self Forcing）</div>
+<pre><code class="lang-py"># 阶段 TF：双向基座生成离线数据；训练因果扩散教师
+D_bi = synthesize_videos(bidirectional_base, prompts)
+AR = causal_copy(bidirectional_base)
+for data in tf_training_batches(D_bi):
+    i, t, eps = sample_chunk_time_noise(data)
+    h, x0 = clean_prefix(data, i), current_chunk(data, i)
+    xt = (1 - t) * x0 + t * eps
+    update(AR, mse(AR.velocity(xt, t, h), eps - x0))
+freeze(AR)
+
+# 阶段 ODE：固定数据中的历史，采样当前块的新条件轨迹
+D_causal = []
+for c, h in sample_conditions_and_prefixes(D_bi):
+    path = solve_conditional_pf_ode(AR, randn_chunk(), h, c)
+    D_causal.append((h, c, path))  # 保留与原历史的对应关系
+G = copy_weights(AR)
+for h, c, path in ode_training_batches(D_causal):
+    t = sample_inference_time()
+    update(G, mse(G(path[t], t, h, c), path.clean_endpoint))
+
+# 阶段 DMD：历史改为学生自身输出；不再回归离线配对
+real = freeze(load_bidirectional_real_score())
+fake = load_fake_score()
+for c in post_training_prompts:
+    xhat = self_rollout(G, c, random_exit=True, detach_history=True)
+    t, eps = sample_score_time_noise(xhat)
+    xt = (1 - t) * xhat.detach() + t * eps
+    update(fake, flow_matching_loss(fake, xt, t, xhat.detach(), eps))
+    if generator_update_due():
+        grad_x = detached_dmd_direction(real, fake, xt, t, c)
+        backward_with_output_gradient(xhat, grad_x)
+        generator_optimizer.step()</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参与预算</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>论文主实验</th><th>出处 / 限定</th></tr></thead>
+  <tbody>
+    <tr><td>离线数据</td><td>约 3K 双向合成视频；3K 因果 ODE 轨迹</td><td><span class="src">§4.1、App. D</span></td></tr>
+    <tr><td>初始化训练</td><td>TF 2K 步 + ODE 1K 步</td><td>对照的普通 ODE 初始化为 3K 步<span class="src">§4.1、App. D</span></td></tr>
+    <tr><td>DMD 训练</td><td>750 步，VidProM 提示词</td><td>按 Self Forcing 协议<span class="src">§4.1</span></td></tr>
+    <tr><td>优化器</td><td>Adam，lr=2e-6，β=(0,0.999)，batch=64</td><td>公开默认配置差异见上方 callout<span class="src">App. D</span></td></tr>
+    <tr><td>DMD 教师 / critic</td><td>Wan2.1-14B / Wan2.1-1.3B</td><td>教师与初始化 AR 教师不是同一网络<span class="src">App. D</span></td></tr>
+    <tr><td>因果 CD 扩展</td><td>48 个离散时刻、UniPC、EMA=0.99、3K 训练步</td><td>扩展实验；主结果仍为 ODE + DMD<span class="src">App. D</span></td></tr>
+  </tbody>
+</table></div>
+<p>“相同训练预算”指论文对齐了初始化更新数与 DMD 协议；不能把它自动解释为总 GPU-hours 完全相同，因为还存在两类离线数据构建和不同阶段的单步成本<span class="src">论文 §4.2、App. D</span>。<span class="unverified">原论文没有给出完整管线的统一 GPU-hours。</span></p>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果：动态、视觉与指令分别怎么测？</h2>
+<p>下表来自同一主比较。Total / Quality / Semantic 是 VBench；Dynamic Degree、VisionReward、Instruction Following 则在作者挑选的 100 条丰富动作提示词上计算，并按论文乘以 100 展示。VBench 总分中的动态维度仍使用其官方提示词，不能拿下表的自定义动态数直接重算总分<span class="src">论文 §4.1、App. D、Tab. 1</span>。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>方法</th><th class="num">Total</th><th class="num">Quality</th><th class="num">Semantic</th><th class="num">Dynamic</th><th class="num">VisionReward</th><th class="num">Instruction</th></tr></thead>
+  <tbody>
+    <tr><td>Wan2.1-1.3B</td><td class="num">83.37</td><td class="num">84.30</td><td class="num">79.65</td><td class="num">61</td><td class="num">5.275</td><td class="num">42</td></tr>
+    <tr><td>CausVid</td><td class="num">81.33</td><td class="num">83.98</td><td class="num">70.72</td><td class="num">62</td><td class="num">5.741</td><td class="num">12</td></tr>
+    <tr><td>Self Forcing</td><td class="num">83.74</td><td class="num">84.48</td><td class="num">80.77</td><td class="num">57</td><td class="num">5.820</td><td class="num">48</td></tr>
+    <tr class="hl"><td>Causal Forcing</td><td class="num">84.04</td><td class="num">84.59</td><td class="num">81.84</td><td class="num">68</td><td class="num">6.326</td><td class="num">56</td></tr>
+  </tbody>
+</table></div>
+<p>相对主表中的 Self Forcing，Dynamic Degree +19.3%、VisionReward +8.7%、Instruction Following +16.7%，是相对提升而非绝对百分点。单张 H100 上，三种少步因果方法均为 17.0 FPS、首帧延迟 0.69 s；Wan2.1-1.3B 为 0.78 FPS、103 s。基线效率数值沿用 Self Forcing 论文<span class="src">论文摘要、Tab. 1、App. D</span>。</p>
+<p>以下只比较<b>训练 AR 教师</b>的 TF / DF 消融，不与主表混合；两者均训练 3K 步<span class="src">论文 Tab. 2、App. D</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>教师训练</th><th class="num">Total</th><th class="num">Dynamic</th><th class="num">VisionReward</th><th class="num">Instruction</th></tr></thead>
+  <tbody>
+    <tr><td>Diffusion Forcing</td><td class="num">81.76</td><td class="num">60</td><td class="num">1.583</td><td class="num">30</td></tr>
+    <tr class="hl"><td>Teacher Forcing</td><td class="num">82.12</td><td class="num">50</td><td class="num">3.343</td><td class="num">32</td></tr>
+  </tbody>
+</table></div>
+<p>TF 的 VisionReward 提升 111.2%，但 Dynamic Degree 比 DF 低。作者将 DF 更高的动态解释为视频崩坏带来的异常运动；因此不能说 TF 在这个消融中“所有指标都更高”，也不能把运动幅度当作运动质量<span class="src">论文 §4.2、Tab. 2、Fig. 4</span>。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="diff">
+  <div class="was"><h4>之前</h4><ul>
+    <li><a href="09-causvid.html">CausVid</a>：双向 ODE 配对启动因果学生，后接非对称 DMD。</li>
+    <li><a href="12-self-forcing.html">Self Forcing</a>：DMD 时训练自生成历史，初始化仍使用双向轨迹。</li>
+    <li><a href="02-trajectory-distillation.html">图像轨迹蒸馏</a>：完整教师状态使确定性回归标签成立。</li>
+  </ul></div>
+  <div class="now"><h4>Causal Forcing 与留下的问题</h4><ul>
+    <li>以 TF AR 教师重新构造条件 ODE 配对，修复回归输入的信息缺口。</li>
+    <li>仍保留离线轨迹构建、在线大教师与 critic；没有消除 DMD 训练成本。</li>
+    <li><a href="17-virdm.html">ViRDM</a> 保留其 causal ODE 起点，以离线表征分布替换后续 teacher–critic 监督。</li>
+  </ul></div>
+</div>
+<p>后续指针：<a href="https://arxiv.org/abs/2605.15141">Causal Forcing++</a> 延续因果一致性初始化；<a href="https://arxiv.org/abs/2606.25473">Causal-rCM</a> 的统一 teacher-forcing / self-forcing 配方见 <a href="13-rcm.html">rCM 页面</a>。本页只说明原始 Causal Forcing 的主方法，不把后续配方或结果合并进主表。</p>
+
+<!-- ================================================================== -->
+<h2 id="questions">简答题</h2>
+<div class="qa">
+  <h3 id="q27"><span class="qid">Q27</span>双向教师的 ODE 是确定的，为什么因果学生回归其终点仍可能只学到条件期望？</h3>
+  <div class="ans">
+    <p class="short">确定性是针对整段带噪视频和条件而言；因果学生删掉了未来块，当前终点可能仍依赖这些不可见变量。固定全部可见输入时若目标还有条件方差，平方损失最优解就是对未知未来求条件期望。Causal Forcing 固定干净历史，用 AR 教师的条件 ODE 生成配对，让终点成为同一学生输入的函数。</p>
+    <ul><li>需要检查所有可见条件，包括历史与文本，不能只比较当前帧。</li><li>这是逐样本轨迹回归的错配，不是因果生成分布表达能力的否定。</li><li>DMD 只要求分布匹配，因此最终 real score 可以继续使用双向教师。</li></ul>
+    <p class="cite">依据：论文 §3.2、式 (4)–(8)、App. B.1、§3.3。</p>
+  </div>
+  <h3 id="q28"><span class="qid">Q28</span>Self Forcing 批评 teacher forcing 的暴露偏差，Causal Forcing 为什么又先使用 teacher forcing？</h3>
+  <div class="ans">
+    <p class="short">两者针对不同差异。TF 让教师学习以干净历史为条件的 AR 扩散，消除 DF 带噪历史与推理干净历史之间的条件分布差异；它还没有解决真实前缀与学生前缀的差异。先用这种教师构造可学习的少步映射，再用 Self Forcing 式 DMD 在自生成历史上训练，两个阶段互相补充。</p>
+    <ul><li>TF 教师提供因果兼容性；ODE 蒸馏提供少步兼容性。</li><li>只把多步 TF 权重当少步模型使用，仍可能发生块间突变。</li><li>DF 的高 Dynamic Degree 可能来自崩坏，需联合视觉指标与样例判断。</li></ul>
+    <p class="cite">依据：论文 §3.3、Prop. 3.4、App. B.2、App. C.1–C.2、Tab. 2。</p>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Zhu, Zhao, He, Su, Li, Zhu. <i>Causal Forcing: Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation.</i> ICML 2026（官方仓库标注）。<a href="https://arxiv.org/abs/2602.02214">arXiv:2602.02214</a> · <a href="https://arxiv.org/html/2602.02214v5">本文核对的全文 v5</a> · <a href="https://thu-ml.github.io/CausalForcing.github.io/">项目页</a> · <a href="https://github.com/thu-ml/Causal-Forcing">官方代码</a></li>
+  <li>Yin et al. <i>From Slow Bidirectional to Fast Autoregressive Video Diffusion Models.</i> CVPR 2025. <a href="https://arxiv.org/abs/2412.07772">arXiv:2412.07772</a> · <a href="09-causvid.html">CausVid 页面</a></li>
+  <li>Huang et al. <i>Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion.</i> <a href="https://arxiv.org/abs/2506.08012">arXiv:2506.08012</a> · <a href="12-self-forcing.html">页面</a></li>
+  <li>Zhao et al. <i>Causal Forcing++: Scalable Few-Step Autoregressive Diffusion Distillation for Real-Time Interactive Video Generation.</i> <a href="https://arxiv.org/abs/2605.15141">arXiv:2605.15141</a>（后续指针）</li>
+  <li><i>Causal-rCM: A Unified Teacher-Forcing and Self-Forcing Open Recipe for Autoregressive Diffusion Distillation in Streaming Video Generation and Interactive World Models.</i> <a href="https://arxiv.org/abs/2606.25473">arXiv:2606.25473</a> · <a href="13-rcm.html">rCM 页面</a></li>
+</ol>
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，具体出处见各节标注与参考。</footer>
+</body>
+</html>

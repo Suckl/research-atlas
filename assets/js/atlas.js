@@ -91,10 +91,11 @@
     if (node) crumbs.push(`<span>${Atlas.esc(node.title)}</span>`);
     const crumbHTML = crumbs.length ? crumbs.map((c) => `<span class="sep">/</span>${c}`).join("") : "";
     host.innerHTML = `<div class="bar">
-      <a class="brand" href="${href("index.html")}"><span class="dot"></span>${Atlas.esc(R.site.title || "Atlas")}</a>
+      <a class="brand" href="${href("index.html")}" aria-label="${Atlas.esc(R.site.title || "Atlas")}"><span class="dot"></span><span class="brand-text">${Atlas.esc(R.site.title || "Atlas")}</span></a>
       <nav class="crumbs" aria-label="breadcrumb">${crumbHTML}</nav>
       <span class="spacer"></span>
-      <a class="nav-link${body().dataset.pageKind === "library" ? " on" : ""}" href="${href("papers/index.html")}">论文书架</a>
+      <a class="nav-link${["library", "reading"].includes(body().dataset.pageKind) ? " on" : ""}" href="${href("index.html")}">论文书架</a>
+      <a class="nav-link${body().dataset.pageKind === "legacy" || (body().dataset.track && !["library", "reading"].includes(body().dataset.pageKind)) ? " on" : ""}" href="${href("legacy/index.html")}">旧版路线</a>
       <button class="icon-btn" id="theme-btn" type="button" title="切换主题"></button>
     </div>`;
     const btn = host.querySelector("#theme-btn");
@@ -124,7 +125,8 @@
         .filter((x) => x.ref)
         .map(({ q, ref }) => `<a href="#${Atlas.esc(ref.anchor || "questions")}" title="${Atlas.esc(q.text)}">${Atlas.esc(q.id)}</a>`)
         .join("");
-      const links = (n.links || []).map((l) => `<a class="pill" href="${Atlas.esc(l.url)}" target="_blank" rel="noopener">${Atlas.esc(l.label)} ↗</a>`).join("");
+      const links = (n.reading ? `<a class="pill pill-reading" href="${href(n.reading)}">逐节精读 →</a>` : "") +
+        (n.links || []).map((l) => `<a class="pill" href="${Atlas.esc(l.url)}" target="_blank" rel="noopener">${Atlas.esc(l.label)} ↗</a>`).join("");
       const tags = (n.tags || []).map((x) => `<span class="tag">${Atlas.esc(x)}</span>`).join("");
       host.classList.add("hero");
       host.innerHTML = `
@@ -201,7 +203,7 @@
   const RENDER = {
     "track-cards"(host) {
       host.classList.add("cards");
-      host.innerHTML = R.tracks.map((t) => {
+      host.innerHTML = R.tracks.filter((t) => t.status !== "papers-only").map((t) => {   // library-only categories have no track page
         const n = R.nodes.filter((x) => x.track === t.id);
         return `<a class="card big kind-model" href="${href(t.page)}">
           <div class="card-kicker">研究路线 · ${n.length} 个节点 · ${Atlas.esc(t.status || "")}</div>
@@ -656,6 +658,11 @@
     renderPager();
     document.querySelectorAll("pre code.lang-py").forEach(highlight);
     document.querySelectorAll("figure.arch").forEach(wireArch);
+    // hand-drawn diagrams: on phones keep the SVG at >= 85% of its viewBox width (the .dia box scrolls sideways)
+    document.querySelectorAll(".dia svg.dg[viewBox]").forEach((s) => {
+      const w = parseFloat(s.getAttribute("viewBox").split(/[\s,]+/)[2]);
+      if (w > 0) s.style.setProperty("--dg-min", Math.round(w * 0.85) + "px");
+    });
     mountWidgets();
     typeset(document.body);
     renderTOC();

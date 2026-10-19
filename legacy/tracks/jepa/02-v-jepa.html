@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>V-JEPA 架构拆解</title>
+<meta name="description" content="V-JEPA：把 I-JEPA 扩展到视频。完整拆解 tubelet 嵌入、时空多块掩码、x/y 编码器、预测器、L1 损失与 attentive probe。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../../../assets/css/atlas.css">
+<script defer src="../../../registry.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../../../assets/js/atlas.js"></script>
+<script defer src="../../../assets/js/widgets/mask3d.js"></script>
+</head>
+<body data-root="../../../" data-page-kind="model" data-track="jepa" data-node="v-jepa">
+<header id="site-header"></header>
+<!-- atlas-defs: shared SVG markers/patterns referenced by every .dg diagram (keep in sync with templates/model-page.html) -->
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div data-hero></div>
+
+<!-- ================================================================== -->
+<h2 id="motivation">1. 动机：只靠“特征预测”能学好视频吗？</h2>
+<p>I-JEPA 证明了在图像上“预测被遮区域的表征”可行。视频是更自然的下一步：它天然包含运动、遮挡、物体持续性等<b>时间结构</b>，而这正是世界模型最需要的东西。</p>
+<p>当时的视频自监督方法大多是：</p>
+<ul>
+  <li><b>像素重建</b>（VideoMAE、Hiera、OmniMAE 等）：要重建每一帧的纹理细节；</li>
+  <li>借助<b>额外监督或先验</b>：预训练图像编码器、文本、负样本、手工增强。</li>
+</ul>
+<p>V-JEPA 问的问题很直接：<b>把“特征预测”作为唯一的训练目标</b>——不用预训练图像编码器、不用文本、不用负样本、不用像素重建——能不能学到通用的视频表征？并且要求在<b>冻结骨干</b>（不微调）的评估下就好用。</p>
+<div class="callout insight">
+  <span class="callout-title">答案</span>
+  可以。而且同样的训练预算下，预测特征比预测像素在冻结评估上更好（K400 73.7 vs 68.6，见 <a href="#results">§8</a>），训练也更快。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="architecture">2. 全局架构</h2>
+<div class="legend">
+  <span><i class="sw data"></i>数据 / 索引</span><span><i class="sw enc"></i>x-encoder（可训练）</span>
+  <span><i class="sw tgt"></i>y-encoder（EMA）</span><span><i class="sw pred"></i>预测器</span>
+  <span><i class="sw loss"></i>损失</span><span><i class="sw mask"></i>mask token</span>
+  <span><i class="ln sg"></i>stop-gradient</span><span><i class="ln ema"></i>EMA 权重更新</span>
+</div>
+<figure class="arch" id="fig-arch">
+  <div class="arch-canvas">
+  <svg class="dg" viewBox="0 0 960 500" role="img" aria-label="V-JEPA 架构图">
+    <!-- input video -->
+    <g data-part="input" data-step="1">
+      <rect class="box data" x="44" y="176" width="92" height="92" rx="4" opacity=".55"/>
+      <rect class="box data" x="34" y="186" width="92" height="92" rx="4" opacity=".75"/>
+      <rect class="box data" x="24" y="196" width="92" height="92" rx="4"/>
+      <rect x="30" y="202" width="80" height="54" style="fill:#dfe9f3"/>
+      <rect x="30" y="256" width="80" height="26" style="fill:#c9b48f"/>
+      <circle cx="58" cy="238" r="8" style="fill:#d9480f"/>
+      <path d="M66,238 h22" style="stroke:#d9480f;stroke-width:2;stroke-dasharray:3 3"/>
+      <text class="t-c t-b" x="78" y="310">视频片段 x</text>
+      <text class="t-c t-sm" x="78" y="327">16 帧 × 224²（stride 4）</text>
+    </g>
+    <path class="edge" d="M140,236 H160" data-step="1"/>
+    <g data-part="tubelet" data-step="1">
+      <rect class="box data" x="164" y="196" width="122" height="80" rx="10"/>
+      <text class="t-c t-b" x="225" y="218">Tubelet 嵌入</text>
+      <text class="t-c t-sm" x="225" y="239">Conv3d 2×16×16</text>
+      <text class="t-c t-sm" x="225" y="257">→ 8×14×14 = 1568</text>
+    </g>
+    <path class="edge" d="M225,196 V86 H316" data-step="3"/>
+    <text class="t-sm" x="234" y="74" data-step="3">全部 token</text>
+    <path class="edge" d="M225,276 V386 H316" data-step="2"/>
+
+    <!-- mask sampler -->
+    <g data-part="masking" data-step="2">
+      <rect class="box data" x="320" y="200" width="172" height="80" rx="10"/>
+      <text class="t-c t-b" x="406" y="221">3D 多块掩码</text>
+      <text class="t-c t-sm" x="406" y="242">短程 8×0.15 / 长程 2×0.7</text>
+      <text class="t-c t-sm" x="406" y="260">贯穿全部时间 · 约 90%</text>
+    </g>
+    <path class="edge idx" d="M395,280 V346" data-step="2"/>
+    <path class="edge idx" d="M492,222 C560,222 605,190 605,126" data-step="4"/>
+    <text class="t-xs" x="528" y="200" data-step="4">被遮位置</text>
+    <path class="edge idx" d="M320,262 H300 V457 H690" data-step="5"/>
+    <text class="t-xs" x="400" y="471" data-step="5">被遮位置（决定 mask token 的 3D 位置编码）</text>
+
+    <!-- y-encoder path -->
+    <g class="tgt" data-part="tgt-enc" data-step="3">
+      <rect class="box" x="320" y="50" width="172" height="72" rx="10"/>
+      <text class="t-c t-b" x="406" y="74">y-encoder f<tspan font-size="10" dy="3">θ̄</tspan></text>
+      <text class="t-c t-sm" x="406" y="99">ViT · EMA · 看完整片段</text>
+    </g>
+    <path class="edge" d="M492,86 H526" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="4"/>
+    <g class="tgt" data-part="tgt-select" data-step="4">
+      <rect class="box" x="530" y="50" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="605" y="74">LayerNorm</text>
+      <text class="t-c t-sm" x="605" y="99">取被遮位置的输出</text>
+    </g>
+    <path class="edge" d="M680,86 H716" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="4"/>
+    <g data-part="tgt-select" data-step="4">
+      <g transform="translate(720,58)">
+        <rect class="tk tgt" x="0" y="0" width="12" height="12"/><rect class="tk tgt" x="12" y="0" width="12" height="12"/><rect class="tk tgt" x="24" y="0" width="12" height="12"/><rect class="tk tgt" x="36" y="0" width="12" height="12"/><rect class="tk tgt" x="48" y="0" width="12" height="12"/><rect class="tk tgt" x="60" y="0" width="12" height="12"/>
+        <rect class="tk tgt" x="0" y="14" width="12" height="12"/><rect class="tk tgt" x="12" y="14" width="12" height="12"/><rect class="tk tgt" x="24" y="14" width="12" height="12"/><rect class="tk tgt" x="36" y="14" width="12" height="12"/><rect class="tk tgt" x="48" y="14" width="12" height="12"/><rect class="tk tgt" x="60" y="14" width="12" height="12"/>
+        <rect class="tk tgt" x="0" y="28" width="12" height="12"/><rect class="tk tgt" x="12" y="28" width="12" height="12"/><rect class="tk tgt" x="24" y="28" width="12" height="12"/><rect class="tk tgt" x="36" y="28" width="12" height="12"/><rect class="tk tgt" x="48" y="28" width="12" height="12"/><rect class="tk tgt" x="60" y="28" width="12" height="12"/>
+      </g>
+      <text class="t-sm" x="800" y="80">s<tspan font-size="9" dy="3">y</tspan><tspan dy="-3">（≈1400 个）</tspan></text>
+      <text class="t-c t-xs" x="756" y="112">2 组掩码共用这一次编码</text>
+    </g>
+    <path class="edge sg" d="M760,122 V206" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)" data-step="6"/>
+    <g class="sg-badge" data-step="6"><rect x="767" y="152" width="26" height="18" rx="4"/><text class="t-c" x="780" y="161.5">sg</text></g>
+
+    <!-- loss -->
+    <g class="loss" data-part="loss" data-step="6">
+      <rect class="box" x="690" y="210" width="180" height="64" rx="10"/>
+      <text class="t-c t-b" x="780" y="232">L1 损失</text>
+      <text class="t-c t-sm" x="780" y="254">mean |ŝ − s| · 2 组掩码平均</text>
+    </g>
+
+    <!-- context path -->
+    <g data-part="ctx-select" data-step="2">
+      <rect class="box data" x="320" y="350" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="395" y="374">取可见 token</text>
+      <text class="t-c t-sm" x="395" y="399">掩码的补集 · 约 10%</text>
+    </g>
+    <path class="edge" d="M470,386 H496" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="3"/>
+    <g class="enc" data-part="ctx-enc" data-step="3">
+      <rect class="box" x="500" y="350" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="575" y="374">x-encoder f<tspan font-size="10" dy="3">θ</tspan></text>
+      <text class="t-c t-sm" x="575" y="399">ViT-L/H · 只看可见</text>
+    </g>
+    <path class="edge" d="M650,386 H686" style="stroke:var(--c-enc);marker-end:url(#ah-enc)" data-step="5"/>
+    <text class="t-c t-sm" x="668" y="372" data-step="5">s<tspan font-size="9" dy="3">x</tspan></text>
+    <g class="pred" data-part="predictor" data-step="5">
+      <rect class="box" x="690" y="350" width="150" height="72" rx="10"/>
+      <text class="t-c t-b" x="765" y="374">预测器 g<tspan font-size="10" dy="3">φ</tspan></text>
+      <text class="t-c t-sm" x="765" y="399">窄 ViT · 12 层 · 宽 384</text>
+    </g>
+    <g data-part="mask-tokens" data-step="5">
+      <g transform="translate(694,450)">
+        <rect class="tk mask" x="0" y="0" width="14" height="14"/><rect class="tk mask" x="16" y="0" width="14" height="14"/><rect class="tk mask" x="32" y="0" width="14" height="14"/><rect class="tk mask" x="48" y="0" width="14" height="14"/><rect class="tk mask" x="64" y="0" width="14" height="14"/>
+      </g>
+      <text class="t-sm" x="782" y="457">mask token + 3D sin-cos</text>
+    </g>
+    <path class="edge" d="M730,448 V426" data-step="5"/>
+    <path class="edge" d="M840,386 H862" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="5"/>
+    <g data-part="predictor" data-step="5">
+      <g transform="translate(866,362)">
+        <rect class="tk pred" x="0" y="0" width="12" height="12"/><rect class="tk pred" x="12" y="0" width="12" height="12"/><rect class="tk pred" x="24" y="0" width="12" height="12"/><rect class="tk pred" x="36" y="0" width="12" height="12"/><rect class="tk pred" x="48" y="0" width="12" height="12"/>
+        <rect class="tk pred" x="0" y="14" width="12" height="12"/><rect class="tk pred" x="12" y="14" width="12" height="12"/><rect class="tk pred" x="24" y="14" width="12" height="12"/><rect class="tk pred" x="36" y="14" width="12" height="12"/><rect class="tk pred" x="48" y="14" width="12" height="12"/>
+        <rect class="tk pred" x="0" y="28" width="12" height="12"/><rect class="tk pred" x="12" y="28" width="12" height="12"/><rect class="tk pred" x="24" y="28" width="12" height="12"/><rect class="tk pred" x="36" y="28" width="12" height="12"/><rect class="tk pred" x="48" y="28" width="12" height="12"/>
+      </g>
+      <text class="t-c t-sm" x="896" y="420">ŝ<tspan font-size="9" dy="3">y</tspan></text>
+    </g>
+    <path class="edge" d="M920,360 V242 H874" style="stroke:var(--c-pred);marker-end:url(#ah-pred)" data-step="6"/>
+    <path class="edge grad" d="M708,276 C680,300 650,325 630,348" data-step="6"/>
+
+    <!-- EMA -->
+    <g data-part="ema" data-step="7">
+      <path class="edge ema" d="M520,348 C520,270 470,200 470,126"/>
+      <rect class="note-bg" x="528" y="290" width="150" height="38" rx="6"/>
+      <text class="t-sm" x="536" y="302" style="fill:var(--c-tgt);font-weight:650">EMA（0.998 → 1.0）</text>
+      <text class="t-mono" x="536" y="319">θ̄ ← m·θ̄ + (1−m)·θ</text>
+    </g>
+  </svg>
+  </div>
+  <div class="arch-foot">
+    <div class="arch-panel"></div>
+    <div class="controls"></div>
+  </div>
+  <div class="arch-notes">
+    <div data-note="input"><h4>视频片段</h4><p>从视频中以时间步长 4 采 16 帧，分辨率 224×224（ViT-H/16<sub>384</sub> 用 384²）。和 I-JEPA 一样，不做手工视角增强。</p></div>
+    <div data-note="tubelet"><h4>Tubelet 嵌入</h4><p>用 3D 卷积（核 = 步长 = 2×16×16）把每 2 帧 × 16×16 像素的小立方体映射成一个 token：16/2 × 224/16 × 224/16 = <b>8 × 14 × 14 = 1568</b> 个 token，再加上 3D sin-cos 绝对位置编码。不使用 [CLS] token。</p></div>
+    <div data-note="masking"><h4>3D 多块掩码</h4><p>每个片段采两组掩码：<b>短程</b>（8 个块各占一帧 15% 的面积，取并集）与<b>长程</b>（2 个块各占 70%）。块的长宽比在 (0.75, 1.5)，并且<b>在时间上贯穿整段片段</b>。平均遮挡约 90%。见 <a href="#c-masking">§3.2 交互演示</a>。</p></div>
+    <div data-note="ctx-select"><h4>取可见 token</h4><p>上下文 = 掩码的<b>补集</b>（I-JEPA 是单独采一个上下文块）。只有这约 10% 的 token 进入 x-encoder，这让视频训练的计算量大幅下降。</p></div>
+    <div data-note="ctx-enc"><h4>x-encoder f<sub>θ</sub></h4><p>标准 ViT（ViT-L/16 或 ViT-H/16），只处理可见 token。每组掩码各跑一次（共 2 次）。训练结束后，下游评估使用冻结的编码器 + attentive probe。</p></div>
+    <div data-note="tgt-enc"><h4>y-encoder f<sub>θ̄</sub></h4><p>与 x-encoder 同结构，权重为其 EMA（动量 0.998 → 1.0）。处理<b>全部 1568 个 token</b>，每个片段只算一次，两组掩码共用。</p></div>
+    <div data-note="tgt-select"><h4>构造目标</h4><p>对 y-encoder 输出做 LayerNorm（官方代码），再在被遮位置取出 token 作为回归目标 \(s_y\)。和 I-JEPA 一样，掩码作用在输出上，所以目标包含整段视频的上下文。</p></div>
+    <div data-note="predictor"><h4>预测器 g<sub>φ</sub></h4><p>窄 Transformer：12 层、宽 384（注意力头数与骨干一致）。输入 = 投影到 384 维的上下文 token + 所有被遮位置的 mask token，输出取 mask token 位置并投回骨干维度，得到 \(\hat s_y\)。</p></div>
+    <div data-note="mask-tokens"><h4>mask token</h4><p>共享可学习向量 + 被遮位置的 <b>3D</b> sin-cos 位置编码。它告诉预测器“请预测时刻 t、位置 (h, w) 的表征”——条件变量 z 从 2D 位置变成了时空位置。</p></div>
+    <div data-note="loss"><h4>L1 损失</h4><p>\(\frac{1}{|M|}\sum_{k\in M}\lVert \hat s_k - s_k\rVert_1\)，两组掩码的损失取平均。论文称 L1 比 L2 训练更稳定。官方代码写作 <code>mean(|z − h|^p)/p</code>，p = 1。</p></div>
+    <div data-note="ema"><h4>EMA 更新</h4><p>与 I-JEPA 相同的机制，动量从 0.998 线性增至 1.0。V-JEPA 的防坍塌仍然完全依赖 EMA + stop-gradient + 预测器。</p></div>
+    <div data-step-note="1"><h4>① 切成时空 token</h4><p>16 帧视频经 2×16×16 的 tubelet 嵌入，得到 8×14×14 = 1568 个 token（+ 3D 位置编码）。</p></div>
+    <div data-step-note="2"><h4>② 采样时空掩码</h4><p>采样短程、长程两组 3D 多块掩码（贯穿时间，约 90%）。上下文 = 补集，只剩约 10% 的 token。</p></div>
+    <div data-step-note="3"><h4>③ 两路编码</h4><p>y-encoder（EMA，无梯度）编码全部 1568 个 token；x-encoder 只编码可见 token，得到 \(s_x\)。</p></div>
+    <div data-step-note="4"><h4>④ 构造目标</h4><p>y-encoder 输出 LayerNorm 后，在被遮位置取出约 1400 个 token 作为目标 \(s_y\)。</p></div>
+    <div data-step-note="5"><h4>⑤ 预测</h4><p>预测器接收 \(s_x\) 与被遮位置的 mask token（3D 位置编码），输出这些位置的预测 \(\hat s_y\)。</p></div>
+    <div data-step-note="6"><h4>⑥ L1 损失与反传</h4><p>\(\lVert\hat s_y - \mathrm{sg}(s_y)\rVert_1\)，两组掩码平均；梯度只更新预测器与 x-encoder。</p></div>
+    <div data-step-note="7"><h4>⑦ EMA 更新</h4><p>y-encoder 参数 \(\bar\theta \leftarrow m\bar\theta + (1-m)\theta\)。</p></div>
+  </div>
+  <figcaption>图 1　V-JEPA 训练流程（以一组掩码为例；实际每个片段两组掩码，y-encoder 只算一次）。依据论文 §3 与 <code>facebookresearch/jepa</code> 的 <code>app/vjepa/train.py</code>。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="components">3. 组件拆解</h2>
+
+<h3 id="c-tubelet">3.1 Tubelet：把视频切成时空 token</h3>
+<p>图像 ViT 把 16×16 像素切成一个 patch；V-JEPA 把<b>2 帧 × 16×16 像素</b>切成一个 tubelet。这相当于在时间维度上也做了 2 倍下采样：</p>
+<div class="formula">$$\underbrace{[B,3,16,224,224]}_{\text{视频}} \xrightarrow{\ \text{Conv3d}(k=s=(2,16,16))\ } [B, D, 8, 14, 14] \xrightarrow{\text{flatten}} [B,\ 1568,\ D]$$</div>
+<p>位置编码是 3D sin-cos（时间 t、高 h、宽 w），固定不训练。到了 <a href="03-v-jepa-2.html#c-rope">V-JEPA 2</a>，这里换成了 3D-RoPE。</p>
+
+<h3 id="c-masking">3.2 时空多块掩码：为什么必须“贯穿时间”</h3>
+<p>视频在时间上高度冗余：相邻帧几乎一样。如果每帧独立遮挡，被遮的区域在相邻帧里往往是可见的，模型只要“抄邻帧”就能把损失降下来，学不到有用的东西。V-JEPA 的做法是让每个掩码块<b>在时间上延伸到整个片段</b>，同时让被遮面积足够大（约 90%）。</p>
+<div data-widget="mask-3d"></div>
+<p>论文消融（ViT-L/16，K710+SSv2 训练，冻结评估）<span class="src">论文 Tab. 4</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>掩码</th><th class="num">K400</th><th class="num">SSv2</th><th class="num">IN-1K</th></tr></thead>
+  <tbody>
+    <tr><td>random-tube[0.9]</td><td class="num">51.5</td><td class="num">46.4</td><td class="num">55.6</td></tr>
+    <tr><td>causal multi-block[6]（上下文只来自前 6 帧）</td><td class="num">61.3</td><td class="num">49.8</td><td class="num">66.9</td></tr>
+    <tr><td>causal multi-block[12]（上下文只来自前 12 帧）</td><td class="num">71.9</td><td class="num">63.6</td><td class="num">72.2</td></tr>
+    <tr class="hl"><td>multi-block（V-JEPA）</td><td class="num">72.9</td><td class="num">67.4</td><td class="num">72.8</td></tr>
+  </tbody>
+</table></div>
+<div class="callout info">
+  <span class="callout-title">与 I-JEPA 掩码的区别</span>
+  I-JEPA：先采 4 个目标块，再单独采一个上下文块并去掉重叠（上下文 + 目标 ≠ 全部）。V-JEPA：采目标块的并集，<b>上下文直接取补集</b>；且同一片段采两组不同尺度的掩码，共享一次 y-encoder 前向。
+</div>
+
+<h3 id="c-encoders">3.3 x-encoder / y-encoder / 预测器</h3>
+<p>结构上与 I-JEPA 完全同构，只是 token 变成了时空 token：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>组件</th><th>结构</th><th>输入</th><th>更新方式</th></tr></thead>
+  <tbody>
+    <tr><td>x-encoder</td><td>ViT-L/16（24 层、宽 1024）或 ViT-H/16（32 层、宽 1280）</td><td>约 10% 可见 token</td><td>梯度下降</td></tr>
+    <tr><td>y-encoder</td><td>同上</td><td>全部 1568 token</td><td>EMA，0.998 → 1.0</td></tr>
+    <tr><td>预测器</td><td>12 层、宽 384 的 Transformer</td><td>上下文 token + 约 1400 个 mask token</td><td>梯度下降</td></tr>
+  </tbody>
+</table></div>
+<p>注意预测器的序列长度：它要同时处理上下文和所有被遮位置，接近完整的 1568 个 token——这也是预测器必须“窄”的原因之一。</p>
+
+<h3 id="c-l1">3.4 从 L2 到 L1</h3>
+<p>V-JEPA 把回归损失换成了 L1：</p>
+<div class="formula">$$\mathcal L = \frac{1}{|M|}\sum_{k\in M}\big\lVert \hat s_k - \mathrm{sg}(s_k)\big\rVert_1$$</div>
+<p>论文给出的理由是“训练更稳定”。直觉上，L1 对少数误差很大的 token 不那么敏感（梯度幅度有界），在约 1400 个目标 token 一起回归时更不容易被个别难预测的区域主导。这个选择一直沿用到 V-JEPA 2。</p>
+
+<h3 id="c-probe">3.5 Attentive probe：冻结评估的“读出头”</h3>
+<p>V-JEPA 强调<b>冻结骨干</b>评估。但视频特征有 1568 个 token，简单平均池化会丢掉“哪里、何时发生了什么”。于是用一个轻量的交叉注意力头来读出：</p>
+<figure>
+  <svg class="dg" viewBox="0 0 900 160" role="img" aria-label="attentive probe 结构">
+    <g class="tgt"><rect class="box frozen" x="10" y="40" width="160" height="70" rx="10"/><text class="t-c t-b" x="90" y="65">冻结编码器</text><text class="t-c t-sm" x="90" y="88">输出 N 个 token</text></g>
+    <path class="edge" d="M170,75 H215"/>
+    <g class="pred"><rect class="box" x="220" y="30" width="190" height="90" rx="10"/><text class="t-c t-b" x="315" y="56">交叉注意力</text><text class="t-c t-sm" x="315" y="78">Q = 1 个可学习 query</text><text class="t-c t-sm" x="315" y="98">K, V = 冻结 token</text></g>
+    <path class="edge" d="M410,75 H450"/>
+    <g><rect class="box" x="455" y="40" width="120" height="70" rx="10"/><text class="t-c t-b" x="515" y="66">+ 残差</text><text class="t-c t-sm" x="515" y="88">（加回 query）</text></g>
+    <path class="edge" d="M575,75 H610"/>
+    <g><rect class="box" x="615" y="40" width="140" height="70" rx="10"/><text class="t-c t-b" x="685" y="66">MLP + LN</text><text class="t-c t-sm" x="685" y="88">2 层，GeLU</text></g>
+    <path class="edge" d="M755,75 H790"/>
+    <g class="loss"><rect class="box" x="795" y="45" width="95" height="60" rx="10"/><text class="t-c t-b" x="842" y="75">线性分类</text></g>
+    <text class="t-sm" x="10" y="140">只训练 probe 的参数；骨干完全冻结。</text>
+  </svg>
+  <figcaption>图 2　attentive probe。论文消融：平均池化 → attentive probe，K400 56.7 → 73.7，SSv2 50.1 → 66.2（ViT-L/16）<span class="src">论文 Tab. 3</span>。</figcaption>
+</figure>
+
+<!-- ================================================================== -->
+<h2 id="shapes">4. 张量形状追踪</h2>
+<p>以 ViT-L/16（宽 1024）、16 帧 × 224²、一组掩码为例。\(K_\text{ctx}\) 随掩码变化，约为 1568 的 10%。</p>
+<div class="table-wrap"><table class="shapes">
+  <thead><tr><th>步骤</th><th>形状</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>视频片段</td><td>[B, 3, 16, 224, 224]</td><td>stride 4 采样的 16 帧</td></tr>
+    <tr><td>Tubelet 嵌入 + 3D pos</td><td>[B, 1568, 1024]</td><td>8 × 14 × 14</td></tr>
+    <tr><td>y-encoder（全部 token）+ LN</td><td>[B, 1568, 1024]</td><td><code>no_grad</code>，每片段一次</td></tr>
+    <tr><td>取可见 token</td><td>[B, K_ctx, 1024]</td><td>K_ctx ≈ 150</td></tr>
+    <tr><td>x-encoder</td><td>[B, K_ctx, 1024]</td><td>每组掩码一次</td></tr>
+    <tr><td>预测器嵌入（Linear 1024→384）</td><td>[B, K_ctx, 384]</td><td></td></tr>
+    <tr><td>拼接 mask token</td><td>[B, K_ctx + K_tgt, 384]</td><td>K_tgt = 1568 − K_ctx ≈ 1400</td></tr>
+    <tr><td>预测器 12 层 → 取 mask 位 → Linear 384→1024</td><td>[B, K_tgt, 1024]</td><td>\(\hat s_y\)</td></tr>
+    <tr><td>目标：y-encoder 输出取被遮位置</td><td>[B, K_tgt, 1024]</td><td>\(s_y\)</td></tr>
+    <tr><td>L1 损失</td><td>标量</td><td>两组掩码平均</td></tr>
+  </tbody>
+</table></div>
+
+<!-- ================================================================== -->
+<h2 id="objective">5. 训练目标与防坍塌</h2>
+<div class="formula">$$\min_{\theta,\phi}\ \frac{1}{2}\sum_{m\in\{\text{短程},\text{长程}\}} \frac{1}{|M_m|}\sum_{k\in M_m}\Big\lVert\, g_\phi\big(f_\theta(x_{\bar M_m}),\ z_{M_m}\big)_k - \mathrm{sg}\big(\mathrm{LN}(f_{\bar\theta}(x))\big)_k \Big\rVert_1$$</div>
+<p>其中 \(x_{\bar M}\) 表示掩码补集（可见 token），\(z_{M}\) 是被遮位置的 mask token。防坍塌机制与 I-JEPA 完全一致：<b>EMA 目标编码器 + stop-gradient + 预测器</b>。没有负样本、没有方差/协方差正则。</p>
+<div class="callout code-note">
+  <span class="callout-title">实现细节</span>
+  官方代码对 y-encoder 输出做 <code>F.layer_norm</code> 后再取目标；损失写作 <code>torch.mean(torch.abs(z - h) ** loss_exp) / loss_exp</code>，<code>loss_exp = 1</code> 即 L1。学习率、weight decay 等调度按 1.25 倍迭代数计算，实际训练在 90K 迭代处截断。
+</div>
+
+<!-- ================================================================== -->
+<h2 id="pseudocode">6. 伪代码</h2>
+<div class="code-title">train_step.py（按 app/vjepa/train.py 结构整理）</div>
+<pre><code class="lang-py"># clips: [B, 3, 16, 224, 224]
+# masks_enc / masks_pred: 两组（短程、长程）索引，由 3D MaskCollator 生成，二者互为补集
+
+def train_step(clips, masks_enc, masks_pred):
+    with torch.no_grad():
+        h = target_encoder(clips)                       # [B, 1568, D]  只算一次
+        h = F.layer_norm(h, (h.size(-1),))
+
+    z = encoder(clips, masks_enc)                       # list[2]: [B, K_ctx, D]
+    z = predictor(z, masks_enc, masks_pred)             # list[2]: [B, K_tgt, D]
+
+    loss = 0.
+    for zi, mi in zip(z, masks_pred):
+        hi = apply_masks(h, mi)                         # 在“输出”上取被遮位置
+        loss += torch.mean(torch.abs(zi - hi) ** 1.0) / 1.0   # L1
+    loss /= len(masks_pred)
+
+    loss.backward(); optimizer.step(); optimizer.zero_grad()
+    ema_update(target_encoder, encoder, m=next(momentum_scheduler))   # 0.998 → 1.0</code></pre>
+
+<!-- ================================================================== -->
+<h2 id="hyperparams">7. 关键超参</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>取值</th></tr></thead>
+  <tbody>
+    <tr><td>片段</td><td>16 帧，时间 stride 4；224²（ViT-H/16<sub>384</sub> 为 384²）</td></tr>
+    <tr><td>Tubelet</td><td>2 × 16 × 16 → 8 × 14 × 14 = 1568 token；3D sin-cos 位置编码</td></tr>
+    <tr><td>掩码</td><td>短程 8 块 × 0.15；长程 2 块 × 0.70；长宽比 (0.75, 1.5)；贯穿时间；平均约 90%</td></tr>
+    <tr><td>编码器</td><td>ViT-L/16（≈300M）、ViT-H/16（≈630M）、ViT-H/16<sub>384</sub></td></tr>
+    <tr><td>预测器</td><td>12 层，宽 384</td></tr>
+    <tr><td>损失</td><td>L1</td></tr>
+    <tr><td>EMA 动量</td><td>0.998 → 1.0</td></tr>
+    <tr><td>优化器</td><td>AdamW；lr 预热 2e-4 → 6.25e-4（12K 迭代）后余弦衰减至 1e-6；wd 0.04 → 0.4</td></tr>
+    <tr><td>Batch / 迭代</td><td>3072（ViT-H/16<sub>384</sub> 为 2400）/ 90K</td></tr>
+    <tr><td>数据</td><td>VideoMix2M：HowTo100M + Kinetics-400/600/700 + SSv2，约 200 万视频（去除了与评测集的重叠）</td></tr>
+    <tr><td>精度 / 硬件</td><td>bfloat16，A100 80GB</td></tr>
+  </tbody>
+</table></div>
+<p class="muted">出处：论文 §3–4 与附录 B。</p>
+
+<!-- ================================================================== -->
+<h2 id="results">8. 关键结果</h2>
+<p><b>冻结评估</b>（attentive probe），ViT-H/16<sub>384</sub><span class="src">论文 Tab. 6</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th class="num">K400</th><th class="num">SSv2</th><th class="num">AVA</th><th class="num">IN-1K</th><th class="num">Places205</th><th class="num">iNat21</th></tr></thead>
+  <tbody><tr><td class="num">81.9</td><td class="num">72.2</td><td class="num">25.0</td><td class="num">77.4*</td><td class="num">62.8</td><td class="num">72.6</td></tr></tbody>
+</table></div>
+<p class="muted">* 摘要中报告 IN-1K 77.9%（不同探针设置）。SSv2 这类强依赖运动理解的任务上，V-JEPA 明显优于像素重建类方法与图像模型。</p>
+<p><b>预测特征 vs 预测像素</b>（ViT-L/16，同样 90K 迭代）<span class="src">论文 Tab. 1</span>：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>预测目标</th><th class="num">K400（冻结）</th><th class="num">SSv2（冻结）</th><th class="num">IN-1K（冻结）</th><th class="num">K400（微调）</th></tr></thead>
+  <tbody>
+    <tr><td>像素</td><td class="num">68.6</td><td class="num">66.0</td><td class="num">73.3</td><td class="num">85.4</td></tr>
+    <tr class="hl"><td>特征</td><td class="num">73.7</td><td class="num">66.2</td><td class="num">74.8</td><td class="num">85.6</td></tr>
+  </tbody>
+</table></div>
+<p><b>数据</b><span class="src">论文 Tab. 2</span>：数据越多样越好——ViT-L/16 三项平均 K710 70.9 → VideoMix2M 71.5；ViT-H/16 从 72.0（K710+SSv2）→ 72.8（VideoMix2M）。这为 V-JEPA 2 的“规模化数据”埋下伏笔。</p>
+
+<!-- ================================================================== -->
+<h2 id="evolution">9. 承上启下</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>I-JEPA</th><th>V-JEPA</th></tr></thead>
+  <tbody>
+    <tr><td>输入</td><td>单张图像</td><td>16 帧视频</td></tr>
+    <tr><td>Token</td><td>2D patch（16×16 = 256）</td><td>3D tubelet（8×14×14 = 1568）</td></tr>
+    <tr><td>条件变量 z</td><td>目标的 2D 位置</td><td>目标的 3D 时空位置</td></tr>
+    <tr><td>掩码</td><td>4 目标块 + 1 上下文块</td><td>短程/长程两组，贯穿时间，上下文 = 补集，约 90%</td></tr>
+    <tr><td>损失</td><td>L2（代码 smooth-L1）</td><td>L1</td></tr>
+    <tr><td>评估</td><td>线性探测（平均池化）</td><td>冻结骨干 + attentive probe</td></tr>
+    <tr><td>不变</td><td colspan="2">EMA 目标编码器 + stop-gradient + 窄预测器；预测发生在表征空间</td></tr>
+  </tbody>
+</table></div>
+<div class="diff">
+  <div class="was"><h4>V-JEPA 证明了</h4><ul><li>“特征预测”可以单独作为视频自监督目标；</li><li>冻结特征同时擅长运动（SSv2）和外观（K400、IN-1K）；</li><li>比像素预测更好、更省算力。</li></ul></div>
+  <div class="now"><h4>留下的问题 → <a href="03-v-jepa-2.html">V-JEPA 2</a></h4><ul><li>规模：200 万视频、6 亿参数、16 帧短片段——远未到上限；</li><li>表征能“理解”视频，但还不能“预测动作的后果”：模型里没有动作 → 无法用于规划；</li><li>位置编码、训练调度在更大模型上不稳定。</li></ul></div>
+</div>
+
+<!-- ================================================================== -->
+<h2 id="references">参考</h2>
+<ol class="refs">
+  <li>Bardes et al. <i>Revisiting Feature Prediction for Learning Visual Representations from Video.</i> 2024. <a href="https://arxiv.org/abs/2404.08471">arXiv:2404.08471</a></li>
+  <li>官方实现：<a href="https://github.com/facebookresearch/jepa">facebookresearch/jepa</a>（<code>app/vjepa/train.py</code>、<code>src/masks/multiblock3d.py</code>）</li>
+  <li>Tong et al. <i>VideoMAE.</i> NeurIPS 2022.（像素重建对照）</li>
+</ol>
+
+<div data-pager></div>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 内容以论文与官方代码为准，出处见 <a href="SOURCES.md">SOURCES.md</a></footer>
+</body>
+</html>
