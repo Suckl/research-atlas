@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DiffusionGemma 精读</title>
+<meta name="description" content="Google DeepMind 的 DiffusionGemma 技术报告（arXiv 2608.00146）逐节精读：怎样把 Gemma 4 26B A4B 微调成均匀噪声的块自回归文本扩散模型（因果编码器 + 双向解码器、熵界采样、自适应停止），SFT 与 SD·RL 两阶段训练，单卡 H100 上约 1,479 token/秒是怎么测的，约 32 个并发后 AR 反超的原因，以及每组比较的条件和结果的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="diffusiongemma">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · 工业技术报告（2026-07，预印本）</div>
+  <h1>DiffusionGemma 技术报告：从 Gemma 4 微调出来的高速文本扩散模型</h1>
+  <p class="en-title">DiffusionGemma Technical Report</p>
+  <div class="paper-authors">DiffusionGemma Team, Google DeepMind<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>报告第 38 页列出贡献与完整名单，共 43 人（arXiv 作者栏同此），各组内按字母排序：核心贡献者 20 人（Daniele Calandriello、João Gante、Tamara von Glehn、Martin Kukla、Ivan Lobov、Nicolas Perez-Nieves、Bobak Shahriari、Jean Tarbouriech 标 * 为工作流负责人），贡献者 8 人，微调框架 11 人，负责人 4 人（Sebastian Flennerhag、Brendan O’Donoghue、George Scrivener、Shantanu Thakoor）。</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2608.00146" target="_blank" rel="noopener">arXiv 2608.00146 ↗</a>
+    <a class="pill" href="https://blog.google/innovation-and-ai/technology/developers-tools/diffusion-gemma-faster-text-generation/" target="_blank" rel="noopener">技术报告（预印本，未经同行评审）· 发布博客 ↗</a>
+    <a class="pill" href="https://huggingface.co/google/diffusiongemma-26B-A4B-it" target="_blank" rel="noopener">权重：google/diffusiongemma-26B-A4B-it（Apache 2.0）↗</a>
+    <a class="pill" href="https://github.com/google/hackable_diffusion" target="_blank" rel="noopener">微调工具：Hackable Diffusion ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/10-industrial.html">旧版结构拆解：工业 dLLM</a>
+  </div>
+  <div class="paper-stats" data-stats></div>
+  <div class="paper-stats">
+    <div><b>1,306</b><span>Hugging Face 点赞（截至 2026-10-20）</span></div>
+    <div><b>666,448</b><span>Hugging Face 近 30 天下载（截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页引用的第三方网页（模型卡、发布博客、相关论文摘要）均于 2026-10-20 查阅；本页依据报告 arXiv v1（2026-07-31，目前唯一版本）。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按报告的章节顺序，用本站自己的话把整份报告从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。报告在 arXiv 上以 CC BY 4.0 许可发布，所以页面里标“原文图”的图片直接取自报告，并说明怎么看；原图没有画到的概念，用本站自己画的示意图补上。标“推算”的数字是本站根据报告数据算出来的，标“读自原图”的数字是从原图上读出的近似值，都不是报告原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：把一台现成的自回归模型，改造成“整块生成”的扩散模型</h3>
+<p>今天几乎所有大语言模型都是<b>自回归</b>（AR）模型：它们一次只写一个 token（大致是一个词或半个词），写完一个才能写下一个。服务很多用户时，这不是大问题，因为可以把很多用户的请求拼成一个批一起算；但只服务一个用户时，GPU 每一步都要把整个模型的权重从显存搬一遍，只为了算出一个 token，绝大部分算力都在空等。<b>文本扩散模型</b>换了一种做法：先摆出一整段随机的“草稿”，再经过若干轮迭代，每一轮同时修改所有位置，直到草稿变成通顺的文字。因为每一轮都同时处理很多位置，搬一次权重能换来很多个 token，所以在单用户场景下可以快得多。</p>
+<p>DiffusionGemma 是 Google DeepMind 在 2026 年 6 月发布权重、7 月底放出技术报告的一个开放权重文本扩散模型。它不是从零训练的，而是拿已经发布的自回归模型 Gemma 4 26B A4B（总参数 252 亿、每个 token 只激活约 38.5 亿的混合专家模型）做起点，用不到原模型训练 token 总量 10% 的数据把它改造成扩散模型。改造后的模型一次生成一块 256 个 token 的“画布”，平均约 12 轮去噪就能写完一块；报告给出的头条数字是：在一张 H100 上、FP8 精度、一次只服务一个请求时，七个基准平均每秒输出约 1,479 个 token，每次前向平均产出 19.74 个 token；同一张卡上的原始 Gemma 4 只有 204 token/秒，加上多 token 预测（MTP）的投机解码也只有 303 token/秒。代价是质量下降：例如 AIME 2026 从原模型的 88.3 降到 69.1。</p>
+<p>这份报告值得细读，有三个原因。第一，它是第一份把“从 AR 模型初始化 → 块状画布 → 少步化 → 强化学习”这条工业配方连同开放权重一起完整公开的报告，前面的 <a href="mercury.html">Mercury</a> 和 <a href="seed-diffusion.html">Seed Diffusion</a> 都只给结果、不给权重，方法也披露得很少。第二，它在设计上有几处和多数开源扩散语言模型不同的选择：用<b>均匀噪声</b>而不是掩码噪声，用同一套权重同时充当“因果编码器”和“双向解码器”，用熵来决定每一步接受多少个 token，并把强化学习和“采样步数蒸馏”合并成一个阶段 SD·RL。第三，它对“快”这件事给出了少见的完整账本：每一步比 AR 慢多少、慢在哪些算子、并发多高时优势消失（约 32 个并发请求），都有数据。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/diffusiongemma-recipe.svg" alt="原文图 2" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>从左往右是整条改造流水线。最左边是自回归模型 Gemma 4 26B A4B；“预训练”一栏被划掉（Bypassed），意思是不重新做扩散预训练，直接从 AR 模型的最终权重出发。第一步是监督微调（SFT），让模型学会在 256 个 token 的画布上做双向去噪；第二步是采样器蒸馏与强化学习（SD·RL），同时提高回答质量、压缩去噪步数；最右边得到 DiffusionGemma。</figcaption></figure>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么单用户时 AR 模型慢，扩散模型又凭什么能快？优势为什么会在高并发时消失？</li>
+  <li>“均匀噪声”和更常见的“掩码噪声”有什么区别，DiffusionGemma 为什么选前者？</li>
+  <li>同一套权重怎么同时当“编码器”和“解码器”，画布之间的 KV 缓存怎么接上？</li>
+  <li>熵界采样器每一步怎样决定接受哪些 token，自适应停止又怎样决定何时停？</li>
+  <li>SFT 之后的模型为什么在少步时会崩，SD·RL 怎样同时提高质量和速度？</li>
+  <li>1,479 token/秒、“比 Mercury 2 快约 2.5 倍”、“约 32 个并发后 AR 反超”这些数字分别是在什么条件下测的，哪些是厂商自测、哪些有第三方数据，哪些关键信息报告没有公开？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2608.00146" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S1.F2" target="_blank" rel="noopener">原文图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：单个请求为什么慢，DiffusionGemma 想占哪个位置</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告开头先讲清楚它要解决的瓶颈：自回归模型在单用户或低并发时被显存带宽卡住，算力闲置，投机解码只能缓解一部分。然后它说明自己要占据的位置：已有的文本扩散模型要么闭源（Gemini Diffusion、Mercury），要么开源但不够聪明或不够快，DiffusionGemma 要做“又聪明、又快、又开放”的那一个。这一节还交代了模型规模、训练预算和发布方式。</div>
+
+<div class="note-pre"><b>先补一点背景：为什么一次只服务一个请求时，AR 解码受显存带宽限制。</b>
+<p>模型每生成一个 token，都要把参与计算的全部权重从显存读到计算单元一次。读数据的速度由显存带宽决定，计算的速度由算力决定。一次只算一个 token 时，读进来的每个权重只被用来做一两次乘加，计算量太小，GPU 大部分时间在等数据，这种状态叫<b>访存受限</b>（memory-bound）。服务很多用户时，可以把几十上百个请求拼成一个批，读一遍权重同时为所有请求各算一个 token，读权重的开销被摊薄，吞吐量就上去了（这一点在 <a href="vllm.html#n-1">vLLM 精读 §1</a> 有详细的示意图）。但单个用户感受到的速度，即“每用户每秒多少 token”，并不会因为别人也在用而变快；在本地电脑、单人使用或对延迟要求极高的场景里，批开不大，GPU 就只能空转。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：投机解码与“每次前向产出几个 token”（TPF）。</b>
+<p><a href="speculative-decoding.html">投机解码</a>的思路是：先用一个便宜的“草稿模型”猜出后面若干个 token，再让大模型一次前向同时检查这些猜测，猜对的前缀全部接受。因为大模型检查 8 个 token 和生成 1 个 token 的时间差不多（同样受访存限制），只要猜得准，一次前向就能产出好几个 token。衡量这件事的指标叫 <b>TPF</b>（tokens per forward，每次前向产出的 token 数）。普通 AR 解码的 TPF 恒为 1。报告引用 <a href="eagle.html">EAGLE-3</a> 的结果说，草稿长度为 8 时，投机解码一般能做到每次前向 3 到 6 个 token。它的局限有两个：草稿模型自己也是一个一个地写，越想猜得准，草稿模型就得越大越慢；而一次并行猜出多个位置的草稿方法，越靠后的位置被接受的比例越低。</p>
+<p>Gemma 4 自带的 <b>MTP</b>（多 token 预测）也是一种投机解码：模型额外学会预测后面几个 token，用作草稿。本报告的对照实验里，带 MTP 的 Gemma 4 的 TPF 只有 1.40（表 3，在 SPEED-Bench 上测得）；并发实验的图 12 注明 MTP 的草稿长度为 4。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：“26B A4B”是什么意思。</b>
+<p>Gemma 4 26B A4B 是一个<b>混合专家</b>（MoE）模型：它的前馈层被拆成 128 个“专家”小网络，外加 1 个所有 token 都要经过的共享专家；每个 token 由路由器挑出其中 8 个专家来算。所以模型总共有约 252 亿参数（“26B”是取整后的型号名），但每个 token 只用到约 38.5 亿（“A4B”即 active 4B）。这样做的好处是计算量和读取量按激活参数算，比同等总参数的稠密模型便宜得多（MoE 的原理可参考 <a href="deepseek-v3.html">DeepSeek-V3 精读</a>）。后面 §6 会看到，这个设计对扩散模型反而不太友好：一块画布里有 256 个 token，它们各自挑的专家加起来会覆盖很大一部分专家，单步要读的专家权重比 AR 多得多。</p>
+</div>
+
+<p><b>报告给出的定位。</b>作者把当时的文本扩散模型分成两类：Gemini Diffusion 和 Mercury 这样的闭源模型，只能通过 API 使用；开源模型（例如 LLaDA 系列和 Nemotron-Labs-Diffusion）要么推理和多模态能力有限，要么没有真正兑现扩散“极低延迟”的承诺，或者两者都有。作者认为在 DiffusionGemma 之前，还没有一个“既聪明、又特别快、又开放”的文本扩散模型。报告的第一张图就是为这个论点服务的。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/pareto-plot-final4.png" alt="原文图 1" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>横轴是输出速度（每秒 token 数），纵轴是质量，定义为 GPQA-Diamond 与 LiveCodeBench-v6 两项分数的平均。蓝色实线是带 MTP 的 Gemma 4 家族（31B、26B A4B、12B、E4B、E2B），浅蓝虚线是不带 MTP 的同一家族；灰色方块是闭源的 Mercury 2，粉色菱形是 LLaDA 2.1 Flash 100B，绿色三角是 Nemotron Diffusion 14B；右上方深蓝点是 DiffusionGemma。读法是“越往右上越好”：DiffusionGemma 的速度约 1,240 token/秒（读自原图；用报告表 4 中这两项的 TPS 平均为 1,243，推算），远在所有对手右边，质量约 71（表 3 两项平均 71.15，推算），低于带 MTP 的 Gemma 4 26B A4B（约 79.7）和 Mercury 2（约 77.3），高于两个开源扩散模型。注意测速条件并不统一：Gemma 4 和 DiffusionGemma 在一张 H100 上用 FP8、批大小 1；Nemotron 在一张 H100 上用 BF16；LLaDA 2.1 Flash 在 8 张 B200 上用 BF16；Mercury 2 是通过公开 API 估计的（§7、附录 E 详述）。图注的脚注还说明 E4B、E2B 是为手机设计的，在 GPU 上比预期慢。</figcaption></figure>
+
+<p><b>报告声称的贡献。</b>按引言的说法，DiffusionGemma 一次输出 256 个 token 的块，平均约 12 次前向写完一块，所以平均 TPF 约 20，远高于投机解码的 3 到 6。前向次数大幅减少，抵消了每次前向更贵的代价，于是在一张 H100 上达到约 1,500 token/秒。引言还提到，第三方推理服务商 Unsloth 的早期测试在 NVIDIA RTX 6000 上做到了最高约 2,000 token/秒；这个数字的测量条件报告没有给出。</p>
+<p><b>为什么从 AR 模型初始化。</b>从零预训练一个扩散语言模型非常昂贵，所以常见做法是从现成的 AR 模型出发改造（本站已有的例子：<a href="dream.html">Dream 7B</a> 从 Qwen2.5 改造，<a href="llada2.html">LLaDA2.0</a> 从 Ling 2.0 改造，<a href="fast-dllm-v2.html">Fast-dLLM v2</a> 和 <a href="sdar.html">SDAR</a> 用很少的数据把 Qwen 模型改造成块扩散模型）。DiffusionGemma 直接从 Gemma 4 26B A4B <b>最终发布的、已经做完后训练的</b>权重出发，沿用同一个 Transformer 骨架，让同一套权重既能做“上下文编码”时的因果注意力，又能做扩散时的双向注意力。训练分两段：先 SFT，后 SD·RL，合计用掉的 token 不到 Gemma 4 训练总量的 10%。报告没有给出这个 10% 对应的绝对 token 数。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>原文表 1：参数量</th><th class="num">数值</th><th>原文表 2：推荐的采样超参</th><th class="num">数值</th></tr></thead>
+<tbody>
+<tr><td>总参数</td><td class="num">25.2B</td><td>画布长度</td><td class="num">256</td></tr>
+<tr><td>激活参数（含自条件模块，不含视觉编码器）</td><td class="num">3.85B</td><td>最大去噪步数 \(N\)</td><td class="num">48</td></tr>
+<tr><td>视觉编码器</td><td class="num">550M</td><td>自适应停止的熵阈值</td><td class="num">0.005</td></tr>
+<tr><td>词嵌入</td><td class="num">740M</td><td>选 token 的熵预算 \(b\)</td><td class="num">0.1</td></tr>
+<tr><td>自条件模块</td><td class="num">7.8M</td><td>温度（线性）</td><td class="num">0.8 → 0.4</td></tr>
+<tr><td>激活 / 总专家数</td><td class="num">8 / 128 + 1 共享</td><td>实际平均去噪步数（随任务变化）</td><td class="num">约 12</td></tr>
+</tbody></table></div>
+<p>词表有 26.2 万个 token（报告表 1 注释）。模型卡另外给出：30 层，滑动窗口 1,024 个 token，上下文最长 256K，输入支持文本和图像（模型卡正文还提到视频输入）。</p>
+
+<p><b>发布方式。</b>权重以 Apache 2.0 许可发布在 Hugging Face。报告说写作时模型才发布几周，已经有人拿它做下游应用，例如多语言语音识别和放射科报告的交互式起草。时间线上要注意：权重和发布博客在 2026 年 6 月 10 日前后就公开了（Hugging Face 仓库创建于 6 月 9 日，Google 博客发表于 6 月 10 日），技术报告晚了约七周（arXiv 首版 7 月 31 日）。所以下面会看到，有两篇第三方或合作分析论文比技术报告本身还早。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：写一段 256 个 token 的回答，各需要几次前向、多少时间（批大小 1，单张 H100，FP8）</div>
+  <div class="dia-row"><span class="lbl">Gemma 4 AR</span><div class="dia-track"><span class="dia-seg w" style="flex:1254">256 次前向，每次 1 个 token；约 1,255 ms</span></div></div>
+  <div class="dia-row"><span class="lbl">Gemma 4 + MTP</span><div class="dia-track"><span class="dia-seg w" style="flex:845">约 183 次前向（TPF 1.40）；约 845 ms</span><span class="dia-seg" style="flex:409"></span></div></div>
+  <div class="dia-row"><span class="lbl">DiffusionGemma</span><div class="dia-track"><span class="dia-seg kv" style="flex:176">约 13 次</span><span class="dia-seg" style="flex:1078">约 12 次去噪前向 + 1 次编码前向；约 175 ms</span></div></div>
+  <div class="dia-out">条长按时间画。DiffusionGemma 每次前向更贵（约 13.6 ms，对比 AR 约 4.9 ms），但次数少了约 20 倍。</div>
+  <div class="dia-note">推算：AR 单步约 1/204 秒 ≈ 4.9 ms，256 步 ≈ 1,255 ms；MTP 按 303 token/秒算 256/303 ≈ 845 ms；DiffusionGemma 按 §6 的单步 13.56 ms × 13 次 ≈ 176 ms，与 256/1,479 ≈ 173 ms 一致。只算解码，不含读入提示词（prefill）的时间。</div>
+</div>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“TPF 20 对投机解码的 3–6”不是同一把尺子上的比较。投机解码的一次前向只多算几个位置，几乎和普通解码一样便宜；DiffusionGemma 的一次前向要处理 256 个位置，§6 测得比 AR 的一步慢约 3.2 倍（只算 GPU 时间）。真正决定速度的是“TPF 除以单步变慢倍数”，而不是 TPF 本身。另外，报告的对照组用的是 Gemma 4 自己的 MTP（TPF 1.40），并没有在同一个模型上测 3–6 TPF 那一档的投机解码方法。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 离散扩散：给文字加噪、再一步步去噪是怎么回事</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散模型原本是为图像这类连续数据设计的，文字是一个个离散的 token，怎么“加噪”？报告先回顾了为什么早期把文字嵌入连续空间再加高斯噪声的做法效果不好，再说明自己采用的离散扩散框架：前向过程怎样把干净文字变成随机 token，反向过程需要神经网络预测什么，以及“一步同时改很多位置”会带来什么问题。</div>
+
+<div class="note-pre"><b>先补一点背景：扩散模型的两个过程。</b>
+<p>扩散模型由两个方向相反的过程组成。<b>前向过程</b>是人为设计好的：从一条干净数据出发，逐步加噪，直到完全变成噪声；它不需要学习，任何噪声强度下的带噪样本都能直接算出来。<b>反向过程</b>是要学的：从纯噪声出发，一步步去噪，变回像样的数据。训练时，取一条干净文字，随机选一个噪声强度把它弄脏，让网络学着从脏的版本猜出干净的版本；生成时，从纯噪声出发，反复调用网络，每一步去掉一点噪声。</p>
+<p>对文字加噪主要有两种做法。<b>掩码噪声</b>（absorbing / masked）：把一部分 token 换成一个特殊的 [MASK] 符号，噪声越大换得越多；<a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>、<a href="dream.html">Dream</a> 都用这种。<b>均匀噪声</b>（uniform / multinomial）：把一部分 token 换成从整个词表里随机抽的另一个真实 token；<a href="d3pm.html">D3PM</a> 最早系统地讨论过这两种转移矩阵，<a href="duo.html">Duo</a> 是近年把均匀噪声做强的代表。</p>
+</div>
+
+<p><b>为什么不用连续扩散。</b>报告回顾：早期工作把 token 映射成连续的嵌入向量，再套用图像那一套高斯扩散。<a href="diffusion-lm.html">Diffusion-LM</a> 这类方法最后要把连续向量“取整”回最近的 token，CDCD 则保持连续过程但直接预测类别概率。作者认为这些做法有两个根本困难：硬取整破坏了扩散模型似然界的精确性；而且真正对应词表 token 的点在高维空间里只占极小一部分，反向过程很容易漂到“什么词也不是”的空白区域，取整后就变成不相干的词。离散扩散直接在 token 上定义转移，绕开了这个问题。报告还指出，掩码和随机替换这两种破坏方式，分别可以追溯到 BERT 的掩码和随机换词，以及 ELECTRA 的“替换成看起来合理的词”。（附录 A.1 也承认，近来连续方法有复兴的迹象，例如 <a href="elf.html">ELF</a> 和流映射一类工作；本站在对应页面里讨论。）</p>
+
+<h4 id="n-2-1">2.1 前向过程：每个位置独立地“以一定概率被换成随机 token”</h4>
+<p>报告沿用连续时间马尔可夫链（CTMC）和<a href="discrete-flow-matching.html">离散流匹配</a>的写法。正在被迭代修改的那段 token 序列叫<b>画布</b>（canvas），长度为 \(C\)（DiffusionGemma 中 \(C=256\)），词表大小为 \(V\)。时间 \(t\) 从 0 到 1：\(t=0\) 是干净文字 \(x_0\)，\(t=1\) 是完全随机的画布 \(x_1\)，其中每个位置都独立地从词表里均匀抽取。给定干净画布，时刻 \(t\) 的带噪画布按位置独立地生成：</p>
+<div class="formula">$$\mathbb{P}(X_t=x_t\mid X_0=x_0)=\prod_{i=1}^{C}\Big[\kappa_t\,\delta(x_t^i,x_0^i)+(1-\kappa_t)\frac{1}{V}\Big]$$</div>
+<p>这里 \(\kappa_t\) 是从 \(\kappa_0=1\) 单调降到 \(\kappa_1=0\) 的噪声日程，\(\delta\) 在两个 token 相同时取 1、否则取 0。读法是：每个位置以概率 \(\kappa_t\) 保留原来的 token，以概率 \(1-\kappa_t\) 换成一个从词表里均匀抽出的 token（抽到的恰好可能还是原词）。因为这个分布有封闭形式，训练时可以对任意 \(t\) 一步算出带噪样本，不用真的一步步加噪。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同一句话在两种噪声下的样子（噪声强度约一半）</div>
+  <div class="dia-row"><span class="lbl">干净文字 \(x_0\)</span><div class="cells"><span class="cell a">今</span><span class="cell a">天</span><span class="cell a">天</span><span class="cell a">气</span><span class="cell a">很</span><span class="cell a">好</span><span class="cell a">，</span><span class="cell a">去</span><span class="cell a">爬</span><span class="cell a">山</span></div></div>
+  <div class="dia-row"><span class="lbl">掩码噪声</span><div class="cells"><span class="cell a">今</span><span class="cell">M</span><span class="cell a">天</span><span class="cell">M</span><span class="cell">M</span><span class="cell a">好</span><span class="cell">M</span><span class="cell a">去</span><span class="cell">M</span><span class="cell a">山</span></div></div>
+  <div class="dia-out">模型一眼就知道哪些位置坏了（M），没坏的位置一定是对的。</div>
+  <div class="dia-row"><span class="lbl">均匀噪声</span><div class="cells"><span class="cell a">今</span><span class="cell c">猫</span><span class="cell a">天</span><span class="cell c">跑</span><span class="cell c">蓝</span><span class="cell a">好</span><span class="cell c">吗</span><span class="cell a">去</span><span class="cell c">书</span><span class="cell a">山</span></div></div>
+  <div class="dia-out">坏掉的位置也是真实的字，模型必须对每个位置都判断“它对不对”。</div>
+  <div class="dia-note">本站示意图。蓝色 = 原词；橙色 = 被换成的随机词。均匀噪声的好处是：生成时已经写下的字仍可能被认作“错的”而改掉；代价是任务更难，因为模型拿不到“哪里坏了”的提示。</div>
+</div>
+
+<h4 id="n-2-2">2.2 反向过程：网络只需要猜“干净的 token 是什么”</h4>
+<p>离散流匹配的理论说明，要把前向过程倒过来，只需要知道“给定当前带噪画布，每个位置原本的干净 token 是什么”的条件分布 \(\mathbb{P}(X_0^i=v\mid X_t=x_t)\)。有了它，从 \(t\) 往回走一小步 \(\Delta t\) 的转移概率可以写成一个映射 \(\mathrm{Step}\)：</p>
+<div class="formula">$$\mathbb{P}(X_{t-\Delta t}=\cdot\mid X_t=x_t)\approx \mathrm{Step}\big(x_t,\ \mathbb{P}(X_0=\cdot\mid X_t=x_t)\big)$$</div>
+<p>报告脚注给的一个典型实例是离散欧拉步：对每个位置，以与 \(\Delta t\cdot\dot\kappa_t/(1-\kappa_t)\) 成比例的概率，把当前 token 跳到从预测分布里抽出的新 token，否则保持不动。真正的后验算不出来，所以用神经网络 \(p_\theta(v\mid x_t)\) 去近似它，训练目标就是让网络从带噪画布猜出干净 token。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/discrete_diff_illustration.png" alt="原文图 3" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>这是一个只有两个位置（\(C=2\)）的玩具画布：横轴是第一个位置可取的形容词，纵轴是第二个位置可取的名词，每个圆点是一种组合，圆点的大小和颜色深浅表示这种组合在该时刻的概率。从左到右时间从 \(t=1\)（噪声）走到 \(t=0\)（数据）：最左边概率均匀地铺开，最右边集中到“red sunset”“deep sky”这类合理的搭配上。黑圈和箭头是一条具体的生成轨迹：从“blue moon”出发，经过“dark cloud”“bright horizon”，最后落在“red sunset”。要看的是：两个位置是交替跳动、一起朝合理组合靠拢的，而不是先定第一个词、再定第二个词。</figcaption></figure>
+
+<p><b>并行的代价：同一步里各位置互相看不见。</b>网络对每个位置给出的是各自的边缘分布，同一步里各位置独立抽样。于是第 \(i\) 个位置抽样时，能看到整张当前画布 \(x_t\)，却看不到其他位置在这一步同时抽到了什么。举个例子：“你好”和“您好”都合理，如果第一个位置抽到“您”、第二个位置独立地抽到“们”，就可能拼出“您们”这样的不通顺组合。报告说下一节的两个设计就是为了对付这个问题：<b>自条件</b>让模型看到自己上一步的完整预测，<b>熵界采样</b>只在各位置都很确定时才一次接受很多个。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>报告用的时间记号和本站一些页面不同：这里 \(t=1\) 是纯噪声、\(t=0\) 是数据，生成时 \(t\) 从 1 往 0 走。另外，报告 §2 的公式是一般框架；§3.3 会看到，DiffusionGemma 实际使用的采样器并不按 \(\kappa_t\) 决定每步改多少个位置，而是由熵预算决定，时间 \(t\) 在采样器里只用来设定温度。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S2.F3" target="_blank" rel="noopener">原文图 3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 架构与推理：一套权重，既当因果编码器，又当双向解码器</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>离散扩散本来是对一段固定长度的序列做的，可聊天回答的长度事先不知道，而且可能长达上万 token，怎么办？已经写好的部分怎样复用 KV 缓存，才不至于每一步都把整段上下文重算一遍？一次去噪迭代具体算了什么，采样器每一步接受哪些 token、什么时候停？怎样公平地数“一次前向产出了几个 token”？这一节是全文的核心，报告把它拆成五个小节。</div>
+
+<div class="note-pre"><b>先补一点背景：KV 缓存与块扩散。</b>
+<p>Transformer 每一层的注意力，要拿当前位置的 query 去和所有可见位置的 key、value 做运算。AR 模型生成时，前面 token 的 key 和 value 算过一次就不会再变，所以存下来复用，这就是 <b>KV 缓存</b>。普通的掩码扩散模型（如 LLaDA）对整段回答做双向注意力，任何一个位置变了，所有位置的 key、value 都跟着变，缓存就失效了，只能每一步把整段重算一遍。</p>
+<p><b>块扩散</b>（<a href="block-diffusion.html">BD3-LM</a>）的折中是：把回答切成若干块，块与块之间按从左到右的顺序生成，块内部做扩散。已经写完的块从此不再改动，它们的 key、value 就可以缓存；正在写的块只在块内双向注意，并读取前面块的缓存。<a href="fast-dllm-v2.html">Fast-dLLM v2</a>、<a href="sdar.html">SDAR</a>、<a href="llada2.html">LLaDA2.0</a> 都走这条路，并且都是从 AR 模型改造而来。DiffusionGemma 的“画布”就是这里的“块”，长度 256。</p>
+</div>
+
+<p>报告把 DiffusionGemma 描述为一个<b>共享权重的编码器-解码器 Transformer</b>：编码器和解码器是同一套 Gemma 4 权重 \(\theta\)，区别只在注意力掩码。作者明确说，绑定在现成 AR 骨架上是一个务实的选择：用一部分绝对质量换取训练成本的大幅下降，同时继承 Gemma 4 的长上下文和多模态能力，而且最终的权重还能直接拿来做 AR 生成（§3.5）。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/encoder-decoder-rev-d.svg" alt="原文图 4" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>这张图把生成一块画布的过程分成三段。① 上下文编码：提示词经过“因果编码器”（同一套权重、因果注意力），写入 KV 缓存。② 去噪循环：一张带噪的画布交给“解码器”（同一套权重、画布内双向注意力、对 KV 缓存做交叉注意力），反复迭代直到去噪完成。③ 编码并追加：去噪完成的干净画布再过一次因果编码器，把它的 key、value 追加到 KV 缓存里（报告说图中用红色表示这一部分），作为下一块画布的上下文。</figcaption></figure>
+
+<h4 id="n-3-1">3.1 块自回归：一次一块画布，画布之间走 KV 缓存</h4>
+<p>具体流程是这样的。第一步，把上下文 \(h\)（系统指令、用户输入，以及多模态时交错插入的图像嵌入）用因果编码器编码成 KV 缓存：</p>
+<div class="formula">$$H=\mathrm{Encoder}_\theta(h)$$</div>
+<p>第二步，从一张完全随机的画布开始（每个位置都是从词表均匀抽出的 token），在解码器里反复去噪；解码器通过交叉注意力读 \(H\)，所以生成能以系统指令、用户输入和之前写好的回答为条件。第三步，画布去噪完成（走满步数，或被 §3.3 的自适应停止提前叫停）后，把得到的干净画布 \(\hat x_0\) 再过一次因果编码器，把它的 key、value 追加到缓存里：</p>
+<div class="formula">$$H\leftarrow H\oplus \mathrm{Encoder}_\theta(\hat x_0)$$</div>
+<p>然后开始下一块画布，直到模型写出表示“本轮结束”的特殊 token，最后把所有画布拼起来就是回答。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：生成第 3 块画布时，模型在看什么、算什么</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="块自回归：KV 缓存由提示词和已提交画布组成，当前画布在解码器中反复去噪，完成后编码追加" style="--dg-min:720px">
+    <text x="20" y="22" class="t-sm t-b">KV 缓存 H（因果编码器写入；写入后不再改变）</text>
+    <g class="enc"><rect class="box" x="20" y="34" width="250" height="46" rx="8"/></g>
+    <text x="145" y="62" class="t-c t-sm">提示词 h（系统 + 用户）</text>
+    <g class="enc"><rect class="box" x="280" y="34" width="190" height="46" rx="8"/></g>
+    <text x="375" y="62" class="t-c t-sm">画布 1（已提交）</text>
+    <g class="enc"><rect class="box" x="480" y="34" width="190" height="46" rx="8"/></g>
+    <text x="575" y="62" class="t-c t-sm">画布 2（已提交）</text>
+    <g class="tgt"><rect class="box frozen" x="690" y="34" width="250" height="46" rx="8"/></g>
+    <text x="815" y="54" class="t-c t-sm">画布 3 的 K/V（完成后追加）</text>
+    <text x="815" y="71" class="t-c t-xs">额外 1 次编码前向</text>
+    <text x="20" y="140" class="t-sm t-b">画布 3：正在去噪（256 个位置，块内双向注意力）</text>
+    <g>
+      <rect class="tk enc" x="20" y="152" width="34" height="34"/><rect class="tk enc" x="56" y="152" width="34" height="34"/><rect class="tk data" x="92" y="152" width="34" height="34"/><rect class="tk enc" x="128" y="152" width="34" height="34"/>
+      <rect class="tk data" x="164" y="152" width="34" height="34"/><rect class="tk data" x="200" y="152" width="34" height="34"/><rect class="tk enc" x="236" y="152" width="34" height="34"/><rect class="tk enc" x="272" y="152" width="34" height="34"/>
+      <rect class="tk data" x="308" y="152" width="34" height="34"/><rect class="tk enc" x="344" y="152" width="34" height="34"/><rect class="tk data" x="380" y="152" width="34" height="34"/><rect class="tk data" x="416" y="152" width="34" height="34"/>
+      <rect class="tk enc" x="452" y="152" width="34" height="34"/><rect class="tk data" x="488" y="152" width="34" height="34"/><rect class="tk enc" x="524" y="152" width="34" height="34"/><rect class="tk data" x="560" y="152" width="34" height="34"/>
+    </g>
+    <text x="604" y="174" class="t-sm">…（共 256 个位置）</text>
+    <path class="edge sg" d="M300,150 C300,110 300,100 330,84"/>
+    <path class="edge sg" d="M200,150 C190,110 160,100 150,84"/>
+    <path class="edge sg" d="M420,150 C440,110 520,100 560,84"/>
+    <text x="440" y="120" class="t-xs">交叉注意力：读整个 H</text>
+    <path class="edge" d="M560,196 C560,240 60,240 40,196"/>
+    <text x="300" y="258" class="t-c t-sm">解码器前向，每块重复若干次（上限 48，平均约 12）</text>
+    <path class="edge" d="M640,170 C760,170 800,140 812,86"/>
+    <text x="700" y="140" class="t-xs">去噪完成 → 编码 → 追加</text>
+    <text x="20" y="288" class="t-xs">深蓝 = 当前被采样器接受的位置；浅色 = 本步被重新加成随机 token 的位置。前面的上下文看不到后面的画布（因果）；画布内部互相可见（双向）。</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2608.00146#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a> 与 §3.1。每块画布的前向次数 = 去噪次数 \(N_k\) + 1 次编码（最后一块除外，见 §3.4 的 TPF 定义）。</div>
+</div>
+
+<p><b>和 BART、T5 正好反过来。</b>经典的编码器-解码器模型（BART、T5）用<b>双向</b>编码器读上下文、用<b>因果</b>解码器逐字生成；DiffusionGemma 反过来，用<b>因果</b>编码器处理历史、用<b>双向</b>解码器做画布去噪。之所以让编码器保持因果，是因为这样每写完一块画布，只需把这一块追加进缓存，前面的缓存原封不动；如果编码器是双向的，早先的上下文 token 会“看见”新画布，它们的 key、value 就会变，整个上下文都得重新编码。代价是早先的上下文看不到后来写的内容，但这正好和 AR 模型的情况一样，也正是 Gemma 4 的权重原本习惯的方式。作者认为这让方法能扩展到很长的推理链。</p>
+<p><b>谁先提出的。</b>报告说这种块自回归方案是他们组在 2023 年 6 月的一份未发表手稿里提出的，与 Fast-dLLM v2（Wu et al., 2025）、BD3-LM（Arriola et al., 2025）以及 Deschenaux 与 Gulcehre（2026）的块状建模和 KV 缓存方案是各自独立得出的。未发表手稿无法核实，读者只需知道这几条工作在结构上属于同一类。</p>
+
+<h4 id="n-3-2">3.2 一次去噪迭代里发生了什么</h4>
+<div class="note-pre"><b>先补一点背景：自条件（self-conditioning）。</b>
+<p>普通的去噪迭代里，模型每一步只看到当前的带噪画布，上一步自己算出的完整概率分布被“抽样”这个动作扔掉了，只剩下抽中的那个 token。<b>自条件</b>（最早见于连续扩散的 Analog Bits 等工作）把上一步的预测作为额外输入喂回模型：模型能看到“我上一步认为每个位置大概是什么、有多确定”，这样同一步里各位置抽样时，至少都能参考一份共同的、完整的上一步判断，减少前面说的“各抽各的、拼不起来”的问题。</p>
+</div>
+<p>设最大去噪步数为 \(N\)，步长 \(\Delta t=1/N\)，画布从 \(t=1\) 的随机 token 开始。每一步，解码器读三样东西：当前带噪画布 \(x_t\)、上下文缓存 \(H\)、以及一个连续的自条件信号 \(z_t\in\mathbb{R}^{C\times d}\)，输出每个位置在整个词表上的 logits：</p>
+<div class="formula">$$L_t=\mathrm{Decoder}_\theta(x_t,z_t,H)\in\mathbb{R}^{C\times V}$$</div>
+<p>接着做三件事：用温度 \(\tau_t\) 缩放 logits 后取 softmax，得到每个位置“干净 token 是什么”的概率 \(\hat p_0\)；把这些概率乘以词嵌入矩阵 \(E\)（相当于按概率对词向量做加权平均），再过一个小前馈网络，得到下一步的自条件信号；最后按 \(\mathrm{Step}\) 规则抽出新画布：</p>
+<div class="formula">$$\hat p_0=\mathrm{Softmax}(L_t/\tau_t),\qquad z_{t-\Delta t}=\mathrm{FFW}(\hat p_0E),\qquad x_{t-\Delta t}\sim\mathrm{Step}(x_t,\hat p_0)$$</div>
+<p>那个前馈网络就是表 1 里 7.8M 参数的“自条件模块”。第一步的 \(z\) 设为全零。</p>
+<p><b>为什么选均匀噪声。</b>报告明确写道，去噪迭代用的是多项式（均匀）扩散，<b>而不是</b>掩码扩散。理由是：在均匀噪声下，任何 token 都可以转移成任何别的 token，所以模型可以持续纠正自己的错误，当前画布里早先已经被接受的 token，后面的步骤里仍然可以被改掉。在常见的掩码扩散采样器里，一个位置一旦从 [MASK] 揭开就固定了，写错了也改不回来。但要注意，这种“可改”只在当前画布内部成立：已经提交的前几块画布是永久冻结的。</p>
+<p><b>关于可解释性的一段旁注。</b>自条件信号是一个连续向量，等于在 token 序列之外开了一条“隐藏通道”，这会不会让模型的推理更难被看懂？报告引用两篇分析（Asaria et al., 2026；Engels et al., 2026）说，这些中间的自条件向量可以稳定地映射回可解释的 token，所以透明度没有明显损失。后一篇是 Google DeepMind 自己的工作，下面“后来怎么样了”一节会简单介绍。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>从公式 (5) 和 §4 的训练损失看，解码器的输入里只有带噪画布、自条件信号和上下文缓存，<b>没有</b>噪声水平 \(t\)。也就是说，模型要从画布本身判断“现在有多脏”。报告没有专门讨论这一点；在均匀噪声下这并不简单，因为脏的位置看上去也是正常的字。自条件信号携带了上一步的置信度，可能在这里起了作用，但这是本站的推测。</div>
+
+<h4 id="n-3-3">3.3 采样器：熵界接受、温度退火与自适应停止</h4>
+<p>上面的 \(\mathrm{Step}\) 只是一个通用框架。报告默认推荐的具体实现由三部分组成（原文算法 1），作者也强调模型并不绑定这一种采样器。</p>
+
+<div class="note-pre"><b>先补一点背景：熵，以及为什么“都很确定的位置”可以一起写。</b>
+<p>一个位置的预测分布的<b>熵</b> \(e^i=-\sum_v \hat p_0^i(v)\log \hat p_0^i(v)\) 衡量它有多不确定：模型 100% 确定是某个词时熵为 0；在两个词之间五五开时熵约为 0.69（以自然对数计）。同时抽很多个位置之所以会出错，是因为这些位置之间可能有依赖（“你好”与“您好”的例子）。信息论给出一个简单的上界：若干位置之间总的依赖程度（它们各自的熵之和减去联合熵，叫总相关或多元互信息），不会超过“各自熵之和减去其中最大的那个熵”，因为联合熵至少不小于任何一个位置自己的熵。所以，如果一批位置的熵都很小，它们之间就不可能有多少依赖，独立地一起抽样也不会出大错。</p>
+<p>这正是 EB-Sampler（Ben-Hamu et al.，原为掩码扩散设计，<a href="https://arxiv.org/abs/2505.24857" target="_blank" rel="noopener">arXiv 2505.24857 ↗</a>）的依据：每一步把位置按熵从小到大排好，在“熵之和减去最大熵”不超过预算的前提下，尽量多接受。下面的交互演示用一个城市名的玩具例子，展示阈值放宽后一次写更多位置、出错概率随之上升的关系（演示用的是置信度阈值，不是熵预算，但道理相同）。</p>
+</div>
+<div data-widget="dllm-decode" data-focus="threshold"></div>
+
+<p><b>第一部分：熵界接受。</b>每一步先从温度缩放后的分布 \(\hat p_0\) 给所有位置各抽一个候选 token，再把位置按熵从小到大排序 \(e^{\pi_1}\le e^{\pi_2}\le\cdots\le e^{\pi_C}\)（熵相同按位置先后），取最大的 \(k\) 使得前 \(k-1\) 个熵之和不超过预算 \(b=0.1\)：</p>
+<div class="formula">$$k=\max\Big\{m\in\{1,\dots,C\}:\ \sum_{j=1}^{m-1}e^{\pi_j}\le b\Big\}$$</div>
+<p>因为是从小到大排序，前 \(k\) 个里最大的熵就是第 \(k\) 个，所以“前 \(k-1\) 个之和”正好等于“前 \(k\) 个之和减去其中最大值”，也就是上面那个依赖程度的上界。排在前 \(k\) 位的位置接受刚抽出的候选 token；其余位置<b>重新换成从词表均匀抽出的随机 token</b>，留到下一步继续探索。注意 \(k\) 至少为 1（空和为 0），所以每一步至少有一个位置被接受。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：熵界接受走一遍（10 个位置，预算 b = 0.1；数值为虚构示例）</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="按熵排序后，前 7 个位置的累计熵不超过 0.1 被接受，后 3 个被重新随机化" style="--dg-min:720px">
+    <line x1="80" y1="210" x2="930" y2="210" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="80" y1="210" x2="80" y2="30" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <text x="30" y="120" class="t-c t-xs" transform="rotate(-90 30 120)">此前各项熵之和</text>
+    <line x1="80" y1="130" x2="930" y2="130" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:6 4"/>
+    <text x="926" y="124" class="t-r t-sm" style="fill:var(--c-loss)">预算 b = 0.1</text>
+    <text x="74" y="214" class="t-r t-xs">0</text><text x="74" y="134" class="t-r t-xs">0.1</text><text x="74" y="54" class="t-r t-xs">0.2</text>
+    <g class="enc">
+      <rect class="box" x="100" y="209" width="56" height="1"/>
+      <rect class="box" x="184" y="208.2" width="56" height="1.8"/>
+      <rect class="box" x="268" y="207.6" width="56" height="2.4"/>
+      <rect class="box" x="352" y="204.4" width="56" height="5.6"/>
+      <rect class="box" x="436" y="196.4" width="56" height="13.6"/>
+      <rect class="box" x="520" y="180.4" width="56" height="29.6"/>
+      <rect class="box" x="604" y="156.4" width="56" height="53.6"/>
+    </g>
+    <g class="loss">
+      <rect class="box" x="688" y="116.4" width="56" height="93.6"/>
+      <rect class="box" x="772" y="40" width="56" height="170"/>
+      <rect class="box" x="856" y="40" width="56" height="170"/>
+    </g>
+    <text x="800" y="34" class="t-c t-xs">↑0.517</text><text x="884" y="34" class="t-c t-xs">↑1.417</text>
+    <text x="128" y="228" class="t-c t-xs">0.001</text><text x="212" y="228" class="t-c t-xs">0.002</text><text x="296" y="228" class="t-c t-xs">0.004</text><text x="380" y="228" class="t-c t-xs">0.010</text><text x="464" y="228" class="t-c t-xs">0.020</text>
+    <text x="548" y="228" class="t-c t-xs">0.030</text><text x="632" y="228" class="t-c t-xs">0.050</text><text x="716" y="228" class="t-c t-xs">0.400</text><text x="800" y="228" class="t-c t-xs">0.900</text><text x="884" y="228" class="t-c t-xs">1.600</text>
+    <text x="80" y="228" class="t-r t-xs">本位置熵</text>
+    <text x="128" y="262" class="t-c t-xs">0</text><text x="212" y="262" class="t-c t-xs">0.001</text><text x="296" y="262" class="t-c t-xs">0.003</text><text x="380" y="262" class="t-c t-xs">0.007</text><text x="464" y="262" class="t-c t-xs">0.017</text>
+    <text x="548" y="262" class="t-c t-xs">0.037</text><text x="632" y="262" class="t-c t-xs">0.067</text><text x="716" y="262" class="t-c t-xs">0.117</text><text x="800" y="262" class="t-c t-xs">0.517</text><text x="884" y="262" class="t-c t-xs">1.417</text>
+    <text x="80" y="262" class="t-r t-xs">此前之和</text>
+    <text x="380" y="284" class="t-c t-sm" style="fill:var(--c-enc)">前 7 个：接受刚抽出的 token</text>
+    <text x="800" y="284" class="t-c t-sm" style="fill:var(--c-loss)">后 3 个：换成随机 token</text>
+  </svg>
+  <div class="dia-note">本站示意图。柱高 = 排在这个位置之前的各项熵之和（即把它加入后“熵之和减去最大值”的大小）。第 7 个位置自己的熵是 0.050，加入后之和变成 0.117，已经超过 0.1，但它仍被接受，因为判断用的是“除去最大那一项”的和 0.067。第 8 个位置之前的和是 0.117 &gt; 0.1，所以从它开始全部重新加噪。真实画布有 256 个位置。</div>
+</div>
+
+<p>这和 MaskGIT 的“按置信度从高到低揭开”很像，区别在于“揭开几个”不是固定的，而是由熵预算自动决定：画布里确定的位置多，一步就接受很多；不确定的位置多，就少接受几个。还有一个和掩码版 EB-Sampler 不同的地方值得说清楚：DiffusionGemma 每一步都对<b>整张画布</b>重新排序、重新挑选，上一步接受的 token 并没有被锁定，它们只是作为下一步的输入；如果下一步模型对某个已接受位置变得不确定，它就会落到预算之外，被重新随机化。这就是 §3.2 所说的“画布内可以改错”的实现方式。</p>
+
+<p><b>第二部分：温度退火。</b>抽样前，logits 要除以温度 \(\tau_t\lt 1\)，让分布更尖锐。温度随时间线性变化：</p>
+<div class="formula">$$\tau_t=(\tau_{\max}-\tau_{\min})\,t+\tau_{\min},\qquad \tau_{\max}=0.8,\ \tau_{\min}=0.4,\qquad t=1-(n-1)\Delta t$$</div>
+<p>作者的说法是：噪声大的早期温度高一些，让模型探索不同的写法；结构逐渐成形后温度降低，果断地落定高置信度的内容。不过这里有一个从公式直接推出来的细节：\(t\) 是按“最大步数 \(N=48\)”匀速往下走的，而实际平均约 12 步就停了。到第 12 步时 \(t=1-11/48\approx 0.77\)，温度约为 0.71（推算）。也就是说，在默认设置下，大多数画布的温度只从 0.8 降到 0.7 左右，远没有降到 0.4。这也解释了原文图 9 的注释“\(N\) 越大，温度退火越温和”：\(N\) 越大，同样步数下 \(t\) 降得越慢。</p>
+
+<p><b>第三部分：自适应停止。</b>每一步都检查两个条件，同时满足就提前结束这块画布：一是<b>预测足够确定</b>，整张画布的平均熵低于 0.005；二是<b>预测已经稳定</b>，连续两步的 argmax 预测（每个位置概率最大的 token）完全相同。停止时返回 argmax 预测；如果走满 48 步还没停，也返回最后一步的 argmax。报告说，这样平均约 12 个有效去噪步就够了，而不是用满 48 步，在不损失质量的前提下把延迟降到约四分之一。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/boxplot_evals_dns.png" alt="原文图 5" loading="lazy"></div>
+<figcaption><b>原文图 5。怎么看：</b>每个基准一对箱子，蓝色是思考模式，红色是非思考模式；纵轴是“有效去噪步数”（§3.4 定义），箱子中间的紫线是中位数，箱子上下沿是四分位数。左边是 HumanEval、GSM8K、Natural2Code 这类代码和简单数学题，中位数约 9 到 11 步；右边是 GPQA-Diamond、MMMU-Pro、IFEval 这类自然语言为主或更难的任务，中位数约 13 到 15 步（读自原图）。同是代码，较难的 LiveCodeBench 比 HumanEval 用的步数多、分布也更宽。结论是：自适应停止让步数随任务的领域和难度自动变化，结构化输出（代码）收敛得快，开放的自然语言收敛得慢。</figcaption></figure>
+
+<div class="code-title">本站伪代码：一块画布的去噪（据原文算法 1 改写，省略批处理与多模态）</div>
+<pre><code class="lang-py">def denoise_canvas(H, N=48, b=0.1, e_stop=0.005, tmax=0.8, tmin=0.4, C=256):
+    x = uniform_random_tokens(C)          # 画布从均匀随机 token 开始
+    z = zeros(C, d)                       # 自条件信号，第一步为 0
+    prev = None
+    for n in range(1, N + 1):
+        t = 1 - (n - 1) / N               # t 只用来定温度
+        L = decoder(x, z, H)              # 画布内双向注意力 + 对 H 交叉注意力，形状 C×V
+        argmax_pred = L.argmax(-1)
+        tau = (tmax - tmin) * t + tmin
+        p = softmax(L / tau)
+        e = entropy(p)                    # 每个位置一个熵
+        if n &gt; 1 and e.mean() &lt;= e_stop and argmax_pred == prev:
+            return argmax_pred            # 自适应停止：够确定、且两步不变
+        prev = argmax_pred
+        if n &lt; N:
+            z = ffw(p @ E)                # 自条件：按概率加权的词向量
+            cand = sample(p)              # 每个位置抽一个候选
+            order = argsort(e)            # 熵从小到大（并列按位置）
+            k = largest m such that sum(e[order[:m-1]]) &lt;= b
+            keep = order[:k]
+            x = uniform_random_tokens(C)  # 未被接受的位置：重新随机
+            x[keep] = cand[keep]          # 被接受的位置：用候选 token
+    return argmax_pred</code></pre>
+
+<h4 id="n-3-4">3.4 怎么数“快”：总 token、有效去噪步数与 TPF</h4>
+<p>因为有自适应停止，每块画布走几步变成了随机的，所以报告专门定义了几个效率指标。设一共生成了 \(K\) 块画布，第 \(k\) 块走了 \(N_k\le N\) 步，产出了 \(C_k\le C\) 个有效 token（整块 256 个，或者截到第一个结束符为止）：</p>
+<div class="formula">$$\text{总 token}=\sum_{k=1}^{K}C_k,\qquad \text{总去噪步数}=\sum_{k=1}^{K}N_k,\qquad \text{有效去噪步数}=\frac{1}{\text{总 token}}\sum_{k=1}^{K}N_kC_k$$</div>
+<div class="formula">$$\mathrm{TPF}=\frac{\text{总 token}}{\text{总去噪步数}+K-1}$$</div>
+<p>每一步去噪的计算开销大致固定，所以总去噪步数基本决定了端到端延迟。“有效去噪步数”是按 token 数加权的平均步数：最后一块画布常常只写了一部分就遇到结束符，往往步数也少，如果简单平均会把指标拉低，所以按 token 加权。不用自适应停止时，它就等于 \(N\)。TPF 分母里的 \(K-1\) 是画布之间那一次额外的编码前向（把刚写完的画布追加进缓存）；读入提示词的那次编码不计入。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：一个三块画布的回答怎样算这几个指标（数值为虚构示例）</div>
+  <div class="dia-row"><span class="lbl">画布 1</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">256 个 token，走了 12 步</span></div></div>
+  <div class="dia-row"><span class="lbl">画布 2</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">256 个 token，走了 10 步</span></div></div>
+  <div class="dia-row"><span class="lbl">画布 3</span><div class="dia-track"><span class="dia-seg kv" style="flex:100">100 个 token，6 步</span><span class="dia-seg" style="flex:156">结束符之后不计</span></div></div>
+  <div class="dia-out">总 token = 612；总去噪步数 = 28；编码前向 K − 1 = 2；TPF = 612 ÷ 30 ≈ 20.4。</div>
+  <div class="dia-out">有效去噪步数 = (12×256 + 10×256 + 6×100) ÷ 612 ≈ 10.2；若不加权，简单平均是 (12+10+6) ÷ 3 ≈ 9.3。</div>
+  <div class="dia-note">本站算例。可以顺便验证报告的数字是否自洽：如果每块画布都写满 256 个 token、平均走 12 步，TPF ≈ 256 ÷ (12 + 1) ≈ 19.7（推算），和报告七项平均 TPF 19.74 几乎一样。</div>
+</div>
+
+<h4 id="n-3-5">3.5 微调之后，仍然可以当自回归模型用</h4>
+<p>因为 DiffusionGemma 和 Gemma 4 的 Transformer 结构完全相同，微调后的权重可以原样装回 Gemma 4 的架构，用因果注意力一个一个 token 地生成，和原模型的用法一模一样。§7 的表 3 显示，这种“AR 模式”的分数正好落在扩散模式和原始 Gemma 4 之间。作者把这叫做<b>双模式</b>：可以按延迟要求和任务难度把请求分流到扩散模式或 AR 模式，也可以设计两种模式混合的解码方式。附录 A.2 还提到，DiffusionGemma 支持 <a href="tidar.html">TiDAR</a> 那样“用扩散起草、用 AR 验证”的配置，但报告没有给出这种配置的实验数据。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“因果编码器 + 双向解码器”并不是两个网络，而是同一套权重的两种注意力掩码。所以参数量没有翻倍，但每块画布要多付一次编码前向。</li>
+  <li>“均匀噪声、可以改错”只在当前这块画布内部成立。一块画布一旦提交就永久冻结，前面画布里的错误后面改不了，这一点和 AR 模型一样。</li>
+  <li>熵预算 \(b=0.1\) 控制的是“一步之内同时落定的位置之间最多有多少依赖”的一个上界，不是错误率本身；上界成立的前提是模型给出的单个位置的分布本身是准的。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2608.00146#alg1" target="_blank" rel="noopener">原文算法 1 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S3.F5" target="_blank" rel="noopener">原文图 5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 第一阶段 SFT：教会一个 AR 模型在画布上去噪</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Gemma 4 原本只会根据前文预测下一个 token，完全不会“看着一整块脏画布把它洗干净”。第一阶段的监督微调要教会它这件事：训练数据怎样加噪、注意力掩码怎样设、损失函数算在哪些位置上，以及训练多久才够。报告这一节很短，下面把它展开，并说明它没有交代的地方。</div>
+
+<div class="note-pre"><b>先补一点背景：块扩散的训练为什么可以一次算完所有画布。</b>
+<p>一条训练样本是“提示词 + 若干块回答画布”。生成时画布是一块块写的，但训练时所有画布的干净答案都已知，所以可以一次前向同时训练所有画布：对每块画布各自独立地加噪；干净的提示词和各块干净画布由因果编码器算出 key、value；每块带噪画布只在自己内部双向注意，并通过缓存看到提示词和它<b>之前</b>各块的干净内容，看不到别的带噪画布，也看不到后面的画布。这种注意力掩码在“带噪画布 × 带噪画布”那一部分是块对角的，所以报告称之为块对角注意力掩码。BD3-LM 把干净序列和带噪序列拼成两倍长度、用一张特制掩码一次算完，是同一个思路（见 <a href="block-diffusion.html">BD3-LM 精读</a>）。</p>
+</div>
+
+<p><b>加噪方式。</b>用多项式（均匀）扩散：对每块画布，先均匀抽一个噪声水平 \(t\sim\mathrm{Unif}[0,1]\)，再让画布里每个 token 以概率 \(t\) 被替换成一个从词表均匀抽出的 token。按 §2 的写法，这相当于 \(\kappa_t=1-t\) 的线性日程（推算）。</p>
+<p><b>损失函数。</b>给定干净上下文（提示词和之前的画布，经编码器写入缓存）\(H\)、自条件信号 \(z_t\) 和带噪画布 \(x_t\)，让模型在画布的<b>每一个</b>位置上预测原本的干净 token，最小化交叉熵：</p>
+<div class="formula">$$L(\theta)=-\sum_{i=1}^{C}\log p_\theta\big(x_0^i\mid x_t,z_t,H\big)$$</div>
+<p>这里有两点和掩码扩散（如 <a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>）的训练不同，值得说清楚原因。第一，损失算在全部 \(C\) 个位置上，而不只是被破坏的位置：在均匀噪声下，模型不知道哪些位置被换过，所以每个位置都要判断“这个字对不对、不对的话应该是什么”，没被换掉的位置也是有用的训练信号。第二，损失没有按噪声水平加权：掩码扩散通常用 \(1/t\) 这类权重，使损失成为对数似然的一个下界（ELBO）；这里是离散流匹配里常用的、不加权的去噪交叉熵。直接后果是，这个模型没有一个现成的似然或困惑度可报，报告的评测也全部是基于生成结果的基准分数。</p>
+<p><b>训练进度。</b>报告用原文图 6、图 7 展示 SFT 过程中下游分数的变化：微调开始前模型完全不会去噪（分数为 0）；开始后分数迅速上升，之后进入随训练量对数线性增长的阶段。非思考模式只需中等量的 SFT 就能达到不错的水平；思考模式起点更低，但斜率更陡，需要长时间的 SFT。原因是模型一开始很难维持连贯的推理链，经常陷入结巴（同一个词反复出现）或循环。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/sft_downstreams.png" alt="原文图 6" loading="lazy"></div>
+<figcaption><b>原文图 6。怎么看：</b>四个小图分别是 MMMU-Pro、AIME 2026、GPQA-Diamond、LiveCodeBench-v6；横轴是 SFT 训练进度（百分比，不是绝对步数），纵轴是 pass@1 或准确率；红色实线是非思考模式，蓝色虚线是思考模式。所有点都用熵界采样器、自适应停止、最大步数 \(N=192\) 测得。要看三件事：在 0% 处分数都是 0 或接近随机（GPQA 起点约 21，四选一的题），说明原始 Gemma 4 不经训练根本不会去噪；非思考模式在最初几个百分点就跳到平台；思考模式涨得慢但一直在涨，到训练结束时在 AIME 和 LiveCodeBench 上明显超过非思考模式（AIME 约 77 对约 43，读自原图）。原文图 7 把这些分数平均后画在对数横轴上，显示为两条直线，思考模式那条更低、更陡。</figcaption></figure>
+
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>原文图 6 的分数是在最大 192 步下测的，远多于最终推荐的 48 步。下一节会看到，SFT 模型在 48 步时会崩，所以这张图说明的是“SFT 学会了去噪”，不是“SFT 模型可以快速生成”。</li>
+  <li>报告没有公开 SFT 用了什么数据、多少 token、训练多少步、用了什么硬件。摘要里“不到原模型训练 token 的 10%”是 SFT 与 SD·RL 两阶段的合计。局限一节又说 SFT “相对较短，受限于算力预算”，和本节“长时间的 SFT”并不矛盾：前者是和理想情况比，后者是和非思考模式所需的量比。</li>
+  <li>§4 的公式里出现了自条件信号 \(z_t\)，但没有说训练时它从哪来。§8 的开源微调工具里是“一半样本用上一次前向算出的 \(z_t\)，一半置零”；主训练是否相同，报告没有说明。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S4.F6" target="_blank" rel="noopener">原文图 6 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S4.F7" target="_blank" rel="noopener">原文图 7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 第二阶段 SD·RL：一边做强化学习，一边把去噪步数压下来</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>SFT 之后的模型在步数很多时质量不错，但推理和代码类任务仍比原来的 AR 模型差；更要命的是，一旦把步数压到实现低延迟所需的范围，生成质量就会崩溃。传统做法是分两个阶段，先做强化学习提质量，再做“采样器蒸馏”压步数。报告把这两件事合并成一个在线学习阶段 SD·RL，并解释了为什么合并之后两者能互相促进。</div>
+
+<div class="note-pre"><b>先补一点背景：两件要同时做的事。</b>
+<p><b>强化学习（RL）</b>：让模型自己生成回答，用奖励（例如答案是否正确、代码能否通过测试、是否遵循指令）给回答打分，再调整参数，让高分回答更可能出现。AR 模型上最常见的是 PPO、GRPO 一类策略梯度方法。扩散语言模型做 RL 的难点在于算不出一条回答的精确似然，本站的 <a href="d1.html">d1</a>、<a href="llada-1-5.html">LLaDA 1.5</a>、<a href="diffucoder.html">DiffuCoder</a> 等页面讨论了各种近似办法。</p>
+<p><b>采样器蒸馏</b>：扩散模型步数越多质量越好，但越慢。蒸馏的思路是让一个用很多步生成的“老师”产出高质量结果，再训练“学生”用很少的步数得到同样的结果。图像领域有渐进式蒸馏、一致性模型；文本扩散里，<a href="seed-diffusion.html">Seed Diffusion</a> 把“少走几步”直接当成在线学习的目标，<a href="dparallel.html">dParallel</a>、<a href="d3llm.html">d3LLM</a> 等工作专门训练模型在每步多定几个 token。</p>
+</div>
+
+<p><b>训练设置。</b>数据沿用 Gemma 4 的 RL 配方所用的数据分布，覆盖思考与非思考两种模式，目标能力包括有用性、数学推理、代码和指令遵循。模型从 SFT 权重初始化，并兼任<b>在线老师</b>：用“最大步数很多、温度退火很温和”的采样器配置生成去噪轨迹，作为高质量的参照。SD·RL 的联合目标利用这些轨迹，在同一次梯度更新里同时做两件事：一是<b>奖励最大化</b>，和 AR 或扩散模型上的标准 RL 类似，提高绝对的回答质量；二是<b>采样器蒸馏</b>，把老师在多步下得到的高质量结果，压缩到学生的少步生成里。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：SD·RL 的一轮循环，以及“隐式课程”从哪来</div>
+  <div class="dia-flow"><span class="dia-box tgt">在线老师（当前模型）<small>最大步数多、温度退火温和</small></span><span class="dia-arrow">→</span><span class="dia-box">去噪轨迹 + 奖励<small>数学、代码、指令遵循、有用性</small></span><span class="dia-arrow">→</span><span class="dia-box enc">一次梯度更新<small>奖励最大化 + 采样器蒸馏</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">↳</span><span class="dia-box pred">预测熵下降<small>模型对每个位置更笃定</small></span><span class="dia-arrow">→</span><span class="dia-box pred">自适应停止更早触发<small>老师的有效步数变少</small></span><span class="dia-arrow">→</span><span class="dia-box act">下一轮训练用的轨迹更短<small>训练分布自动移向少步区间</small></span><span class="dia-arrow">↺</span></div>
+  <div class="dia-note">本站示意图，依据 §5 文字描述。报告没有公开联合目标的公式、两项的权重、奖励模型、老师的具体步数和温度，所以图中只画出因果关系，不代表具体实现。</div>
+</div>
+
+<p><b>训练动态与“隐式课程”。</b>原文图 8 显示，SD·RL 训练中出现两个同时发生、互相促进的现象。第一，在线老师的平均奖励稳步上升，说明基本能力在提高。第二，借助自适应停止，在线老师达到这些奖励所需的有效去噪步数越来越少。作者给出的机制是：SD·RL 的目标会系统性地降低模型的预测熵；熵降低后，自适应停止（平均熵低于 0.005 且两步不变）更早触发；于是老师生成的轨迹更短，训练数据的分布自动移向越来越短的去噪轨迹，相当于算法自己安排了一个由易到难的“课程”，自己控制蒸馏的节奏。由此还有一个和 AR 模型 RL 不同的现象：奖励指标进入平台期之后，继续做 SD·RL 仍然有好处，因为熵还在下降，会直接换来更快的推理。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/sdrl_training.png" alt="原文图 8" loading="lazy"></div>
+<figcaption><b>原文图 8。怎么看：</b>横轴都是 SD·RL 训练步数（每 200 步合并成一个点）。左图纵轴是平均奖励，从约 0.28 升到约 0.38，900 步之后基本走平；右图纵轴是在线老师的有效去噪步数，从约 51 一路降到约 17（数值读自原图）。两张图放在一起看：奖励在 900 步左右已经饱和，但步数在那之后还在下降，这就是作者说“奖励饱和后继续训练仍然有用”的依据。注意这是训练分布上的训练指标，不是评测分数。</figcaption></figure>
+
+<p><b>质量—速度前沿的移动。</b>原文图 9 把 SD·RL 前后放在同一组坐标里比较。报告的结论是：质量上，GPQA-Diamond 和 LiveCodeBench-v6 的综合分提高约 10 分；效率上，TPF 从约 5 提高到接近 20。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/pareto_sdrl_vs_sft.png" alt="原文图 9" loading="lazy"></div>
+<figcaption><b>原文图 9。怎么看：</b>四个小图的纵轴都是 GPQA-Diamond 与 LiveCodeBench-v6（思考模式，3 个随机种子）的平均分；横轴依次是有效去噪步数、总 token 数、总去噪步数、TPF。蓝色折线是 SFT 模型在最大步数 \(N\) 从 48 扫到 192 时的结果（点上的数字是 \(N\)），红色星号是 SD·RL 之后、用默认采样器（\(N=48\)）的结果。读法：SFT 模型在 \(N=192\) 时约 59 分、TPF 约 5、总 token 约 10,800；在 \(N=48\) 时只有约 9 分，而且有效步数“异常地低”、TPF“异常地高”（约 27），总 token 反而最多（约 13,700）。SD·RL 之后在 \(N=48\) 下约 69 分、有效步数约 14、TPF 约 17.5、总 token 约 5,800，总去噪步数从约 2,400 降到约 400（以上均读自原图）。星号同时在四张图里都位于左上或右上，即同时更好、更快、更短。</figcaption></figure>
+
+<p><b>为什么 SFT 模型在 48 步下会崩，而且看起来还“很快”。</b>原因在于重复循环：步数受限时，SFT 模型经常陷入反复输出同一个 token 的循环；一旦陷入循环，模型对这些重复 token 非常“确定”，预测熵骤降，于是自适应停止被过早触发。结果就是步数很少、TPF 很高，但输出是垃圾，而且因为循环一直写到长度上限，总 token 数反而最多。附录 B 给了两个 GPQA-Diamond 的例子：一道遗传学题，SFT 模型前面的推理是对的，写着写着变成一串重复的数字“1”，直到用完 token 预算，最终回答为空；一道二维谐振子的量子力学题，SFT 模型的推导也是对的，最后陷入不停输出右括号的循环。SD·RL 之后两题都干净地答出了正确选项 (B)。这个例子说明，只看 TPF 或步数而不看质量，会把“崩溃”误读成“加速”。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/performance_vs_denoising_steps.png" alt="原文图 10" loading="lazy"></div>
+<figcaption><b>原文图 10。怎么看：</b>SD·RL 之后的最终模型，在<b>关闭自适应停止、温度固定为 1</b> 的条件下，固定走 \(N\) 步时的 GPQA-Diamond 与 LiveCodeBench-v6 平均分（3 个种子）。红线是思考模式：8 步约 0.11，16 步约 0.36，32 步约 0.57，48 步约 0.65，之后到 128 步约 0.67、256 步约 0.66 基本持平；蓝线是非思考模式，从 8 步的约 0.34 升到 48 步的约 0.58，之后也持平（读自原图）。结论有两个：思考模式对步数更敏感，步数太少时比非思考模式还差；SD·RL 之后 48 步左右就饱和了，再加步数几乎没有收益。</figcaption></figure>
+
+<p><b>SD·RL 让模型专门适应少步区间。</b>对 SFT 模型来说，下游表现随最大步数一直改善到 192 步，这时 256 个位置大约每步只定一两个，作者说此时的去噪“大致相当于任意顺序的自回归”。SD·RL 之后，表现随步数改善得更快，也更早饱和：48 步以内稳步提高，48 步之后收益递减（原文图 10）。作者的解释是，SD·RL 通过大力压低预测熵，把模型专门优化到了少步区间。</p>
+<p><b>意外的副产品：回答变短了。</b>SD·RL 还让模型的输出变得简洁、省 token。这和 AR 模型上的 RL 正好相反，后者常常通过拉长推理链来提高奖励。最终检查点的输出长度约为 SFT 检查点的一半（原文图 9 第二张小图）。作者坦言，这意味着模型放弃了一部分“想得更久、答得更好”的收益，但它对速度是一个乘数：每块画布的步数更少，加上总 token 数更少，端到端延迟极低。报告称，在整套评测上，DiffusionGemma 用的总前向次数不到 Gemma 4 AR 基线的 5%。用表 3 的数字核对：DiffusionGemma 平均写 4,001 个 token、TPF 19.74，约 203 次前向；Gemma 4 平均写 7,207 个 token，不带 MTP 时就是 7,207 次前向，比例约 2.8%（推算）。</p>
+
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>SD·RL 是这份报告方法上最核心的部分，但它的目标函数没有以公式形式公开：两项怎么组合、蒸馏损失具体是什么、奖励来自哪些模型或验证器、老师用几步和什么温度、训练了多少样本，报告都没有写。原文图 8 的横轴只到约 1,300 步，每步的批大小也未给出。所以外部无法复现这一阶段，只能使用它的结果（权重）。</li>
+  <li>“+10 分、TPF 5 → 接近 20”是在 GPQA-Diamond 和 LiveCodeBench-v6 两项上测的，这两项也正是原文图 1 头条图使用的两项。其他基准上 SD·RL 前后的变化，报告没有给出。</li>
+  <li>“回答变短”同时解释了一部分速度优势和一部分质量损失。§7 的表 3 里，DiffusionGemma 平均输出 4,001 个 token，原始 Gemma 4 是 7,207 个；在需要长推理的 AIME 上差距最大。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S5.F9" target="_blank" rel="noopener">原文图 9 ↗</a> · <a href="https://arxiv.org/html/2608.00146#A2" target="_blank" rel="noopener">附录 B 的样例 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 推理优化：每一步贵多少，并发高了会怎样</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>前两节讲的是怎样让每次前向多产出几个 token（提高 TPF）；这一节讲另一面：怎样让每次前向本身别太慢。扩散的一步要处理 256 个位置，比 AR 的一步贵；贵多少、贵在哪些算子上？单个请求时最终能快多少？请求一多，优势还在不在？报告在这一节给出了“约 32 个并发请求后 AR 开始反超”的结论。</div>
+
+<div class="note-pre"><b>先补一点背景：访存受限与算力受限（屋顶线模型）。</b>
+<p>一次计算花的时间，大致取决于两个下限中较大的那个：把数据从显存搬到计算单元的时间（数据量 ÷ 带宽），和把乘加做完的时间（计算量 ÷ 算力）。每搬 1 字节数据能做多少次运算，叫<b>算术强度</b>。AR 解码在批大小为 1 时，每个权重只用来算 1 个 token，算术强度极低，时间几乎全花在搬数据上，GPU 的算力大部分闲着。扩散的一步同时算 256 个位置，同一份权重被用了 256 次，算术强度高得多：搬数据的时间基本不变，多出来的计算原本就是闲置的算力，几乎“白拿”。但如果同时服务很多请求，AR 也可以靠拼批把算术强度提上去；而扩散模型每个 token 实际要被处理很多次（每块画布走十几步），一旦算力被占满，这些重复的计算就不再白拿。下面的小工具可以拖动批大小，看解码点在屋顶线上从左（访存受限）往右（算力受限）移动。</p>
+</div>
+<div data-widget="roofline" data-panel="roofline"></div>
+
+<h4 id="n-6-1">6.1 一个公式：速度比 = TPF ÷ 单步变慢的倍数</h4>
+<p>报告用一个很简单的关系概括扩散相对 AR 的吞吐优势：每一步去噪产出 TPF 个 token，所以总前向次数是 AR 的 1/TPF；但每一步要处理 256 个位置，比 AR 的一步慢 \(r\) 倍；所以相对 AR 的吞吐比约为 \(\mathrm{TPF}/r\)。提高 TPF 靠训练（§4、§5），降低 \(r\) 靠硬件层面的优化，这一节讲后者。报告把分析限定在批大小为 1、只服务一个请求的场景，对照对象是同一个模型的 AR 版本 Gemma 4 26B A4B。参考推理实现有 Hugging Face Transformers 和 vLLM 两个版本。</p>
+
+<h4 id="n-6-2">6.2 单步时间拆解：慢在 MoE、采样和注意力</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/op_breakdown_plot8.png" alt="原文图 11" loading="lazy"></div>
+<figcaption><b>原文图 11。怎么看：</b>两根堆叠柱分别是 Gemma 4 AR（每步 1 个 token）和 DiffusionGemma（每步 256 个 token）一步的 GPU 内核时间，条件是单个请求、H100、FP8、输入 4,096 个 token、输出 1,024 个 token。AR 一步 4.01 ms，DiffusionGemma 一步 12.63 ms，约 3.2 倍。右侧标出各算子变慢的倍数：MoE 专家 1.08 → 4.66 ms（×4.3），采样 0.56 → 3.06 ms（×5.5），注意力 0.45 → 1.84 ms（×4.1），共享专家 0.74 → 1.12 ms（×1.5），注意力输出投影 0.61 → 1.06 ms（×1.7），前馈层归一化与路由 0.46 → 0.64 ms（×1.4），其他 ×2.1。结论：处理的 token 多了 256 倍，时间只多了 3.2 倍，而多出来的时间主要集中在 MoE、采样和注意力三项。</figcaption></figure>
+<p>报告专门看 GPU 内核时间而不是端到端延迟，是为了把模型本身的瓶颈和服务框架的开销分开。端到端延迟比 GPU 时间多出约 1 ms，来自反分词等 CPU 侧的服务开销，两个模型差不多。三个主要的变慢来源分别是这样形成的：</p>
+<ul>
+  <li><b>MoE 专家层。</b>单个请求时，MoE 层的时间主要花在从显存读专家权重上。AR 的一步只有 1 个 token，每层只激活 8 个专家；DiffusionGemma 的一步有 256 个 token，在 PG-19 数据上测得每层平均激活约 84 个不同的专家，要读的专家权重多了十倍左右，所以 MoE 内核慢了 4.3 倍。作者指出这和投机解码验证时付出的代价是同一类，只是并行的 token 更多；如果是稠密模型，就不存在“激活更多专家”的问题，前馈层的变慢会小于 2 倍。顺带可以看出画布内 token 的路由高度相关：如果 256 个 token 各自独立地从 128 个专家里随机挑 8 个，几乎每个专家都会被挑到（期望约 128 个，推算），实测只有约 84 个。</li>
+  <li><b>采样。</b>AR 的采样只是对一个位置做 softmax 并抽样；扩散的采样要对整块画布的 256 个位置、26.2 万词表做 softmax，还要做自条件需要的“概率 × 嵌入矩阵”乘法，而且这些都用全精度计算。仅那次矩阵乘法就约有 \(2\times256\times262{,}144\times2{,}816\approx3.8\times10^{11}\) 次浮点运算（推算，按模型卡的隐藏维度 2,816）。所以扩散采样要 3.06 ms，AR 只要 0.56 ms。报告说，采样部分有意用标准 PyTorch 原语加 <code>torch.compile</code> 实现，而不是手写 GPU 内核，以便社区修改和扩展，这也意味着这里还有优化余地。</li>
+  <li><b>注意力。</b>DiffusionGemma 在 256 个位置的画布上做双向注意力，用不了 AR 专用的单 token 解码注意力内核，只能用 FlashAttention-4 这类为整块计算优化的内核；即便如此，注意力仍比 AR 慢约 4 倍。</li>
+</ul>
+<p><b>消除 CPU 与 GPU 的同步。</b>服务 DiffusionGemma 还有额外的复杂性：去噪步数取决于自适应停止，是运行时才知道的；而且有两种前向（去噪步和更新 KV 缓存的编码步），注意力掩码不同，还可能出现在同一个批里。如果每次都要 CPU 来判断“这个请求停了没有、下一步用哪种掩码”，CPU 和 GPU 之间的来回同步会显著增加延迟。报告说他们把异步调度扩展到文本扩散模型，并给每条序列加了一个“是否用因果注意力”的标志，让这些判断全部在 GPU 上完成，细节见 vLLM 的实现。</p>
+
+<h4 id="n-6-3">6.3 单个请求：每秒约 1,456 个 token</h4>
+<p>扩散模型的解码吞吐按下式计算：</p>
+<div class="formula">$$\mathrm{TPS}=\frac{\mathrm{TPF}}{t_{\mathrm{fwd}}}$$</div>
+<p>其中 \(t_{\mathrm{fwd}}\) 是一步去噪的时间，它随上下文长度变化（因为注意力要读整个上下文）。在 H100、FP8、单个请求、输入 4,096、输出 1,024 的条件下，一步去噪端到端平均 13.56 ms（GPU 时间 12.63 ms）。代入七项基准的平均 TPF 19.74，得到 1,456 token/秒，是同一设备上 Gemma 4 AR（204 token/秒）的 7.1 倍、带 MTP 的 Gemma 4（303 token/秒）的 4.8 倍。顺带可以反推 \(r\)：AR 一步约 1/204 秒 ≈ 4.9 ms，所以端到端的 \(r\approx13.56/4.9\approx2.8\)，\(\mathrm{TPF}/r\approx7.1\)，和报告一致（推算）。</p>
+<p>这里的 1,456 是用公式算出来的，§7 表 3 里的 1,479 是在七个基准上实测的平均，两个数字来源不同。也正因为 \(t_{\mathrm{fwd}}\) 随上下文变化，不能简单地用 TPF 除以 13.56 ms 去推每个任务的速度：例如 AIME（思考模式）TPF 19.3，按 13.56 ms 算应为约 1,423 token/秒，实测 1,365；GSM8K TPF 23.2，按公式约 1,711，实测 1,866（推算）。长推理任务上下文更长、每步更慢，短任务则更快。</p>
+
+<h4 id="n-6-4">6.4 多个请求：约 32 个并发后，AR 的总吞吐反超</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/throughput_plot_merged11.png" alt="原文图 12" loading="lazy"></div>
+<figcaption><b>原文图 12。怎么看：</b>条件是 H100、FP8、PG-19 数据（输入 4,096、输出 1,024），MTP 的草稿长度为 4。(a) 横轴是每个用户感受到的速度（token/秒/用户），纵轴是整张 GPU 的总吞吐（token/秒），每个点标了并发数 c。紫线 DiffusionGemma（图例标注“16 TPF”），红线 Gemma 4 AR，橙线 Gemma 4 AR + MTP。往右是“单个用户更快”，往上是“整张卡产出更多”。DiffusionGemma 在 c=1 时每用户约 1,300 token/秒，到 c=16 时总吞吐约 2,900、每用户约 180；AR + MTP 在 c=32 时总吞吐约 2,700，c=64 时约 3,500；不带 MTP 的 AR 在 c=128 时总吞吐约 4,950（以上读自原图）。(b) 是 DiffusionGemma 相对 AR + MTP 的倍数（图上直接标注）：每用户速度在 c=1、2、4、8、16 时分别为 4.11、3.01、2.28、1.62、1.22 倍；总吞吐分别为 4.11、3.18、2.38、1.73、1.35 倍。倍数随并发稳定下降，按这个趋势在 c=32 附近会降到 1 以下，这就是“约 32 个并发后 AR 开始占优”的来源。</figcaption></figure>
+<p>报告的原话是：低并发时，DiffusionGemma 的每用户速度和总吞吐都更高；到中等并发（约 32 个并发请求）时，AR 模型开始有吞吐优势。报告同时强调，这些结果没有针对大于 1 的批大小做专门优化：当前的内核选择不是最优的，采样也没有调到能随批大小扩展，例如对采样步做 top-\(k\) 截断，预计能在大批量时明显提高吞吐、对质量影响可以忽略。</p>
+<p><b>为什么并发一高，优势就消失。</b>关键在于“每产出一个 token，要处理多少个位置”。AR 每产出 1 个 token 处理 1 个位置。DiffusionGemma 每块画布 256 个位置要被处理十几遍，平均每产出 1 个 token 要处理约 256 ÷ 19.74 ≈ 13 个位置（推算）。单个请求时这些额外计算用的是本来闲置的算力，所以不要紧；并发多了，AR 靠拼批也能把算力用起来，扩散模型多出来的约 13 倍计算就成了真正的成本。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：每产出 1 个 token，大约要处理几个“位置”（以 AR 的 1 个为单位）</div>
+  <div class="dia-row"><span class="lbl">Gemma 4 AR</span><div class="dia-track"><span class="dia-seg w" style="flex:1">1</span><span class="dia-seg" style="flex:12"></span></div></div>
+  <div class="dia-row"><span class="lbl">Gemma 4 + MTP</span><div class="dia-track"><span class="dia-seg w" style="flex:3.6">约 3.6</span><span class="dia-seg" style="flex:9.4"></span></div></div>
+  <div class="dia-row"><span class="lbl">DiffusionGemma</span><div class="dia-track"><span class="dia-seg kv" style="flex:13">约 13 = 256 ÷ TPF 19.74</span></div></div>
+  <div class="dia-out">低并发：算力闲着，多处理的位置几乎不花时间，比的是“前向次数”，扩散赢。</div>
+  <div class="dia-out">高并发：算力被占满，比的是“总计算量”，AR 赢。</div>
+  <div class="dia-note">推算，只是数量级示意。MTP 一栏按“每次验证 1 + 4 个位置 ÷ TPF 1.40”估算，没有计入草稿模块本身的计算；DiffusionGemma 一栏忽略了编码前向与注意力、采样的差异。按 H100 SXM 的 FP8 稠密峰值约 1,979 TFLOPS（NVIDIA 规格）和每个位置约 2 × 3.85B ≈ 7.7 GFLOP 估算，c=16 时一步要处理 4,096 个位置，仅矩阵乘法就至少约 16 ms；而原文图 12 读出的 c=16 每用户约 180 token/秒、按 16 TPF 折算一步约 89 ms，说明此时还有大量未优化的开销（例如全精度采样若随并发线性增长，16 个请求约需 49 ms，这是本站的假设）。</div>
+</div>
+
+<p><b>面向真实流量。</b>报告最后指出，和 AR 相比，DiffusionGemma 改变了两类层的计算特性：注意力层读 KV 缓存的次数少了 TPF 倍（因为每次前向产出约 20 个 token，而不是 1 个）；MoE 层则做了更多的计算，与有效去噪步数成正比。现代推理服务的一个难题是：长上下文时注意力受访存限制，拖累了前馈层和 MoE 层的算力利用率，智能体类长上下文工作流尤其如此；DiffusionGemma 用计算换数据搬运，在“算力与带宽之比”逐代增长的 GPU 上是有利的方向。但作者也明确说，真实流量下的系统性实证分析不在本文范围内。Google 的发布博客说得更直接：在高 QPS 的云服务里，AR 模型可以把算力用满，DiffusionGemma 的并行解码收益递减，甚至可能带来更高的服务成本；它的优势在单张加速卡、低到中等批大小的场景。</p>
+
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>原文图 12 里的 DiffusionGemma 标注为“16 TPF”，而不是表 3 的 19.74，数据集是 PG-19 而不是七项基准；报告没有说明 16 TPF 是实测值还是设定值。</li>
+  <li>图中 DiffusionGemma 只测到 c=16，“约 32 个并发后反超”是从 c=1 到 16 的倍数趋势得出的，c=32 本身没有扩散模型的数据点。</li>
+  <li>“反超”指同一并发下的比较。若问“一张卡最多能产出多少 token”，AR 在 c=128 时约 4,950 token/秒，远高于图中 DiffusionGemma 的最高点约 2,900（读自原图）。对按 token 计费、追求单卡总吞吐的云服务商，这一点比低并发时的倍数更重要。</li>
+  <li>表 3 的全部速度数字都是批大小 1。它们回答的是“单个用户最快能多快”，不是“服务成本是多少”。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S6.F11" target="_blank" rel="noopener">原文图 11 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S6.F12" target="_blank" rel="noopener">原文图 12 ↗</a> · <a href="https://vllm.ai/blog/2026-06-10-diffusion-gemma" target="_blank" rel="noopener">vLLM 博客 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 实验结果：分数掉了多少，速度快了多少，以及这些数字的份量</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DiffusionGemma 和它的 AR 起点 Gemma 4、和其他开源扩散模型、和闭源的 Mercury 2 相比，质量和速度分别如何？报告的主表（表 3）和效率表（表 4）里的数字分别是在什么条件下测的？哪些比较是“同条件”的，哪些不是？这一节最后的“结果的份量”专门回答最后一个问题。</div>
+
+<h4 id="n-7-1">7.1 实验是怎么设计的</h4>
+<p><b>四种运行模式。</b>DiffusionGemma 可以用文本扩散（TD）或自回归（AR）两种方式生成，每种又分开启和关闭“思考”两种，共四种模式；不特别说明时，指的是 TD 加思考模式。</p>
+<p><b>对照对象。</b>一是它的 AR 起点 Gemma 4 26B A4B（表里列的是带 MTP 的版本；MTP 属于投机解码，原理上不改变输出分布，所以分数可以看作 Gemma 4 本身的分数，与模型卡给出的 Gemma 4 分数一致）。二是两个同期的开放权重文本扩散模型：LLaDA 2.1 Flash 100B（用它的速度优先模式“S Mode”，本站另有 <a href="llada2-1.html">LLaDA2.1 精读</a>）和 Nemotron Diffusion 14B（用它的扩散模式，见 <a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion 精读</a>）。三是只能通过 API 使用的闭源扩散模型 Mercury 2（“high”和“medium”两档推理强度）。</p>
+<div class="note-pre"><b>先补一点背景：这些基准考什么。</b>
+<p>数学推理：AIME 2026（美国数学邀请赛题）、GSM8K（小学应用题）、MGSM（GSM8K 的多语言版）、Putnam（大学数学竞赛题）、HiddenMath（Google 内部数学集）。代码：LiveCodeBench-v6（定期更新的竞赛编程题，降低训练数据污染）、Codeforces（按 Elo 分计）、HumanEval、BigCodeBench、LBPP v2、Natural2Code（Google 内部代码集）。知识与综合推理：GPQA-Diamond（研究生水平的科学选择题）、BIG-Bench Extra Hard、MMMLU（多语言 MMLU）、MMLU-Pro。多模态：MMMU-Pro。指令遵循：IFEval。智能体：τ2-bench 的零售、航空、电信三个环境。HiddenMath 和 Natural2Code 是 Google 自有、未公开的评测集，报告特意标出它们“未泄露”，也就是不可能出现在别人的训练数据里，但外部也无法复现。</p>
+</div>
+<p><b>测速条件。</b>TPS 不含读入提示词（prefill）的时间。DiffusionGemma 和 Gemma 4 在 1 张 H100 上用 FP8、批大小 1；Nemotron 14B 在 1 张 H100 上用 BF16、批大小 1；LLaDA 2.1 Flash 在 8 张 B200 上用 BF16、批大小 1；Mercury 2 通过公开 API 估计（附录 E，见 §11）。TPS、TPF 和平均总 token 数取 7 个所有模型都有结果的基准的平均：AIME 2026、GPQA-Diamond、LiveCodeBench-v6、MGSM、HumanEval、LBPP、Natural2Code。Gemma 4（MTP）的 TPS 和 TPF 是在投机解码专用的 SPEED-Bench 上测的。报告脚注还说明，Nemotron 和 LLaDA 没有 FP8 的数字，FP8 的加速上限是 2 倍，典型值更接近 1.5 倍。</p>
+
+<h4 id="n-7-2">7.2 主要结果</h4>
+<p>下表摘录原文表 3 的主要行（完整表格共 20 个基准、10 列）。</p>
+<div class="table-wrap"><table>
+<thead><tr><th>基准</th><th class="num">DG 扩散·思考</th><th class="num">DG 扩散·不思考</th><th class="num">DG 的 AR 模式·思考</th><th class="num">Gemma 4（MTP）·思考</th><th class="num">LLaDA 2.1 Flash（S）</th><th class="num">Nemotron 14B</th><th class="num">Mercury 2 High</th></tr></thead>
+<tbody>
+<tr><td>AIME 2026</td><td class="num">69.1</td><td class="num">50.8</td><td class="num">84.2</td><td class="num">88.3</td><td class="num">80.0</td><td class="num">40.0</td><td class="num">91.7</td></tr>
+<tr><td>GPQA-Diamond</td><td class="num">73.2</td><td class="num">64.6</td><td class="num">79.8</td><td class="num">82.3</td><td class="num">68.7</td><td class="num">47.0</td><td class="num">75.2</td></tr>
+<tr><td>LiveCodeBench-v6</td><td class="num">69.1</td><td class="num">60.6</td><td class="num">71.4</td><td class="num">77.1</td><td class="num">39.4</td><td class="num">28.6</td><td class="num">79.4</td></tr>
+<tr><td>Codeforces Elo</td><td class="num">1429</td><td class="num">959</td><td class="num">1569</td><td class="num">1718</td><td class="num">718</td><td class="num">–</td><td class="num">1986</td></tr>
+<tr><td>BIG-Bench Extra Hard</td><td class="num">47.6</td><td class="num">40.0</td><td class="num">59.1</td><td class="num">64.8</td><td class="num">–</td><td class="num">–</td><td class="num">48.9</td></tr>
+<tr><td>GSM8K</td><td class="num">96.3</td><td class="num">95.8</td><td class="num">96.6</td><td class="num">96.7</td><td class="num">45.0</td><td class="num">–</td><td class="num">96.5</td></tr>
+<tr><td>MMMU-Pro</td><td class="num">54.3</td><td class="num">66.0</td><td class="num">63.3</td><td class="num">73.8</td><td class="num">–</td><td class="num">–</td><td class="num">–</td></tr>
+<tr><td>HumanEval</td><td class="num">94.5</td><td class="num">92.7</td><td class="num">98.2</td><td class="num">98.8</td><td class="num">90.2</td><td class="num">86.0</td><td class="num">98.2</td></tr>
+<tr><td>IFEval</td><td class="num">97.4</td><td class="num">94.5</td><td class="num">97.2</td><td class="num">98.7</td><td class="num">–</td><td class="num">72.1</td><td class="num">97.0</td></tr>
+<tr><td>τ2 零售 / 航空 / 电信</td><td class="num">71.5 / 69.0 / 28.1</td><td class="num">57.5 / 49.0 / 32.0</td><td class="num">75.4 / 72.0 / 33.8</td><td class="num">85.5 / 76.0 / 43.0</td><td class="num">–</td><td class="num">–</td><td class="num">–</td></tr>
+<tr><td>Natural2Code（内部）</td><td class="num">94.0</td><td class="num">90.1</td><td class="num">96.2</td><td class="num">96.3</td><td class="num">86.9</td><td class="num">73.3</td><td class="num">79.1</td></tr>
+<tr class="hl"><td>输出速度（token/秒）</td><td class="num">1479</td><td class="num">1512</td><td class="num">204</td><td class="num">303</td><td class="num">375</td><td class="num">49</td><td class="num">600</td></tr>
+<tr class="hl"><td>TPF</td><td class="num">19.74</td><td class="num">18.76</td><td class="num">1.00</td><td class="num">1.40</td><td class="num">4.63</td><td class="num">1.79</td><td class="num">–</td></tr>
+<tr class="hl"><td>平均总 token 数</td><td class="num">4,001</td><td class="num">829</td><td class="num">5,184</td><td class="num">7,207</td><td class="num">4,371</td><td class="num">941</td><td class="num">3,882</td></tr>
+</tbody></table></div>
+<p class="w-note">“–”表示报告没有该项数据。DG = DiffusionGemma。速度、TPF、总 token 为 7 项基准平均；Mercury 2 的速度为 API 黑盒估计。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/benchmark_summary_rev_b.png" alt="原文图 13" loading="lazy"></div>
+<figcaption><b>原文图 13。怎么看：</b>前三个面板把基准分成三类，各取 0–100 分的简单平均：推理与知识（9 项）、代码（5 项）、指令遵循与智能体（4 项）；第四个面板是输出速度。斜线填充的是不思考版本；一个模型只有在某类的全部基准都有分数时才会出现，所以空白不代表 0 分。三类平均分依次为：DiffusionGemma 扩散模式 75.3、76.9、66.5；它的 AR 模式 81.0、80.0、69.6；Gemma 4（MTP）84.7、82.4、75.8；Mercury 2 High 在前两类为 80.0、78.7；Nemotron 只在代码类有完整数据，为 52.4。要看的是：扩散模式在三类上都比 Gemma 4 低 6 到 9 分，AR 模式收回大约一半差距；速度面板上扩散模式比所有对手都快得多。</figcaption></figure>
+
+<p><b>和开源扩散模型比。</b>报告说 DiffusionGemma 在质量上明显超过现有的开放权重扩散模型，同时 TPF 高了约一个数量级：19.74 对 LLaDA 2.1 Flash 的 4.63 和 Nemotron 的 1.79，分别约 4.3 倍和 11 倍（推算）。逐项看，DiffusionGemma 在大多数基准上领先，例外是 AIME 2026，LLaDA 2.1 Flash 得 80.0，高于 DiffusionGemma 的 69.1。</p>
+<p><b>和 Mercury 2 比。</b>报告说质量上“很有竞争力”，速度约为 Mercury 2 的 2.5 倍（1,479 对 600）。</p>
+<p><b>和自己的 AR 起点比。</b>扩散模式在三类能力上都有损失，换来的是约 5 倍于带 MTP 的 Gemma 4 的输出速度（1,479 对 303）。把同一套权重放回 AR 模式运行，可以收回一部分差距，但速度回到 204 token/秒。作者认为这种双模式可以按延迟要求和任务难度动态分流请求。</p>
+<p><b>效率表（原文表 4）。</b>表 4 列出 DiffusionGemma 扩散模式在 15 个基准上思考与不思考两种模式的分数、TPF、TPS、有效去噪步数、总前向次数、总 token 数和端到端时间（不含 prefill，按样本平均）。几个值得注意的规律：思考模式下各任务的 TPF 在 15 到 23 之间，TPS 在约 950 到 1,870 之间；GSM8K、HumanEval 这类短而结构化的任务 TPF 最高（约 23），有效步数最少（约 9）；Codeforces 输出最长（平均 11,622 个 token），上下文越写越长，每步越慢，TPS 只有约 950，单个样本平均要 12.2 秒。一个反常值是 IFEval 不思考模式：TPF 只有 9.0、TPS 只有 732。这类回答平均只有 239 个 token，不到一块画布，本站的解释是：一块 256 位置的画布不论有效 token 多少都要去噪到收敛，结束符之后的位置也要定下来，短回答摊不开这部分开销。表 4 还显示 MMMU-Pro 思考模式 54.3 分低于不思考模式的 66.0，原因见 §10。</p>
+<p><b>一个小的不一致。</b>用表 4 中 7 项基准思考模式的 TPS 直接平均，得到约 1,487 token/秒，与表 3 的 1,479 略有出入（推算）；同样算法得到的 TPF（19.73）、总 token（4,001）和不思考模式的数字则与表 3 吻合。差别不到 1%，不影响结论，报告没有解释。</p>
+
+<h4 id="n-7-3">7.3 结果的份量</h4>
+<p>先把同一个模型在不同地方出现过的速度数字放在一起，因为它们经常被混着引用：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>数字</th><th>出处</th><th>条件</th></tr></thead>
+<tbody>
+<tr><td>1,479 token/秒</td><td>报告表 3</td><td>1 × H100，FP8，批大小 1，思考模式，7 项基准实测平均，不含 prefill</td></tr>
+<tr><td>1,512 token/秒</td><td>报告表 3</td><td>同上，不思考模式</td></tr>
+<tr><td>1,456 token/秒</td><td>报告 §6 公式</td><td>单步 13.56 ms（PG-19，输入 4,096、输出 1,024）× 平均 TPF 19.74 推得</td></tr>
+<tr><td>约 1,240 token/秒</td><td>报告图 1</td><td>只取 GPQA-Diamond 与 LiveCodeBench-v6 两项</td></tr>
+<tr><td>约 1,300 token/秒</td><td>报告图 12，c=1</td><td>PG-19，图例标注 16 TPF（读自原图）</td></tr>
+<tr><td>约 1,500 token/秒</td><td>报告摘要</td><td>7 项平均的取整说法</td></tr>
+<tr><td>1,000+（H100）、700+（RTX 5090）</td><td>Google 发布博客（2026-06-10）</td><td>未给出条件；博客标题称“最高快 4 倍”</td></tr>
+<tr><td>超过 1,100 token/秒、15–20 TPF</td><td>Hugging Face 模型卡</td><td>H100，FP8，低批大小</td></tr>
+<tr><td>最高约 2,000 token/秒</td><td>报告转述 Unsloth</td><td>RTX 6000，其余条件报告未给</td></tr>
+<tr><td>1,479 token/秒</td><td>Gemini Diffusion 模型页（另一个模型）</td><td>“不含开销的平均采样速度”，开销 0.84 秒，硬件未披露；与 DiffusionGemma 数值相同只是巧合，二者不可比</td></tr>
+</tbody></table></div>
+
+<p>再看每一组比较到底匹配了什么：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>比较</th><th>模型与数据</th><th>硬件与精度</th><th>批大小</th><th>测速用的题</th><th>谁测的</th></tr></thead>
+<tbody>
+<tr><td>DG 对 Gemma 4 AR</td><td>同一个模型；DG 多训了 SFT + SD·RL（合计不到原训练量 10%）</td><td>相同：1 × H100，FP8</td><td>1</td><td>相同的 7 项</td><td>报告作者</td></tr>
+<tr><td>DG 对 Gemma 4 + MTP</td><td>同上</td><td>相同</td><td>1</td><td>DG 用 7 项；MTP 的 TPS、TPF 用 SPEED-Bench</td><td>报告作者</td></tr>
+<tr><td>DG 对 LLaDA 2.1 Flash</td><td>不同模型（总参数 100B），不同数据</td><td>DG 1 × H100 FP8；对方 8 × B200 BF16</td><td>1</td><td>相同的 7 项；分数由报告作者测</td><td>报告作者</td></tr>
+<tr><td>DG 对 Nemotron 14B</td><td>不同模型，不同数据</td><td>DG FP8；对方 BF16，同为 1 × H100</td><td>1</td><td>同上</td><td>报告作者</td></tr>
+<tr><td>DG 对 Mercury 2</td><td>Mercury 2 参数量、数据、架构都未公开</td><td>DG 本地 H100；Mercury 2 是公开 API，硬件未知</td><td>DG 为 1；API 端未知</td><td>7 项，用回归模型从 API 计时反推</td><td>报告作者（黑盒估计）</td></tr>
+</tbody></table></div>
+
+<p>在这两张表的基础上，可以这样评估报告的结论：</p>
+<ul>
+  <li><b>和自己的 AR 起点比，是这份报告里最干净的一组比较。</b>参数完全相同、起点权重相同、硬件精度和批大小相同，质量的损失（例如 AIME 2026 从 88.3 降到 69.1，GPQA-Diamond 从 82.3 降到 73.2）可以比较可信地归因于“改成扩散 + 少步化”。不过 DiffusionGemma 多做了一轮包含 RL 的后训练，所以这不是一个“只改生成方式、其他都不变”的对照；AR 模式的分数（AIME 84.2）说明这轮训练本身也让权重偏离了原模型。</li>
+  <li><b>“比最先进的投机解码还快”只在 Gemma 4 自带的 MTP 上得到了验证。</b>表 3 里 MTP 的 TPF 只有 1.40（图 12 注明草稿长度为 4），而且它的速度是在另一套题（SPEED-Bench）上测的。用这两个数推出的单步时间（1.40 ÷ 303 ≈ 4.6 ms）甚至比不带 MTP 的 AR 单步（约 4.9 ms）还短（推算），说明两组数字的测量条件并不一致，不宜互相推导。引言引用的 3–6 TPF 那一档投机解码方法（如 EAGLE-3），报告没有在 Gemma 4 上实测。</li>
+  <li><b>速度优势里有一部分来自“写得少”。</b>DiffusionGemma 平均输出 4,001 个 token，Gemma 4 是 7,207 个。TPS 只衡量“写得多快”，不衡量“要写多少”。按平均值粗算，单个样本的解码时间约为 4,001 ÷ 1,479 ≈ 2.7 秒对 7,207 ÷ 303 ≈ 23.8 秒（推算，不含 prefill，平均值相除只是近似），用户感受到的端到端差距比 TPS 的 4.9 倍更大；但这部分差距和质量损失是同一件事的两面：思考变短，在 AIME 这类需要长推理的任务上掉分最多。</li>
+  <li><b>所有速度数字都是批大小 1。</b>这是扩散模型最有利的场景，报告也明确这样限定。原文图 12 显示优势随并发下降，DiffusionGemma 只测到 16 个并发，约 32 个并发后 AR 反超是按趋势得出的；按单卡最大总吞吐，AR 远高于扩散模式。这些数字适合回答“本地或单用户能有多快”，不适合回答“服务成本是多少”。</li>
+  <li><b>和其他开源扩散模型的速度比较，硬件和精度都不同。</b>DiffusionGemma 用 FP8，两个对手用 BF16；按报告自己的脚注，FP8 最多能带来 2 倍加速。即使把 Nemotron 的 49 和 LLaDA 2.1 Flash 的 375 都乘以 2（分别约 98 和 750，推算的上限），也远低于 1,479，所以“快得多”这个结论站得住，但具体倍数不是同条件的。</li>
+  <li><b>对手的分数由报告作者自己测，个别数字明显异常。</b>LLaDA 2.1 Flash 的 GSM8K 只有 45.0、MGSM 只有 6.8，而它的 HumanEval 有 90.2，这种落差更像是提示格式或答案提取不匹配，而不是模型真的不会小学数学（本站推测）。好在头条图用的两项与 LLaDA2.1 论文自报的 S 模式分数接近（GPQA 66.67、LiveCodeBench 44.05，对报告测得的 68.7、39.4），所以原文图 1 的相对位置大致可信。</li>
+  <li><b>和 Mercury 2 的比较，速度来自黑盒估计，质量上 Mercury 2 其实多数领先。</b>Mercury 2 的 600 token/秒是从 OpenRouter 公开 API 的计时用回归反推的，包含网络与共享服务的影响，而 DiffusionGemma 是本地独占一张卡。Inception 自报约 1,000 token/秒（Blackwell GPU），独立测速机构 Artificial Analysis 报告的中位数约 987（硬件未披露）；若用 987，DiffusionGemma 的倍数约为 1.5 倍而不是 2.5 倍（推算）。质量上，除了 IFEval（97.4 对 97.0）和 MMLU-Pro（同为 77.6），Mercury 2 High 在其余有数据的公开基准上都高于 DiffusionGemma，差距较大的有 AIME（91.7 对 69.1）、LiveCodeBench（79.4 对 69.1）和 Codeforces（1986 对 1429）；代码类平均分里 Mercury 2 之所以只比 DiffusionGemma 高 1.8 分，是因为包含了 Google 内部的 Natural2Code（Mercury 2 只有 79.1）；去掉这一项，四项公开代码基准的平均约为 78.6 对 72.7（推算）。“质量很有竞争力”是公允的说法，“质量相当”则不是。</li>
+  <li><b>两个内部基准无法外部复现。</b>HiddenMath 和 Natural2Code 不受训练数据污染，这是优点；但只有 Google 能跑，而且恰好是 DiffusionGemma 相对 Mercury 2 优势最大的一项（Natural2Code 94.0 对 79.1）。</li>
+  <li><b>步数与采样设置。</b>表 3、表 4 的扩散模式分数都用默认采样器：画布 256、最多 48 步、熵预算 0.1、温度 0.8 → 0.4、自适应停止，实际有效步数按任务约 7.5 到 18.5 步（表 4）；默认开启思考。报告没有写表 3 用了几个随机种子，也没有写质量评测时用的是 FP8 还是更高精度。</li>
+  <li><b>独立测量几乎没有。</b>报告里 DiffusionGemma 自己的全部质量和速度数字都由作者测得；唯一的第三方速度数字是转述 Unsloth 的“最高约 2,000 token/秒”，没有条件。好在权重、Transformers 与 vLLM 的实现都公开，任何人都可以在同样条件下复测，这一点和只有 API 的 Mercury 根本不同。截至 2026-10-20，本站没有找到在相同条件下独立复现 1,479 token/秒的公开报告。</li>
+  <li><b>没有公开的部分。</b>SFT 与 SD·RL 的数据组成和 token 数（只给了“不到 10%”）、训练算力与硬件、SD·RL 的目标函数与奖励、老师的步数与温度、表 3 的随机种子数、AR 基线所用的推理引擎。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S7.T3" target="_blank" rel="noopener">原文表 3 ↗</a> · <a href="https://arxiv.org/html/2608.00146#S7.T4" target="_blank" rel="noopener">原文表 4 ↗</a> · <a href="https://deepmind.google/models/gemini-diffusion/" target="_blank" rel="noopener">Gemini Diffusion 模型页 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 开源微调：数独与 PubMedQA</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DiffusionGemma 发布时附带了一套开源微调工具。普通用户能不能用消费级或少量专业 GPU 把它适配到自己的任务上？训练目标怎么写？报告用数独和生物医学问答两个例子给出答案。</div>
+<div class="note-pre"><b>先补一点背景：LoRA。</b>
+<p>LoRA（低秩适配）不改动原模型的大矩阵 \(W\)，而是给它加一个低秩的增量 \(W+BA\)，其中 \(B\)、\(A\) 是两个又瘦又长的小矩阵，秩 \(r\) 很小（如 4 或 8）。训练时只更新 \(A\) 和 \(B\)，要存的梯度和优化器状态少得多，所以能在显存有限的机器上微调大模型。秩越大，增量的表达能力越强，但要训练的参数也越多。</p>
+</div>
+<p><b>工具与目标函数。</b>微调工具建立在 Google 开源的 JAX 研究工具箱 Hackable Diffusion 之上，提供 LoRA 配方。训练序列长度为 \(P+KC\)：\(P\) 个提示 token 加上 \(K\) 块、每块 \(C\) 个 token 的画布。损失由两部分相加：编码器部分对整条序列做普通的下一个 token 预测；解码器部分从 \(K\) 块画布里均匀抽一块，加噪后做去噪交叉熵，条件是这块画布之前的提示和画布的 KV 缓存；一半样本带上由前一次前向算出的自条件信号，另一半置零：</p>
+<div class="formula">$$L_{\text{enc}}=-\frac{1}{P+KC}\sum_{j=1}^{P+KC}\log p_\theta(x^j\mid x^{1:j-1}),\qquad L_{\text{dec}}=-\frac{1}{C}\sum_{i=1}^{C}\log p_\theta(x_0^i\mid x_t,z_t,H)$$</div>
+<p>同时训练编码器损失的原因是：编码器就是因果模式下的同一套权重，它负责把提示和已写好的画布写进缓存，如果只训练解码器，编码出来的缓存质量可能退化。LoRA 加在所有线性层上（注意力投影、MLP 门控、MoE 路由器、自条件前馈块），用 2 张 A100 80GB 就能训练。</p>
+<p><b>数独。</b>数独是检验离散扩散的好题目，因为每个格子的取值同时受行、列、宫的约束，天然不是“从左到右”的问题。作者用 Kaggle 上的公开数独数据集微调：全参数微调在 4,096 道留出题上整题正确率超过 85%；LoRA 秩为 8 时（只训练约 800 万参数、2,000 步）正确率 84.40%，有效去噪步数 10.72；而未经微调的原模型正确率是 0%，有效步数 40.65。附录 C 的例子显示，原模型失败的一个直接原因是格式：题目要求“只输出解好的 9×9 网格”，它却在思考通道里反复尝试构造网格，最后没有给出回答。所以这 84% 里既有“学会解题”，也有“学会遵守输出格式”。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/lora_accuracy_comparison.svg" alt="原文图 14" loading="lazy"></div>
+<figcaption><b>原文图 14。怎么看：</b>数独留出集上的整题正确率（纵轴，0.60 到 0.90）随 LoRA 秩（横轴 1、2、4、…、128）以及全参数微调（最右“Full”）的变化。要看的是趋势：秩越大、训练的参数越多，正确率越高，全参数微调最高（超过 85%）；秩 8 已经接近全参数微调的水平。这张图说明的是“精度与微调成本可以互换”。</figcaption></figure>
+<p><b>PubMedQA。</b>为了说明不只限于结构化推理，作者还在生物医学问答 PubMedQA 上做了 LoRA（秩 4）微调：模型读一篇医学摘要，给出是 / 否 / 可能的判断和一段解释，评测只看长回答与参考解释的 BLEU。结果 BLEU 从 10.76 升到 20.67，判断准确率从 75.6% 小幅升到 76.62%；有效去噪步数则从 18.09 增加到 31.57，报告没有解释步数为什么变多。</p>
+<div class="note-warn"><b>读的时候要注意：</b>数独和 PubMedQA 都是“微调前后自己和自己比”，没有和同样微调过的 AR 模型对照，所以不能据此说扩散模型比 AR 更适合这些任务。数独的 0% 起点主要反映格式失败，不代表原模型完全不会推理。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a> · <a href="https://arxiv.org/html/2608.00146#A3" target="_blank" rel="noopener">附录 C ↗</a> · <a href="https://github.com/google/hackable_diffusion" target="_blank" rel="noopener">Hackable Diffusion ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 文本扩散的其他好处：几个手挑的例子</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>除了低延迟，按块双向生成还有没有别的实际好处？作者从三个角度举例：画布内的双向推理和自我纠错、随任务难度自动调整的计算量、以及结构化输出的快速收敛。为了看清生成过程本身，这一节的例子全部关闭了思考模式，DiffusionGemma 和 Gemma 4 都一样。</div>
+<p><b>双向推理与自我纠错。</b>AR 模型写第 \(n\) 个 token 时只能看前文，看不到还没写的内容；扩散模型在一块画布内是双向注意的，后面的 token 可以影响前面的 token 怎么写，而且早先步骤里过早落定的 token 后面还能改。报告用一道算术题演示：题目是 \(7\times(\sqrt{111+10}-3)-9^2\)，并要求“先给答案再给推理”。Gemma 4 必须先写答案，于是第一个 token 就写下了错误的“−1”，接着一步步推理，算到 56 − 81 = −25 时才发现不对，只好追加一句更正。DiffusionGemma 的去噪轨迹（原文图 15）显示，它第一步也把最大概率给了“−1”，第二步变成“−15”，第三步就收敛到正确的“−25”，答案和推理在同一块画布里互相修正，5 步完成。附录 G.1 还有一个“青蛙过河”的陷阱题，Gemma 4 先答“能”再自相矛盾地说“不可能”，DiffusionGemma 初始也偏向“能”，几步后改成“不能”，6 步完成。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="diffusiongemma/fig/td_reasoning_cropped.png" alt="原文图 15" loading="lazy"></div>
+<figcaption><b>原文图 15。怎么看：</b>每一行是一个去噪步（Step 00 到 04），每一格是画布开头 12 个位置之一（图中只显示前 12 格左右），格子里是该步每个位置最可能的 token，颜色越深表示模型越确定。看第 2 到 4 格（负号和答案的两位数字）：Step 00 是“-”“1”加一个换行，即 −1，而且“1”颜色很浅；Step 01 变成“-”“1”“5”，即 −15；Step 02 起变成“-”“2”“5”，即 −25，并且颜色变深。与此同时，右边“Reasoning:”“1.”这些结构性 token 从第一步起就很确定。结论：答案不是一次写死的，而是随着整块画布逐渐清晰而被修正。</figcaption></figure>
+<p><b>随难度变化的计算量。</b>AR 模型每个 token 花的计算量是固定的；扩散模型借助自适应停止，简单任务少走几步，难任务多走几步（原文图 5）。附录 G.2 用两个规则相同的二进制序列任务对比：“难”的版本里每个新 token 取决于它前面两个刚生成的 token，必须按顺序推，模型大致从左到右地定下来，40 个 token（20 个数字加 20 个空格）用了 7 步；“易”的版本只是把同样的规则作用在给定的输入串上，每个输出位置只依赖输入，模型并行地一次定下来，只用了 4 步。即使是难的版本，7 步也远少于 AR 需要的 40 步。此外，最大步数本身就是一个可以调节的“延迟—质量”旋钮（原文图 10）。</p>
+<p><b>结构化与受约束的输出。</b>JSON 抽取、OCR、代码修改这类任务，输出要么受严格格式约束，要么大段照抄输入。AR 模型生成 \(N\) 个 token 总要走 \(N\) 步，哪怕是固定的样板文字；扩散模型可以一次性把可预测的结构全部锁定。附录 G.3 给了两个例子：按给定 JSON schema 从一段自我介绍里抽取信息，第一步的平均置信度已达 0.834，第二步全部收敛，两步完成；修复一段 Python 生成器被消耗两次的 bug，大部分 token 照抄输入，三步完成。</p>
+<figure class="paper-fig"><div class="imgs"><img src="diffusiongemma/fig/td_json_canvas_0.png" alt="原文图 27 左" loading="lazy"><img src="diffusiongemma/fig/td_json_canvas_1.png" alt="原文图 27 右" loading="lazy"></div>
+<figcaption><b>原文图 27。怎么看：</b>左边是第一次去噪后（Step 0）每个位置最可能的 token，颜色表示置信度（色条从红到深蓝，越深越确定）；右边是第二步。第一步时，键名、引号、括号和“Arthur”“Pendelton”“34”等照抄或由 schema 决定的内容已经是深色，只有“hobbies”列表后半段和“is_student”一行还是浅蓝、甚至有重复和错位（如“bakingaking sourdough”）。第二步全部变成正确且完全确定的 JSON。这说明受约束的输出几乎在第一步就成形，剩下的步数只用来修正少数不确定的位置。</figcaption></figure>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>这些都是作者挑选的定性例子，没有统计意义上的对比。“先给答案再给推理”的提示本身就是为暴露 AR 模型的弱点设计的；正常提问时 AR 模型会先推理后作答。</li>
+  <li>双向修正只发生在一块 256 个 token 的画布内部。如果推理链跨越多块画布，前面已提交的画布就不能再改。</li>
+  <li>“AR 照抄也要一步一个 token”只对普通解码成立；投机解码在草稿猜得准时（照抄正是最容易猜的情况）一次就能接受很多个 token。</li>
+  <li>第三方分析（<a href="https://arxiv.org/abs/2606.14620" target="_blank" rel="noopener">arXiv 2606.14620 ↗</a>）用 686 个提示统计了 DiffusionGemma 采样器的提交顺序，发现整体上既不是完全并行、也不是严格按块从左到右，而是带有部分从左到右的偏向，结构化 JSON 的提交顺序则基本任意。这与本节的例子方向一致，但那篇文章把模型称为“掩码离散扩散”，与报告明确写的均匀噪声不符，本站以报告为准。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a> · <a href="https://arxiv.org/html/2608.00146#A7" target="_blank" rel="noopener">附录 G ↗</a> · <a href="https://arxiv.org/html/2608.00146#A6" target="_blank" rel="noopener">附录 F 的完整去噪轨迹 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 局限与已知问题</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者自己承认了哪些问题？它们的原因是什么，哪些可能在后续版本里改善，哪些是方法本身的代价？</div>
+<ul>
+  <li><b>质量低于 AR 起点。</b>作者列了四个原因：没有做原生的扩散预训练，而是从 AR 权重热启动；受算力预算限制，SFT 相对较短；SD·RL 刻意追求极低延迟，本身就以牺牲最终质量为代价；架构、优化和数据配比都继承自 AR 模型，对离散扩散未必最优。前两条可以靠投入更多算力改善，后两条是这条路线的结构性取舍。</li>
+  <li><b>回答偏短。</b>如 §5 所说，最终检查点的输出很简洁。这对速度是乘数，但也让模型用不上“更长推理换更高质量”的收益，这正是 AIME 这类任务掉分最多的原因之一。</li>
+  <li><b>偶尔的结巴。</b>极少数情况下输出会退化成重复循环或局部结巴（例如不停重复“the the the”）。SD·RL 已经消除了绝大多数这类情况，但它是极少步数运行的直接代价：步数压得越狠，生成过程的鲁棒性越差。</li>
+  <li><b>多模态思考时偶尔漏掉结束标签。</b>处理带图片的提示时，模型有时不输出“思考结束”的标签，即使推理本身是对的；这会导致评测程序拿不到最终答案，人为拉低分数。MMMU-Pro 上思考模式（54.3）反而低于不思考模式（66.0）就是这个原因。作者说发现得太晚，没来得及在本次发布中修复。</li>
+  <li><b>高并发时吞吐受限。</b>如 §6 所说，约 32 个并发以内，DiffusionGemma 的每用户速度和总吞吐都优于带 MTP 的 Gemma 4；超过之后，每个 token 更高的计算成本让 AR 模型占优。这些结果没有针对大批量做优化，真实流量下的系统性分析留给未来。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S10" target="_blank" rel="noopener">英文原文 §10 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">11 结论与附录：相关工作、提示格式与 Mercury 2 的测速方法</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者怎样总结这份工作？附录里还有哪些正文没有展开、但对使用者或评估者有用的信息，特别是“比 Mercury 2 快 2.5 倍”里 Mercury 2 的速度是怎么估出来的？</div>
+<p><b>结论。</b>作者认为 DiffusionGemma 展示了一条省算力的超高速文本生成路线：用两阶段训练（SFT 与 SD·RL）把现成的 Gemma 4 26B A4B 改造成文本扩散模型，在一张 H100 上达到约 1,500 token/秒，同时保留有竞争力的推理和多模态能力。作者把它作为实验性的开放权重模型发布，连同 Hugging Face Transformers 和 vLLM 的参考实现，希望社区在此基础上做任务微调、探索新的采样算法或继续优化推理效率。</p>
+<p><b>附录 A：相关工作。</b>A.1 承认连续扩散正在复兴：例如在连续嵌入空间里一直走到最后一步才离散化的 Embedded Language Flows（本站 <a href="elf.html">ELF 精读</a>），以及把生成轨迹压缩成一步或几步的离散数据流映射方法（同类工作见本站 <a href="flow-map-lm.html">流映射语言模型精读</a>），作者认为连续方法早期的失败可能源于空间几何和训练目标没选好，而不是模态本身的限制。A.2 把 DiffusionGemma 放到投机解码的脉络里：AR 草稿模型受串行生成限制；<a href="medusa.html">Medusa</a> 这类并行草稿各位置独立，接受率不高；用扩散做草稿可以建模草稿 token 之间的依赖，<a href="tidar.html">TiDAR</a> 用同一个模型做扩散起草和 AR 验证（作者说 DiffusionGemma 也支持这种配置），<a href="dflash.html">DFlash</a> 用单独的扩散模型做草稿，但越靠后的草稿位置接受率越低；DiffusionGemma 则作为独立的扩散模型运行，没有验证这一环，能生成比“草稿—验证”方法长得多的画布。</p>
+<p><b>附录 D：提示格式。</b>对使用者有几条实用信息：和其他 Gemma 模型一样，每段对话必须以 BOS（编号 2）开头；整段块自回归生成结束时，以轮次结束标签收尾，最后一块画布剩下的位置用 EOS（编号 1）填满。对话用成对的轮次标签分隔，角色有 system、user、model 和工具返回用的 tool 四种。在系统指令里加入思考标记即可开启思考模式；即使不开启，模型仍会先输出一个空的思考通道。多轮对话时，历史里不要带上之前的思考内容，只保留最终回答。工具调用有专门的标签和一个代替普通引号的定界符。</p>
+<p><b>附录 E：Mercury 2 的速度是怎么估出来的。</b>Mercury 2 是闭源模型，作者拿不到它的 TPF 或真实 TPS，只能通过 OpenRouter 的公开 API 发请求（输入加输出最长 50,000 个 token），记录每个请求的输入 token 数、命中缓存的 token 数、输出 token 数（分思考与回答）和总耗时。耗时里没有拆分生成速度，所以作者用非负最小二乘拟合一个线性模型：</p>
+<div class="formula">$$\text{总耗时}=\alpha\cdot\text{需重新计算的输入 token 数}+\beta\cdot\text{输出 token 数}+\gamma$$</div>
+<p>其中 \(\alpha\) 是每个输入 token 的处理时间，\(\beta\) 是每个输出 token 的生成时间，\(\gamma\) 是每个请求的固定开销（网络延迟等），生成速度取 \(1/\beta\)。系数被约束为非负，因为处理、生成和开销都只会增加时间；查询之间关闭了缓存。为了反映不同任务的速度差异，每个基准单独拟合，再做算术平均（开源模型的 TPS 也是先按任务算再平均）。两轮测量分别在 2026 年 7 月 9–10 日（11 日少量重试）和 7 月 25–26 日进行，结果一致。得到的数字是：原文图 1 用的 GPQA-Diamond 452.6、LiveCodeBench-v6 525.5，平均 489 token/秒；表 3 用的 7 项基准，high 档 600、medium 档 547 token/秒。作者自己指出，HumanEval 和 Natural2Code 里有一些离群样本：模型陷入思考循环，以极高的速度写满 50,000 个 token 却没给出有效回答，这让估计值略微偏高，也解释了为什么 high 档反而比 medium 档快。作为参照，Inception 自报在 NVIDIA Blackwell GPU 上约 1,000 token/秒，Artificial Analysis 在未披露的硬件上测得中位数约 987，并且方差很大；作者认为差异可能来自硬件、服务优化和测速数据集的不同，他们的估计反映的是用户通过 OpenRouter API 平均能感受到的速度。</p>
+<div class="note-warn"><b>读的时候要注意：</b>这个回归法本身是合理的，但它测的是“经由第三方 API 路由、与其他用户共享的服务”，而 DiffusionGemma 测的是“本地独占一张 H100、批大小 1”。前者包含了服务端为了总吞吐而做的拼批，后者恰好是扩散模型最有利的设定。所以“约 2.5 倍”应理解为“两种使用方式下用户分别能感受到的速度之比”，而不是同条件下两个模型的速度之比。Mercury 系列的背景见本站 <a href="mercury.html">Mercury 精读</a>。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2608.00146#S11" target="_blank" rel="noopener">英文原文 §11 ↗</a> · <a href="https://arxiv.org/html/2608.00146#A1" target="_blank" rel="noopener">附录 A ↗</a> · <a href="https://arxiv.org/html/2608.00146#A4" target="_blank" rel="noopener">附录 D ↗</a> · <a href="https://arxiv.org/html/2608.00146#A5" target="_blank" rel="noopener">附录 E ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>DiffusionGemma 的权重比技术报告早公开了约七周，所以到 2026 年 10 月，它已经有了三个多月的使用记录，但作为论文仍然很新：报告目前只有 arXiv v1，没有同行评审的发表记录。下面是截至 2026-10-20 能查到的情况。</p>
+<ul>
+  <li><b>使用与生态。</b>Hugging Face 上的权重仓库有 1,306 个点赞，近 30 天下载 666,448 次。发布当天 vLLM 博客宣布原生支持（称其为 vLLM 原生支持的第一个扩散语言模型），Transformers 提供了参考实现（报告引用的 PR #46540）；Unsloth 提供了使用文档；Google 的发布博客说 llama.cpp 的官方支持“即将到来”，本站没有核实是否已经落地。报告提到的下游用途（多语言语音识别、放射科报告起草）来自报告本身的引用，本站没有独立核实。</li>
+  <li><b>围绕它的分析工作。</b>两篇论文比技术报告还早出现。一篇是 Asaria 等人的 <a href="https://arxiv.org/abs/2606.14620" target="_blank" rel="noopener">Neither Parallel Nor Sequential（2606.14620）↗</a>，统计了采样器实际提交 token 的顺序（见 §9 的提示）。另一篇是 Google DeepMind 的 <a href="https://arxiv.org/abs/2606.20560" target="_blank" rel="noopener">How Transparent is DiffusionGemma?（2606.20560）↗</a>，作者中有几位也是 DiffusionGemma 的作者：它担心自条件这条连续通道会让推理变得不透明，发现两次可解释状态之间的“不透明串行计算深度”乍看是 Gemma 4 的 28.6 倍，但把步与步之间传递的信息映射回一个可解释的 token 瓶颈（且不损失下游表现）后，只有 Gemma 4 的 1.1 倍；监控性与 Gemma 4 相近。这正是 §3.2 那段可解释性旁注的依据。</li>
+  <li><b>和同期工作的关系。</b>本站同一批精读里，<a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a> 与 <a href="llada2-1.html">LLaDA2.1</a> 是报告直接对比的两个开放权重扩散模型；<a href="tidar.html">TiDAR</a> 与 <a href="wedlm.html">WeDLM</a> 代表“扩散与 AR 混合”和“把 AR 模型改成块扩散”的其他做法；<a href="seed-diffusion.html">Seed Diffusion</a> 与 <a href="mercury.html">Mercury</a> 是更早的工业报告。和它们相比，DiffusionGemma 的独特之处是均匀噪声、开放权重、完整的速度账本，以及把 RL 与少步蒸馏合并成一个阶段。</li>
+  <li><b>还没有的东西。</b>截至 2026-10-20，本站没有找到在相同条件（单卡 H100、FP8、批大小 1）下独立复现报告速度数字的公开结果，也没有找到对 SD·RL 的独立复现；SD·RL 的目标函数仍未公开。报告承诺的“针对大批量优化后的吞吐”和“真实流量下的分析”也还没有后续发布。</li>
+</ul>
+<p>想看与 Mercury、Seed Diffusion 并排的结构对照表和简答题，见旧版的<a href="../legacy/tracks/dllm/10-industrial.html">工业 dLLM 结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">报告以团队名义署名，单位为 Google DeepMind。下面只列报告本身能查证的分工信息和报告参考文献里能对上的关联工作，不对个人背景做推断。</p>
+<div class="author-cards">
+  <div class="author-card"><b>DiffusionGemma Team</b><div class="aff">Google DeepMind（共 43 人，报告第 38 页）</div>分为核心贡献者 20 人、贡献者 8 人、微调框架 11 人、负责人 4 人，组内按字母排序；另列有致谢名单和赞助人名单（包括 Demis Hassabis、Jeff Dean、Koray Kavukcuoglu、Oriol Vinyals 等）。arXiv 提交人为 Jean Tarbouriech。</div>
+  <div class="author-card"><b>工作流负责人</b><div class="aff">核心贡献者中标 * 的 8 人</div>Daniele Calandriello、João Gante、Tamara von Glehn、Martin Kukla、Ivan Lobov、Nicolas Perez-Nieves、Bobak Shahriari、Jean Tarbouriech。其余核心贡献者：Adrien Ali Taïga、James Assiene、Rahma Chaabouni、Nate Keating、Chris Knutsen、Tianlin Liu、Ofir Nabati、João Gabriel Oliveira、Nastasia Prutianova、Pavel Tyletski、Çağlar Ünlü、Cindy Wu。</div>
+  <div class="author-card senior"><b>负责人（Leads）</b><div class="aff">Google DeepMind</div>Sebastian Flennerhag、Brendan O’Donoghue、George Scrivener、Shantanu Thakoor。其中 Brendan O’Donoghue 与核心贡献者 Cindy Wu、Jean Tarbouriech、João Gabriel Oliveira 也是透明度分析论文（2606.20560）的作者。</div>
+  <div class="author-card"><b>微调框架组</b><div class="aff">Google DeepMind</div>Quentin Berthet、Andrew Campbell、Clément Crepy、Valentin De Bortoli、Arnaud Doucet、Romuald Elie、Alexandre Galashov、Klaus Greff、Alexis Jacq、David Ruhe、Yu-Han Wu。按报告参考文献，§8 所用的 Hackable Diffusion 由 Crepy、De Bortoli、Galashov、Greff 与 Korshunova 编写，Doucet 与 Elie 为赞助人。</div>
+  <div class="author-card"><b>贡献者</b><div class="aff">Google DeepMind</div>Glenn Cameron、Jerome Connor、Sertan Girgin、Maarten Grootendorst、Alon Levkovitch、Eliya Nachmani、Omar Sanseviero、Piotr Stanczyk。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：Google DeepMind 技术报告，arXiv 2608.00146 v1（2026-07-31），截至 2026-10-20 没有同行评审的发表记录。</li>
+  <li><b>开放权重</b>：<a href="https://huggingface.co/google/diffusiongemma-26B-A4B-it" target="_blank" rel="noopener">google/diffusiongemma-26B-A4B-it</a>，Apache 2.0 许可，仓库创建于 2026-06-09；截至 2026-10-20 有 1,306 个点赞、近 30 天下载 666,448 次。</li>
+  <li><b>推理与微调实现</b>：Hugging Face Transformers（<a href="https://github.com/huggingface/transformers/pull/46540" target="_blank" rel="noopener">PR #46540</a>）；vLLM（<a href="https://github.com/vllm-project/vllm/pull/45163" target="_blank" rel="noopener">PR #45163</a>，<a href="https://vllm.ai/blog/2026-06-10-diffusion-gemma" target="_blank" rel="noopener">2026-06-10 博客</a>）；微调工具 <a href="https://github.com/google/hackable_diffusion" target="_blank" rel="noopener">google/hackable_diffusion</a>（JAX）。</li>
+  <li><b>发布材料</b>：<a href="https://blog.google/innovation-and-ai/technology/developers-tools/diffusion-gemma-faster-text-generation/" target="_blank" rel="noopener">Google 发布博客（2026-06-10）</a>；<a href="https://ai.google.dev/gemma/docs/diffusiongemma" target="_blank" rel="noopener">官方文档</a>。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>同类工业报告：<a href="mercury.html">Mercury</a> · <a href="seed-diffusion.html">Seed Diffusion</a> · <a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a> · <a href="llada2.html">LLaDA2.0</a> · <a href="llada2-1.html">LLaDA2.1</a></li>
+  <li>从 AR 模型改造：<a href="dream.html">Dream 7B</a> · <a href="fast-dllm-v2.html">Fast-dLLM v2</a> · <a href="sdar.html">SDAR</a> · <a href="wedlm.html">WeDLM</a></li>
+  <li>块扩散与缓存：<a href="block-diffusion.html">BD3-LM</a> · <a href="fast-dllm.html">Fast-dLLM</a> · <a href="dkv-cache.html">dKV-Cache</a></li>
+  <li>噪声与理论基础：<a href="d3pm.html">D3PM</a> · <a href="mdlm.html">MDLM</a> · <a href="duo.html">Duo（均匀态扩散）</a> · <a href="discrete-flow-matching.html">离散流匹配</a></li>
+  <li>投机解码与混合解码：<a href="speculative-decoding.html">投机解码</a> · <a href="eagle.html">EAGLE</a> · <a href="tidar.html">TiDAR</a> · <a href="dflash.html">DFlash</a></li>
+  <li>少步化与 RL：<a href="dparallel.html">dParallel</a> · <a href="d3llm.html">d3LLM</a> · <a href="d1.html">d1</a> · <a href="tracerl.html">TraceRL</a></li>
+  <li>推理服务背景：<a href="vllm.html">vLLM / PagedAttention</a> · <a href="deepseek-v3.html">DeepSeek-V3（MoE）</a></li>
+  <li>旧版路线：<a href="../legacy/tracks/dllm/10-industrial.html">工业 dLLM</a> · <a href="../legacy/tracks/dllm/05-uniform.html">均匀噪声</a> · <a href="../legacy/tracks/dllm/11-block-diffusion.html">块扩散</a> · <a href="../legacy/tracks/dllm/12-ar-to-block.html">AR 改块扩散</a> · <a href="../legacy/tracks/dllm/13-hybrid.html">混合解码</a> · <a href="../legacy/tracks/dllm/01-foundations.html">从头讲起</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对技术报告的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2608.00146" target="_blank" rel="noopener">arXiv:2608.00146</a>（本页依据 v1）。标“原文图”的图片取自报告 arXiv 版，arXiv 页面标注的许可为 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>，图片未做修改，版权归 DiffusionGemma Team / Google DeepMind 所有（报告 PDF 首页另印有“© 2026 Google DeepMind. All rights reserved”，本站按 arXiv 标注的许可使用）。标“示意图”的图由本站绘制；标“读自原图”的数字是从原图上读出的近似值；交互演示为本站组件。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

@@ -1,0 +1,901 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeDLM 精读</title>
+<meta name="description" content="WeDLM（ICML 2026 Oral）逐节精读：为什么双向注意力让扩散语言模型用不上前缀 KV 缓存，拓扑重排怎样在标准因果注意力下做掩码恢复，流式并行解码怎样边猜边提交前缀，以及与 vLLM 上自回归模型的速度对比在什么条件下成立。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="wedlm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ICML 2026（Oral）</div>
+  <h1>WeDLM：让扩散语言模型用回标准因果注意力，换来真正的推理加速</h1>
+  <p class="en-title">WeDLM: Reconciling Diffusion Language Models with Standard Causal Attention for Fast Inference</p>
+  <div class="paper-authors">Aiwei Liu<sup>1,∗,†</sup>, Minghua He<sup>1,2,∗,‡</sup>, Shaoxun Zeng<sup>3</sup>, Sijun Zhang<sup>1</sup>, Linhao Zhang<sup>1</sup>, Chuhan Wu<sup>1</sup>, Wei Jia<sup>1</sup>, Yuan Liu<sup>1</sup>, Xiao Zhou<sup>1</sup>, Jie Zhou<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>WeChat AI, Tencent（腾讯微信 AI）　<sup>2</sup>北京大学　<sup>3</sup>清华大学　<sup>∗</sup>共同一作　<sup>†</sup>通讯作者　<sup>‡</sup>在微信 AI 实习期间完成（按 arXiv v1 署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2512.22737" target="_blank" rel="noopener">arXiv 2512.22737 ↗</a>
+    <a class="pill" href="https://icml.cc/virtual/2026/oral/71142" target="_blank" rel="noopener">ICML 2026 Oral ↗</a>
+    <a class="pill" href="https://github.com/Tencent/WeDLM" target="_blank" rel="noopener">Code: Tencent/WeDLM ↗</a>
+    <a class="pill" href="https://huggingface.co/collections/tencent/wedlm" target="_blank" rel="noopener">权重：Hugging Face ↗</a>
+    <a class="pill" href="https://wedlm.github.io" target="_blank" rel="noopener">项目页 ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/12-ar-to-block.html#wedlm">旧版结构拆解：AR → 块扩散（WeDLM 一节）</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>658</b><span>GitHub star（Tencent/WeDLM，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。本页读的是 arXiv 第 1 版（2025-12-28，23 页；截至 2026-10-20，arXiv 上只有这一版）。论文后来被 ICML 2026 接收为口头报告，会议版本我们没能核对（OpenReview 页面需要人机验证），所以这里的数字都以 arXiv 第 1 版为准。论文以 CC BY 4.0 许可发布，所以原文的图 1–8 直接放在讲到它的地方；原图没画到的东西（注意力里谁能看见谁、解码窗口一步步怎么走、各种加速数字的测量条件）用本站自己画的示意图和表格补上。标“推算”的数字是本站根据论文数据算出来的；标“读自原图数据”的数字是本站从原文 SVG 图的矢量坐标里读出来的近似值，不是论文正文里的原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>今天的大语言模型几乎都是自回归（AR）模型：从左到右一次生成一个 token，每生成一个就要把整个网络算一遍。在只服务一两个请求的时候，这样做非常浪费：每一步都要把几十 GB 的参数从显存读一遍，计算单元大部分时间在等数据，却只换来一个 token。扩散语言模型（DLLM）换了一种生成方式：先在要写的位置放上一串 <code>[M]</code>（掩码），每一步并行地猜所有被遮住的位置，把有把握的几个定下来，再接着猜剩下的。一次前向能定好几个 token，这就是它“并行解码”的卖点。</p>
+<p>可是在真实部署里，扩散语言模型很少能比 vLLM 这类高度优化的 AR 推理引擎更快。这篇论文认为关键原因在注意力的方向上：LLaDA、Dream 等模型用双向注意力，每个位置都能看到右边尚未确定的位置，于是已经写好的 token 的中间结果（key 和 value）也会跟着右边的变化而变，没法像 AR 那样算一次就存进 KV 缓存。块扩散虽然能缓存已经写完的块，但块内部仍是双向的，块里的 token 要等整块写完才能进缓存。</p>
+<p>WeDLM 的想法是：<b>从头到尾只用标准的因果注意力（每个位置只看它左边），但通过调整 token 在输入里的摆放顺序，让每个被遮住的位置仍然能看到所有已知的 token。</b>具体做法叫“拓扑重排”：把已知 token 挪到输入的最前面，被遮住的位置排到后面，同时让每个 token 带着它原来在句子里的位置编号，旋转位置编码（RoPE）就仍然按原来的位置计算注意力。推理时，作者配了一个“流式并行解码”：维护一个固定大小的窗口，每一步把窗口最左边已经连成一段的 token 立刻提交进 KV 缓存，再在窗口末尾补上同样多的新 <code>[M]</code>，让每一步的并行工作量保持不变。因为注意力始终是标准的因果掩码，每一步在计算上就是一次“在已有缓存上做的小规模预填充”，FlashAttention、PagedAttention、CUDA Graphs 这些 AR 引擎里的现成优化都能直接用。</p>
+<p>作者从 Qwen2.5-7B 和 Qwen3-8B 出发，用 100B token 继续预训练、再做指令微调，得到 WeDLM-7B / 8B。在作者自己的评测协议下，WeDLM-8B-Instruct 的 10 项平均分是 77.53，比 Qwen3-8B-Instruct 的 75.12 高；不过这张质量表是用“每步只定 1 个 token”的方式测的，并没有用加速模式。速度方面，在 GSM8K 上相对 vLLM 上的 Qwen3-8B，保守设置下约 1.97 倍（准确率 92.3%），激进设置下 3.2 倍（准确率 79% 以上）；在“从 1 数到 200”这种几乎没有不确定性的文本上能到 1673 token/s，在开放式解释题上只有 197.8 token/s。论文没有写测速用的 GPU 型号、batch 大小和并发数，这一点在第 6 节的“结果的份量”里会仔细讨论。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么扩散语言模型“每步能猜好几个”，却常常跑不过 vLLM 上一个一个生成的 AR 模型？</li>
+  <li>KV 缓存成立需要什么条件？双向注意力和块扩散分别在哪里破坏了它？</li>
+  <li>“前缀可缓存率” \(p_{\text{cache}}\) 量的是什么，和“每次前向定几个 token”有什么不同？</li>
+  <li>拓扑重排怎样只靠改变 token 的摆放顺序和位置编号，就让被遮住的位置看到全部已知 token？它放弃了什么？</li>
+  <li>双流掩码训练在弥补训练和推理之间的哪一种差距？</li>
+  <li>流式并行解码每一步做哪几件事？为什么它提交进缓存的 KV 一定是精确的？</li>
+  <li>“接近 3 倍”“最高 10 倍”是在什么条件下量出来的？什么情况下会缩水？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2512.22737" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：扩散模型能并行，为什么还跑不过 vLLM</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散语言模型的卖点是一次前向能并行地恢复多个被遮住的 token，可在实际部署中，它们并没有表现出比优化过的 AR 引擎更快。作者想先说清楚差距从哪里来：AR 引擎的速度建立在什么机制上，扩散模型又是在哪一步丢掉了这个机制。作者的回答是“前缀 KV 缓存”，所以这一节先把它讲清楚。</div>
+
+<div class="note-pre"><b>先补一点背景：KV 缓存，以及它为什么只对“前缀”成立。</b>
+<p>AR 模型生成第 \(t\) 个 token 时，每一层的注意力都要用到前面所有 token 的 key 和 value。因为用的是因果注意力，第 \(i\) 个 token 在每一层的表示只依赖它自己和它左边的 token；右边后来写出什么，都不会回过头改变它的 key 和 value。所以这些 key、value 算过一次就可以存下来，以后每一步只为新 token 计算并追加，这就是 KV 缓存（细节见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。</p>
+<p>它成立的条件可以说得很精确：<b>一个位置的 key/value 只依赖它左边已经确定下来的内容</b>。从序列开头起连续满足这个条件的一段，就叫“可以缓存的前缀”。只要前缀不变，缓存就永远有效；新内容只能接在末尾。</p>
+<p>vLLM 这类引擎围绕这个性质做了大量工程：PagedAttention 把 KV 缓存切成小块按需分配（见 <a href="vllm.html#n-4">vLLM 精读 §4</a>）；前缀缓存让共享同一段系统提示的请求复用同一份 KV；CUDA Graphs 把每一步要启动的几十上百个 GPU 内核预先录成一张图，一次提交，省掉逐个启动的开销；FlashAttention 等内核把注意力算得又快又省显存。这些优化全都默认两件事：注意力是因果的，新 token 只追加在末尾。</p>
+</div>
+
+<div class="note-pre"><b>再补一点背景：双向注意力为什么让 KV 缓存失效，块扩散又挽回了多少。</b>
+<p>LLaDA、Dream 这类掩码扩散模型用的是双向注意力：每个位置都能看到序列里的所有其他位置，包括右边那些还是 <code>[M]</code> 的位置。于是，一个早就定下来的 token，它从第 2 层开始的 key/value 也会随着右边某个 <code>[M]</code> 被填成具体的词而改变。严格地说，每一步都得把整段序列重新算一遍。Fast-dLLM、dKV-Cache 的做法是承认相邻几步之间 KV 变化不大，直接复用旧值，这是“近似缓存”，会带来一些误差（见 <a href="fast-dllm.html#n-3-1">Fast-dLLM 精读 §3.1</a>、<a href="dkv-cache.html#n-4">dKV-Cache 精读 §4</a>）。</p>
+<p>块扩散（BD3-LM、SDAR、Fast-dLLM v2）是一个折中：把序列切成长度为 \(B\) 的块，块与块之间用因果注意力，块内部用双向注意力。前面的块写完以后不再变，它们的 KV 是精确的，可以缓存；但当前这一块内部仍然双向，块里任何一个 token 都要等整块写完才能进缓存（见 <a href="block-diffusion.html">BD3-LM 精读</a>、<a href="sdar.html">SDAR 精读</a>）。</p>
+</div>
+
+<p>作者在块扩散身上看到两个限制。第一，块内双向注意力推迟了“可以缓存”的时刻：一个 token 早早就猜对了，也得等同一块里所有位置都定下来，因为它的 KV 可能还依赖块里右边那些没定的位置。第二，扩散式的解码可能是乱序的：右边的位置先定、左边的后定，新定下来的 token 就连不成一段从左到右的前缀，能进缓存的部分自然变少。</p>
+<p>由此作者提出一个不同的设计方向：并行地恢复被遮住的 token，本身并不需要双向注意力；把严格的因果结构找回来，是让扩散式解码用上缓存的最直接的路。下面这张示意图把四种解码方式在“某一步里哪些位置的 KV 能直接复用”这件事上放在一起比较。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同样处在生成过程的中途，四种解码方式各有多少位置的 KV 可以直接复用</div>
+  <div class="dia-row"><span class="lbl">AR（vLLM）</span><div class="cells"><span class="cell a">提</span><span class="cell a">示</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell b">6</span></div></div>
+  <div class="dia-out">前面全部来自缓存，这一步只为刚生成的第 6 个 token 算一次 KV，同时预测第 7 个。</div>
+  <div class="dia-row"><span class="lbl">全序列双向（LLaDA 式）</span><div class="cells"><span class="cell c">提</span><span class="cell c">示</span><span class="cell c">1</span><span class="cell c">2</span><span class="cell c">M</span><span class="cell c">4</span><span class="cell c">M</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">任何位置的 KV 都可能随右边 [M] 的变化而变，严格做法是每一步全部重算（近似缓存则冒一点误差去复用）。</div>
+  <div class="dia-row"><span class="lbl">块扩散（块长 4）</span><div class="cells"><span class="cell a">提</span><span class="cell a">示</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell c">5</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">之前的整块精确缓存；当前块里第 5 个虽然已经定了，也要等整块写完才能进缓存，在那之前每一步都跟着整块重算。</div>
+  <div class="dia-row"><span class="lbl">WeDLM（窗口 4）</span><div class="cells"><span class="cell a">提</span><span class="cell a">示</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell b">5</span><span class="cell c">M</span><span class="cell c">7</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">第 5 个刚刚和左边连成一段，这一步算出的 KV 就是精确的，算完立即提交；第 7 个左边还有 [M]，暂不提交，下一步再算。</div>
+  <div class="dia-note">蓝色 = KV 直接来自缓存；绿色 = 这一步要算、算完就能进缓存；橙色 = 这一步要算、但算完还不能进缓存（或被遮住的位置）。本站示意图，用来对照原文 §1 的论述，不是论文数据。</div>
+</div>
+
+<p>方法分训练和推理两部分。训练时用<b>拓扑重排</b>：把已知 token 搬到输入的物理前面，同时保留它们的逻辑位置编号，这样不改注意力掩码，被遮住的位置也能看到所有已知 token；再用<b>双流掩码</b>构造一条干净的“记忆流”和一条被遮住的“预测流”，让每个预测块学会以干净的历史为条件，缩小训练和推理之间的差距。推理时用<b>流式并行解码</b>：用一条按位置加权的置信度规则优先填左边的位置；因果注意力保证新提交的前缀立刻可以缓存；窗口随提交随补，不必像块扩散那样在块边界停下来等待。</p>
+<p>论文列出三条贡献：一是因果扩散框架本身，二是流式并行解码，三是“第一个在墙钟速度上超过工业级 AR 引擎的扩散语言模型”。第三条的分量取决于速度是在什么条件下量的，第 6 节会把条件一条条摆出来。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="wedlm/fig/overview.svg" alt="原文图 1" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左图横轴是推理速度（token/s），纵轴是 GSM8K 准确率；越靠右上越好。红色五角星是 WeDLM-8B，灰色圆点是在 vLLM 上运行的两个 AR 基线，蓝色三角是其他扩散模型（LLaDA、Dream 用 dInfer 引擎，SDAR 用 JetEngine）。从矢量数据读出的坐标大约是：WeDLM-8B 361 token/s、87.3%；Qwen3-8B 120 token/s、85.4%；Qwen2.5-7B 130 token/s、79.6%；SDAR-8B 130 token/s、86.3%；LLaDA-8B 约 22 token/s、80.5%；Dream-7B 约 7 token/s、75.0%（均为读自原图数据）。361 ÷ 120 ≈ 3.0，就是标题里“约 3 倍”的来源。右图是雷达图，比较 WeDLM-8B-Instruct（红）和 Qwen3-8B-Instruct（蓝）在五项上的分数，数字与原文表 2 一致（四舍五入到一位小数）。注意左图的准确率和表 1、表 2 的同名数字对不上（例如表 2 里 Qwen3-8B 的 GSM8K 是 89.91），论文没有说明左图用的是哪种解码设置。</figcaption></figure>
+
+<div class="note-warn"><b>读的时候容易混淆的地方：</b>
+<ul>
+  <li>引言里的几个数字和正文不完全一致：引言说 WeDLM-8B 平均 77.36，表 2 是 77.53；引言说指令微调用了“10B token”，§6.1 说用的是“10K 条内部指令数据”；加速倍数在摘要里是“接近 3 倍”，在引言里是“最高 3 倍”，在贡献列表里是“超过 3 倍”；低熵场景在摘要和引言里是“最高 10 倍 / 超过 10 倍”，在 §6.6 里是“超过 8 倍”。本页一律以正文表格和图为准，并在用到时说明出处。</li>
+  <li>这里的“快”指的是单个请求每秒生成多少 token（墙钟速度），不是整台服务器在大批量下每秒处理多少 token。这两者在扩散模型身上可能给出相反的结论，第 6.7 节会解释为什么。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2512.22737#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：位置编号可以和摆放顺序分开</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>后面的方法要用到三样东西：AR 模型怎样把整句话的概率拆开；“一个 token 在句子里排第几”和“它在输入张量里排第几行”为什么可以是两回事；掩码扩散模型怎样训练。第二点是整篇论文的关键，它决定了“把 token 挪个位置”这种操作在数学上是否合法。</div>
+
+<h4 id="n-2-1">2.1 自回归语言模型</h4>
+<p>给定一串 token \(\mathbf{x}=[x_1,\dots,x_T]\)，AR 模型把整句话的概率拆成一连串条件概率的乘积：</p>
+<div class="formula">$$P(\mathbf{x})=\prod_{t=1}^{T}P(x_t\mid x_{&lt;t};\theta)$$</div>
+<p>第 \(t\) 个 token 只以它左边的 \(x_{&lt;t}\) 为条件，所以生成时必须先有左边才能有右边，天然是一个接一个的。</p>
+
+<h4 id="n-2-2">2.2 逻辑位置与物理位置可以解耦</h4>
+<div class="note-pre"><b>先补一点背景：旋转位置编码（RoPE）只看位置编号之差。</b>
+<p>注意力本身不知道 token 的先后顺序，位置信息要靠位置编码告诉模型。RoPE（见 <a href="roformer.html">RoFormer 精读</a>）的做法是：把位置编号为 \(p\) 的 token 的 query 和 key 向量，按与 \(p\) 成正比的角度旋转。两个旋转过的向量做点积时，旋转角度会相减，结果只取决于两者的位置编号之差 \(p_i-p_j\)。</p>
+<p>这带来一个很有用的推论：注意力分数只看“你交给模型的位置编号”，不看这个 token 在输入张量里排在第几行。把一句话的 token 在输入里打乱顺序，只要每个 token 带着它原来的编号，任意两个 token 之间的注意力分数完全不变。真正决定“谁能看到谁”的，只剩下注意力掩码。</p>
+</div>
+<p>论文把这一点写成形式化的说法：AR 模型默认第 \(t\) 个 token 的逻辑位置 \(p_t\) 就等于它的物理下标 \(t\)；把输入看成“token–位置”对 \((x_t,p_t)\) 之后，模型给出的条件分布同时取决于 token 和交给它的位置编号：</p>
+<div class="formula">$$P(x_t\mid x_{&lt;t},p_{\le t};\theta)=\mathrm{LLM}(x_{\le t},p_{\le t};\theta)$$</div>
+<p>这里 \(x_{&lt;t}\) 指物理上排在第 \(t\) 行之前的 token。于是 token 可以按别的物理顺序送进模型，同时仍按它们的逻辑位置被引用；计算结果另外取决于注意力掩码规定的信息流向。WeDLM 正是利用了这一点。下图先用论文图 2 里的 6 个 token 的例子，把“物理下标”和“位置编号”分开画出来。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：拓扑重排只改物理顺序，不改位置编号</div>
+  <svg class="dg" viewBox="0 0 760 262" role="img" aria-label="拓扑重排前后：token 的物理顺序与位置编号" style="--dg-min:620px">
+<text x="20" y="22" class="t-b">① 遮住之后，按原始顺序排</text>
+<text x="180" y="44" class="t-r t-sm">物理下标</text>
+<text x="180" y="70" class="t-r t-sm">输入的 token</text>
+<text x="180" y="102" class="t-r t-sm">位置编号（RoPE 用）</text>
+<text x="228.0" y="44" class="t-c t-xs">#1</text>
+<rect x="196" y="53" width="64" height="34" rx="6" class="box enc"/>
+<text x="228.0" y="70" class="t-c t-b">x₁</text>
+<text x="228.0" y="102" class="t-c t-mono">p = 1</text>
+<text x="314.0" y="44" class="t-c t-xs">#2</text>
+<rect x="282" y="53" width="64" height="34" rx="6" class="box enc"/>
+<text x="314.0" y="70" class="t-c t-b">x₂</text>
+<text x="314.0" y="102" class="t-c t-mono">p = 2</text>
+<text x="400.0" y="44" class="t-c t-xs">#3</text>
+<rect x="368" y="53" width="64" height="34" rx="6" class="box pred"/>
+<text x="400.0" y="70" class="t-c t-b">[M]</text>
+<text x="400.0" y="102" class="t-c t-mono">p = 3</text>
+<text x="486.0" y="44" class="t-c t-xs">#4</text>
+<rect x="454" y="53" width="64" height="34" rx="6" class="box enc"/>
+<text x="486.0" y="70" class="t-c t-b">x₄</text>
+<text x="486.0" y="102" class="t-c t-mono">p = 4</text>
+<text x="572.0" y="44" class="t-c t-xs">#5</text>
+<rect x="540" y="53" width="64" height="34" rx="6" class="box pred"/>
+<text x="572.0" y="70" class="t-c t-b">[M]</text>
+<text x="572.0" y="102" class="t-c t-mono">p = 5</text>
+<text x="658.0" y="44" class="t-c t-xs">#6</text>
+<rect x="626" y="53" width="64" height="34" rx="6" class="box pred"/>
+<text x="658.0" y="70" class="t-c t-b">[M]</text>
+<text x="658.0" y="102" class="t-c t-mono">p = 6</text>
+<text x="20" y="140" class="t-b">② 拓扑重排：已知 token 挪到前面，位置编号跟着走</text>
+<text x="180" y="162" class="t-r t-sm">物理下标</text>
+<text x="180" y="188" class="t-r t-sm">输入的 token</text>
+<text x="180" y="220" class="t-r t-sm">位置编号（RoPE 用）</text>
+<text x="228.0" y="162" class="t-c t-xs">#1</text>
+<rect x="196" y="171" width="64" height="34" rx="6" class="box enc"/>
+<text x="228.0" y="188" class="t-c t-b">x₁</text>
+<text x="228.0" y="220" class="t-c t-mono">p = 1</text>
+<text x="314.0" y="162" class="t-c t-xs">#2</text>
+<rect x="282" y="171" width="64" height="34" rx="6" class="box enc"/>
+<text x="314.0" y="188" class="t-c t-b">x₂</text>
+<text x="314.0" y="220" class="t-c t-mono">p = 2</text>
+<text x="400.0" y="162" class="t-c t-xs">#3</text>
+<rect x="368" y="171" width="64" height="34" rx="6" class="box enc"/>
+<text x="400.0" y="188" class="t-c t-b">x₄</text>
+<text x="400.0" y="220" class="t-c t-mono">p = 4</text>
+<text x="486.0" y="162" class="t-c t-xs">#4</text>
+<rect x="454" y="171" width="64" height="34" rx="6" class="box pred"/>
+<text x="486.0" y="188" class="t-c t-b">[M]</text>
+<text x="486.0" y="220" class="t-c t-mono">p = 3</text>
+<text x="572.0" y="162" class="t-c t-xs">#5</text>
+<rect x="540" y="171" width="64" height="34" rx="6" class="box pred"/>
+<text x="572.0" y="188" class="t-c t-b">[M]</text>
+<text x="572.0" y="220" class="t-c t-mono">p = 5</text>
+<text x="658.0" y="162" class="t-c t-xs">#6</text>
+<rect x="626" y="171" width="64" height="34" rx="6" class="box pred"/>
+<text x="658.0" y="188" class="t-c t-b">[M]</text>
+<text x="658.0" y="220" class="t-c t-mono">p = 6</text>
+<path d="M196,232 v6 H432 v-6" class="edge no-head" style="stroke:var(--c-enc)"/>
+<text x="314.0" y="250" class="t-c t-sm" style="fill:var(--c-enc)">已知 token 占物理前缀</text>
+<path d="M454,232 v6 H690 v-6" class="edge no-head" style="stroke:var(--c-pred)"/>
+<text x="572.0" y="250" class="t-c t-sm" style="fill:var(--c-pred)">[M] 占物理后缀</text>
+</svg>
+  <div class="dia-note">蓝框是已知 token，橙框是被遮住的位置 [M]。第二行里 x₄ 排在物理第 3 行，但它带着位置编号 4；被遮住的第 3 个位置排到物理第 4 行，仍带着编号 3。按 RoPE 的性质，任意两个 token 之间的注意力分数和第一行完全一样，改变的只是因果掩码下“谁排在谁前面”。本站示意图，对应 <a href="https://arxiv.org/html/2512.22737#S4.F2" target="_blank" rel="noopener">原文图 2 左半 ↗</a>。</div>
+</div>
+
+<h4 id="n-2-3">2.3 掩码扩散语言模型</h4>
+<p>掩码扩散语言模型（MDLM）把生成看成去噪。训练时取一段干净序列 \(\mathbf{x}_0\)（长度 \(L\)），随机抽一个掩码率 \(\gamma\in(0,1]\)，随机选出 \(\gamma L\) 个位置组成集合 \(\mathcal{M}\)，把它们换成 <code>[M]</code>，得到被破坏的序列 \(\mathbf{x}_\gamma\)；模型要把被遮住的位置猜回来。常用的目标是加权交叉熵：</p>
+<div class="formula">$$\mathcal{L}(\theta)=-\mathbb{E}_{\gamma,\mathbf{x}_0,\mathbf{x}_\gamma}\Big[\frac{1}{\gamma}\sum_{i=1}^{L}\mathbf{1}\big[x_\gamma^{(i)}=\mathbf{M}\big]\log p_\theta\big(x_0^{(i)}\mid\mathbf{x}_\gamma\big)\Big]$$</div>
+<p>求和只算被遮住的位置。系数 \(1/\gamma\) 的作用是：掩码率高时被遮住的位置多、损失项多，掩码率低时损失项少，乘上 \(1/\gamma\) 把不同噪声水平的贡献拉到同一量级。（从概率模型的角度，这个加权正好让损失成为负对数似然的一个上界，推导见 <a href="mdlm.html">MDLM 精读</a>；WeDLM 只沿用了这个加权，并没有报告似然或困惑度。）</p>
+<p>标准 MDLM 用双向注意力，让被遮住的位置能汇集所有已知 token 的信息。作者指出这带来两个问题。第一，双向注意力与 KV 缓存不兼容（上一节已经讲过）。第二，当模型从一个预训练好的 AR 检查点改造而来时，双向结构和 AR 模型学到的因果表示之间有“归纳偏置的错配”：AR 模型的每一层都习惯了只看左边，突然让它看右边，它得重新适应。Dream 和 DiffuLLaMA 为此用了注意力掩码退火、输出错位（shift）等技巧（见 <a href="dream.html">Dream 精读</a>）。WeDLM 的做法是在严格因果注意力下优化 MDLM 式的去噪目标，靠的就是下一节和第 4 节的重排。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 动机与分析：速度看什么，掩码恢复需要什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在设计方法之前，作者先提出两个判断。第一，在有 KV 缓存的部署中，解码速度主要由“前缀可缓存率”决定，而不是由“每次前向并行猜几个”决定。第二，掩码恢复并不需要双向注意力，标准因果注意力就够。这一节看这两个判断各自怎么论证、能推到多远。</div>
+
+<h4 id="n-3-1">3.1 前缀可缓存率 \(p_{\text{cache}}\)</h4>
+<p>以往的扩散语言模型主要靠提高“每次前向预测几个 token”来提速。作者认为在推理时更要紧的是：预测出来的 token 里，有多少能转化成一段不断增长、KV 有效的前缀。理由是：有 KV 缓存时，一个 token 的 KV 只有在它只依赖左边内容时才能复用，所以只有从左到右的前缀能缓存；预测出来却没能进入已提交前缀的 token，在之后的前向里还得重算，总计算量就上去了。</p>
+<p>为了量化这一点，作者定义了两个计数。\(N_{\text{gen}}\) 是最终生成的新 token 数（不算提示）；\(N_{\text{fwd}}\) 是预填充之后，所有解码前向里网络处理过的 token 实例总数，包括因为重算而重复处理的那些。两者之比就是前缀可缓存率：</p>
+<div class="formula">$$p_{\text{cache}}\triangleq\frac{N_{\text{gen}}}{N_{\text{fwd}}}\in(0,1]$$</div>
+<p>它可以读成：预填充之后网络每处理一个 token 实例，平均有 \(p_{\text{cache}}\) 的概率变成一个最终的、可以复用的 token；倒过来，\(1/p_{\text{cache}}\) 就是平均的重算倍数。AR 解码每次前向只处理一个新 token，这个 token 就是最终输出，所以 \(p_{\text{cache}}=1\)。</p>
+<p>把定义往下推一步（本站推导）：如果每次前向处理 \(n\) 个 token 实例、平均最终定稿 \(k\) 个，那么 \(p_{\text{cache}}\approx k/n\)。也就是说，\(p_{\text{cache}}\) 是“每次前向定稿的 token 数”除以“每次前向处理的位置数”。下表用一组假设的数字把四种方式放在一起。</p>
+
+<div class="dia">
+  <div class="dia-title">表格：生成 256 个 token 时的 \(p_{\text{cache}}\)（推算；每次前向定稿几个是本站假设的示例值）</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>解码方式</th><th>每次前向处理的位置数 \(n\)</th><th>每次前向定稿 \(k\)（假设）</th><th>\(p_{\text{cache}}\approx k/n\)</th><th>平均重算倍数</th></tr></thead>
+    <tbody>
+      <tr><td>AR</td><td>1</td><td>1</td><td>1</td><td>1</td></tr>
+      <tr><td>全序列双向，不用缓存（每步定 1 个）</td><td>256（生成区全部重算，提示也要重算，这里没计入）</td><td>1</td><td>≈ 0.004</td><td>256</td></tr>
+      <tr><td>全序列双向，不用缓存（每步定 4 个）</td><td>256</td><td>4</td><td>≈ 0.016</td><td>64</td></tr>
+      <tr><td>块扩散，块长 32（每步定 4 个）</td><td>32（当前块整块重算）</td><td>4</td><td>0.125</td><td>8</td></tr>
+      <tr><td>WeDLM，窗口 16（每步提交 4 个）</td><td>16（窗口里的所有槽位）</td><td>4</td><td>0.25</td><td>4</td></tr>
+    </tbody>
+  </table></div>
+  <div class="dia-note">块扩散一行没有计入 SDAR 那种“整块写完后再做一次前向写入 KV”的额外开销；WeDLM 一行按原文算法 1 计数（每次前向处理窗口里的 \(W\) 个槽位），官方实现每次前向还要多带上本步要提交的几个 token，数值会略低。表里的 \(k\) 是示例值，论文没有报告任何方法的实测 \(p_{\text{cache}}\)。</div>
+</div>
+
+<p>作者据此说：全双向的方法（LLaDA、Dream）每次前向也许能预测很多 token，但能立刻进缓存的很少，所以 \(p_{\text{cache}}\) 低；块扩散（SDAR、NBDiff）的提速，很大程度上来自部分前缀提交带来的 \(p_{\text{cache}}\) 提升。因此在有缓存的解码里，提高 \(p_{\text{cache}}\) 带来的提速可以赶上甚至超过提高每步并行度，应当作为推理导向的解码的首要目标。</p>
+<p>接着作者把大多数 MDLM 式解码器里 \(p_{\text{cache}}\) 崩塌的原因归结为两个结构性问题：<b>双向的 KV 耦合</b>（token 的表示依赖右边未定的 token，连早早定下的 token 也不能缓存）和<b>乱序定稿</b>（右边先于左边定下，破坏了缓存所需的从左到右结构）。前者靠第 4 节的全程因果注意力解决，后者靠第 5 节推理时偏向从左到右提交的机制解决。</p>
+
+<div class="note-warn"><b>读这个指标时要注意的两点（本站分析）：</b>
+<ul>
+  <li>\(p_{\text{cache}}\) 在论文里只被定义和定性引用，实验部分从没报告过任何方法的实测值。第 6.4 节说“流式解码的 \(p_{\text{cache}}\) 更高”，依据是速度更快，而不是测出来的 \(p_{\text{cache}}\)。</li>
+  <li>\(p_{\text{cache}}\) 衡量的是“算力浪费了多少”，它能不能变成时间上的浪费，要看硬件处在什么状态。只服务一两个请求时，解码是访存受限的：一次前向的时间主要花在读参数上，多处理十几个位置几乎不花额外时间（第 6.6 节的案例能看到这一点），这时速度主要取决于前向次数，也就是每次前向定稿几个。只有当 batch 大到算力成为瓶颈时，被浪费的计算才实打实地变成时间，\(p_{\text{cache}}\) 才直接决定吞吐。所以“速度主要由 \(p_{\text{cache}}\) 决定”这个判断，在大 batch 的服务场景里最有力，在 batch 1 的场景里要打折扣。</li>
+</ul></div>
+
+<h4 id="n-3-2">3.2 掩码恢复真的需要双向注意力吗</h4>
+<p>掩码扩散模型根据已知（未被遮住）的上下文恢复被遮住的 token。标准 MDLM 用双向注意力，让每个位置都能汇集所有其他位置的信息。作者指出这很自然，但并不是掩码恢复这个目标本身的要求。他们把掩码恢复真正需要的信息流归纳成两条原则。记 \(\mathcal{O}\) 为已知位置的集合，\(\mathcal{M}\) 为被遮住位置的集合：</p>
+<ul>
+  <li><b>原则 (i) 已知上下文可见：</b>每个被遮住的位置都应该能看到全部已知 token \(x_{\mathcal{O}}\)，从而利用全局的已知信息做预测。这是 MDLM 式去噪的核心要求。</li>
+  <li><b>原则 (ii) 掩码之间单向依赖：</b>被遮住的位置之间的相互作用不必是对称的。给 \(\mathcal{M}\) 规定一个顺序 \(\pi\)，每个被遮住的位置只看顺序在它之前的那些被遮住的位置。这样，“同一步里互相可见”就换成了因果注意力能实现的单向依赖。这是一个建模上的选择。</li>
+</ul>
+<p>按原则 (ii)，被遮住的那一组 token 的联合分布被写成一个有向的分解：</p>
+<div class="formula">$$q_\theta\big(x_{\mathcal{M}}\mid x_{\mathcal{O}};\pi\big)=\prod_{j=1}^{|\mathcal{M}|}q_\theta\big(x_{\pi(j)}\mid x_{\mathcal{O}},\,x_{\pi(&lt;j)}\big)$$</div>
+<p>意思是：顺序靠前、先被解出来的 token，可以影响顺序靠后的 token，而不需要双向注意力。作者明确说，他们<b>不</b>声称这和双向注意力的 MDLM 等价，只是说这两条原则足以用标准因果注意力实现“以已知集合为条件的掩码预测”；原则 (ii) 的单向依赖在实践中够不够用，是一个要靠实验回答的问题（第 6.5 节的消融）。</p>
+<p>由此得出 WeDLM 的设计要求：保持标准因果注意力，同时保证每个被遮住的位置都能看到完整的已知上下文。下一节讲怎样用拓扑重排做到。</p>
+
+<div class="note-warn"><b>一个容易读过头的地方（本站分析）：</b>上面那个乘积分解里的 \(x_{\pi(&lt;j)}\) 是“顺序靠前的那些位置最终被填成的词”。但在同一次前向里，排在前面的被遮住位置还只是 <code>[M]</code> 占位符：后面的 <code>[M]</code> 能看到它们的隐藏状态，却看不到它们将被填成什么词。所以在同一步之内，各个被遮住位置的预测仍然是彼此独立地给出的，和双向 MDLM 并行解码时的情况一样（并行解码的风险见 <a href="fast-dllm.html#n-2-3">Fast-dLLM 精读 §2.3</a>）。分解式里“前面的词影响后面的词”，要跨步才真正发生：前一步填好的词，在下一步被挪进已知前缀，成为后面位置的条件。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 训练：在因果注意力下做掩码恢复</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练要同时满足两个要求：计算必须在严格的因果掩码下进行，这样推理时才能用前缀缓存；每个被遮住的位置又必须能看到全部已知 token，这样才算真正的掩码恢复。这两个要求表面上是矛盾的：在因果掩码下一个位置只能看左边，而已知 token 完全可能在它右边。作者先用“拓扑重排”化解这个矛盾，再用“双流掩码”处理训练条件和推理条件不一致的问题。</div>
+
+<div class="note-pre"><b>先补一点背景：注意力掩码是一张“谁能看谁”的表。</b>
+<p>一层注意力里，第 \(i\) 行（发出查询的位置）能否看到第 \(j\) 列（被看的位置），由一张 \(n\times n\) 的表决定。因果掩码是下三角：第 \(i\) 行只能看第 1 到第 \(i\) 列。双向掩码全开。块因果掩码是按块的下三角、块内全开。FlashAttention 这类高效内核对“标准下三角”和“全开”支持最好，推理引擎里的 KV 缓存、分页、CUDA Graphs 也都是按标准下三角设计的；其他形状的掩码要么需要专门的内核，要么得退回较慢的实现。</p>
+</div>
+
+<h4 id="n-4-1">4.1 拓扑重排：换位置，不换编号</h4>
+<p><b>设定。</b>取一段干净序列 \(\mathbf{x}_0=[x_1,\dots,x_L]\)，逻辑位置是 \(\mathbf{p}=[1,\dots,L]\)。抽一个掩码率 \(\gamma\in(0,1]\)，均匀地选出 \(\gamma L\) 个位置组成被遮住的集合 \(\mathcal{M}\)，其余位置组成已知集合 \(\mathcal{O}\)，记 \(N_o=|\mathcal{O}|\)、\(N_m=|\mathcal{M}|\)。</p>
+<p><b>重排。</b>标准 MDLM 靠双向注意力让被遮住的位置不论在哪都能看到已知 token。WeDLM 改用一次重新排列来提供同样的可见性：把所有已知 token 排在所有 <code>[M]</code> 前面，</p>
+<div class="formula">$$\tilde{\mathbf{x}}=\big[\underbrace{x_{o_1},x_{o_2},\dots,x_{o_{N_o}}}_{\text{已知 token}},\ \underbrace{\texttt{[M]},\dots,\texttt{[M]}}_{N_m\ \text{个掩码}}\big]$$</div>
+<p>其中 \(o_1&lt;o_2&lt;\dots\) 是按升序排好的已知位置。逻辑位置用一条同样重排过的位置序列保留下来：</p>
+<div class="formula">$$\tilde{\mathbf{p}}=\big[\underbrace{o_1,\dots,o_{N_o}}_{\mathbf{p}_o},\ \underbrace{m_1,\dots,m_{N_m}}_{\mathbf{p}_m}\big]$$</div>
+<p>\(m_1&lt;m_2&lt;\dots\) 是按升序排好的被遮住位置。<b>为什么这样就够了：</b>在因果注意力下，物理下标为 \(k\) 的位置只能看下标不超过 \(k\) 的位置。重排后已知 token 占据物理下标 \(1,\dots,N_o\)，掩码占据 \(N_o+1,\dots,L\)，所以每个掩码都能看到所有已知 token。而 RoPE 按 \(\tilde{\mathbf{p}}\) 里的逻辑位置计算，注意力分数取决于逻辑上的相对距离，而不是物理下标。</p>
+<p><b>走一遍论文的例子。</b>6 个 token \(x_1,\dots,x_6\)，遮住第 3、5、6 个，得到 \(x_1\ x_2\ \texttt{[M]}\ x_4\ \texttt{[M]}\ \texttt{[M]}\)。重排后物理顺序是 \(x_1\ x_2\ x_4\ \texttt{[M]}\ \texttt{[M]}\ \texttt{[M]}\)，对应的位置编号是 \(1,2,4,3,5,6\)。套上普通的下三角掩码：位置 3 的 <code>[M]</code> 排在物理第 4 行，看得到 \(x_1,x_2,x_4\)；位置 6 的 <code>[M]</code> 排在最后，看得到全部已知 token 以及位置 3、5 的两个 <code>[M]</code>。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="wedlm/fig/training.png" alt="原文图 2" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>左半部分是拓扑重排，从上往下四步：输入序列（物理顺序与逻辑位置一致）→ 按比例 \(\gamma\) 遮住一部分 → 把已知 token 挪到前面、位置编号 \(p\) 跟着走（注意第三行的编号变成了 \(p_1,p_2,p_4,p_3,p_5,p_6\)）→ 套上普通的因果掩码，三个 <code>[M]</code> 都能看到全部已知 token。右半部分是 4.2 节的双流掩码：上面是输入怎么拼（8 个 token 的记忆流 \(x_0\)，后面接两个长度为 4 的预测块，块内已经重排过），下面是对应的注意力掩码，绿色是允许看、灰色是禁止看。图中 “Mased Suffix” 是原图的拼写错误（应为 Masked）。</figcaption></figure>
+
+<div class="dia">
+  <div class="dia-title">示意图：重排前后，谁能看到谁</div>
+  <svg class="dg" viewBox="0 0 760 318" role="img" aria-label="双向注意力与重排后因果注意力的可见性矩阵" style="--dg-min:640px">
+<text x="194.0" y="36" class="t-c t-b">双向注意力（原始顺序，LLaDA 式）</text>
+<text x="194.0" y="54" class="t-c t-xs">列 = 被看的位置</text>
+<text x="66" y="168.0" class="t-c t-xs" transform="rotate(-90 66 168.0)">行 = 发出查询的位置</text>
+<text x="124.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₁</text>
+<text x="102" y="98.0" class="t-r t-sm" style="fill:var(--c-enc)">x₁</text>
+<text x="152.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₂</text>
+<text x="102" y="126.0" class="t-r t-sm" style="fill:var(--c-enc)">x₂</text>
+<text x="180.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₃</text>
+<text x="102" y="154.0" class="t-r t-sm" style="fill:var(--c-pred)">M₃</text>
+<text x="208.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₄</text>
+<text x="102" y="182.0" class="t-r t-sm" style="fill:var(--c-enc)">x₄</text>
+<text x="236.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₅</text>
+<text x="102" y="210.0" class="t-r t-sm" style="fill:var(--c-pred)">M₅</text>
+<text x="264.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₆</text>
+<text x="102" y="238.0" class="t-r t-sm" style="fill:var(--c-pred)">M₆</text>
+<rect x="111" y="85" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="99.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="85" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="99.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="85" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="99.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="85" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="99.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="85" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="99.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="85" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="99.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="111" y="113" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="127.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="113" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="127.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="113" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="127.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="113" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="127.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="113" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="127.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="113" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="127.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="111" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="141" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="155.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="141" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="155.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="141" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="155.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="111" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="169" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="183.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="169" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="183.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="169" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="183.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="111" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="197" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="197" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="197" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="111" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="124.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="139" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="152.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="167" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="180.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="195" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="208.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="223" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="236.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="251" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="264.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<text x="584.0" y="36" class="t-c t-b">因果注意力（重排之后，WeDLM）</text>
+<text x="584.0" y="54" class="t-c t-xs">列 = 被看的位置</text>
+<text x="456" y="168.0" class="t-c t-xs" transform="rotate(-90 456 168.0)">行 = 发出查询的位置</text>
+<text x="514.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₁</text>
+<text x="492" y="98.0" class="t-r t-sm" style="fill:var(--c-enc)">x₁</text>
+<text x="542.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₂</text>
+<text x="492" y="126.0" class="t-r t-sm" style="fill:var(--c-enc)">x₂</text>
+<text x="570.0" y="72" class="t-c t-sm" style="fill:var(--c-enc)">x₄</text>
+<text x="492" y="154.0" class="t-r t-sm" style="fill:var(--c-enc)">x₄</text>
+<text x="598.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₃</text>
+<text x="492" y="182.0" class="t-r t-sm" style="fill:var(--c-pred)">M₃</text>
+<text x="626.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₅</text>
+<text x="492" y="210.0" class="t-r t-sm" style="fill:var(--c-pred)">M₅</text>
+<text x="654.0" y="72" class="t-c t-sm" style="fill:var(--c-pred)">M₆</text>
+<text x="492" y="238.0" class="t-r t-sm" style="fill:var(--c-pred)">M₆</text>
+<rect x="501" y="85" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="99.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="85" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="557" y="85" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="585" y="85" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="613" y="85" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="641" y="85" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="501" y="113" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="127.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="113" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="542.0" y="127.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="557" y="113" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="585" y="113" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="613" y="113" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="641" y="113" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="501" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="542.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="557" y="141" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="570.0" y="155.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="585" y="141" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="613" y="141" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="641" y="141" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="501" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="542.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="557" y="169" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="570.0" y="183.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="585" y="169" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="598.0" y="183.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="613" y="169" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="641" y="169" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="501" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="542.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="557" y="197" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="570.0" y="211.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="585" y="197" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="598.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="613" y="197" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="626.0" y="211.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="641" y="197" width="26" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border);stroke-width:1"/>
+<rect x="501" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="514.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="529" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="542.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="557" y="225" width="26" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1"/>
+<text x="570.0" y="239.0" class="t-c t-xs" style="fill:var(--c-enc)">✓</text>
+<rect x="585" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="598.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="613" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="626.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<rect x="641" y="225" width="26" height="26" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1"/>
+<text x="654.0" y="239.0" class="t-c t-xs" style="fill:var(--c-pred)">✓</text>
+<text x="194" y="282" class="t-c t-sm">36 格全开：x₁ 也能看到右边的 M₃、M₅</text>
+<text x="584" y="282" class="t-c t-sm">下三角：每个 M 都看得到 x₁、x₂、x₄</text>
+<text x="584" y="300" class="t-c t-sm">已知 token 看不到任何 M</text>
+</svg>
+  <div class="dia-note">左：LLaDA 式的双向注意力，按原始顺序排列，所有格子都开着。右：WeDLM 重排之后的普通下三角掩码。蓝格表示“看的是已知 token”，橙格表示“看的是 [M]”，灰格表示不可见。右图里每个 M 行的前三格都是蓝的，说明原则 (i)“已知上下文可见”成立；M 行之间只有左下方可见，就是原则 (ii) 的单向依赖。本站示意图，对应 <a href="https://arxiv.org/html/2512.22737#S4.F2" target="_blank" rel="noopener">原文图 2 左半 ↗</a>。</div>
+</div>
+
+<p><b>训练目标。</b>有了 \((\tilde{\mathbf{x}},\tilde{\mathbf{p}})\)，模型要在每个掩码位置猜出原来的 token。第 \(j\) 个掩码排在物理下标 \(N_o+j\)，逻辑位置是 \(m_j\)，它只以物理上排在它前面的内容为条件：</p>
+<div class="formula">$$\mathcal{L}(\theta)=-\mathbb{E}_{\gamma,\mathbf{x}_0,\mathcal{M}}\Big[\frac{1}{\gamma}\sum_{j=1}^{N_m}\log P_\theta\big(x_0^{(m_j)}\mid\tilde{\mathbf{x}}_{&lt;N_o+j},\ \tilde{\mathbf{p}}_{&lt;N_o+j}\big)\Big]$$</div>
+<p>\(1/\gamma\) 沿用了式 (3) 的加权习惯。和双向 MDLM 的关键区别是：这里全程是严格的因果注意力，每个掩码只以物理上更早的位置为条件，却通过重排仍然拿到了完整的已知上下文。</p>
+
+<div class="note-warn"><b>重排换来了什么，又放弃了什么（本站分析）：</b>
+<ul>
+  <li>已知 token 之间也只能单向看。在右图里，\(x_1\) 看不到 \(x_2\)、\(x_4\)，\(x_4\) 也看不到它右边的任何东西；而在双向 MDLM 里，\(x_1\) 能看到整句话。也就是说，已知 token 自己的表示只用到了它左边的已知 token，和 AR 预训练时一模一样。这对从 AR 检查点出发是好事（不用改变模型已经学会的表示方式），代价是只有排在最后的掩码位置汇集了全部已知信息。</li>
+  <li>已知 token 看不到任何 <code>[M]</code>。这正是推理时它们的 KV 能被缓存的原因：它们的表示不受右边未定内容的影响。</li>
+  <li>式中的条件 \(\tilde{\mathbf{x}}_{&lt;N_o+j}\) 包含排在前面的那些 <code>[M]</code> 占位符本身，而不是它们的正确答案。所以 3.2 节那个乘积分解在训练里也是“看得到前面的掩码位置，但看不到它们的词”。</li>
+</ul></div>
+
+<h4 id="n-4-2">4.2 双流掩码：让训练看到和推理一样的上下文</h4>
+<p><b>训练与推理的差距从哪里来。</b>式 (7) 在整段序列上均匀地遮。可推理时，解码大体从左往右推进：左边是已经提交的干净前缀，还没解出来的位置集中在右边一段（块状的）后缀里。训练时模型面对的是“遮得到处都是、上下文里也有洞”的序列，推理时面对的是“一长段干净前缀加一小段被遮的后缀”，两种输入的分布不一样。SDAR、NBDiff 等把 AR 和扩散目标结合的工作也有类似的动机。最直接的修补是训练时只遮一小段后缀，但这样每条序列里只有很少几个 token 参与损失，训练效率太低。</p>
+<p><b>构造两条流。</b>把干净序列复制成两份：一份是记忆流 \(\mathbf{x}_o\)，一份是预测流 \(\mathbf{x}_t\)，起初都和 \(\mathbf{x}_0\) 一样，然后首尾相接作为物理输入。关键是两条流共用同一套位置编号：</p>
+<div class="formula">$$\mathbf{x}_{\text{input}}=\big[\underbrace{\mathbf{x}_o}_{\text{记忆流}},\ \underbrace{\mathbf{x}_t}_{\text{预测流}}\big],\qquad \mathbf{p}_{\text{input}}=\big[\underbrace{1,2,\dots,L}_{\mathbf{p}_o},\ \underbrace{1,2,\dots,L}_{\mathbf{p}_t}\big]$$</div>
+<p>这样，在 RoPE 看来，预测流里位置 5 的 token 和记忆流里位置 5 的 token 处在同一个位置参照系中，两者能对齐；两条流的区别只体现在物理段落和注意力掩码上。</p>
+<p><b>按块遮、块内重排。</b>把预测流切成 \(K=\lceil L/B\rceil\) 个长度为 \(B\) 的块（最后一块可能短一些）。每个块 \(k\) 独立抽一个掩码率 \(\gamma_k\in(0,1]\)，遮住一部分，然后在块内做 4.1 节的拓扑重排：块里已知的 token 挪到前面，掩码挪到后面，位置编号保留。记忆流始终不遮、不重排。</p>
+<p><b>注意力怎么开。</b>预测流里第 \(k\) 块的一个 token 能看到两部分：记忆流里逻辑位置在第 \(k\) 块之前的所有 token（干净的历史）；第 \(k\) 块内部、重排后物理上排在它前面的 token（普通因果）。它看不到预测流里前面那些块，前面的历史一律从干净的记忆流里取。这模拟的正是推理时“前面的块已经定稿，作为上下文使用”的情形。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：双流输入的排布与可见范围（原文图 2 右半的例子：8 个 token，块长 4）</div>
+  <div class="dia-row"><span class="lbl">物理输入</span><div class="dia-track"><span class="dia-seg kv" style="flex:8">记忆流：x₁ x₂ x₃ x₄ x₅ x₆ x₇ x₈（位置 1–8，不遮）</span><span class="dia-seg cmp" style="flex:4">预测块 1：x₁ x₃ M₂ M₄</span><span class="dia-seg res" style="flex:4">预测块 2：x₆ x₈ M₅ M₇</span></div></div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>发出查询的 token</th><th>在记忆流里能看到</th><th>在预测流里能看到</th><th>看不到</th></tr></thead>
+    <tbody>
+      <tr><td>记忆流的 x₅</td><td>x₁–x₅（普通因果）</td><td>无</td><td>整个预测流</td></tr>
+      <tr><td>预测块 1 的 M₄</td><td>无（块 1 之前没有历史）</td><td>x₁、x₃、M₂、M₄ 自己</td><td>块 2；记忆流</td></tr>
+      <tr><td>预测块 2 的 x₈</td><td>x₁–x₄（块 2 之前的干净历史）</td><td>x₆、x₈ 自己</td><td>M₅、M₇；预测块 1；记忆流的 x₅–x₈</td></tr>
+      <tr><td>预测块 2 的 M₇</td><td>x₁–x₄</td><td>x₆、x₈、M₅、M₇ 自己</td><td>预测块 1；记忆流的 x₅–x₈</td></tr>
+    </tbody>
+  </table></div>
+  <div class="dia-note">预测块 2 的 M₇ 以“干净的 x₁–x₄ + 本块已知的 x₆、x₈”为条件去猜 x₇，这和推理时“已提交前缀 + 窗口里已经填好的词”是同一种处境。可见范围按论文 §4.2 和官方训练代码 <code>build_2d_attention_mask</code> 整理；本站示意图。</div>
+</div>
+
+<p><b>训练目标。</b>记 \(\mathcal{M}_k\) 为第 \(k\) 块里被遮住的逻辑位置集合，\(\tilde{\mathbf{x}}_t^{(k)}\) 为重排后的第 \(k\) 块。各块的损失加起来：</p>
+<div class="formula">$$\mathcal{L}(\theta)=-\mathbb{E}_{\{\gamma_k\},\mathbf{x}_0}\Big[\sum_{k=1}^{K}\frac{1}{\gamma_k}\sum_{j\in\mathcal{M}_k}\log P_\theta\big(x_0^{(j)}\mid\mathbf{x}_o^{(&lt;k)},\ \tilde{\mathbf{x}}_t^{(k,&lt;j)}\big)\Big]$$</div>
+<p>\(\mathbf{x}_o^{(&lt;k)}\) 是逻辑位置在第 \(k\) 块之前的记忆流 token，\(\tilde{\mathbf{x}}_t^{(k,&lt;j)}\) 是重排后第 \(k\) 块里物理上排在位置 \(j\) 前面的 token，\(1/\gamma_k\) 是按块的加权。</p>
+<p><b>推理时怎么办。</b>推理时直接扔掉记忆流，在单条序列上用标准因果掩码解码。模型结构不需要任何改动，FlashAttention 这类优化过的注意力实现都能用。</p>
+<p>把干净序列和加噪序列拼成一条、用一张特制掩码一次算完，这个技巧最早是 BD3-LM 为块扩散训练提出的“向量化训练”（见 <a href="block-diffusion.html#n-4-2">BD3-LM 精读 §4.2</a>），SDAR、Fast-dLLM v2 也用了类似的拼接。WeDLM 的不同在于块内部：别人块内双向，WeDLM 块内是“先重排、再因果”。</p>
+
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（训练）</span>
+官方开源的是微调框架（<code>finetune/</code>），继续预训练的代码和数据没有公开，下面几点来自微调代码，未必与论文的 100B 继续预训练完全一致。① 每块的掩码率 \(\gamma_k\) 从 \((0,1)\) 均匀抽取；损失权重 \(1/\gamma\) 在被遮住的 token 上按总和归一化，所以实际算的是加权平均，而不是式 (10) 那样的加权求和。② 论文说 AR 辅助损失“在同一批序列上用普通的下一个词预测计算”；代码里它取的是记忆流那一段的输出，因为记忆流本身就是一条普通的因果序列，这个损失在同一次前向里顺带算出。③ 总损失是 \((\mathcal{L}_{\text{mask}}+w\,\mathcal{L}_{\text{AR}})/(1+w)\)，示例微调配置里 \(w=1.0\)、块长 32、学习率 \(3\times10^{-6}\)；论文没有给出继续预训练时 \(w\) 取多少。④ 注意力后端可选 PyTorch 自带的 SDPA（直接用一张完整的掩码矩阵）或 MagiAttention（按区间描述不规则掩码）。<span class="src">官方仓库 finetune/src/masking.py、loss.py、trainer.py、configs/example.yaml</span></div>
+
+<div class="note-warn"><b>容易忽略的代价：</b>双流把每条训练序列的长度翻了一倍，线性层的计算量随之大约翻倍（推算），而这种块状、不规则的掩码还需要 MagiAttention 这类专门的实现才能跑得快。论文没有报告训练所花的算力或时间，也没有和“同样 100B token、只用 AR 目标继续训练”的对照比较训练成本。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2512.22737#S4.F2" target="_blank" rel="noopener">原文图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 推理：流式并行解码</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练好的模型在推理时要同时做到两件事：每一步并行地猜好几个位置；猜出来的东西尽快变成可以缓存的前缀。作者先列出达到高 \(p_{\text{cache}}\) 必须满足的三个要求，再给出满足它们的算法：一个固定大小、边提交边补充的滑动窗口。</div>
+
+<h4 id="n-5-1">5.1 三个要求</h4>
+<p>对提示做完预填充之后，解码器反复做两件事：并行预测多个被遮住的位置；把足够有把握的预测转成已提交的前缀，供后面的步骤复用它们的 KV。为了让 \(p_{\text{cache}}\) 高，作者要求：</p>
+<ol>
+  <li><b>KV 立即有效（没有双向耦合）。</b>一个 token 一旦预测出来，它的 KV 应该只依赖已经提交的上下文；否则它不能马上缓存，以后还要重算。</li>
+  <li><b>从左到右提交（避免乱序）。</b>标准 KV 缓存只支持连续的前缀，所以应优先解出逻辑上靠左的位置，让每一步尽可能延长已提交的前缀。</li>
+  <li><b>不停下等待（避免流水线气泡）。</b>不在块边界停顿；token 一提交就引入新的掩码位置，让每次前向的工作量保持稳定。</li>
+</ol>
+<p>第 1 条由因果注意力加上推理时的重排保证：已经解出的 token 排在未解的 <code>[M]</code> 前面（位置编号照旧），在严格因果掩码下它的 KV 只依赖物理上更早的 token，解出来以后马上就是有效的。第 2、3 条由流式并行解码保证：一条偏向左边的置信度规则，加上一个随时补充的动态滑动窗口。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="wedlm/fig/inference.png" alt="原文图 3" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>上面是块解码：一个 3 个位置的块，第一次前向猜出 A、B，第二次猜出 C，块写满之后 A、B、C 才一起进缓存（绿色），3 次前向得到 3 个 token。下面是 WeDLM 的流式解码：第一次前向猜出 A、B 并补上新的 <code>[M]</code>；第二次前向时 A、B 已在最左边连成一段，直接进缓存，同时猜出 C 和 E；第三次 C 进缓存，同时猜出 D、F。3 次前向里提交了 A、B、C，另外 D、E、F 已经猜好、等待提交，标题“6 Token”数的是猜出来的总数。这张图只是示意：图中窗口的长度在 3、5、4、6 之间变化，而算法里的窗口长度是固定的 \(W\)。</figcaption></figure>
+
+<h4 id="n-5-2">5.2 算法：窗口里的五个动作</h4>
+<p>维护一个有 \(W\) 个槽位的窗口，每个槽位带着一个固定的全局位置编号，槽位里要么是“已经填好、但还没提交”的 token，要么是等待预测的 <code>[M]</code>。每一步做五件事：</p>
+<ol>
+  <li><b>重排</b>：把窗口里已填好的 token 排到 <code>[M]</code> 前面，位置编号跟着走；</li>
+  <li><b>前向</b>：以持久的 KV 缓存为前文，对窗口做一次因果前向；</li>
+  <li><b>提交</b>：把窗口最左边、逻辑上连续的那段已填 token 提交，它们这一步算出的 KV 已经有效，追加进缓存；</li>
+  <li><b>预测</b>：在剩下的 <code>[M]</code> 里，按置信度和位置挑出一部分填上；</li>
+  <li><b>补充</b>：在窗口末尾补上与提交数相同的新 <code>[M]</code>，让并行度保持不变。</li>
+</ol>
+<p><b>距离惩罚。</b>为了让解出来的 token 尽量连成长前缀，挑选时偏向靠左的位置。沿用 Dream 的做法，用预测分布的熵 \(H_i=-\sum_v p_i(v)\log p_i(v)\) 衡量第 \(i\) 个掩码槽的不确定性（熵越低越有把握），再加上一个距离项：</p>
+<div class="formula">$$\tilde{H}_i=H_i+\lambda\cdot d_i$$</div>
+<p>\(d_i\) 是槽位 \(i\) 到窗口里最左边那个剩余 <code>[M]</code> 的距离，\(\lambda&gt;0\) 控制偏向左边的力度。调整后的熵低于阈值 \(\tau\) 的槽位全部填上。举个数（推算，示例值）：\(\lambda=0.1\)、\(\tau=0.4\)，最左边的掩码熵是 0.35，往右第 3 个掩码熵只有 0.15。调整后前者仍是 0.35，后者变成 \(0.15+0.3=0.45\)。结果是左边那个被填上，右边那个虽然更有把握，这一步也先不填。这样做减少了乱序，让前缀更快地连起来。</p>
+<p>原文算法 1 用本站的话改写如下：</p>
+<div class="code-title">streaming_decode（依据原文算法 1 改写；变量名为本站所取）</div>
+<pre><code class="lang-py">cache = prefill(prompt)                    # 提示的 KV
+window = [MASK] * W                        # 每个槽位带固定的全局位置编号
+while window:
+    order = filled(window) + masks(window) # (a) 已填的排前面，位置编号不变
+    logits, kv = forward(order, cache)     # (b) 以缓存为前文的一次因果前向
+    j = first_mask_index(window)           # (c) 窗口里第一个 [M] 之前的部分
+    output += window[:j]                   #     逻辑上连续的已填 token：提交
+    cache.extend(kv_of(window[:j]))        #     它们这一步算出的 KV 已经有效
+    window = window[j:]
+    for i in select_by_entropy(logits, tau, lam):  # (d) 调整后熵 &lt; tau 的槽位
+        window[i] = sample(logits[i])
+    window += [MASK] * j                   # (e) 补充 j 个新 [M]，窗口长度回到 W
+</code></pre>
+
+<p>下面用一个 \(W=4\) 的小例子把这五个动作走一遍。要生成的句子是“猫坐在垫子上。”，提示已经在缓存里。</p>
+<div class="dia">
+  <div class="dia-title">示意图：窗口长度 4 的流式解码，逐步展开（数字下标 = 位置编号）</div>
+  <div class="table-wrap"><table>
+    <thead><tr><th>步</th><th>送进前向的物理顺序</th><th>这一步提交进缓存</th><th>这一步新填入</th><th>补入 [M]</th><th>步末窗口（按位置排）</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><span class="cells"><span class="cell">M₁</span><span class="cell">M₂</span><span class="cell">M₃</span><span class="cell">M₄</span></span></td><td>无（窗口里没有已填的）</td><td>猫₁、坐₂</td><td>0</td><td><span class="cells"><span class="cell b">猫₁</span><span class="cell b">坐₂</span><span class="cell">M₃</span><span class="cell">M₄</span></span></td></tr>
+      <tr><td>2</td><td><span class="cells"><span class="cell b">猫₁</span><span class="cell b">坐₂</span><span class="cell">M₃</span><span class="cell">M₄</span></span></td><td><span class="cells"><span class="cell a">猫</span><span class="cell a">坐</span></span></td><td>垫₄（位置 3 熵太高，没填）</td><td>2</td><td><span class="cells"><span class="cell">M₃</span><span class="cell b">垫₄</span><span class="cell">M₅</span><span class="cell">M₆</span></span></td></tr>
+      <tr><td>3</td><td><span class="cells"><span class="cell c">垫₄</span><span class="cell">M₃</span><span class="cell">M₅</span><span class="cell">M₆</span></span></td><td>无（最左边的位置 3 还是 [M]）</td><td>在₃、子₅</td><td>0</td><td><span class="cells"><span class="cell b">在₃</span><span class="cell b">垫₄</span><span class="cell b">子₅</span><span class="cell">M₆</span></span></td></tr>
+      <tr><td>4</td><td><span class="cells"><span class="cell b">在₃</span><span class="cell b">垫₄</span><span class="cell b">子₅</span><span class="cell">M₆</span></span></td><td><span class="cells"><span class="cell a">在</span><span class="cell a">垫</span><span class="cell a">子</span></span></td><td>上₆</td><td>3</td><td><span class="cells"><span class="cell b">上₆</span><span class="cell">M₇</span><span class="cell">M₈</span><span class="cell">M₉</span></span></td></tr>
+    </tbody>
+  </table></div>
+  <div class="dia-note">绿色 = 已经填好、还没提交的 token；在“送进前向”一列里改标橙色的，是左边还有 [M]、这一步算出的 KV 不能用的那个；蓝色 = 提交进缓存；灰色 = [M]。第 3 步里“垫₄”排在物理第 1 行，只看得到缓存（提示、猫、坐），看不到位置 3，所以它这一步的 KV 不能用；第 4 步“在₃”填好后，三个字按位置 3、4、5 依次排在最前面，这次算出的 KV 才是精确的，于是一起提交。4 次前向提交了 5 个 token。本站示意图（假设的填词过程），对应 <a href="https://arxiv.org/html/2512.22737#alg1" target="_blank" rel="noopener">原文算法 1 ↗</a>。</div>
+</div>
+
+<p><b>为什么提交的 KV 一定精确。</b>重排之后，已填 token 占据窗口最左边的几个物理槽位，它们只能看到持久缓存和物理上更早的已填槽位。对于逻辑上从左边连续的那一段来说，“物理上更早的已填槽位”恰好就是它在逻辑上的前驱。所以这段 token 这一步算出的 KV，和一个因果模型处理“提示 + 已提交文本 + 这段文本”时会算出的完全一样，可以不等其他掩码槽就直接提交。这正面解决了第 3 节说的双向 KV 耦合。</p>
+<p><b>乱序的代价。</b>上例中“垫₄”早一步就填好了，却要等“在₃”填好才能提交，而且它第 3 步算出的 KV 作废、第 4 步重算。这就是乱序在 WeDLM 里的代价：不影响正确性，但浪费一次计算和一点时间。距离惩罚的作用就是让这种情况少发生。</p>
+<p><b>用动态滑动窗口消除“停下等待”。</b>块解码必须等整块定稿才能提交，块快写完时，每次前向只剩一两个掩码可猜，却还要把整块重算一遍，形成流水线里的“气泡”。流式解码保持窗口长度 \(W\) 不变：每一步提交多少 token，就在末尾补多少新的 <code>[M]</code>，每次前向的工作量大致恒定，也不需要在块边界同步。</p>
+<p><b>与高效推理系统兼容。</b>因为全程都是标准因果注意力，每一步解码在计算上就是“在已有缓存之上，对窗口里的 \(W\) 个 token 做一次因果前向”，相当于一次小规模的预填充。FlashAttention、PagedAttention、CUDA Graphs 都原生支持这种计算，不需要改内核，所以可以直接部署在工业级的 AR 推理设施上。补充一点（本站分析）：窗口长度固定，意味着每一步送进模型的张量形状固定，这恰好符合 CUDA Graphs 要求形状不变的条件。</p>
+
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（推理引擎）</span>
+① 论文 §6.2 说 WeDLM“通过 vLLM 提供服务”；开源的推理库 <code>wedlm</code> 在致谢里写的是基于 nano-vllm（一个精简的 vLLM 复刻）构建，并不是直接跑在 vLLM 上。② 默认参数：窗口 \(W=16\)、阈值 \(\tau=0.4\)、距离系数 \(\lambda=0.02\)；评测脚本的默认值相同，每个进程每批 16 条。\(\tau\) 设为 None 时退化为“每步只填调整后熵最小的那一个”，这对应论文表 1、表 2 的质量评测方式。③ 如果没有任何槽位低于阈值，就填调整后熵最小的那一个，所以每一步至少填 1 个。④ \(d_i\) 按窗口里离第一个剩余 <code>[M]</code> 的槽位数计算；熵用原始 logits 计算，真正填进去的词按温度、top-p、top-k 采样。⑤ 填进去的词以后不会被重新遮住或改写。⑥ 每一步窗口里各位置的 KV 直接写进它们逻辑位置对应的分页缓存槽，“提交”只是把已提交长度往前推；官方实现在前向之前就把本步要提交的数量补成新的 <code>[M]</code>，所以前向实际处理 \(W\) 加上提交数个位置，与算法 1 的记账略有不同。<span class="src">官方仓库 wedlm/engine/wedlm_decoder.py、sampler.py、sampling_params.py、config.py；evaluation/evaluation_base.sh</span></div>
+
+<div class="note-warn"><b>和投机解码不是一回事：</b>投机解码（见 <a href="speculative-decoding.html">投机解码精读</a>）先用小模型起草，再让大模型验证，被接受的 token 与大模型自己逐个生成的分布完全一致。WeDLM 没有验证这一步：一个位置只要调整后的熵低于阈值就被填上，而且以后不会再改。因此它的输出和“同一个模型逐个生成”并不保证一致，阈值越松、并行越多，出错的机会越大；这就是第 6.4 节里速度与准确率此消彼长的原因。另外，速度对比里的 AR 基线是原版 Qwen3-8B，而不是 WeDLM 自己用 AR 方式解码，所以“快多少”同时混入了两个不同模型的差别。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2512.22737#S5.F3" target="_blank" rel="noopener">原文图 3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实验：质量保住了吗，到底快了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>实验要回答三件事：从 AR 模型改造出来的 WeDLM，生成质量有没有掉；和 vLLM 上的 AR 模型同场比较时，到底快多少；块长、块内因果还是双向、底座大小、推理超参这些选择各起多大作用。读这一节时要特别留意：质量表和速度图用的不是同一种解码设置，速度测量也有不少条件没有写明。最后的 6.7 节专门讨论这些数字的分量。</div>
+
+<h4 id="n-6-1">6.1 训练设置</h4>
+<div class="table-wrap"><table>
+  <thead><tr><th>项目</th><th>设置（原文 §6.1）</th></tr></thead>
+  <tbody>
+    <tr><td>底座</td><td>Qwen2.5-7B → WeDLM-7B；Qwen3-8B → WeDLM-8B</td></tr>
+    <tr><td>继续预训练</td><td>100B token；学习率从 \(3\times10^{-6}\) 按余弦衰减到 \(3\times10^{-7}\)；双流掩码的块长 \(B=32\)；用 MagiAttention 处理不规则掩码（不需要自定义 CUDA 内核）；加 AR 辅助损失以保留原来的下一个词预测能力</td></tr>
+    <tr><td>指令微调</td><td>10K 条内部指令–回答数据（§1 的说法是 10B token）；学习率 \(3\times10^{-6}\)，余弦衰减</td></tr>
+    <tr><td>没有交代的</td><td>继续预训练数据的来源与构成、batch 大小、训练步数、AR 辅助损失的权重、所用 GPU 与训练时长</td></tr>
+  </tbody>
+</table></div>
+<p>还有一处小的出入：Hugging Face 上 WeDLM-8B 的模型卡写的是从 <code>Qwen/Qwen3-8B</code> 初始化，而这个仓库名对应的是 Qwen3-8B 经过后训练的版本（只做过预训练的版本叫 <code>Qwen/Qwen3-8B-Base</code>）；论文表 1 却把它当作“基础模型”来比较。到底从哪个检查点出发，论文和模型卡都没有说清。</p>
+
+<h4 id="n-6-2">6.2 评测设置</h4>
+<p><b>任务。</b>常识与知识：ARC-Challenge（0-shot）、ARC-Easy（表里有，正文的任务列表里没提）、GPQA-Diamond（5-shot）、HellaSwag（10-shot）、MMLU（5-shot）。数学：GSM8K（3-shot）、MATH（4-shot）。代码：MBPP（3-shot）、HumanEval 与 HumanEval-plus（4-shot）。生成类任务的最大生成长度都是 512 个 token，采样温度 0.1。</p>
+<p><b>解码方式。</b>为了公平，表 1、表 2 统一用“逐步解码”：每一步，所有方法（WeDLM 和扩散基线）都只在熵最低的位置生成 <b>1 个</b> token；WeDLM 另外用窗口 \(W=6\)、距离系数 \(\lambda=0.10\)。也就是说，<b>两张质量表测的都是不并行时的质量</b>，没有用到任何加速。</p>
+<p><b>对照。</b>AR 基线是 WeDLM 的两个底座 Qwen2.5-7B 和 Qwen3-8B；扩散基线是 LLaDA-8B、Dream-7B，指令模型里另加 SDAR-8B。每个模型用它推荐的推理框架：LLaDA 和 Dream 用 dInfer，SDAR 用 JetEngine，Qwen 用 vLLM；论文说 WeDLM 也“通过 vLLM 提供服务”（官方代码实际基于 nano-vllm，见第 5 节的代码说明）。</p>
+
+<h4 id="n-6-3">6.3 生成质量：表 1 与表 2</h4>
+<div class="table-wrap"><table>
+  <thead><tr><th>基础模型（原文表 1）</th><th>Qwen2.5-7B</th><th>WeDLM-7B</th><th>Qwen3-8B</th><th>WeDLM-8B</th><th>LLaDA-8B</th><th>Dream-7B</th></tr></thead>
+  <tbody>
+    <tr><td>ARC-C（0-shot）</td><td>89.93</td><td>90.70</td><td>92.66</td><td><b>92.92</b></td><td>81.14</td><td>88.40</td></tr>
+    <tr><td>ARC-E（0-shot）</td><td>96.55</td><td>96.13</td><td>97.13</td><td><b>97.14</b></td><td>92.00</td><td>96.21</td></tr>
+    <tr><td>HellaSwag（10-shot）</td><td>80.20</td><td>85.11</td><td>85.27</td><td>84.55</td><td><b>85.34</b></td><td>78.05</td></tr>
+    <tr><td>MMLU（5-shot）</td><td>71.62</td><td>71.93</td><td>74.03</td><td><b>75.46</b></td><td>64.61</td><td>70.64</td></tr>
+    <tr><td>GSM8K（3-shot）</td><td>79.23</td><td>84.76</td><td>85.97</td><td><b>90.20</b></td><td>71.80</td><td>75.97</td></tr>
+    <tr><td>MATH（4-shot）</td><td>43.40</td><td>48.20</td><td>50.80</td><td><b>53.60</b></td><td>28.00</td><td>38.00</td></tr>
+    <tr><td>GPQA-Diamond（5-shot）</td><td>33.70</td><td>36.87</td><td>37.00</td><td><b>42.42</b></td><td>29.80</td><td>25.76</td></tr>
+    <tr><td>MBPP（3-shot）</td><td>65.30</td><td>61.81</td><td><b>70.94</b></td><td>67.00</td><td>41.99</td><td>56.47</td></tr>
+    <tr><td>HumanEval（4-shot）</td><td>59.14</td><td>68.90</td><td>68.90</td><td><b>75.00</b></td><td>31.71</td><td>20.12</td></tr>
+    <tr><td>HumanEval-plus（4-shot）</td><td>53.05</td><td>64.00</td><td>63.40</td><td><b>68.90</b></td><td>28.05</td><td>19.51</td></tr>
+    <tr><td><b>平均</b></td><td>67.21</td><td>70.84</td><td>72.61</td><td><b>74.72</b></td><td>55.44</td><td>56.91</td></tr>
+  </tbody>
+</table></div>
+<div class="table-wrap"><table>
+  <thead><tr><th>指令模型（原文表 2）</th><th>Qwen2.5-7B</th><th>WeDLM-7B</th><th>Qwen3-8B</th><th>WeDLM-8B</th><th>LLaDA-8B</th><th>Dream-7B</th><th>SDAR-8B</th></tr></thead>
+  <tbody>
+    <tr><td>ARC-C（0-shot）</td><td>86.09</td><td>89.59</td><td>91.47</td><td><b>92.92</b></td><td>85.92</td><td>87.20</td><td>91.13</td></tr>
+    <tr><td>ARC-E（0-shot）</td><td>93.27</td><td>96.09</td><td>96.17</td><td><b>97.43</b></td><td>94.32</td><td>93.27</td><td>97.01</td></tr>
+    <tr><td>HellaSwag（10-shot）</td><td>87.59</td><td>84.75</td><td>86.13</td><td>82.94</td><td>78.55</td><td>62.00</td><td><b>92.12</b></td></tr>
+    <tr><td>MMLU（5-shot）</td><td>71.98</td><td>70.52</td><td>71.52</td><td><b>75.14</b></td><td>63.70</td><td>64.19</td><td>73.61</td></tr>
+    <tr><td>GSM8K（3-shot）</td><td>89.91</td><td>87.57</td><td>89.91</td><td><b>92.27</b></td><td>80.59</td><td>79.00</td><td>91.66</td></tr>
+    <tr><td>MATH（4-shot）</td><td>45.00</td><td>55.40</td><td><b>69.60</b></td><td>64.80</td><td>34.20</td><td>41.00</td><td>43.40</td></tr>
+    <tr><td>GPQA-Diamond（5-shot）</td><td>27.10</td><td>33.84</td><td>41.41</td><td><b>44.95</b></td><td>25.25</td><td>35.86</td><td>38.38</td></tr>
+    <tr><td>MBPP（3-shot）</td><td>63.66</td><td>63.66</td><td>68.37</td><td><b>70.53</b></td><td>36.24</td><td>58.52</td><td>67.97</td></tr>
+    <tr><td>HumanEval（4-shot）</td><td>76.22</td><td>75.00</td><td>71.95</td><td><b>80.49</b></td><td>36.59</td><td>57.32</td><td>76.83</td></tr>
+    <tr><td>HumanEval-plus（4-shot）</td><td>70.12</td><td>71.34</td><td>64.63</td><td><b>73.78</b></td><td>32.32</td><td>51.22</td><td>70.12</td></tr>
+    <tr><td><b>平均</b></td><td>71.09</td><td>72.78</td><td>75.12</td><td><b>77.53</b></td><td>56.77</td><td>62.96</td><td>74.22</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">两张表按原文数字转录，只是把 WeDLM 移到了各自的 AR 底座旁边，方便对照；加粗沿用原文（每行最高）。各列平均分本站按 10 项重新算过，与原文一致。</p>
+
+<p><b>基础模型。</b>WeDLM-7B 平均 70.84，比 Qwen2.5-7B 的 67.21 高 3.6 分；WeDLM-8B 平均 74.72，比 Qwen3-8B 的 72.61 高 2.1 分。提升集中在偏推理的任务上：GSM8K 分别高 5.5 和 4.2 分，MATH 高 4.8 和 2.8 分，GPQA-Diamond 高 3.2 和 5.4 分；代码方面 HumanEval 高 9.8 和 6.1 分。MBPP 是唯一一致下降的任务（低 3–4 分），作者猜测是对领域或提示格式敏感。</p>
+<p><b>指令模型。</b>WeDLM-8B 平均 77.53，比 Qwen3-8B 的 75.12 高 2.4 分，在 MMLU（+3.6）、GPQA-Diamond（+3.5）、HumanEval（+8.5）、HumanEval-plus（+9.2）上提升明显，GSM8K（+2.4）和 MBPP（+2.2）也略高。作者由此认为，扩散式的训练目标和并行解码与指令微调并不冲突，从一个强的指令检查点出发甚至能放大它的效果。</p>
+<p><b>和扩散基线比。</b>基础模型里 LLaDA-8B、Dream-7B 平均 55.44 和 56.91，比 WeDLM 低 15–19 分；指令模型里最强的扩散基线是 SDAR-8B（74.22），仍低于 WeDLM-8B 的 77.53，差距主要在代码和难推理题（HumanEval、GPQA-Diamond）上。SDAR 和 WeDLM-8B 都是从 Qwen3-8B 转换来的（SDAR 用 50B token 继续预训练加 4B token 指令微调，见 <a href="sdar.html">SDAR 精读</a>），所以这一组是表里最接近“同底座比较”的一对，但两者的训练数据和步骤仍然不同。</p>
+
+<div class="dia">
+  <div class="dia-title">图表：WeDLM-8B 相对它的 AR 底座，逐项高了还是低了多少</div>
+  <svg class="dg" viewBox="0 0 760 426" role="img" aria-label="WeDLM-8B 相对 Qwen3-8B 的逐项分差" style="--dg-min:600px">
+<rect x="160" y="14" width="14" height="12" rx="2" style="fill:var(--c-tgt)"/><text x="180" y="21" class="t-sm">基础模型：WeDLM-8B − Qwen3-8B（原文表 1）</text>
+<rect x="160" y="32" width="14" height="12" rx="2" style="fill:var(--c-enc)"/><text x="180" y="39" class="t-sm">指令模型：WeDLM-8B-Instruct − Qwen3-8B-Instruct（原文表 2）</text>
+<line x1="220" y1="52" x2="220" y2="386" class="grid-ln"/>
+<text x="220" y="400" class="t-c t-xs">-6</text>
+<line x1="280" y1="52" x2="280" y2="386" class="grid-ln"/>
+<text x="280" y="400" class="t-c t-xs">-4</text>
+<line x1="340" y1="52" x2="340" y2="386" class="grid-ln"/>
+<text x="340" y="400" class="t-c t-xs">-2</text>
+<line x1="400" y1="52" x2="400" y2="386" class="grid-ln"/>
+<text x="400" y="400" class="t-c t-xs">0</text>
+<line x1="460" y1="52" x2="460" y2="386" class="grid-ln"/>
+<text x="460" y="400" class="t-c t-xs">+2</text>
+<line x1="520" y1="52" x2="520" y2="386" class="grid-ln"/>
+<text x="520" y="400" class="t-c t-xs">+4</text>
+<line x1="580" y1="52" x2="580" y2="386" class="grid-ln"/>
+<text x="580" y="400" class="t-c t-xs">+6</text>
+<line x1="640" y1="52" x2="640" y2="386" class="grid-ln"/>
+<text x="640" y="400" class="t-c t-xs">+8</text>
+<line x1="700" y1="52" x2="700" y2="386" class="grid-ln"/>
+<text x="700" y="400" class="t-c t-xs">+10</text>
+<text x="400" y="418" class="t-c t-xs">分差（百分点；右边 = WeDLM 更高）</text>
+<text x="132" y="71.0" class="t-r t-sm">ARC-C</text>
+<rect x="400.0" y="60" width="7.8" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="412.8" y="65" class="t-xs">+0.26</text>
+<rect x="400.0" y="72" width="43.5" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="448.5" y="77" class="t-xs">+1.45</text>
+<text x="132" y="101.0" class="t-r t-sm">ARC-E</text>
+<rect x="400.0" y="90" width="1.5" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="405.3" y="95" class="t-xs">+0.01</text>
+<rect x="400.0" y="102" width="37.8" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="442.8" y="107" class="t-xs">+1.26</text>
+<text x="132" y="131.0" class="t-r t-sm">HellaSwag</text>
+<rect x="378.4" y="120" width="21.6" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="373.4" y="125" class="t-xs t-r">-0.72</text>
+<rect x="304.3" y="132" width="95.7" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="299.3" y="137" class="t-xs t-r">-3.19</text>
+<text x="132" y="161.0" class="t-r t-sm">MMLU</text>
+<rect x="400.0" y="150" width="42.9" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="447.9" y="155" class="t-xs">+1.43</text>
+<rect x="400.0" y="162" width="108.6" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="513.6" y="167" class="t-xs">+3.62</text>
+<text x="132" y="191.0" class="t-r t-sm">GSM8K</text>
+<rect x="400.0" y="180" width="126.9" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="531.9" y="185" class="t-xs">+4.23</text>
+<rect x="400.0" y="192" width="70.8" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="475.8" y="197" class="t-xs">+2.36</text>
+<text x="132" y="221.0" class="t-r t-sm">MATH</text>
+<rect x="400.0" y="210" width="84.0" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="489.0" y="215" class="t-xs">+2.80</text>
+<rect x="256.0" y="222" width="144.0" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="251.0" y="227" class="t-xs t-r">-4.80</text>
+<text x="132" y="251.0" class="t-r t-sm">GPQA-D</text>
+<rect x="400.0" y="240" width="162.6" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="567.6" y="245" class="t-xs">+5.42</text>
+<rect x="400.0" y="252" width="106.2" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="511.2" y="257" class="t-xs">+3.54</text>
+<text x="132" y="281.0" class="t-r t-sm">MBPP</text>
+<rect x="281.8" y="270" width="118.2" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="276.8" y="275" class="t-xs t-r">-3.94</text>
+<rect x="400.0" y="282" width="64.8" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="469.8" y="287" class="t-xs">+2.16</text>
+<text x="132" y="311.0" class="t-r t-sm">HumanEval</text>
+<rect x="400.0" y="300" width="183.0" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="588.0" y="305" class="t-xs">+6.10</text>
+<rect x="400.0" y="312" width="256.2" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="661.2" y="317" class="t-xs">+8.54</text>
+<text x="132" y="341.0" class="t-r t-sm">HumanEval+</text>
+<rect x="400.0" y="330" width="165.0" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="570.0" y="335" class="t-xs">+5.50</text>
+<rect x="400.0" y="342" width="274.5" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="679.5" y="347" class="t-xs">+9.15</text>
+<text x="132" y="371.0" class="t-r t-sm t-b">平均</text>
+<rect x="400.0" y="360" width="63.3" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="468.3" y="365" class="t-xs">+2.11</text>
+<rect x="400.0" y="372" width="72.3" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="477.3" y="377" class="t-xs">+2.41</text>
+<line x1="400" y1="52" x2="400" y2="386" class="axis" style="stroke:var(--text-2)"/>
+</svg>
+  <div class="dia-note">本站根据原文表 1、表 2 的数字计算并绘制（分差 = WeDLM − 同名 Qwen3-8B）。基础模型除 HellaSwag 和 MBPP 外都持平或提高；指令模型的 MATH 低了 4.8 分、HellaSwag 低了 3.2 分，这两项正文没有提到。</div>
+</div>
+
+<div class="note-warn"><b>读这两张表时要注意的地方：</b>
+<ul>
+  <li><b>正文与表 2 对不上。</b>正文说 WeDLM-7B 相对 Qwen2.5-7B 在 ARC-C +4.0、MATH +9.2、GPQA-Diamond +8.8、GSM8K −3.3、HumanEval −3.1；按表 2 的数字算出来却是 +3.50、+10.40、+6.74、−2.34、−1.22。表和正文必有一处有误，论文没有更正版本可以核对。</li>
+  <li><b>表 2 里有两组数字完全相同：</b>两个 Qwen 指令模型的 GSM8K 都是 89.91，WeDLM-7B 和 Qwen2.5-7B 的 MBPP 都是 63.66。这可能是巧合，也可能是录入错误。</li>
+  <li><b>正文只挑了提升的项目说。</b>WeDLM-8B 指令模型在 MATH 上比 Qwen3-8B 低 4.8 分、HellaSwag 低 3.2 分，正文的逐项讨论没有提到。</li>
+  <li><b>“并行解码不影响质量”这个结论，两张表并没有检验。</b>两张表都是每步只定 1 个 token 测出来的，加速模式下的质量只有 GSM8K 和 MATH 两项数据（下一小节）。</li>
+</ul></div>
+
+<h4 id="n-6-4">6.4 速度：阈值、距离惩罚、流式与块式</h4>
+<p><b>超参敏感性（原文图 4，WeDLM-7B-Instruct，MATH）。</b>熵阈值 \(\tau\) 控制填词的胆子：\(\tau\) 越低越谨慎，准确率越高、速度越慢。\(\tau\le0.5\) 时准确率稳定在 53–54% 左右，再往上就急剧下降，因为低置信的预测开始把错误传下去。作者在正文里推荐 \(\tau\in[0.3,0.6]\)，图注里写的是 \([0.3,0.5]\)。距离系数 \(\lambda\) 让选择偏向左边：从 \(p_{\text{cache}}\) 的角度看，越早解出靠左的位置，越容易连成可以提交的前缀；实验里 \(\lambda\) 从 0.01 加到 0.05，准确率提高 2.6 分，速度只慢了 3%。作者据此认为，从左到右的解码不仅加快了缓存，还减少了乱序预测带来的错误累积。</p>
+<p><b>流式 vs 块式。</b>图 4(c) 显示，在所有阈值下流式解码都比块式解码快；\(\tau=0.9\) 时快 1.9 倍（423 对 221 token/s）。作者用 \(p_{\text{cache}}\) 解释：块式解码要等整块定稿，token 才能进缓存，同步开销拉低了 \(p_{\text{cache}}\)；流式解码一旦有 token 和左边连成一段就提交，没有等待。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="wedlm/fig/speed-evaluation.svg" alt="原文图 4" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>三张小图都基于 WeDLM-7B-Instruct。(a) 横轴是熵阈值 \(\tau\)（0.1 到 0.9），蓝线是 MATH 准确率（左轴），红线是速度（右轴，token/s）：红线一路上升，蓝线在 \(\tau\le0.5\) 时基本平稳，之后下滑。(b) 横轴是距离系数 \(\lambda\)（0.01 到 0.09），蓝线准确率总体上升，红线速度缓慢下降。(c) 横轴同样是 \(\tau\)，蓝线是流式解码、红线是块式解码的速度，两者的差距在 \(\tau\ge0.6\) 后明显拉大，最右端标出了 1.9 倍。下表是从这张图的矢量数据里读出来的数值。</figcaption></figure>
+
+<div class="table-wrap"><table>
+  <thead><tr><th>\(\tau\)</th><th>(a) MATH 准确率</th><th>(a) 速度 tok/s</th><th>(c) 流式 tok/s</th><th>(c) 块式 tok/s</th><th>流式 ÷ 块式（推算）</th></tr></thead>
+  <tbody>
+    <tr><td>0.1</td><td>53.4</td><td>216</td><td>215</td><td>172</td><td>1.25</td></tr>
+    <tr><td>0.2</td><td>53.2</td><td>260</td><td>241</td><td>177</td><td>1.36</td></tr>
+    <tr><td>0.3</td><td>53.8</td><td>282</td><td>255</td><td>186</td><td>1.37</td></tr>
+    <tr><td>0.4</td><td>54.0</td><td>297</td><td>260</td><td>187</td><td>1.39</td></tr>
+    <tr><td>0.5</td><td>53.6</td><td>311</td><td>276</td><td>193</td><td>1.43</td></tr>
+    <tr><td>0.6</td><td>52.2</td><td>328</td><td>360</td><td>204</td><td>1.76</td></tr>
+    <tr><td>0.7</td><td>52.4</td><td>346</td><td>383</td><td>209</td><td>1.83</td></tr>
+    <tr><td>0.8</td><td>51.0</td><td>367</td><td>411</td><td>216</td><td>1.90</td></tr>
+    <tr><td>0.9</td><td>47.6</td><td>383</td><td>423</td><td>221</td><td>1.91</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">读自原图数据（误差约 ±0.2 分、±2 token/s）。图 4(b) 读出的数值：\(\lambda=0.01,0.03,0.05,0.07,0.09\) 时准确率约 53.2、54.4、55.8、55.8、56.0，速度约 295、294、287、278、264 token/s。</p>
+<p>这张表能看出两件正文没有点明的事。第一，1.9 倍出现在 \(\tau=0.9\)，而同一个阈值下图 4(a) 的 MATH 准确率已经掉到约 47.6；在作者推荐的 \(\tau=0.3\)–0.5 区间，流式只比块式快约 1.4 倍（推算）。第二，同样的 \(\tau\)，图 4(a) 和图 4(c) 的流式速度并不相同（例如 \(\tau=0.4\) 时 297 对 260），说明两张小图用的其他设置（窗口、生成长度或 \(\lambda\)）不一样，论文没有交代。块式解码用的块长是多少、是否同一个模型，也没有写。</p>
+
+<p><b>质量–速度的帕累托前沿（原文图 5(a)，WeDLM-8B-Instruct，GSM8K）。</b>作者扫了一组超参，把“不被其他配置同时在速度和准确率上超过”的那些点连成前沿：准确率从 79.7% 到 92.3%，速度从 272 到 445 token/s。保守设置（\(\tau=0.2,\lambda=0.01\)）保住接近基线的 92.3%，速度是 AR 基线的 1.97 倍；激进设置（\(\tau=0.9,\lambda=0.01\)）达到 3.2 倍，准确率仍在 79% 以上。作者说这让使用者可以按任务需要挑选工作点。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="wedlm/fig/ablation-study.svg" alt="原文图 5" loading="lazy"></div>
+<figcaption><b>原文图 5。怎么看：</b>(a) 横轴速度（token/s）、纵轴 GSM8K 准确率；蓝点连成的折线是帕累托前沿，左上的红点是准确率最高的配置，右下的金色星是速度最快的配置。(b) 继续预训练时用不同块长 \(B=4,8,32\) 得到的平均分（71.23、70.45、70.84），虚线是三者的均值 70.84。(c) 三种底座（Qwen3-0.6B、Qwen2.5-1.5B、Qwen2.5-7B）上三种模型的平均分：绿色是原始 AR 模型，黄色是“块内双向”的变体，蓝色是 WeDLM；柱子上方的数字是相对原始模型的变化（0.6B：−5.02 / −3.91；1.5B：−0.48 / −0.57；7B：−0.11 / +3.63，前一个是块内双向，后一个是 WeDLM）。</figcaption></figure>
+
+<div class="table-wrap"><table>
+  <thead><tr><th>前沿上的点（读自原图数据）</th><th>速度 tok/s</th><th>GSM8K 准确率</th><th>相对 AR 基线的倍数（推算）</th></tr></thead>
+  <tbody>
+    <tr><td>最准（\(\tau=0.2,\lambda=0.01\)）</td><td>272</td><td>92.3</td><td>1.97（原文）</td></tr>
+    <tr><td></td><td>341</td><td>91.4</td><td>约 2.5</td></tr>
+    <tr><td></td><td>370</td><td>89.8</td><td>约 2.7</td></tr>
+    <tr><td></td><td>404</td><td>87.6</td><td>约 2.9</td></tr>
+    <tr><td></td><td>431</td><td>84.5</td><td>约 3.1</td></tr>
+    <tr><td>最快（\(\tau=0.9,\lambda=0.01\)）</td><td>445</td><td>79.7</td><td>3.2（原文）</td></tr>
+  </tbody>
+</table></div>
+<p>由两个端点可以反推 AR 基线本身的速度：\(272\div1.97\approx138\)、\(445\div3.2\approx139\)，也就是 vLLM 上的 Qwen3-8B 在这组实验里大约每秒 138 个 token（推算）。表 2 里 Qwen3-8B 指令模型的 GSM8K 是 89.91；WeDLM 在准确率与之相当（约 89.8）的点上速度约 370 token/s，约为基线的 2.7 倍（推算）。图 1(a) 里的 AR 基线是 120 token/s（读自原图数据），和这里反推的 138 不一样，说明两张图的测量条件也不同。</p>
+
+<h4 id="n-6-5">6.5 消融：块长、块内因果还是双向、底座大小</h4>
+<p><b>块长。</b>继续预训练时用 \(B\in\{4,8,32\}\)，平均分都在 70.45–71.23 之间，差距不到 0.8 分，作者据此说 WeDLM 对块长不敏感。（块长 32 那一组的 70.84 恰好等于表 1 里 WeDLM-7B 的平均分，所以这组实验应当是在 7B 上做的，论文没有直说。）既然不敏感，实践中倾向用大块：MagiAttention 这类库在小块上开销更大；而且用大块训练的模型，推理时可以直接用任何更小的窗口，不必重训。（本站补充：训练时一个块就是推理时一个窗口的“样子”；推理窗口如果比训练块长还大，被遮住的位置就会面对训练中没见过的、更多的未提交 token。官方默认窗口 16 小于训练块长 32，符合这个要求。）</p>
+<p><b>块内因果还是双向。</b>作者做了一个变体：块与块之间仍然因果，但预测块内部改成双向，相当于放松原则 (ii)，让同一块里的掩码互相可见。总体上，WeDLM 的全因果设计平均分更高，作者认为这说明对 AR 初始化的模型来说，单向依赖已经够用；而且块内双向从根本上限制了 \(p_{\text{cache}}\)，token 要等整块解完才能提交。不过看具体数字，1.5B 上块内双向（−0.48）其实比 WeDLM（−0.57）略好一点，正文“块内双向一致地更差”的说法在这个点上不成立；两者真正拉开差距的是 7B（−0.11 对 +3.63）。</p>
+<p><b>底座大小。</b>小模型（0.6B、1.5B）转换后略有下降（WeDLM 分别 −3.9 和 −0.6），7B 则提高 3.6 分。作者注意到提升幅度和底座原本的能力单调相关，强的 AR 检查点更容易适应扩散目标，并由此猜测 AR 转扩散可能存在一种“规模定律”，建议从 7B 以上的模型开始用 WeDLM。这个猜测只有三个点支撑，而且 0.6B 来自 Qwen3、1.5B 和 7B 来自 Qwen2.5，模型家族和规模混在一起；每个点只跑了一次。作者自己也说要留待以后系统验证。</p>
+
+<h4 id="n-6-6">6.6 案例：速度跟着文本的熵走</h4>
+<p>作者用三个例子说明解码速度和输出分布的熵密切相关（附录 A）：</p>
+<ul>
+  <li><b>低熵：</b>从 1 数到 200。序列几乎是确定的，熵极低，模型一步能猜中并接受很多 token，峰值速度 1673.3 token/s。</li>
+  <li><b>中熵：</b>解一元一次方程的推导。虽然要推理，但解题步骤的句式比较可预测，速度仍有 745.2 token/s。</li>
+  <li><b>高熵：</b>用浅显的话解释量子物理。开放式文本语义多样、用词不确定，猜出来的 token 置信度低，有效并行度小，速度降到 197.8 token/s。</li>
+</ul>
+<figure class="paper-fig"><div class="imgs"><img src="wedlm/fig/case-counting.png" alt="原文图 6" loading="lazy"><img src="wedlm/fig/case-math.png" alt="原文图 7" loading="lazy"><img src="wedlm/fig/case-quantum.png" alt="原文图 8" loading="lazy"></div>
+<figcaption><b>原文图 6、7、8。怎么看：</b>三张都是演示界面的截图，从左到右依次是数数、解方程、解释量子物理。每张底部有一行统计：Prefill（提示的处理速度）、Decode（生成速度）、Tok/Fwd（平均每次前向提交几个 token）、Tokens（生成了多少 token）、Forwards（做了几次前向）。数数：907 个 token、64 次前向、每次 14.17 个；解方程：282 个 token、47 次前向、每次 6.00 个；量子物理：117 个 token、75 次前向、每次 1.56 个。截图没有标明用的是哪个模型、什么 GPU。</figcaption></figure>
+
+<div class="dia">
+  <div class="dia-title">图表：每次前向提交几个 token，基本决定了速度（数字取自原文图 6–8，单次前向耗时为推算）</div>
+  <div class="dia-row"><span class="lbl">数数（低熵）</span><div class="dia-track"><span class="dia-seg kv" style="flex:14.17">14.17 token/次</span><span class="dia-seg oth" style="flex:1.83"></span></div></div>
+  <div class="dia-out">1673.3 token/s ÷ 14.17 ≈ 每秒 118 次前向，每次约 8.5 ms</div>
+  <div class="dia-row"><span class="lbl">解方程（中熵）</span><div class="dia-track"><span class="dia-seg kv" style="flex:6">6.00</span><span class="dia-seg oth" style="flex:10"></span></div></div>
+  <div class="dia-out">745.2 ÷ 6.00 ≈ 每秒 124 次前向，每次约 8.1 ms</div>
+  <div class="dia-row"><span class="lbl">量子物理（高熵）</span><div class="dia-track"><span class="dia-seg kv" style="flex:1.56">1.56</span><span class="dia-seg oth" style="flex:14.44"></span></div></div>
+  <div class="dia-out">197.8 ÷ 1.56 ≈ 每秒 127 次前向，每次约 7.9 ms</div>
+  <div class="dia-note">每条的满格是 16，即官方默认的窗口长度 \(W\)，也是每次前向能提交的上限。三个例子单次前向的耗时几乎一样（7.9–8.5 ms），说明在这种单条请求的状态下，一次前向多算十几个位置几乎不花额外时间，速度差别几乎全部来自“每次前向提交几个”。如果同一张卡上 AR 每步也要 7–8 ms（6.4 节反推出的 138 token/s 对应约 7.2 ms），那么加速倍数大致就等于每次前向提交的 token 数（推算）。</div>
+</div>
+<p>作者坦承这暴露了一个明显的差距：低熵任务能有 8 倍以上的加速，高熵的开放式生成收益递减。这部分反映了自然语言本身的不确定性，但也说明当前框架在高困惑度场景下的局限；作者认为更稳健的接受机制或动态的熵校准是未来的关键方向。</p>
+<div class="note-warn"><b>数数这个例子的分量：</b>从 1 数到 200 几乎不需要“生成”，任何能并行猜词的方法都会在这里表现极好，它说明的是上限而不是常态；而且 14.17 已经接近窗口长度 16 的天花板。论文也没有给出同一条提示在 vLLM 上用 AR 生成的速度，所以“超过 8 倍”无法从图上直接核对。若按 6.4 节反推的 AR 速度（约 138 token/s）算，1673.3 ÷ 138 ≈ 12 倍；若按图 1(a) 的 120 token/s 算约 14 倍（均为推算，硬件可能不同）。</div>
+
+<h4 id="n-6-7">6.7 结果的份量</h4>
+<p>先把论文里出现过的速度数字和它们背后的条件放在一张表里：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>数字</th><th>出处</th><th>模型 / 任务</th><th>对照</th><th>这个速度下的准确率</th><th>没有写明的条件</th></tr></thead>
+  <tbody>
+    <tr><td>约 3.0 倍（361 对 120 token/s，读自原图数据）</td><td>图 1(a)</td><td>WeDLM-8B / GSM8K</td><td>vLLM 上的 Qwen3-8B</td><td>87.3% 对 85.4%（读自原图数据）</td><td>GPU、batch、并发、\(\tau\)/\(\lambda\)/\(W\)、生成长度</td></tr>
+    <tr><td>1.97 倍 / 3.2 倍</td><td>§6.4、图 5(a)</td><td>WeDLM-8B-Instruct / GSM8K</td><td>vLLM 上的 Qwen3-8B（反推约 138 token/s）</td><td>92.3% / 79% 以上</td><td>GPU、batch、并发、\(W\)、生成长度</td></tr>
+    <tr><td>1.9 倍（423 对 221 token/s）</td><td>§6.4、图 4(c)</td><td>WeDLM-7B-Instruct / 任务未写明（推测同为 MATH）</td><td>同一模型的块式解码</td><td>同一 \(\tau\) 下约 47.6%（图 4(a)，读自原图数据）</td><td>块长、\(W\)、GPU、batch</td></tr>
+    <tr><td>1673.3 / 745.2 / 197.8 token/s</td><td>§6.6、图 6–8</td><td>未写明哪个模型 / 单条提示</td><td>没有同条件的 AR 数字</td><td>无</td><td>GPU、batch、对照</td></tr>
+    <tr><td>“超过 8 倍”“最高 10 倍”</td><td>§6.6、摘要</td><td>低熵生成</td><td>未给出</td><td>无</td><td>全部</td></tr>
+    <tr><td>数学 3–6 倍、代码 2–3 倍、数数最高 10 倍、开放问答 1.5–2 倍</td><td>官方 README</td><td>未写明</td><td>vLLM 上的 Qwen3-8B</td><td>无</td><td>全部（README 的示例输出标注 NVIDIA H20、单条提示）</td></tr>
+  </tbody>
+</table></div>
+
+<p><b>测量条件缺了最关键的几项。</b>论文没有写测速用的 GPU 型号、batch 大小、同时在跑的请求数、提示和生成的长度。从数字的量级可以推断大致的状态：一个 8B 模型用 BF16 存储约 16 GB 参数，单条请求解码时每一步都要把参数读一遍，以当前数据中心 GPU 每秒几个 TB 的显存带宽，每步需要几毫秒，对应每秒一两百个 token；而 vLLM 在大批量下服务 8B 模型时，整卡吞吐是每秒几千个 token（SDAR 论文在单张 H200、LMDeploy 上测到 AR 在 batch 128 时约 7100 token/s，见 <a href="sdar.html#n-6-4">SDAR 精读 §5.2.4</a>）。所以论文里 120–140 token/s 的 AR 基线，只和“单条或极少几条并发请求”的状态相符（推算）。摘要里说的“匹配的部署设置”，实际上指的是这种以延迟为目标、并发很低的场景。</p>
+<p><b>batch 一大，优势会怎样（推算）。</b>论文没有做任何 batch 扫描，但可以用屋顶线模型估一个方向。AR 每次前向为每个请求处理 1 个位置；WeDLM 每次前向为每个请求处理窗口里的约 \(W\) 个位置（默认 16，官方实现再加上本步要提交的几个）。以 H100 SXM 的公开规格（BF16 稠密约 989 TFLOPS、显存带宽 3.35 TB/s）为例，两条上限的交点约在每字节 295 次运算；对 8B 模型的线性层来说，这大致对应一次前向处理约 295 个位置。于是，AR 要到约 295 条并发请求才进入算力受限区，WeDLM 在约 17 条并发（\(295\div17\)）时就到了。进入算力受限区之后，时间与计算量成正比：如果平均每次前向提交 3 个 token，WeDLM 每提交一个 token 要算约 \((16+3)\div3\approx6\) 个位置，是 AR 的约 6 倍，这时它应当比 AR 慢。这个估算忽略了注意力和 KV 读取，只用来判断方向；块扩散上的实测印证了这个方向：SDAR 在 batch 4 时约为同引擎 AR 的 2.3 倍，到 batch 64 时最好的也只与 AR 持平（见 <a href="sdar.html#n-6-4">SDAR 精读 §5.2.4</a>）。下面的小工具可以自己试：模型选 Llama-3-8B（和 Qwen3-8B 规模相近），GPU 选 H100 SXM，把 batch 设成“并发数 × 17”，看工作点落在屋顶线的哪一侧。</p>
+<div data-widget="roofline" data-panel="roofline"></div>
+<p class="w-note">小工具里的模型和 GPU 是预设的常见配置，不是论文所用的硬件（论文没有写）；它只用来建立“为什么 batch 大了优势会消失”的直觉。</p>
+
+<p><b>快的时候，准确率是多少。</b>两张质量表都是每步只定 1 个 token 测的，加速模式下的质量只有两组数据：GSM8K（8B 指令模型，图 5(a)）和 MATH（7B 指令模型，图 4(a)）。在 GSM8K 上，3.2 倍那个点的准确率约 79.7%，比同一模型逐步解码的 92.27 低约 12.6 分，比 Qwen3-8B 的 89.91 低约 10 分；在准确率与 Qwen3-8B 相当的点上，加速约 2.7 倍（推算）。在 MATH 上，即使最保守的 \(\tau=0.1\)，图 4(a) 的准确率也只有约 53.4，比表 2 的 55.40 低约 2 分（读自原图数据）；论文没有交代图 4 的窗口和生成长度，所以没法判断这 2 分来自并行解码本身还是设置不同。代码、知识类任务在加速模式下的质量完全没有报告。</p>
+<p><b>质量对比里的 AR 基线并不是“同样训练量的对手”。</b>WeDLM 是在 Qwen 底座上又训了 100B token（带 AR 辅助损失），再做指令微调；表里的 Qwen 基线没有这额外的 100B token。WeDLM 相对底座的 2–4 分提升，可能来自扩散目标，也可能只是来自这 100B 额外数据（数据构成没有公开），论文没有“同样 100B 数据、只用 AR 目标继续训练”的对照。相比之下，SDAR 专门训了一个走同样流程的 AR 模型做对照，结论是两者平均分相差不到 1 分（见 <a href="sdar.html#n-5-2">SDAR 精读 §5.1.2</a>）。指令模型的比较更不对等：WeDLM-Instruct 只用了 1 万条内部数据做微调，Qwen3-8B 则经过了 Qwen 团队完整的后训练流程；而评测统一用少样本提示、最多生成 512 个 token，论文没有说 Qwen3-8B 是否开了思考模式。这种协议下测得的 Qwen 分数不能和 Qwen 官方报告直接对照，“WeDLM-8B-Instruct 超过 Qwen3-8B-Instruct”也只在这个协议下成立。</p>
+<p><b>和其他扩散模型的速度比较混入了引擎差别。</b>LLaDA、Dream 跑在 dInfer 上，SDAR 跑在 JetEngine 上，WeDLM 跑在自己基于 nano-vllm 的引擎上。图 1(a) 里扩散模型之间的速度排序，一部分反映的是推理引擎的成熟度，而不只是方法本身。</p>
+<p><b>任务类型。</b>所有评测都是标准的知识、数学、代码题，没有测填空、反转这类需要右侧上下文或非顺序生成的任务。按拓扑重排的原理，被遮住的位置能看到右边的已知 token，理论上可以做填空；但流式解码器是从左往右提交的，没有为此设计，论文也没有数据。</p>
+<p><b>“第一个超过工业级 AR 引擎”的说法。</b>SDAR 第 3 版（2025-10）已经在 LMDeploy 这个工业引擎上和同引擎的 AR 解码做过对比，小 batch 时约 2.3 倍；D2F 也报告过对 AR 的 2.5 倍（AR 引擎未写明）。所以“第一个”取决于怎么界定。WeDLM 的贡献在于明确把 vLLM 当作基线，这比很多只和 Hugging Face 原生生成代码比较的扩散论文更有说服力。</p>
+<p><b>统计上的不确定性。</b>所有结果都是单次运行，没有误差范围。块长消融里 0.8 分的差距、1.5B 上两种变体 0.09 分的差距，很可能在评测噪声以内。</p>
+<p><b>做得扎实的地方。</b>以 vLLM 上的 AR 模型为速度基线，本身就比与未优化实现比较强得多；代码、四个检查点、评测脚本都已开源，2026-01-06 还补充了在 vLLM 上测 AR 基线的脚本，原则上可以在自己的硬件和并发条件下复现上面的每一项比较。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2512.22737#S6.F4" target="_blank" rel="noopener">原文图 4 ↗</a> · <a href="https://arxiv.org/html/2512.22737#S6.F5" target="_blank" rel="noopener">原文图 5 ↗</a> · <a href="https://arxiv.org/html/2512.22737#A1" target="_blank" rel="noopener">附录 A ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作：WeDLM 在扩散语言模型版图里的位置</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>WeDLM 借用了哪些前人的想法，又和它们有什么不同？作者把相关工作分成四组：离散扩散语言模型本身、从 AR 模型改造成扩散模型、块扩散与推理加速、排列与重排。最后一组和 WeDLM 的“拓扑重排”最容易混淆，值得细看。</div>
+<p><b>离散扩散语言模型。</b>离散扩散模型学习反复给被破坏的序列去噪，从而能并行生成、利用双向上下文。RADD 推出了与时间无关的具体分数形式，省掉了时间嵌入，也让缓存更方便；Nie 等人的扩展规律研究发现，掩码扩散模型要大约 16 倍的算力才能达到 AR 的困惑度，但扩展趋势相似；LLaDA 首次把掩码扩散做到 8B 并与 AR 模型有竞争力（见 <a href="llada.html">LLaDA 精读</a>）；LLaDA-MoE 说明稀疏专家混合能与掩码扩散结合，用 1/6 的激活参数达到稠密模型的效果；还有一批工作用强化学习提升扩散模型的推理能力（如 <a href="d1.html">d1</a>）。</p>
+<p><b>从 AR 模型改造。</b>预训练好的 AR 模型投入巨大，于是有工作研究如何高效改造。DiffuLLaMA 用输出错位（shift）保留 AR 的下一个词预测结构，并用注意力掩码退火逐步过渡到双向注意力；Dream 7B 从 Qwen2.5 出发，提出按上下文信息密度给损失加权的噪声重排，只用 0.6T token 就取得很强的效果（见 <a href="dream.html">Dream 精读</a>）；Dream-Coder 把这条路线用到代码上，观察到“先写草图”这类非线性的生成模式。这些工作都把 AR 模型改成双向；WeDLM 反其道而行，保留因果注意力。</p>
+<p><b>块扩散与推理加速。</b>块扩散在固定长度的块内做扩散、块与块之间保持 AR 依赖。BD3-LM 提出向量化训练和截断的噪声日程来降低梯度方差（见 <a href="block-diffusion.html">BD3-LM 精读</a>）；NBDiff 把 AR 看成块长为 1 的块扩散，提出逐渐增大块长的平滑改造路径；SDAR 展示了轻量的 AR 到块扩散改造，并用基于置信度的动态截断做并行解码（见 <a href="sdar.html">SDAR 精读</a>）；Efficient-DLM 用块间因果、块内双向的注意力加上随位置变化的掩码来改造 AR 模型；SDLM 在扩散块内用最长前缀解码做自适应长度的投机解码；SBD（集合块解码）把下一个词预测和掩码预测统一在一个架构里，配合有熵上界的采样器做灵活的并行解码；LLaDA2.0 把块扩散模型推到 100B 参数（见 <a href="llada2.html">LLaDA2.0 精读</a>）。</p>
+
+<div class="note-pre"><b>先补一点背景：XLNet 的排列语言建模和双流注意力。</b>
+<p>XLNet（2019）想让 AR 模型也能利用双向上下文。它的做法是：每条训练序列随机抽一个分解顺序（比如先预测第 3 个词、再第 1 个、再第 4 个……），按这个顺序做 AR 训练，于是在期望意义上每个位置都见过两侧的上下文。麻烦在于：预测某个位置时，模型必须知道“我要预测的是第几个位置”，但不能看到这个位置的内容，否则就泄题了。XLNet 为此维护两条流：内容流带着词本身，供后面的位置参考；查询流只带位置不带内容，专门用来做预测。两条流用不同的注意力掩码，而且掩码的形状随抽到的分解顺序变化。</p>
+</div>
+<p><b>排列与重排。</b>作者强调 WeDLM 与 XLNet 在目标和机制上都不同：WeDLM 关心的是推理时用扩散式并行解码加速，同时保持标准因果注意力；它的拓扑重排只是把当前已知的 token 挪到物理前缀，让被遮住的位置在一张不改动的下三角掩码下看到它们，逻辑位置靠 RoPE 位置编号保留，因此对 KV 缓存友好。补充一点对照（本站分析）：WeDLM 里的 <code>[M]</code> 占位符带着位置编号、却不带内容，作用很像 XLNet 的查询流；而它的双流掩码（记忆流加预测流）和 XLNet 的双流名字相近，用途却不同，记忆流是为了给预测块提供干净的历史，而不是为了防止泄题。</p>
+<p><b>本站补充：和“多 token 预测”“投机解码”的关系。</b>WeDLM 的结论（下一节）把扩散语言模型重新定位为一种更有效的“多 token 预测”机制。另一条思路是让扩散模型只负责起草、由 AR 模型验证，从而拿回 AR 的输出分布保证，例如 <a href="tidar.html">TiDAR</a> 和 <a href="dflash.html">DFlash</a>；WeDLM 不做验证，换来更简单的部署，代价是输出质量随阈值变化（见第 5 节末尾）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 结论：作者认为证明了什么，证据有多强</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后提出了一个更大的主张：前缀可缓存性应当成为并行文本生成的首要设计目标，未来的扩散语言模型应当被构造成更有效的多 token 预测机制。这个主张由哪些结果支撑，哪些部分还只是论证？</div>
+<p>作者的总结是：在有 KV 缓存的解码中，决定效率的主要因素不只是“每次前向预测几个 token”，而是预测结果变成一段连续的、从左到右的、可复用前缀的速度，这就是 \(p_{\text{cache}}\)。这个视角也解释了为什么乱序定稿和双向 KV 耦合与快速解码根本上不合拍：两者都降低了能被缓存分摊的计算比例。WeDLM 在训练和推理中全程坚持因果的依赖结构：拓扑重排让被遮住的位置看到全部已知上下文，同时保留严格的因果掩码，使新提交的 token 立刻可以缓存；流式并行解码偏向逻辑上靠左的位置，并持续补充固定的窗口，把并行的提议转成前缀的增长，几乎不需要重算。实验上，WeDLM 保住了（并且常常提高了）强 AR 底座的能力，同时在开启缓存的匹配条件下带来显著的推理加速。</p>
+<p>更进一步，作者认为既然最优的复用模式天然接近前缀顺序，未来的扩散语言模型应当被构造成更有效的多 token 预测机制：每次迭代生成很多 token，只有在这些 token 能在因果计算图下迅速晋升为可缓存前缀时才真正有用。在这个意义上，“因果扩散”为调和扩散式并行与高效缓存解码所需的算法结构提供了一条有原则的路。</p>
+<p>按本页前面的分析，把这几条结论的证据强度分开看：</p>
+<ul>
+  <li><b>“因果注意力足以做掩码恢复”</b>：对从 AR 初始化的 7B 级模型，在作者的评测协议下得到支持（图 5(c)）；小模型上并不成立，且只有单次运行。</li>
+  <li><b>“\(p_{\text{cache}}\) 是速度的主导因素”</b>：是概念上的论证，论文没有测量任何方法的 \(p_{\text{cache}}\)；而在单条请求的访存受限状态下，速度主要取决于每次前向提交几个 token（6.6 节）。</li>
+  <li><b>“在墙钟速度上超过 vLLM 上的 AR 引擎”</b>：在未写明硬件、看起来是低并发的条件下成立，GSM8K 上同等准确率时约 2.7 倍（推算）；没有 batch 扫描，大批量服务场景下的结论未知，按屋顶线估算方向不利。</li>
+  <li><b>“保住并常常提高 AR 底座的能力”</b>：在每步只定 1 个 token 的模式下、多训了 100B token 之后成立；缺少同数据的 AR 对照，加速模式下的质量只在两个数学任务上有数据。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2512.22737#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇论文 2025-12-28 上传 arXiv，截至 2026-10-20 只有第 1 版。它被 ICML 2026 接收为口头报告，安排在 2026-07-09 的 Oral 5A“LLM Training &amp; Inference Efficiency”场次，同日另有海报展示。</p>
+<p>代码和模型几乎与论文同时发布。官方 README 的更新记录是：2025-12-29 首次发布 WeDLM-7B / 8B 模型、推理引擎和评测套件；2026-01-02 发布支持稠密注意力和 MagiAttention 两种后端的微调框架；2026-01-06 补充在 vLLM 上评测 AR 基线的脚本；2026-01-10 第三方的 C++ 推理项目 chatllm.cpp 支持了 WeDLM 模型。Hugging Face 上有 WeDLM-7B、WeDLM-7B-Instruct、WeDLM-8B、WeDLM-8B-Instruct 四个检查点，许可证为 Apache-2.0。仓库最后一次推送是 2026-03-03。</p>
+<p>截至 2026-10-20，我们没有找到对它的速度结论（尤其是不同 batch、不同硬件下与 vLLM 的对比）的独立复现；这不代表没有，只是公开渠道里没有查到。WeDLM 提出的“前缀可缓存率”和“因果扩散”的思路，在本站其他精读里被当作块扩散的一种对照方案提到：<a href="sdar.html">SDAR 精读</a>和 <a href="fast-dllm-v2.html">Fast-dLLM v2 精读</a>都把它列为同类的 AR 转换方法，三者的结构对照见<a href="../legacy/tracks/dllm/12-ar-to-block.html#wedlm">旧版 AR → 块扩散拆解页</a>。</p>
+<p>同样以“让扩散模型在真实部署里跑得比 AR 快”为目标的其他精读，可以对照着读：<a href="tidar.html">TiDAR</a>（扩散起草、AR 验证）、<a href="dparallel.html">dParallel</a> 与 <a href="d3llm.html">d3LLM</a>（学出来的并行解码）、<a href="llada2-1.html">LLaDA2.1</a>（可编辑 token 的大规模块扩散）、Nemotron-Labs-Diffusion（旧版拆解见<a href="../legacy/tracks/dllm/13-hybrid.html#nemotron-diffusion">扩散与自回归的混合</a>）。读这些论文的速度数字时，可以沿用 6.7 节的那张表：问清楚硬件、batch、对照引擎和那个速度下的准确率。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Aiwei Liu（刘瑷玮）</b>（共同一作、通讯作者）<div class="aff">WeChat AI, Tencent</div>据个人主页，是微信 AI WeLM 团队的研究员、预训练团队核心成员，负责模型架构设计与预训练基础设施；2020–2025 年在清华大学攻读软件工程博士，导师为 Lijie Wen 教授；本科毕业于南京大学软件工程专业。此前的代表工作包括大模型水印工具包 MarkLLM（EMNLP 2024 Demo）和 TIS-DPO（ICLR 2025）。</div>
+  <div class="author-card"><b>Minghua He</b>（共同一作）<div class="aff">WeChat AI, Tencent；北京大学</div>论文注明这项工作是在微信 AI 实习期间完成的。</div>
+  <div class="author-card"><b>Shaoxun Zeng</b><div class="aff">清华大学</div></div>
+  <div class="author-card"><b>Sijun Zhang、Linhao Zhang、Chuhan Wu、Wei Jia、Yuan Liu、Xiao Zhou</b><div class="aff">WeChat AI, Tencent</div>按论文署名。</div>
+  <div class="author-card senior"><b>Jie Zhou</b>（末位作者）<div class="aff">WeChat AI, Tencent</div>按论文署名。</div>
+</div>
+<p class="w-note">官方 README 里的 BibTeX 作者列表与论文略有不同（没有 Sijun Zhang，多了 Yang Yu）；本页以 arXiv 论文和 ICML 会议页面的署名为准，两者一致。</p>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：ICML 2026 口头报告（Oral 5A，2026-07-09）；arXiv 只有 2025-12-28 的第 1 版。</li>
+  <li><b>开源</b>：<a href="https://github.com/Tencent/WeDLM" target="_blank" rel="noopener">Tencent/WeDLM</a> 有 658 个 star、47 个 fork（截至 2026-10-20），包含推理引擎、评测脚本（含 vLLM 上的 AR 基线脚本）和微调框架；README 标注 Apache-2.0 许可，但 GitHub 识别出的许可证类型显示为“Other”。继续预训练的代码与数据没有公开。</li>
+  <li><b>权重</b>：<a href="https://huggingface.co/collections/tencent/wedlm" target="_blank" rel="noopener">Hugging Face 合集</a>里的四个检查点均为 Apache-2.0；其中 WeDLM-8B-Instruct 有 313 个点赞（截至 2026-10-20）。</li>
+  <li><b>第三方支持</b>：chatllm.cpp 自 2026-01-10 起支持 WeDLM 模型（据官方 README）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>旧版结构拆解：<a href="../legacy/tracks/dllm/12-ar-to-block.html#wedlm">AR → 块扩散（SDAR / Fast-dLLM v2 / WeDLM）</a> · <a href="../legacy/tracks/dllm/14-kv-cache.html">扩散 LLM 的 KV 缓存与阈值解码</a> · <a href="../legacy/tracks/dllm/11-block-diffusion.html">块扩散</a> · <a href="../legacy/tracks/dllm/13-hybrid.html">扩散与自回归的混合</a> · <a href="../legacy/tracks/dllm/15-learned-parallel.html">学出来的并行</a></li>
+  <li>背景精读：<a href="vllm.html">vLLM（KV 缓存、分页、批处理）</a> · <a href="roformer.html">RoFormer（RoPE）</a> · <a href="fast-dllm.html">Fast-dLLM（近似 KV 缓存）</a> · <a href="dkv-cache.html">dKV-Cache</a> · <a href="block-diffusion.html">BD3-LM（块扩散）</a> · <a href="mdlm.html">MDLM</a> · <a href="llada.html">LLaDA</a> · <a href="dream.html">Dream 7B</a></li>
+  <li>同类方法：<a href="sdar.html">SDAR</a> · <a href="fast-dllm-v2.html">Fast-dLLM v2</a> · <a href="d2f.html">D2F</a> · <a href="dflash.html">DFlash</a> · <a href="tidar.html">TiDAR</a> · <a href="speculative-decoding.html">投机解码</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2512.22737" target="_blank" rel="noopener">arXiv:2512.22737</a>（v1）。原文图 1–8 取自论文 arXiv HTML 版，作者 Aiwei Liu 等，以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布，本站未做修改。“读自原图数据”的数字由本站从原图的矢量坐标中读出，是近似值。代码细节依据 <a href="https://github.com/Tencent/WeDLM" target="_blank" rel="noopener">Tencent/WeDLM</a> 仓库 2026-10-20 的版本。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

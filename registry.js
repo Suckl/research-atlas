@@ -3694,6 +3694,101 @@ window.ATLAS_REGISTRY = {
       "tldr": "把每个词变成向量，在整句的词向量上做连续高斯扩散，生成时从噪声逐步去噪、最后取整成词；因为中间状态是连续的，每一步都能用分类器的梯度引导，于是句法树、指定片段、长度、填空这类自回归模型难做的精细控制都做得很好。代价是似然更差、解码比自回归慢得多，后来的扩散语言模型主流转向了离散的掩码扩散。"
     },
     {
+      "id": "flm",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "objective",
+      "title": "Flow Map LM",
+      "full_title": "Flow Map Language Models: One-step Language Modeling via Continuous Denoising",
+      "authors": ["Chanhyuk Lee", "Jaehoon Yoo", "Manan Agarwal", "Sheel Shah", "Jerry Huang", "Aditi Raghunathan", "Seunghoon Hong", "Nicholas M. Boffi", "Jinwoo Kim"],
+      "date": "2026-02",
+      "venue": "NeurIPS 2026（官方仓库标注）",
+      "org": "KAIST; Carnegie Mellon University",
+      "arxiv": "2602.16813",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2602.16813" },
+        { "label": "Code", "url": "https://github.com/david3684/flm" },
+        { "label": "Weights", "url": "https://huggingface.co/collections/david3684/flm-fmlm" },
+        { "label": "Project page", "url": "https://one-step-lm.github.io/" },
+        { "label": "Blog", "url": "https://one-step-lm.github.io/blog/index.html" },
+        { "label": "OpenReview (COLM 2026 NonAR-LM workshop)", "url": "https://openreview.net/forum?id=aCmiFA1tMu" }
+      ],
+      "page": "papers/flow-map-lm.html",
+      "reading": "papers/flow-map-lm.html",
+      "tldr": "把每个 token 写成 one-hot 向量，从高斯噪声出发做连续流匹配（FLM），网络预测每个位置的词概率并用交叉熵训练，1024 步时生成质量与 Duo、MDLM 相当；再用“双时间去噪器”把这条确定性轨迹的流映射蒸馏出来（FMLM），一步生成在 LM1B 和 OpenWebText 上远好于蒸馏后的离散扩散（119 对 1000 以上，或对熵塌缩的样本）。实验只有约 1.8 亿参数，没有似然评测和自回归基线。"
+    },
+    {
+      "id": "langflow",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "objective",
+      "title": "LangFlow",
+      "full_title": "LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling",
+      "authors": ["Yuxin Chen", "Chumeng Liang", "Hangke Sui", "Ruihan Guo", "Chaoran Cheng", "Jiaxuan You", "Ge Liu"],
+      "date": "2026-04",
+      "venue": "arXiv 预印本（ICML 2026 研讨会海报）",
+      "org": "UIUC",
+      "arxiv": "2604.11748",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2604.11748" },
+        { "label": "Code", "url": "https://github.com/nealchen2003/LangFlow" },
+        { "label": "Weights (OWT)", "url": "https://huggingface.co/Continuous-Rivals-Discrete/langflow-owt" },
+        { "label": "Weights (LM1B)", "url": "https://huggingface.co/Continuous-Rivals-Discrete/langflow-lm1b" },
+        { "label": "Blog", "url": "https://caradryanl.github.io/blog/2026/langflow/" },
+        { "label": "ICML 2026 Workshop", "url": "https://icml.cc/virtual/2026/74267" }
+      ],
+      "page": "papers/langflow.html",
+      "reading": "papers/langflow.html",
+      "tldr": "在可学习的词嵌入上做连续扩散，把交叉熵训练解释为流匹配，配上按信息量分配噪声的 Gumbel 调度和自条件，在约 1.3 亿参数的标准设定下把生成质量做到与离散扩散相当。论文报告的困惑度（LM1B 30.0、OWT 24.6）后来被指出在开自条件时漏算了一项，修正后 OWT 约 32–33，仍落后于 MDLM 和 Duo。"
+    },
+    {
+      "id": "elf",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "objective",
+      "title": "ELF",
+      "full_title": "ELF: Embedded Language Flows",
+      "authors": ["Keya Hu", "Linlu Qiu", "Yiyang Lu", "Hanhong Zhao", "Tianhong Li", "Yoon Kim", "Jacob Andreas", "Kaiming He"],
+      "date": "2026-05",
+      "venue": "NeurIPS 2026",
+      "org": "MIT",
+      "arxiv": "2605.10938",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2605.10938" },
+        { "label": "NeurIPS 2026", "url": "https://neurips.cc/virtual/2026/poster/148278" },
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=z3I6Aj563f" },
+        { "label": "Code", "url": "https://github.com/lillian039/ELF" },
+        { "label": "Weights", "url": "https://huggingface.co/embedded-language-flows" },
+        { "label": "Blog", "url": "https://linlu-qiu.github.io/assets/html/elf_pd.html" }
+      ],
+      "page": "papers/elf.html",
+      "reading": "papers/elf.html",
+      "tldr": "ELF 用冻结的 T5 编码器把句子变成一串连续向量，在上面做图像式的流匹配，整个去噪过程不碰词表，只在最后一步由同一个网络解码成词，因此能直接用上 CFG、随机采样器和蒸馏。在 OpenWebText 上，1 亿参数的 ELF-B 用 32 步得到约 24 的生成困惑度，低于用 1024 步的离散与连续对手，但它不报告似然，样本熵也低于对手。"
+    },
+    {
+      "id": "dreamon",
+      "track": "dllm",
+      "kind": "paper",
+      "lane": "post",
+      "title": "DreamOn",
+      "full_title": "DreamOn: Diffusion Language Models For Code Infilling Beyond Fixed-size Canvas",
+      "authors": ["Zirui Wu", "Lin Zheng", "Zhihui Xie", "Jiacheng Ye", "Jiahui Gao", "Shansan Gong", "Yansong Feng", "Zhenguo Li", "Wei Bi", "Guorui Zhou", "Lingpeng Kong"],
+      "date": "2026-02",
+      "org": "The University of Hong Kong; Kuaishou Technology; Huawei Noah's Ark Lab; Peking University",
+      "venue": "ICLR 2026",
+      "arxiv": "2602.01326",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2602.01326" },
+        { "label": "ICLR 2026", "url": "https://openreview.net/forum?id=EQTPmqukiU" },
+        { "label": "Code", "url": "https://github.com/DreamLM/DreamOn" },
+        { "label": "Weights", "url": "https://huggingface.co/Dream-org/DreamOn-v0-7B" },
+        { "label": "Blog", "url": "https://hkunlp.github.io/blog/2025/dreamon/" }
+      ],
+      "page": "papers/dreamon.html",
+      "reading": "papers/dreamon.html",
+      "tldr": "掩码扩散模型做代码填空时必须预先定好中间要写几个 token，猜短了写不下、猜长了会多写。DreamOn 在词表里加入 [expand]（一个 [mask] 裂成两个）和 [delete]（删掉这一格）两个状态，在 Dream-Coder 等 7B 扩散模型上用 11 万条数据微调约 5 小时，让模型在去噪中自己调整长度：HumanEval-Infilling 单行题在 4 到 64 个初始掩码下都在 88.7 到 92.1 之间，与 Qwen2.5-Coder-7B 的 92.6 相当，但 AR 基线没有用同一份数据微调，扩散模型也是每步只解码一个 token。"
+    },
+    {
       "id": "sedd",
       "track": "dllm",
       "kind": "model",
@@ -3913,7 +4008,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Subham Sekhar Sahoo", "Jean-Marie Lemercier", "Zhihan Yang", "Justin Deschenaux", "Jingyu Liu", "John Thickstun", "Ante Jukić"],
       "org": "Cornell Tech; NVIDIA; Cornell; EPFL; UChicago",
       "date": "2026-02",
-      "venue": "ICML 2026（官方仓库标注）",
+      "venue": "ICML 2026",
       "arxiv": "2602.15014",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2602.15014" },
@@ -3921,7 +4016,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/s-sahoo/sdllm" }
       ],
       "page": "legacy/tracks/dllm/05-uniform.html#uniform-scaling",
-      "tldr": "首次对均匀态（Duo）与插值（Eso-LM）离散扩散做 IsoFLOP 扩展律：各族斜率与 AR 相近、常数差很大（匹配 AR 损失需 14–32× 计算）；困惑度只在族内可比，跨族应看速度-质量前沿与下游，1.7B 上困惑度更差的 Duo 在 GSM8K 上最好。",
+      "reading": "papers/scaling-beyond-masked.html",
+      "tldr": "论文在同一套骨干、同一份数据和同等训练算力下，给掩码（MDLM）、均匀态（Duo）、插值（Eso-LM）三族离散扩散和自回归模型拟合扩展律：三族的斜率与自回归相近，但要达到自回归的验证损失分别约需 14–16、23、32 倍算力，并指出各族报告的是不同的似然上界、不能横向比较。扩到 17 亿参数、2.1 万亿 token 后，自回归在六个似然基准上全胜，而困惑度更差的 Duo 在 GSM8K 微调后以 65.8% 领先自回归的 62.9%（所有模型都逐个 token 从左到右生成，差距约 1.5 个标准误）。",
       "tags": ["扩展律", "均匀态扩散", "评测口径", "速度-质量前沿"],
       "facts": {
         "noise": "对比掩码（MDLM）、均匀（Duo）、插值（Eso-LM）三族",
@@ -4001,10 +4097,10 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "iLLaDA",
       "full_title": "Improved Large Language Diffusion Models",
-      "authors": ["Shen Nie", "…", "Ji-Rong Wen"],
+      "authors": ["Shen Nie", "Qiyang Min", "Shaoxuan Xu", "Zihao Huang", "Yuxuan Song", "Yong Shan", "Yankai Lin", "Wayne Xin Zhao", "Chongxuan Li", "Ji-Rong Wen"],
       "org": "Renmin University of China (GSAI); ByteDance Seed",
       "date": "2026-06",
-      "venue": "",
+      "venue": "arXiv 预印本",
       "arxiv": "2606.25331",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2606.25331" },
@@ -4012,13 +4108,14 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/iLLaDA-8B-Instruct" }
       ],
       "page": "legacy/tracks/dllm/06-llada.html#illada",
-      "tldr": "同一掩码扩散目标从零扩到 12T token：改回 GQA、共享嵌入、8192 长度，SFT 25B token × 12 epoch 且整段加掩码，变长块生成与置信度打分；Base 8 项平均 63.9（LLaDA 51.1）。",
+      "reading": "papers/illada.html",
+      "tldr": "LLaDA 团队保持掩码扩散目标不变，把 8B 模型从零重训到 12T token，改用 GQA、共享嵌入和 8192 上下文，并把指令微调改成和预训练一样的整段遮挡、训 12 个 epoch；推理改为按块变长生成，选择题改用置信度打分。预训练版 8 项平均 63.9（LLaDA 51.1），与 Dream 重测的 Qwen2.5 7B（63.3）相当，指令版仍比 Qwen2.5 7B Instruct 低约 10 分。",
       "tags": ["from scratch", "12T tokens", "GQA", "variable-length generation"],
       "facts": {
         "noise": "掩码（吸收态），与 LLaDA 相同",
         "init": "从零：7.62B（非嵌入 6.98B），12T token，最大长度 8192，30% 序列拆成两段打包",
         "attn": "全双向 GQA（8 个 KV 头），为 dKV-Cache 等近似缓存降低显存；输入嵌入与 LM head 共享",
-        "decode": "变长块生成：每次追加一个 [M] 块（块长 32，HumanEval 512），出现停止符即结束；步数 / TPF 未报告",
+        "decode": "变长块生成：每次追加一个 [M] 块（块长 32，HumanEval 512），出现停止符即结束；论文未报告步数 / TPF；官方评测脚本每次前向只定稿 1 个 token",
         "train": "被掩位置 CE ÷ t；SFT 把指令语料连续打包、对整段（含 prompt）掩码，约 25B token × 12 epoch；选择题用置信度打分",
         "eval": "Base：BBH 71.3、ARC-C 60.8（LLaDA 49.7、45.9）；Instruct 平均 67.1 vs Qwen2.5-7B-Instruct 77.1（各列协议不完全统一）",
         "limits": "未做 RL；Instruct 在难题上出现反思循环，需逐步提高 </think> 概率；没有与 AR 的同算力对照；未公开算力"
@@ -4092,7 +4189,7 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "数据受限扩展律",
       "full_title": "Diffusion Beats Autoregressive in Data-Constrained Settings",
-      "authors": ["Mihir Prabhudesai", "…", "Deepak Pathak"],
+      "authors": ["Mihir Prabhudesai", "Mengning Wu", "Amir Zadeh", "Katerina Fragkiadaki", "Deepak Pathak"],
       "org": "Carnegie Mellon University; Lambda",
       "date": "2025-07",
       "venue": "NeurIPS 2025",
@@ -4102,7 +4199,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://diffusion-scaling.github.io" }
       ],
       "page": "legacy/tracks/dllm/08-data-constrained.html",
-      "tldr": "固定独特数据、多 epoch 训练 200 个模型：扩散的数据复用半衰期 R_D* 约 500（AR 约 31），计算足够时反超 AR，临界计算量 C_crit ∝ U^2.174；用“随机掩码 = 隐式数据增强”解释。",
+      "reading": "papers/diffusion-data-constrained.html",
+      "tldr": "作者把独特数据固定在 2500 万到 1 亿 token，让掩码扩散和自回归模型在同一批数据上重复训练最多 800 遍：算力少时 AR 更好，但 AR 几十遍后就过拟合，扩散重复几百遍仍在进步，最终验证损失和多数下游任务更好。他们据此拟合数据受限扩展律（重复数据的衰减常数扩散约 500、AR 约 31），给出扩散反超所需的临界算力公式 C_crit ∝ U^2.174，并把优势归因于随机掩码带来的顺序多样性。",
       "tags": ["scaling law", "data-constrained", "multi-epoch", "critical compute"],
       "facts": {
         "noise": "掩码（吸收态），r ~ U(0,1)，权重 1/r（arXiv v7）",
@@ -4213,7 +4311,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Tiwei Bie", "…", "Yihong Zhuang"],
       "org": "Ant Group; Zhejiang University; Westlake University; SUSTech",
       "date": "2026-02",
-      "venue": "",
+      "venue": "arXiv 预印本（技术报告）",
       "arxiv": "2602.08676",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2602.08676" },
@@ -4221,7 +4319,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/inclusionAI/LLaDA2.1-flash" }
       ],
       "page": "legacy/tracks/dllm/09-llada2.html#llada21",
-      "tldr": "在 [M]→token（M2T）之外加入 token→token（T2T）编辑，用两个阈值形成 Speedy / Quality 两种模式：flash S 模式 33 项平均 72.34 / 5.93 TPF，Q 模式 73.54 / 3.64 TPF；并做了基于块级 ELBO 的大规模 RL（EBPO）。",
+      "reading": "papers/llada2-1.html",
+      "tldr": "LLaDA2.1 在“把 [M] 填成词”之外允许把已写的词改成别的词，用填空与编辑两个阈值组成快速（S）和高质量（Q）两种解码模式，并加入基于块级 ELBO 的强化学习 EBPO。在 33 个基准上，100B 的 flash 用 S 模式以基本不变的平均分把每次前向写下的 token 数从 3.08 提到 5.93，但测速硬件、批大小以及编辑、训练、强化学习各自的贡献论文都没有交代。",
       "tags": ["T2T 编辑", "阈值解码", "RL", "100B"],
       "facts": {
         "noise": "掩码 + 随机 token 替换（训练时的 T2T 编辑流）",
@@ -4243,14 +4342,15 @@ window.ATLAS_REGISTRY = {
       "authors": ["DiffusionGemma Team", "Adrien Ali Taïga", "…", "Shantanu Thakoor"],
       "org": "Google DeepMind",
       "date": "2026-07",
-      "venue": "",
+      "venue": "arXiv 技术报告",
       "arxiv": "2608.00146",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2608.00146" },
         { "label": "Weights", "url": "https://huggingface.co/google/diffusiongemma-26B-A4B-it" }
       ],
       "page": "legacy/tracks/dllm/10-industrial.html",
-      "tldr": "由 Gemma 4 26B A4B 微调而来的开放权重文本扩散模型：均匀（多项式）噪声、256 token 画布的块自回归生成、共享权重的因果编码器 + 双向解码器、熵界采样；SFT 后用 SD·RL 联合做 RL 与采样器蒸馏，7 项平均 19.74 TPF、单卡 H100 FP8 batch 1 约 1479 TPS。",
+      "reading": "papers/diffusiongemma.html",
+      "tldr": "Google DeepMind 把已发布的 Gemma 4 26B A4B 用不到原训练量 10% 的数据微调成开放权重的文本扩散模型：均匀噪声、每块 256 个 token 的画布，同一套权重既当因果编码器又当双向解码器，再用 SD·RL 把强化学习和少步蒸馏合成一个阶段。单张 H100、FP8、批大小 1 时，七项基准平均每秒约 1,479 个 token（同卡 Gemma 4 为 204，加 MTP 为 303），但质量低于原模型（AIME 2026 69.1 对 88.3），约 32 个并发后 AR 的吞吐反超。",
       "tags": ["均匀噪声", "AR 初始化", "块自回归", "采样器蒸馏", "开放权重"],
       "facts": {
         "noise": "均匀 / 多项式噪声（报告 §2.1.1、§3.2、§4 明确不是掩码；第三方 2606.14620 称“masked”与原文矛盾）",
@@ -4451,7 +4551,7 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "WeDLM",
       "full_title": "WeDLM: Reconciling Diffusion Language Models with Standard Causal Attention for Fast Inference",
-      "authors": ["Aiwei Liu", "…", "Jie Zhou"],
+      "authors": ["Aiwei Liu", "Minghua He", "Shaoxun Zeng", "Sijun Zhang", "Linhao Zhang", "Chuhan Wu", "Wei Jia", "Yuan Liu", "Xiao Zhou", "Jie Zhou"],
       "org": "WeChat AI, Tencent; Peking University; Tsinghua University",
       "date": "2025-12",
       "venue": "ICML 2026 (Oral)",
@@ -4463,7 +4563,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://wedlm.github.io" }
       ],
       "page": "legacy/tracks/dllm/12-ar-to-block.html#wedlm",
-      "tldr": "坚持标准因果注意力做掩码恢复：拓扑重排把已观测 token 挪到物理前缀（保留逻辑位置 id），定稿前缀立即可缓存；流式并行解码保持固定窗口，并以 vLLM 上的 AR 为速度基线。",
+      "reading": "papers/wedlm.html",
+      "tldr": "WeDLM 全程用标准因果注意力做掩码扩散：把已知 token 挪到输入前面、保留原来的位置编号，被遮住的位置就能看到全部已知内容，解码时最左边连成一段的 token 立刻进入 KV 缓存。在作者的测速条件下（未写明硬件和并发），GSM8K 上保守设置约为 vLLM 上 Qwen3-8B 的 2 倍、激进设置 3.2 倍，但激进设置的准确率低了约 10 分。",
       "tags": ["因果注意力", "拓扑重排", "流式解码", "vLLM 基线"],
       "facts": {
         "noise": "块内随机掩码（掩码率 γ），记忆流 + 预测流双流训练",
@@ -4482,7 +4583,7 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "TiDAR",
       "full_title": "TiDAR: Think in Diffusion, Talk in Autoregression",
-      "authors": ["Jingyu Liu", "…", "Pavlo Molchanov"],
+      "authors": ["Jingyu Liu", "Xin Dong", "Zhifan Ye", "Rishabh Mehta", "Yonggan Fu", "Vartika Singh", "Jan Kautz", "Ce Zhang", "Pavlo Molchanov"],
       "org": "NVIDIA",
       "date": "2025-11",
       "venue": "MLSys 2026 (Oral)",
@@ -4491,7 +4592,8 @@ window.ATLAS_REGISTRY = {
         { "label": "arXiv", "url": "https://arxiv.org/abs/2511.08923" }
       ],
       "page": "legacy/tracks/dllm/13-hybrid.html",
-      "tldr": "同一模型、同一次前向：前缀因果段按 AR 验证上一轮草稿，末尾 k 组掩码按组内双向一步扩散为每种接受结果预起草；1.5B / 8B 在单 H100、batch 1 下 tokens/s 为同尺寸 AR 的 4.71× / 5.91×。",
+      "reading": "papers/tidar.html",
+      "tldr": "TiDAR 让同一个模型在一次前向里同时做两件事：用因果注意力验证上一轮的草稿，用块内双向注意力一步为下一轮的每种可能接受结果预先起草。从 Qwen2.5-1.5B 和 Qwen3-8B 继续预训练后，它在单张 H100、批大小 1 时每秒产出的 token 数是同尺寸自回归模型的 4.71 倍和 5.91 倍，8B 的平均分比 Qwen3-8B 低约 2.8 分。",
       "tags": ["自推测", "结构化注意力掩码", "一步扩散起草", "精确 KV"],
       "facts": {
         "noise": "扩散段全部设为 [M]（训练与推理一致的一步起草）",
@@ -4510,10 +4612,10 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "Nemotron-Diff",
       "full_title": "Nemotron-Labs-Diffusion: A Tri-Mode Language Model Unifying Autoregressive, Diffusion, and Self-Speculation Decoding",
-      "authors": ["Yonggan Fu", "…", "Pavlo Molchanov"],
+      "authors": ["Yonggan Fu", "Lexington Whalen", "Abhinav Garg", "Chengyue Wu", "Maksim Khadkevich", "Nicolai Oswald", "Enze Xie", "Daniel Egert", "Sharath Turuvekere Sreenivas", "Shizhe Diao", "Chenhan Yu", "Ye Yu", "Weijia Chen", "Sajad Norouzi", "Jingyu Liu", "Shiyi Lan", "Ligeng Zhu", "Jin Wang", "Jindong Jiang", "Morteza Mardani", "Mehran Maghoumi", "Song Han", "Ante Jukić", "Nima Tajbakhsh", "Jan Kautz", "Pavlo Molchanov"],
       "org": "NVIDIA",
       "date": "2026-07",
-      "venue": "",
+      "venue": "预印本（arXiv / NVIDIA 技术报告）",
       "arxiv": "2607.05722",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2607.05722" },
@@ -4521,13 +4623,14 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/nvidia/nemotron-labs-diffusion" }
       ],
       "page": "legacy/tracks/dllm/13-hybrid.html#nemotron-diffusion",
-      "tldr": "AR 与块扩散联合训练（L_AR + 0.3·L_diff）的三模式模型：可按并发在 AR、扩散、自推测（扩散起草 + AR 验证）之间切换；3B / 8B / 14B 开放权重，8B 在 SGLang 上线性自推测相对 AR 模式最高 3.3×（GB200）。",
+      "reading": "papers/nemotron-diffusion.html",
+      "tldr": "NVIDIA 在 Ministral3 基座上用“AR 损失 + 0.3 倍块扩散损失”继续训练出 3B / 8B / 14B 模型，同一套权重只换注意力掩码，就能做普通 AR 生成、块扩散并行生成，或“扩散一次起草、AR 一次验证”的自推测解码。低并发时自推测在 GB200 上比本模型的 AR 模式快 3.3 倍（定制 kernel 下 3.97 倍），高并发时则应退回 AR 模式。",
       "tags": ["三模式", "自推测", "联合训练", "SGLang"],
       "facts": {
         "noise": "块扩散（块内掩码，1/t 加权）与 AR 联合",
         "init": "Ministral3 Base；1T tokens 纯 AR → 300B 联合 → 45B SFT；256×H100",
         "attn": "训练双流，干净流严格因果；AR / 自推测模式 KV 精确，扩散模式块完成后刷新",
-        "decode": "扩散模式 TPF 2.57；线性自推测 5.99、二次 6.38（Tab. 5 口径；线性每轮 2 次前向）",
+        "decode": "扩散模式 TPF 2.57；线性自推测 5.99、二次 6.38（Tab. 5；按官方评测代码为每次前向的数，线性每轮 2 次前向）",
         "train": "L_AR + 0.3·L_diff，全局 token 平均；草稿路径 LoRA（o_proj，秩 128）以 LK-hybrid + CE 对齐 AR 验证器",
         "eval": "8B Instruct 10 项平均：AR 模式 63.61、线性 SS 62.81 vs Qwen3-8B 62.75（Tab. 5）；SGLang batch 1 相对 AR 模式最高 3.3×（GB200；优化 kernel 3.97×）",
         "limits": "TPF 与“4×”口径不一；自推测只接受连续前缀；高并发需退回 AR"
@@ -4673,15 +4776,16 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/Zigeng/dParallel-LLaDA-8B-instruct" }
       ],
       "page": "legacy/tracks/dllm/15-learned-parallel.html",
-      "tldr": "沿模型自己的半自回归轨迹自蒸馏，并只在已预测正确的掩码位置上最小化熵（确定性强制），把按顺序收敛的置信度压成早期并行收敛；LLaDA-8B-Instruct 在 GSM8K 上 256 步降到 30 步而精度不降。",
+      "reading": "papers/dparallel.html",
+      "tldr": "作者发现开源扩散语言模型每一步只对紧挨已知内容的少数位置有把握，于是让模型在自己生成且答对的答案上用 LoRA 自蒸馏，并对已经预测对的位置压低预测熵，让更多位置提前同时变得确定。LLaDA-8B-Instruct 在 GSM8K 上解码步数从 256 降到 30，单条请求延迟快 8.5 倍，准确率基本不变（75.7% → 76.1%）。",
       "tags": ["训练式并行解码", "自蒸馏", "熵最小化", "LoRA"],
       "facts": {
         "noise": "掩码扩散（沿用底座）；训练画布用半自回归前向掩码：上下文块干净、活动块 50% 掩码、未来块全掩码",
         "init": "LLaDA-8B-Instruct / Dream-7B-Instruct 上 LoRA 微调；LLaDA 版约 92k 条自生成、答案正确的样本",
-        "attn": "全双向，结构不变；论文中 dParallel 行未注明是否叠加 KV cache",
+        "attn": "全双向，结构不变；论文未注明是否叠加 KV cache，官方 README 说明测速时未用 KV cache",
         "decode": "熵阈值（0.45 / 0.5）半自回归解码，块 32、长 256；LLaDA GSM8K 30 步（约 8.5 token/步）",
         "train": "活动块掩码位置交叉熵 + β=2 × 已预测正确位置的温度化熵（T=0.5）；代码另加互补掩码",
-        "eval": "LLaDA-8B-Instruct GSM8K 75.7%→76.1%、18.6 s→2.2 s；MBPP 256→24 步、42.4%→40.8%（RTX 6000 Ada，batch 未注明）",
+        "eval": "LLaDA-8B-Instruct GSM8K 75.7%→76.1%、18.6 s→2.2 s；MBPP 256→24 步、42.4%→40.8%（RTX 6000 Ada；论文未注明 batch，官方评测脚本为 batch 1）",
         "limits": "只用数学提示训练，MATH 33.5%→31.5%；精度受底座限制；论文中训练硬件、数据量与 LoRA 设置前后不一"
       }
     },
@@ -4704,7 +4808,8 @@ window.ATLAS_REGISTRY = {
         { "label": "AUP Leaderboard", "url": "https://huggingface.co/spaces/d3LLM/dLLM_Leaderboard" }
       ],
       "page": "legacy/tracks/dllm/15-learned-parallel.html#d3llm",
-      "tldr": "用教师逐 token 解码的顺序（伪轨迹）构造训练中间态，配掩码率与窗口双课程，推理时熵驱动多块并行解码并刷新 KV cache；提出把精度–并行度曲线压成一个数的 AUP 指标。",
+      "reading": "papers/d3llm.html",
+      "tldr": "d3LLM 先让原模型逐个 token 地解码并记下它揭开各位置的顺序，再按这个顺序决定训练时遮哪些位置，配合掩码率与窗口两个课程做自蒸馏；推理时让几个块按熵阈值同时解码，并延迟写入、定期刷新 KV 缓存。论文还提出把精度和并行度合成一个数的 AUP 指标；在 LLaDA 上每次前向约写 9 个 token 而 GSM8K 精度不降，H100 单卡、batch 1 时比 Qwen2.5-7B-Instruct 快约 5 倍（A100 上约 3.6 倍）。",
       "tags": ["训练式并行解码", "伪轨迹蒸馏", "多块解码", "AUP"],
       "facts": {
         "noise": "掩码扩散；训练中间态按教师解码顺序揭开、内容取数据真值；掩码率 0→0.8 课程",
@@ -4815,7 +4920,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Zanlin Ni", "Shenzhi Wang", "Yang Yue", "Tianyu Yu", "Weilin Zhao", "Yeguo Hua", "Tianyi Chen", "Jun Song", "Cheng Yu", "Bo Zheng", "Gao Huang"],
       "org": "Tsinghua University; Alibaba Group",
       "date": "2026-01",
-      "venue": "ICML 2026 (Oral)",
+      "venue": "ICML 2026 (Oral, Outstanding Paper Award)",
       "arxiv": "2601.15165",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2601.15165" },
@@ -4823,7 +4928,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Project", "url": "https://nzl-thu.github.io/the-flexibility-trap" }
       ],
       "page": "legacy/tracks/dllm/16-order-limits.html#flexibility-trap",
-      "tldr": "发现置信度驱动的任意顺序解码会推迟高熵的连接词、压低分叉处的熵，使 Pass@k 低于左到右；RL 阶段把 dLLM 当 AR 策略直接做标准 GRPO（JustGRPO），GSM8K 89.1%，推理仍可并行解码。",
+      "reading": "papers/flexibility-trap.html",
+      "tldr": "在数学和代码题上，按置信度挑位置的“任意顺序”解码会把 Therefore、Since 这类决定推理走向的高熵词推迟到最后再补，使多次采样覆盖的解法变少，Pass@k 反而低于从左到右。据此提出 JustGRPO：RL 训练时把扩散模型当成从左到右的策略、用标准 GRPO 精确优化，LLaDA-8B-Instruct 的 GSM8K 达到 89.1%，推理时仍可并行解码。",
       "tags": ["任意顺序", "RL", "GRPO", "Pass@k"],
       "facts": {
         "noise": "掩码扩散（LLaDA 8B Instruct），预训练不变",
@@ -4916,7 +5022,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/Gen-Verse/TraDo-8B-Instruct" }
       ],
       "page": "legacy/tracks/dllm/17-rl.html#tracerl",
-      "tldr": "沿模型实际推理轨迹做 RL：以前几步已定稿的 token 为条件计算每步 token 的概率（收缩参数 s 合并相邻步），并配扩散价值模型；在 SDAR 上得到 TraDo-4B/8B 与首个长 CoT dLLM。",
+      "reading": "papers/tracerl.html",
+      "tldr": "扩散语言模型做 RL 时拿不到精确的逐 token 概率，以前的方法用随机掩码近似，和实际解码顺序对不上；TraceRL 记下采样时每一步揭开了哪些 token，训练时在同样的状态下重算概率，并可配一个扩散价值模型。作者在 SDAR 块扩散底座上只用它训练出 TraDo-4B/8B，MATH500 比 RL 前高 4–5 个点。",
       "tags": ["RL", "轨迹", "价值模型", "块扩散"],
       "facts": {
         "noise": "掩码扩散；块扩散（SDAR，块 4）与全注意力（Dream）均适用",
@@ -4969,7 +5076,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Zhihui Xie", "Jiacheng Ye", "Lin Zheng", "Jiahui Gao", "Jingwei Dong", "Zirui Wu", "Xueliang Zhao", "Shansan Gong", "Xin Jiang", "Zhenguo Li", "Lingpeng Kong"],
       "org": "The University of Hong Kong; Huawei Noah's Ark Lab",
       "date": "2025-09",
-      "venue": "",
+      "venue": "arXiv 技术报告",
       "arxiv": "2509.01142",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2509.01142" },
@@ -4977,7 +5084,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/Dream-org/dream-coder-7b-68761cfa0e218f0776a84ee7" }
       ],
       "page": "legacy/tracks/dllm/18-code.html#dream-coder",
-      "tldr": "完全基于公开数据的 7B 代码 dLLM：Qwen2.5-Coder 初始化 + Dream 配方，SFT 用随机截断与 [PAD] 惩罚，RL 用 GRPO + 互补掩码；生成顺序随任务出现草图优先、左到右、交错三种模式（定性）。LiveCodeBench pass@1 21.4%。",
+      "reading": "papers/dream-coder.html",
+      "tldr": "港大与华为诺亚从 AR 代码模型 Qwen2.5-Coder-7B 出发，用 3220 亿个公开 token 把它改造成 7B 掩码扩散模型，再做 SFT（随机截断、推理时压低 [PAD]）和带互补掩码的 GRPO。Instruct 版在 LiveCodeBench（2410–2505）上 pass@1 为 21.4%，略高于同底座的 Qwen2.5-Coder-7B-Instruct，但 HumanEval、MBPP、BigCodeBench 仍低于它，且所有分数都在每步只定一个 token 的设置下测得。",
       "tags": ["代码", "开放配方", "草图优先", "RL"],
       "facts": {
         "noise": "掩码扩散 + 上下文自适应 token 级噪声重排（Dream）",
@@ -4999,7 +5107,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Chenghao Fan", "Wen Heng", "Bo Li", "Sichen Liu", "Yuxuan Song", "Jing Su", "Xiaoye Qu", "Kai Shen", "Wei Wei"],
       "org": "Huazhong University of Science and Technology; ByteDance Seed",
       "date": "2026-01",
-      "venue": "",
+      "venue": "arXiv 预印本",
       "arxiv": "2601.15892",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2601.15892" },
@@ -5007,7 +5115,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/ByteDance-Seed/stable-diffcoder" }
       ],
       "page": "legacy/tracks/dllm/18-code.html#stable-diffcoder",
-      "tldr": "从 Seed-Coder-8B 退火前的检查点出发，用块大小为 4 的块扩散持续预训练 1.3T token（配 warmup 与块级截断噪声），再复用 Seed-Coder 的 SFT 数据。多数代码基准超过它的 AR 对照，但最后一段的 token 数、DPO 与评测模板并未对齐。",
+      "reading": "papers/stable-diffcoder.html",
+      "tldr": "从 Seed-Coder-8B 退火前的检查点出发，用块长为 4 的块扩散继续预训练 1.3T token（配 warmup 与块级截断噪声），再复用 Seed-Coder 的 SFT 数据。指令模型 14 项指标里有 9 项超过这个 AR 对照，但两边最后一段的训练量、上下文长度和 DPO 并不一致，AR 数字是照抄的，论文也没有测速度。",
       "tags": ["代码", "块扩散", "持续预训练", "AR 对照"],
       "facts": {
         "noise": "块内掩码扩散，B=4；块内掩码率截断到 ≥1/B，并保证至少一个位置被掩；warmup 期间掩码率上限从 1e-3 线性升到 1，且不乘 w(t)",
@@ -5486,6 +5595,10 @@ window.ATLAS_REGISTRY = {
     { "from": "shotstream", "to": "causalcine", "label": "双缓存对照内容路由", "kind": "baseline" },
     { "from": "d3pm", "to": "sedd", "label": "离散状态空间扩散 → 学概率比" },
     { "from": "d3pm", "to": "mdlm", "label": "吸收态转移即掩码扩散" },
+    { "from": "diffusion-lm", "to": "flm", "label": "连续去噪 → 一步 flow map" },
+    { "from": "diffusion-lm", "to": "langflow", "label": "连续嵌入扩散 → 学习噪声日程" },
+    { "from": "diffusion-lm", "to": "elf", "label": "连续嵌入扩散 → 嵌入空间流匹配" },
+    { "from": "dream-coder", "to": "dreamon", "label": "固定长度画布 → 可变长度补全" },
     { "from": "sedd", "to": "radd", "label": "吸收态得分=条件概率" },
     { "from": "sedd", "to": "mdlm", "label": "对照 SEDD 困惑度", "kind": "baseline" },
     { "from": "sedd", "to": "md4", "label": "重训 SEDD 作对照", "kind": "baseline" },

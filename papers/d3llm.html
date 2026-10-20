@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>d3LLM 伪轨迹蒸馏 精读</title>
+<meta name="description" content="d3LLM（ICML 2026）逐节精读：按老师自己的解码顺序构造训练输入的伪轨迹蒸馏、掩码率与窗口两个课程、熵阈值多块并行解码与 KV 缓存刷新、把精度和并行度合成一个数的 AUP 指标，以及“比 AR 快 5 倍”在什么条件下成立。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="d3llm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ICML 2026</div>
+  <h1>d3LLM：用伪轨迹蒸馏打造超快的扩散语言模型</h1>
+  <p class="en-title">d3LLM: Ultra-Fast Diffusion LLM using Pseudo-Trajectory Distillation</p>
+  <div class="paper-authors">Yu-Yang Qian<sup>1,2</sup>, Junda Su<sup>1</sup>, Lanxiang Hu<sup>1</sup>, Peiyuan Zhang<sup>1</sup>, Zhijie Deng<sup>4</sup>, Peng Zhao<sup>2,3,†</sup>, Hao Zhang<sup>1,†</sup></div>
+  <div class="paper-affil"><sup>1</sup>加州大学圣地亚哥分校（UC San Diego）　<sup>2</sup>南京大学人工智能学院　<sup>3</sup>南京大学计算机软件新技术国家重点实验室　<sup>4</sup>上海交通大学　<sup>†</sup>通讯作者（按 arXiv v3 署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2601.07568" target="_blank" rel="noopener">arXiv 2601.07568 ↗</a>
+    <a class="pill" href="https://openreview.net/forum?id=rzBAQT2Fkg" target="_blank" rel="noopener">ICML 2026 · OpenReview ↗</a>
+    <a class="pill" href="https://github.com/hao-ai-lab/d3LLM" target="_blank" rel="noopener">Code: hao-ai-lab/d3LLM ↗</a>
+    <a class="pill" href="https://huggingface.co/d3LLM" target="_blank" rel="noopener">权重：d3LLM-LLaDA / Dream / Coder ↗</a>
+    <a class="pill" href="https://huggingface.co/spaces/d3LLM/dLLM_Leaderboard" target="_blank" rel="noopener">AUP 排行榜 ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/15-learned-parallel.html#d3llm">旧版结构拆解：训练式并行解码</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>157</b><span>GitHub star（hao-ai-lab/d3LLM，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。标“推算”的数字是本站根据论文或官方仓库的数据算出来的，不是论文原话。本页依据 arXiv v3（2026-08-06，ICML 2026 版本），并对照了官方代码与仓库里公开的 AUP 数据。论文以 arXiv 非独占许可发布，不允许转载原图，所以本页的图都是本站自己画的示意图或按论文数字重画的简图，旁边附有原图链接。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>扩散语言模型（diffusion LLM，下面简称 dLLM）生成文字的方式和 ChatGPT 这类自回归（AR）模型不同。AR 模型从左到右一次写一个 token；dLLM 先摆出一整段被遮住的空位，然后每一步对所有空位同时做预测，挑一部分填上，反复多轮直到填满。因为每一步都能同时看到所有空位的预测，理论上一步可以填好几个 token，这就是 dLLM 最常被提到的速度优势。</p>
+<p>可是开源的 dLLM（LLaDA、Dream）实际用起来并不快。作者在引言里说它们每秒只能生成 20 个 token 左右，甚至比同样大小的 AR 模型还慢。原因在于：一步填很多个 token，答案就容易出错；为了保住质量，只能一步填一个，速度优势也就没了。论文把这种此消彼长称为<b>精度–并行度权衡</b>，并认为已有的加速方法大多只是在这条权衡曲线上换了个位置，而没有把曲线本身往外推。</p>
+<p>d3LLM 在训练和推理两头各做了一件事。<b>训练时</b>，它先让原模型（老师）一个一个 token 地把答案解出来，记下老师揭开各个位置的先后顺序，称为<b>伪轨迹</b>；然后按这个顺序决定训练输入里哪些位置被遮住，而不是像标准训练那样随机遮，并配上“由易到难”的课程。<b>推理时</b>，它让后面的块不必等前面的块写完就开始解码（多块并行），用预测分布的熵来判断“有没有把握”，并配一套延迟写入、定期刷新的 KV 缓存。此外，论文还提出了一个评价指标 <b>AUP</b>（Accuracy Under Parallelism，并行度下的精度），把“精度随并行度变化”的曲线压成一个数，用来比较各种加速方法。</p>
+<p>论文报告的代表性结果是：基于 LLaDA 的 d3LLM 在 GSM8K-CoT 上平均每次前向写出 9.11 个 token，精度 73.1%，和原版 LLaDA 的 72.6% 持平；在 H100 上用 HuggingFace 推理后端、batch 1 测，每秒生成 288.9 个 token，是原版 LLaDA 的 10.3 倍、AR 模型 Qwen-2.5-7B-Instruct 的 5.0 倍（A100 上是 3.6 倍）。这些倍数各自是在什么条件下测出来的，第 4 节会逐一交代。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>“每次前向写几个 token”（TPF）和“每秒写几个 token”（TPS）有什么不同？论文为什么用前者来定义 AUP？</li>
+  <li>AUP 怎么算？它什么时候奖励一个方法、什么时候惩罚它？它的排名主要由什么决定？</li>
+  <li>“伪轨迹”到底是什么？它和随机遮盖相比，改变了训练里的哪一部分？</li>
+  <li>多块并行解码里的五种块状态分别在做什么？KV 缓存为什么要延迟写入，还要定期刷新？</li>
+  <li>d3LLM 和 dParallel、D2F、Fast-dLLM v2 分别是什么关系？</li>
+  <li>“比 AR 快 5 倍”是在什么硬件、什么推理框架、什么 batch、什么任务上测的？在这个速度下精度掉了多少？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：开源 dLLM 为什么快不起来，又为什么一快就掉点</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>dLLM 号称可以并行解码，为什么开源模型实际上又慢、又常常不如同样大小的 AR 模型准？已有的加速方法各自偏向“快”还是“准”？作者认为把两者绑在一起的根本原因有哪两个，d3LLM 打算怎么分别处理？</div>
+
+<div class="note-pre"><b>先补一点背景：掩码扩散语言模型怎么生成一段答案。</b>
+<p>LLaDA、Dream 这类模型属于<b>掩码扩散</b>。生成前，先在提示后面摆出一段固定长度（比如 256 个位置）的“画布”，每个位置都填一个特殊的遮盖符 [MASK]。之后每一步，模型读入“提示 + 当前画布”，对每一个还被遮住的位置给出一个词表上的概率分布；解码规则再从中挑出一部分位置，把它们换成预测出的 token（称为“揭开”或“定稿”），其余位置继续遮着，进入下一步。所有位置都揭开后，生成结束。原理和训练目标见 <a href="mdlm.html">MDLM 精读</a> 与 <a href="llada.html">LLaDA 精读</a>。</p>
+<p>每一步要把整段画布送进模型算一遍，称为一次<b>前向</b>（forward pass）。如果每步只揭开 1 个位置，256 个位置就要 256 次前向；如果平均每步揭开 4 个，就只要 64 次。所以“每次前向揭开几个 token”直接决定了要算多少次。LLaDA 的常用设置是把画布切成每 32 个位置一块，从左到右一块一块地写，块内再按置信度挑位置，这叫<b>半自回归</b>（semi-autoregressive）解码。</p>
+<p>为什么不一步多揭开几个？因为同一步里揭开的位置，是<b>各自按自己的分布</b>独立选出来的，模型没有机会让它们互相协调。举个例子：两个相邻空位要填一个城市名，可能的答案是“New York”或“San Francisco”。第一个空位的分布大约是 New 一半、San 一半，第二个空位是 York 一半、Francisco 一半。如果两个空位在同一步各填各的，有一半的概率拼出“New Francisco”这种错误组合；如果先填好第一个，第二个空位看到“New”之后就几乎只会选 York。所以，一步揭开的位置越多，越容易出现这种互相矛盾的组合，答案的质量就越差。下面这个小演示用一个概率完全已知的玩具例子展示这一点：把置信度阈值调低，每步揭开的位置变多、总步数变少，出错的概率随之上升。</p>
+</div>
+<div data-widget="dllm-decode" data-focus="threshold"></div>
+
+<p>理解了上面这一点，引言里的现象就好解释了。作者先对比了两类模型：闭源的 Mercury、Gemini Diffusion、Seed Diffusion 报告在某些设置下每秒能生成 1000 个 token 以上；开源的 LLaDA 和 Dream 却只有每秒 20 个左右，常常比同等大小的 AR 模型还慢，精度也往往落后于它们。开源模型慢，是因为它们要保住精度，就只能接近“每步揭开 1 个”的保守设置，而每一步又要把整段画布重算一遍，比 AR 模型每步只算一个新 token 贵得多。</p>
+<p>针对这个问题，已经有不少加速方法。作者点名的两个最强方法是：<a href="fast-dllm-v2.html">Fast-dLLM v2</a>，它把 AR 模型微调成块扩散模型；以及 <a href="dparallel.html">dParallel</a>，它用一种“确定性强制”的蒸馏让模型敢在一步里揭开更多 token。作者说这两种方法的吞吐都接近 AR 基线的两倍。另一条研究线则致力于提升 dLLM 的能力，例如更好的训练方法、更长的上下文、多模态和推理能力，以及更大更好的数据。</p>
+<p>作者的核心观察是：这些工作大多只顾了一头。在第 4 节的实验里，<a href="d2f.html">D2F</a> 这类方法追求并行度，但精度明显低于同样大小的 AR 模型；Fast-dLLM v2 这类方法保住了精度，并行度却不高。换句话说，大部分改进只是沿着同一条“精度–并行度”曲线滑动：并行度高了，精度就低了，反过来也一样。作者认为这种权衡是 dLLM 天生的，于是问题变成：<b>怎样把这条曲线整体往外推？</b></p>
+<p>作者找到两个把精度和并行度绑在一起的原因：</p>
+<ul>
+  <li><b>训练方面。</b>标准的 dLLM 训练是随机遮盖：随机挑一部分位置遮住，让模型预测它们。这样训练出来的模型，并没有被告知“哪些位置可以放心地早点揭开”。于是推理时一旦想多揭开几个，模型就会把一些其实还没把握的位置也提前揭开，导致出错。</li>
+  <li><b>推理方面。</b>常规的解码只在当前这一个块里挑位置，一个块写完才能开始下一个，并行度的上限因此受限。D2F 把解码扩展到多个块同时进行，并行度上去了，但后面块的预测依赖前面块里还不完整、甚至有错的内容，生成质量会下降。</li>
+</ul>
+<p>d3LLM 对应地给出两件事。训练时用<b>伪轨迹蒸馏</b>：不只用标准答案，还把老师模型自己的解码轨迹拿来提供“中间状态”的监督，告诉学生哪些 token 可以早点揭开，并用课程学习逐步加大难度。推理时用<b>基于熵的多块解码</b>：几个块同时解码，优先揭开低熵（高把握）的 token；再用<b>KV 缓存刷新</b>定期重算之前缓存的状态，以减轻质量下降。为了评价这些改动，作者提出 AUP 指标。论文宣称的结果是：在 10 个任务中的 9 个上 AUP 最高；相对 AR 模型 Qwen-2.5-7B-Instruct 快 3.6–5 倍（取决于 GPU）；相对原版 LLaDA / Dream 快约 10 倍，精度下降可以忽略；在代码生成上，第一次做出了与 AR 代码模型性能相当的高效 dLLM 代码模型，相对原版 Dream-Coder 快 8 倍。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li>闭源模型的“每秒 1000 个 token 以上”是厂商自己报告的数字，模型大小和测量条件都没有公开（参见 <a href="mercury.html">Mercury 精读</a>）。开源模型的“每秒 20 个左右”则和推理实现关系很大，论文里用的是未经专门优化的 HuggingFace 实现。</li>
+  <li>“10 个任务中的 9 个”指 LLaDA 组和 Dream 组各 5 个任务，不包括附录里的代码模型任务。</li>
+  <li>“相对原版 Dream-Coder 快 8 倍”在正文和附录里都找不到对应的测速表格；附录表 9 只给出了 d3LLM-Coder 的 TPF（2.88 和 2.50）、精度和 AUP。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 问题表述：AUP，把“精度–并行度曲线”压成一个数</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个方法更快但掉了两分，另一个方法更准但慢一些，到底谁更好？已有论文要么只报速度（每秒 token 数、每次前向 token 数），要么只报精度，很难回答这个问题。作者因此设计了一个同时反映两者的指标 AUP。这一节先讲清楚“并行度”是怎么量的，再拆开 AUP 的每一项，最后用官方公开的数据实际算一遍，看看这个数主要由什么决定。</div>
+
+<h4 id="n-2-1">2.1 并行度怎么量：TPF、TPS 和阈值</h4>
+<div class="note-pre"><b>先补一点背景：TPF 和 TPS 是两回事。</b>
+<p><b>TPF</b>（tokens per forward，每次前向的 token 数）= 生成的 token 数 ÷ 前向次数。AR 模型每次前向只生成 1 个 token，TPF 恒为 1（不算投机解码）。原版 LLaDA 用 256 步填 256 个位置时，按定义也记作 1。按官方评测代码，分子只数真正有用的 token：生成结果先按停止串截断，再去掉结束符，所以答案写完之后的填充不算数。</p>
+<p><b>TPS</b>（tokens per second，每秒 token 数）= 生成的 token 数 ÷ 墙钟时间。它是用户真正感受到的速度，但它同时取决于 GPU 型号、算子是否融合、用的是哪个推理框架、batch 多大，以及<b>每次前向本身有多贵</b>。</p>
+<p>最后这一点最容易被忽略。AR 模型有 KV 缓存，每一步只需要为 1 个新 token 做计算；dLLM 的一次前向通常要处理一整段画布（几十到几百个位置）。所以 TPF 高不等于快：如果一次前向的成本是 AR 一步的 3 倍，TPF 得超过 3 才能在墙钟上打平。用论文的数字推算一下：d3LLM-LLaDA 在 H100 上是 288.9 TPS、9.11 TPF，相当于每秒约 31.7 次前向，每次约 31.5 毫秒；同一环境下 Qwen-2.5-7B-Instruct 是 57.3 TPS，每步约 17.5 毫秒（推算）。也就是说，在这个设置里 d3LLM 的一次前向大约是 AR 一步的 1.8 倍贵，它靠每次写 9 个 token 才换来 5 倍的墙钟加速。</p>
+</div>
+<p>大多数 dLLM 加速方法都带有一个可以调的“胆量”旋钮。例如 <a href="fast-dllm.html">Fast-dLLM</a> 的置信度阈值：每一步只揭开置信度高于阈值的位置。阈值调低，每步揭开得多、TPF 变高，但精度往往下降；阈值调高则相反。把阈值从高到低扫一遍，就得到一串（TPF，精度）点，连起来就是一条<b>精度–并行度曲线</b>（原文图 1 是它的示意）。作者认为，比较两个方法应该比较整条曲线，而不是曲线上某一个点。</p>
+
+<h4 id="n-2-2">2.2 AUP 的定义，逐项拆开</h4>
+<p>要把一条曲线变成一个数，最直接的办法是算曲线下的面积（AUC）。但作者指出，普通的 AUC 有一个严重的漏洞：它会奖励“靠牺牲精度换速度”的方法。曲线右边精度已经崩掉的那一段，因为横向很宽，仍然能贡献很大的面积。举一个本站编的例子：某方法逐个解码时精度 74%，把 TPF 推到 10 时精度掉到 40%。按普通 AUC（从 0 到 1 的矩形加上 1 到 10 的梯形）算，它的面积是 74 + ½×9×(74+40) = 587（推算），和下文 d3LLM 的 637.7 差不多，可是这个方法在 TPF 10 时已经没法用了。所以需要一个指标，先强烈要求精度留在高位，然后才奖励更高的并行度。</p>
+<p>AUP 就是这样一个<b>加权</b>的曲线下面积。设一个方法测得 \(m\) 个点 \(\mathcal S=\{(\rho_i,y_i)\}_{i=1}^{m}\)，按并行度从小到大排好：\(\rho_1&lt;\rho_2&lt;\dots&lt;\rho_m\)，其中 \(\rho_i\) 是 TPF，\(y_i\in[0,100]\) 是百分制精度。计算分三步：</p>
+<ol>
+  <li><b>先截断。</b>定义最低可接受精度 \(y_{\min}=y_1-5\)，也就是比“并行度最低的那个点”的精度低 5 个百分点。精度低于它的点整个丢掉，不参与计算。上面那个编出来的方法，第二个点 40% 远低于 74−5=69%，会被直接丢掉，它的 AUP 只剩第一项 74（推算）。</li>
+  <li><b>再加权。</b>每个点的高度不直接用 \(y\)，而用 \(y\cdot W(y)\)，权重是
+    <div class="formula">$$W(y)=\min\!\Big(e^{-\alpha\,(1-y/y_{\max})},\;1\Big),\qquad \alpha=3$$</div>
+    其中 \(y_{\max}\) 是<b>这个任务上所有参与比较的方法达到的最高精度</b>。精度等于 \(y_{\max}\) 时权重为 1；精度越低于 \(y_{\max}\)，权重按指数下降。</li>
+  <li><b>最后求面积。</b>
+    <div class="formula">$$\mathrm{AUP}=\rho_1y_1+\sum_{i=2}^{m}(\rho_i-\rho_{i-1})\,\frac{y_iW(y_i)+y_{i-1}W(y_{i-1})}{2}$$</div>
+    第一项是从 0 到 \(\rho_1\) 的一个矩形，高度是 \(y_1\)，<b>没有乘权重</b>；后面每一项是相邻两点之间的一个梯形，高度是加权后的精度。</li>
+</ol>
+<p>权重到底有多狠？以默认的 \(\alpha=3\) 推算：精度是最高分的 98% 时，权重 0.94；95% 时，0.86；90% 时，0.74；80% 时，0.55。再乘上精度本身，一个点的高度在精度为最高分 95% 时只剩最高分的 0.95×0.86≈0.82 倍，在 90% 时只剩约 0.67 倍（均为推算）。作者总结的直觉是两句话：并行度提高而精度不掉，AUP 会涨很多；靠牺牲精度换来的并行度，AUP 只涨一点。</p>
+<div class="dia">
+  <div class="dia-title">简图：权重 \(W\) 随“精度占最高分的比例”变化（按论文公式画）</div>
+  <svg class="dg" viewBox="0 0 960 270" role="img" aria-label="AUP 权重函数在 alpha 等于 1、3、5 时随相对精度变化的曲线" style="--dg-min:720px">
+    <line class="grid-ln" x1="80" y1="40" x2="560" y2="40"/>
+    <line class="grid-ln" x1="80" y1="135" x2="560" y2="135"/>
+    <line x1="80" y1="230" x2="560" y2="230" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="80" y1="230" x2="80" y2="30" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="74" y="230" class="t-r t-xs">0</text>
+    <text x="74" y="135" class="t-r t-xs">0.5</text>
+    <text x="74" y="40" class="t-r t-xs">1</text>
+    <text x="80" y="246" class="t-c t-xs">70%</text>
+    <text x="240" y="246" class="t-c t-xs">80%</text>
+    <text x="400" y="246" class="t-c t-xs">90%</text>
+    <text x="560" y="246" class="t-c t-xs">100%</text>
+    <text x="320" y="262" class="t-c t-sm">精度 ÷ 本任务最高精度 \(y/y_{\max}\) →</text>
+    <text x="28" y="135" class="t-c t-sm" transform="rotate(-90 28 135)">权重 W</text>
+    <polyline points="80.0,89.2 112.0,86.4 144.0,83.5 176.0,80.5 208.0,77.5 240.0,74.4 272.0,71.3 304.0,68.1 336.0,64.8 368.0,61.5 400.0,58.1 432.0,54.6 464.0,51.1 496.0,47.5 528.0,43.8 560.0,40.0" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+    <polyline points="80.0,152.8 112.0,148.0 144.0,142.9 176.0,137.5 208.0,131.8 240.0,125.7 272.0,119.3 304.0,112.4 336.0,105.2 368.0,97.4 400.0,89.2 432.0,80.5 464.0,71.3 496.0,61.5 528.0,51.1 560.0,40.0" style="fill:none;stroke:var(--c-enc);stroke-width:3"/>
+    <polyline points="80.0,187.6 112.0,183.1 144.0,178.2 176.0,172.8 208.0,166.8 240.0,160.1 272.0,152.8 304.0,144.6 336.0,135.6 368.0,125.7 400.0,114.8 432.0,102.6 464.0,89.2 496.0,74.4 528.0,58.1 560.0,40.0" style="fill:none;stroke:var(--c-loss);stroke-width:2"/>
+    <circle cx="520" cy="53.7" r="5" style="fill:var(--c-enc)"/>
+    <text x="512" y="70" class="t-r t-xs">d3LLM-LLaDA · GSM8K-CoT：97.5% → 0.93</text>
+    <circle cx="184" cy="136" r="5" style="fill:var(--c-enc)"/>
+    <text x="192" y="152" class="t-xs">d3LLM-Dream · MATH：76.5% → 0.49</text>
+    <rect class="panel" x="600" y="34" width="345" height="200" rx="8"/>
+    <line x1="616" y1="58" x2="646" y2="58" style="stroke:var(--c-tgt);stroke-width:2"/>
+    <text x="654" y="58" class="t-sm">α = 1：宽松，主要奖励并行度</text>
+    <line x1="616" y1="82" x2="646" y2="82" style="stroke:var(--c-enc);stroke-width:3"/>
+    <text x="654" y="82" class="t-sm">α = 3：论文默认</text>
+    <line x1="616" y1="106" x2="646" y2="106" style="stroke:var(--c-loss);stroke-width:2"/>
+    <text x="654" y="106" class="t-sm">α = 5：严格，掉点罚得更重</text>
+    <text x="616" y="138" class="t-xs">α = 3 时：相对精度 95% → W = 0.86；</text>
+    <text x="616" y="156" class="t-xs">90% → 0.74；80% → 0.55（推算）。</text>
+    <text x="616" y="182" class="t-xs">精度离最高分只差一两个百分点时，W 接近 1，</text>
+    <text x="616" y="200" class="t-xs">AUP 基本等于“TPF × 精度”；差到 20% 以上，</text>
+    <text x="616" y="218" class="t-xs">同样的 TPF 只能拿到一半左右的面积。</text>
+  </svg>
+  <div class="dia-note">本站按论文公式画的简图。两个圆点是用官方仓库公开数据算出的实际位置：d3LLM-LLaDA 在 GSM8K-CoT 上精度离最高分很近，几乎不受罚；d3LLM-Dream 在 MATH 上比 Fast-dLLM v2 低约 10 个百分点，只拿到一半左右的权重。原文没有这张图，权重的形状对应 <a href="https://arxiv.org/html/2601.07568#S2.F1" target="_blank" rel="noopener">原文图 1 ↗</a> 里阴影的含义。</div>
+</div>
+
+<h4 id="n-2-3">2.3 用官方数据实际算一遍</h4>
+<p>论文说“扫描阈值得到一条曲线”。但打开官方仓库里用来算 AUP 的数据（<code>AUP_leaderboard/data_llada.yaml</code> 等），会发现表 1、表 2 里每个方法其实只有<b>两个点</b>：一个是 TPF=1、也就是每步只揭开一个 token 时的精度；另一个是论文表格里报告的那个工作点。用这两个点和论文公式重算，表 1、表 2 的 50 个 AUP 里有 46 个能精确对上；对不上的 4 个都在 D2F 和 Fast-dLLM v2 两行，原因是仓库数据和表格数字本身不一致（见第 4.3 节）。下面以 d3LLM-LLaDA 在 GSM8K-CoT 上的数字为例走一遍：</p>
+<ul>
+  <li>两个点是 \((1,\,74.02)\) 和 \((9.11,\,73.09)\)。第二个点只比第一个低不到 1 个百分点，没有被截断。</li>
+  <li>这个任务上所有方法的最高精度 \(y_{\max}=74.98\)，来自 D2F 逐个解码时的精度。于是 \(W(74.02)=0.962\)、\(W(73.09)=0.927\)，加权后的高度分别是 71.2 和 67.8。</li>
+  <li>第一项矩形：\(1\times74.02=74.0\)。梯形：\(\tfrac12\times(9.11-1)\times(71.2+67.8)=563.6\)。两项相加 637.7，和论文表 1 一致（推算）。</li>
+  <li>同样算 dParallel-LLaDA：两个点 \((1,\,74.0)\) 和 \((5.14,\,72.63)\)，得 358.1，也与表 1 一致（推算）。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">简图：d3LLM-LLaDA 在 GSM8K-CoT 上的 AUP 面积（按官方数据重画，纵轴从 0 开始）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="AUP 面积示意：一个未加权的矩形加一个加权梯形" style="--dg-min:720px">
+    <line class="grid-ln" x1="80" y1="70" x2="570" y2="70"/>
+    <line class="grid-ln" x1="80" y1="120" x2="570" y2="120"/>
+    <line class="grid-ln" x1="80" y1="170" x2="570" y2="170"/>
+    <line class="grid-ln" x1="80" y1="220" x2="570" y2="220"/>
+    <line x1="80" y1="270" x2="570" y2="270" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="80" y1="270" x2="80" y2="50" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="74" y="270" class="t-r t-xs">0</text>
+    <text x="74" y="220" class="t-r t-xs">20</text>
+    <text x="74" y="170" class="t-r t-xs">40</text>
+    <text x="74" y="120" class="t-r t-xs">60</text>
+    <text x="74" y="70" class="t-r t-xs">80</text>
+    <text x="80" y="286" class="t-c t-xs">0</text>
+    <text x="128" y="286" class="t-c t-xs">1</text>
+    <text x="224" y="286" class="t-c t-xs">3</text>
+    <text x="320" y="286" class="t-c t-xs">5</text>
+    <text x="416" y="286" class="t-c t-xs">7</text>
+    <text x="512" y="286" class="t-c t-xs">9</text>
+    <text x="325" y="306" class="t-c t-sm">每次前向写出的 token 数（TPF）→</text>
+    <text x="30" y="160" class="t-c t-sm" transform="rotate(-90 30 160)">精度（%）</text>
+    <rect x="80" y="85" width="48" height="185" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.5"/>
+    <polygon points="128,270 128,91.9 517.3,100.6 517.3,270" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+    <polygon points="128,91.9 128,85 517.3,87.3 517.3,100.6" style="fill:url(#hatch);stroke:none"/>
+    <line x1="128" y1="85" x2="517.3" y2="87.3" style="stroke:var(--c-enc);stroke-width:2.5"/>
+    <circle cx="128" cy="85" r="5" style="fill:var(--c-enc)"/>
+    <circle cx="517.3" cy="87.3" r="5" style="fill:var(--c-enc)"/>
+    <text x="136" y="72" class="t-xs">(1, 74.02)</text>
+    <text x="517" y="72" class="t-c t-xs">(9.11, 73.09)</text>
+    <text x="104" y="176" class="t-c t-xs">①</text>
+    <text x="104" y="192" class="t-c t-xs">74.0</text>
+    <text x="320" y="178" class="t-c t-sm">② 加权后的梯形</text>
+    <text x="320" y="198" class="t-c t-sm">563.6</text>
+    <line x1="330" y1="93" x2="360" y2="56" style="stroke:var(--text-3);stroke-width:1"/>
+    <text x="364" y="52" class="t-xs">斜纹 = 被权重 W 扣掉的面积</text>
+    <rect class="panel" x="600" y="40" width="345" height="240" rx="8"/>
+    <text x="616" y="64" class="t-b">怎么算（推算，与论文 637.7 一致）</text>
+    <text x="616" y="94" class="t-sm">y_max = 74.98（本任务所有方法的最高精度）</text>
+    <text x="616" y="118" class="t-sm">W(74.02) = 0.962，W(73.09) = 0.927</text>
+    <text x="616" y="142" class="t-sm">① 第一项：1 × 74.02 = 74.0（不加权）</text>
+    <text x="616" y="166" class="t-sm">② 梯形：½ × (9.11 − 1) × (71.2 + 67.8)</text>
+    <text x="616" y="188" class="t-sm">　　　　= 563.6</text>
+    <text x="616" y="216" class="t-b">AUP = 74.0 + 563.6 ≈ 637.7</text>
+    <text x="616" y="246" class="t-xs">若精度一点不掉、W 都等于 1，面积约为</text>
+    <text x="616" y="264" class="t-xs">9.11 × 74.02 ≈ 674；d3LLM 拿到了其中约 95%。</text>
+  </svg>
+  <div class="dia-note">本站按官方仓库 <code>AUP_leaderboard/data_llada.yaml</code> 的两个数据点和论文公式重画。浅绿矩形是第一项（不乘权重），浅蓝梯形是加权后的面积，斜纹是因为精度略低于 \(y_{\max}\) 而被扣掉的部分。论文的示意图见 <a href="https://arxiv.org/html/2601.07568#S2.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</div>
+</div>
+<p>从这个例子可以读出 AUP 的一个重要性质：当一个方法的精度只比最高分低一两个百分点时，权重接近 1，AUP 约等于“最高 TPF × 精度”再打一点折扣。这时候，<b>AUP 的大小主要由 TPF 决定</b>。把表 1、表 2 的 10 个任务逐一核对：在其中 9 个任务上，AUP 第一名就是 TPF 最高的方法；唯一的例外是 Dream 组的 MATH，Fast-dLLM v2 的精度（48.7%）比其他方法高出约 10 个百分点，d3LLM-Dream 的权重因此只剩一半左右，排名被反超（推算）。所以读 AUP 时可以这样理解：它首先是一个“并行度”分数，精度只有在落后得比较多（比如相对最高分低 5% 以上）时才会明显改变排名。</p>
+<p>下面这张图把 LLaDA 组在 GSM8K-CoT 上的数据画在同一张图里。因为每个方法只有两个点，所谓“曲线”其实是一条从 TPF=1 出发的线段。</p>
+<div class="dia">
+  <div class="dia-title">简图：LLaDA 组在 GSM8K-CoT 上的“精度–并行度曲线”（官方数据，纵轴放大）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="LLaDA 组各方法在 GSM8K-CoT 上的精度与 TPF" style="--dg-min:720px">
+    <line class="grid-ln" x1="80" y1="70" x2="580" y2="70"/>
+    <line class="grid-ln" x1="80" y1="130" x2="580" y2="130"/>
+    <line class="grid-ln" x1="80" y1="190" x2="580" y2="190"/>
+    <line class="grid-ln" x1="80" y1="250" x2="580" y2="250"/>
+    <line x1="80" y1="262" x2="580" y2="262" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="80" y1="262" x2="80" y2="36" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="74" y="250" class="t-r t-xs">72</text>
+    <text x="74" y="190" class="t-r t-xs">73</text>
+    <text x="74" y="130" class="t-r t-xs">74</text>
+    <text x="74" y="70" class="t-r t-xs">75</text>
+    <text x="128" y="276" class="t-c t-xs">1</text>
+    <text x="224" y="276" class="t-c t-xs">3</text>
+    <text x="320" y="276" class="t-c t-xs">5</text>
+    <text x="416" y="276" class="t-c t-xs">7</text>
+    <text x="512" y="276" class="t-c t-xs">9</text>
+    <text x="330" y="294" class="t-c t-sm">TPF →</text>
+    <text x="34" y="150" class="t-c t-sm" transform="rotate(-90 34 150)">精度（%）</text>
+    <line x1="128" y1="82.6" x2="213" y2="89.2" style="stroke:var(--c-tgt);stroke-width:2.5"/>
+    <circle cx="213" cy="89.2" r="4.5" style="fill:var(--c-tgt)"/>
+    <text x="221" y="82" class="t-xs">Fast-dLLM（2.77, 74.7）</text>
+    <line x1="128" y1="71.2" x2="218.2" y2="106.6" style="stroke:var(--c-act);stroke-width:2.5"/>
+    <circle cx="218.2" cy="106.6" r="4.5" style="fill:var(--c-act)"/>
+    <text x="226" y="110" class="t-xs">D2F（2.88, 74.4）</text>
+    <line x1="128" y1="130" x2="326.7" y2="212.2" style="stroke:var(--c-reg);stroke-width:2.5"/>
+    <circle cx="326.7" cy="212.2" r="4.5" style="fill:var(--c-reg)"/>
+    <text x="334" y="222" class="t-xs">dParallel（5.14, 72.6）</text>
+    <line x1="128" y1="128.8" x2="517.3" y2="184.6" style="stroke:var(--c-enc);stroke-width:3"/>
+    <circle cx="517.3" cy="184.6" r="5" style="fill:var(--c-enc)"/>
+    <text x="517" y="204" class="t-c t-xs">d3LLM（9.11, 73.1）</text>
+    <rect x="123" y="119" width="10" height="10" style="fill:none;stroke:var(--c-pred);stroke-width:2"/>
+    <circle cx="128" cy="217" r="4.5" style="fill:var(--text-3)"/>
+    <rect class="panel" x="610" y="36" width="335" height="226" rx="8"/>
+    <text x="626" y="58" class="t-b">AUP（α = 3，论文表 1）</text>
+    <text x="626" y="84" class="t-sm" style="fill:var(--c-enc)">d3LLM-LLaDA　637.7</text>
+    <text x="626" y="106" class="t-sm" style="fill:var(--c-reg)">dParallel-LLaDA　358.1</text>
+    <text x="626" y="128" class="t-sm" style="fill:var(--c-act)">D2F-LLaDA　213.8</text>
+    <text x="626" y="150" class="t-sm" style="fill:var(--c-tgt)">Fast-dLLM-LLaDA　205.8</text>
+    <text x="626" y="172" class="t-sm">LLaDA（灰点）72.6 · Qwen（方框）74.1</text>
+    <text x="626" y="202" class="t-xs">TPF = 1 处挤在一起的是各方法逐个解码时的</text>
+    <text x="626" y="220" class="t-xs">精度（74.0–75.0）。纵轴只跨 3.5 个百分点，</text>
+    <text x="626" y="238" class="t-xs">看上去很陡的下降其实不到 1.5 个百分点。</text>
+  </svg>
+  <div class="dia-note">本站按官方仓库 <code>data_llada.yaml</code> 重画。每条线段的左端是该方法每步只揭开一个 token 时的精度，右端是论文表 1 报告的工作点。原文图 4(a) 与附录图 5 用同样的数据画了各任务的曲线：<a href="https://arxiv.org/html/2601.07568#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>、<a href="https://arxiv.org/html/2601.07568#A1.F5" target="_blank" rel="noopener">原文图 5 ↗</a>。</div>
+</div>
+<p>还有一点需要单独说明：\(y_{\max}\) 取的是“这个任务上所有参与比较的方法”的最高精度，官方脚本里把 AR 基线 Qwen-2.5-7B-Instruct（Dream 组还有 EAGLE-3）也算了进去。这会让同一个模型的 AUP 随参照对象变化。例如 LLaDA 组的 MBPP，Qwen 的 63.6% 远高于所有 LLaDA 系方法（最高 42.0%），于是 d3LLM-LLaDA 的 AUP 是 88.4；如果把 Qwen 拿掉，\(y_{\max}\) 变成 42.0，同一组数据算出来的 AUP 是 168.4（推算）。这正是作者想要的效果（落后于 AR 模型的方法要受罚），但也意味着<b>不同论文报告的 AUP 只有在参照集合相同的情况下才能直接比较</b>。</p>
+
+<h4 id="n-2-4">2.4 两条补充说明：\(\alpha\) 怎么选，为什么不直接优化 AUP</h4>
+<p><b>\(\alpha\) 的选择。</b>\(\alpha\) 控制掉点的惩罚力度：\(\alpha\) 越大，精度一下降，并行度带来的面积就衰减得越快。在一个方法完全不掉点的理想情况下，所有权重都是 1，AUP 就退化成普通的曲线下面积。作者取 \(\alpha=3\) 作为默认值，认为它在并行度和精度之间比较平衡；附录 A.4 换了 \(\alpha\in\{1,2,3,5,10\}\)，第 4 节表 8 又换了指数、幂函数、线性三种权重形式，方法的排名都不变（第 4.6 节细说）。</p>
+<p><b>为什么不直接拿 AUP 当训练目标。</b>因为它不可导。TPF 是解码过程跑出来的统计量，不是模型参数的显式函数；AUP 的每个点又对应一个离散的、硬性的阈值，梯度传不过去。所以 AUP 只用作评价指标，d3LLM 的方法设计只是“朝着同时提高精度和并行度的方向”去做。</p>
+<p><b>为什么用 TPF 而不用 TPS。</b>附录 A.4 的说明（Remark 3）是：TPS 受 GPU 代际、算子融合、推理框架的影响很大，同一个算法换个系统看起来就很不一样。例如 d3LLM-LLaDA 在 H100 上比 AR 基线快约 5 倍，在 A100 上优势明显缩小。TPF 只反映算法层面的并行度，在不同硬件上稳定得多，大家不必用同样的 GPU 和推理引擎也能比较算法。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>“曲线”只有两个点。</b>表 1、表 2 的 AUP 都是由“TPF=1 的点 + 报告的工作点”两点算出的（推算，已用官方数据复核）。所以 AUP 并没有比较各方法在多个阈值下的整条曲线，它衡量的是“从逐个解码到报告的工作点，精度保住了多少、并行度提高了多少”。</li>
+  <li><b>TPF 不计每次前向的成本。</b>这是“与硬件无关”的代价：一次处理整段画布的前向、刷新缓存时的整段重算、投机解码里草稿模型的计算，都不会反映在 TPF 里。作者自己在附录 A.7 也承认，与 EAGLE-3 的比较没有约束总计算量（FLOPs）。</li>
+  <li><b>\(y_1\) 的说法前后不一。</b>第 2 节把 \(y_1\) 定义为并行度最低那个点的精度，附录 A.6 却称它为“达到的最高精度”。官方代码用的是前者（排序后第一个点）。代码还要求最后一个点比 \(y_1\) 低不超过 5 个百分点，否则直接报错，所以掉点更多的方法在这套脚本里无法打分。</li>
+  <li><b>TPF 的计数口径各家不同。</b>dParallel 论文自己报告的 LLaDA 在 GSM8K 上约 8.5 token/步（256 个位置用 30 步），在 d3LLM 的统一评测里是 5.14，差别来自是否把答案后面的结束符算进去等口径（见 <a href="../legacy/tracks/dllm/15-learned-parallel.html#q30">旧版拆解页 Q30</a>）。跨论文比较 TPF 或 AUP 时要先对齐口径。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A1.SS4" target="_blank" rel="noopener">附录 A.4 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A1.SS6" target="_blank" rel="noopener">附录 A.6 ↗</a> · <a href="https://github.com/hao-ai-lab/d3LLM/tree/main/AUP_leaderboard" target="_blank" rel="noopener">官方 AUP 脚本与数据 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 方法：训练时教“先写哪里”，推理时让几个块一起写</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节说 AUP 不能直接当损失函数来优化，那 d3LLM 具体改了什么，才能让精度和并行度同时变好？训练一侧，“伪轨迹”是怎么从老师那里取出来、又怎么变成学生的训练输入的？推理一侧，几个块同时解码时怎样避免后面的块被前面没写完的内容带偏？KV 缓存在一个双向注意力的模型里又是怎么用的？</div>
+<p>作者的出发点是上一节的结论：精度和并行度要同时顾及。因此 d3LLM（名字取自 pseuDo-Distilled-Diffusion LLM）分成两部分。训练一侧是<b>伪轨迹蒸馏</b>：把老师模型自己的解码轨迹放进蒸馏过程，告诉学生哪些 token 可以放心地早点揭开，以提高并行度；再配上逐步加大难度的课程，让训练稳定、保住精度。推理一侧是<b>带 KV 刷新的多块解码</b>：几个块同时解码，优先揭开把握大的 token，以提高并行度；再定期重算之前缓存的状态，以保住精度。</p>
+<p>论文用两张图概括这两部分：<a href="https://arxiv.org/html/2601.07568#S2.F2" target="_blank" rel="noopener">原文图 2：伪轨迹蒸馏 ↗</a> 和 <a href="https://arxiv.org/html/2601.07568#S3.F3" target="_blank" rel="noopener">原文图 3：多块解码 ↗</a>。论文的许可不允许转载原图，下面用本站自己的示意图讲同样的内容。</p>
+
+<h4 id="n-3-0">先补背景：标准训练、半自回归解码和 dParallel 做了什么</h4>
+<div class="note-pre"><b>先补一点背景：掩码扩散的标准训练为什么是“随机遮”。</b>
+<p>训练掩码扩散模型时，每条样本先随机抽一个掩码率 \(t\in(0,1]\)，再让答案里的每个位置以概率 \(t\) 独立地被换成 [MASK]，然后要求模型在被遮的位置上预测原来的 token（交叉熵损失）。因为遮哪些位置完全随机，模型见过各种各样的“部分已知”状态，从而学会了在任意状态下补全答案。这正是 dLLM 能“以任意顺序生成”的来源（详见 <a href="mdlm.html">MDLM 精读</a>）。</p>
+<p>问题在于，推理时模型真正会遇到的状态并不随机。常用的解码规则总是先揭开模型最有把握的位置，所以推理过程中的中间状态有一种固定的模式：容易的位置先出现，难的位置后出现。随机遮盖把大量训练花在了推理时几乎不会遇到的状态上，比如“难的位置已经揭开、容易的位置反而还遮着”。作者在引言里说的“随机遮盖不告诉模型哪些位置可以早点揭开”，指的就是这件事。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：LLaDA 的半自回归解码和“老师的轨迹”。</b>
+<p>LLaDA 生成一段 256 个 token 的答案时，常用设置是把画布切成 8 个 32-token 的块，从左到右一块一块地写；在当前块里，每一步揭开置信度最高的位置（官方叫 low-confidence remasking，意思是把置信度低的位置继续遮着）。如果规定每步只揭开 1 个，那么 256 步正好填满 256 个位置。这样跑一遍，就得到一条完整的<b>解码轨迹</b>：第 1 步揭开了哪个位置，第 2 步揭开了哪个位置……一直到第 256 步。轨迹里既有每个位置被揭开的<b>顺序</b>，也有每个位置被填上的<b>内容</b>。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：dParallel 的“确定性强制”蒸馏。</b>
+<p><a href="dparallel.html">dParallel</a> 是 d3LLM 最直接的前身，d3LLM 沿用了它的损失函数和训练数据。dParallel 观察到，模型在解码过程中“变得有把握”是从左往右一点一点传递的：每一步只有紧挨已知内容的少数位置置信度高。所以想靠调低阈值来提速，就只能把还没把握的位置提前揭开，一个错误又会连带后面的位置出错。它的办法是自蒸馏：用模型自己生成的回答当训练目标，在当前块里随机遮一半位置，损失由两部分组成：</p>
+<div class="formula">$$\mathcal L=\underbrace{-\frac{1}{|\mathcal M|}\sum_{i\in\mathcal M}\log p_{\theta}(y_i\mid\tilde{\mathbf y})}_{\text{交叉熵：预测对}}\;+\;\beta\,\underbrace{\frac{1}{|\mathcal M_c|}\sum_{i\in\mathcal M_c}H\big(p_{\theta}(\cdot\mid\tilde{\mathbf y};T)\big)_i}_{\text{确定性强制：预测对的位置要更有把握}}$$</div>
+<p>这里 \(\tilde{\mathbf y}\) 是被遮过的输入，\(\mathcal M\) 是被遮的位置，\(\mathcal M_c\) 是其中模型已经预测对（概率最大的 token 等于目标）的位置，\(H\) 是在温度 \(T\) 下算的预测分布的熵，\(\beta\) 是权重。第二项只压低“已经对了”的位置的熵：预测对的位置变得更尖锐，推理时就更早越过阈值、一步能揭开更多；而预测错的位置不去压，免得模型自信地输出错的 token。dParallel 还用了<b>互补遮盖</b>：同一条样本再算一遍“把遮和不遮反过来”的输入，让每个位置都被监督到一次。更多细节见 <a href="../legacy/tracks/dllm/15-learned-parallel.html#c-cfd">旧版拆解页 §3.2</a>。</p>
+</div>
+
+<h4 id="n-3-1">3.1 伪轨迹蒸馏：只借老师的“顺序”，不借老师的“内容”</h4>
+<p>蒸馏 dLLM 有一个基本困难：通常手里只有“提示–答案”这样的成对数据，没有老师在解码过程中的中间状态，所以没法告诉学生“在这个中间状态下，下一步该揭开哪几个位置”。理想的情况是老师的最终输出恰好等于标准答案，那么它的整条解码轨迹就是一条“真轨迹”，可以拿来教学生正确的生成顺序；但这种情况很少见。</p>
+<p>作者的办法是退一步：<b>不管老师最后答得对不对，都只取它解码的顺序</b>，称为<b>伪轨迹</b>（pseudo-trajectory）。具体做法是：给定提示 \(\mathbf x\) 和预先设定的最大输出长度 \(n\)，让老师每一步只揭开恰好 1 个 token，并且在生成了结束符（EOS）之后继续生成，直到正好填满 \(n\) 个位置。记录下每一步的状态 \(\mathcal T_1,\dots,\mathcal T_n\)，其中 \(\mathcal T_j\) 是老师走完第 \(j\) 步时的画布，里面有 \(j\) 个位置已经揭开、其余仍是 [MASK]。之后，老师填进去的<b>内容</b>全部丢掉，只留下“哪个位置在第几步被揭开”这个<b>顺序</b>。</p>
+<p>构造训练输入时，把这个顺序和数据集里的“提示–答案”对 \((\mathbf x,\mathbf y)\) 组合起来，模拟老师在解码过程中的某个中间状态。设 \(t\in[0,1]\) 是掩码率，\(w=\{s,\dots,s+k\}\) 是一个长度为 \(k\) 的解码窗口（\(s\) 是窗口起点），带噪输入 \(\tilde{\mathbf y}\) 的第 \(i\) 个位置是：</p>
+<div class="formula">$$[\tilde{\mathbf y}]_i=\begin{cases}[\mathbf y]_i, &amp; i\le s\ \ \text{或}\ \ [\mathcal T_{s+\lceil kt\rceil}]_i\neq\texttt{mask},\\[4pt] \texttt{mask}, &amp; i&gt;s+k\ \ \text{或}\ \ [\mathcal T_{s+\lceil kt\rceil}]_i=\texttt{mask}.\end{cases}$$</div>
+<p>翻译成大白话：窗口<b>之前</b>的位置全部显示标准答案；窗口<b>之后</b>的位置全部遮住；窗口<b>之内</b>，看老师走到第 \(s+\lceil kt\rceil\) 步时这个位置有没有揭开，揭开了就显示<b>标准答案</b>里的 token，没揭开就遮住。然后让学生在被遮的位置上预测标准答案（交叉熵）。这样学到的，就是“在老师那种解码顺序下的中间状态里，把剩下的位置补出来”。作者说，与随机遮盖相比，这让 TPF 提高了 18%（第 4 节表 5：6.41 → 7.55，精度 72.2% → 72.1%）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样遮一半，伪轨迹遮法和随机遮法遮掉的是不同的位置</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="伪轨迹构造训练输入的示意：按老师揭开顺序决定窗口内哪些位置可见" style="--dg-min:760px">
+<text x="309" y="22" class="t-c t-sm">块 1：之前的块</text>
+<text x="557" y="22" class="t-c t-sm t-b">块 2：当前窗口 w</text>
+<text x="805" y="22" class="t-c t-sm">块 3：之后的块</text>
+<rect x="436" y="32" width="242" height="232" rx="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.5;stroke-dasharray:6 4"/>
+<text x="184" y="56" class="t-r t-sm">数据集里的答案 y</text>
+<text x="184" y="106" class="t-r t-sm">老师在第几步揭开它</text>
+<text x="184" y="166" class="t-r t-sm">d3LLM 的训练输入</text>
+<text x="184" y="234" class="t-r t-sm">随机遮盖（同样遮一半）</text>
+<rect class="box" x="196" y="40" width="52" height="32" rx="5"/><text x="222" y="56" class="t-c">3</text>
+<rect class="box" x="254" y="40" width="52" height="32" rx="5"/><text x="280" y="56" class="t-c">+</text>
+<rect class="box" x="312" y="40" width="52" height="32" rx="5"/><text x="338" y="56" class="t-c">5</text>
+<rect class="box" x="370" y="40" width="52" height="32" rx="5"/><text x="396" y="56" class="t-c">=</text>
+<rect class="box" x="444" y="40" width="52" height="32" rx="5"/><text x="470" y="56" class="t-c">8</text>
+<rect class="box" x="502" y="40" width="52" height="32" rx="5"/><text x="528" y="56" class="t-c">,</text>
+<rect class="box" x="560" y="40" width="52" height="32" rx="5"/><text x="586" y="56" class="t-c">so</text>
+<rect class="box" x="618" y="40" width="52" height="32" rx="5"/><text x="644" y="56" class="t-c">the</text>
+<rect class="box" x="692" y="40" width="52" height="32" rx="5"/><text x="718" y="56" class="t-c">answer</text>
+<rect class="box" x="750" y="40" width="52" height="32" rx="5"/><text x="776" y="56" class="t-c">is</text>
+<rect class="box" x="808" y="40" width="52" height="32" rx="5"/><text x="834" y="56" class="t-c">8</text>
+<rect class="box" x="866" y="40" width="52" height="32" rx="5"/><text x="892" y="56" class="t-c">.</text>
+<rect class="panel" x="196" y="90" width="52" height="32" rx="5"/><text x="222" y="106" class="t-c t-sm">1</text>
+<rect class="panel" x="254" y="90" width="52" height="32" rx="5"/><text x="280" y="106" class="t-c t-sm">3</text>
+<rect class="panel" x="312" y="90" width="52" height="32" rx="5"/><text x="338" y="106" class="t-c t-sm">2</text>
+<rect class="panel" x="370" y="90" width="52" height="32" rx="5"/><text x="396" y="106" class="t-c t-sm">4</text>
+<rect class="panel" x="444" y="90" width="52" height="32" rx="5"/><text x="470" y="106" class="t-c t-sm">5</text>
+<rect class="panel" x="502" y="90" width="52" height="32" rx="5"/><text x="528" y="106" class="t-c t-sm">7</text>
+<rect class="panel" x="560" y="90" width="52" height="32" rx="5"/><text x="586" y="106" class="t-c t-sm">8</text>
+<rect class="panel" x="618" y="90" width="52" height="32" rx="5"/><text x="644" y="106" class="t-c t-sm">6</text>
+<rect class="panel" x="692" y="90" width="52" height="32" rx="5"/><text x="718" y="106" class="t-c t-sm">9</text>
+<rect class="panel" x="750" y="90" width="52" height="32" rx="5"/><text x="776" y="106" class="t-c t-sm">11</text>
+<rect class="panel" x="808" y="90" width="52" height="32" rx="5"/><text x="834" y="106" class="t-c t-sm">12</text>
+<rect class="panel" x="866" y="90" width="52" height="32" rx="5"/><text x="892" y="106" class="t-c t-sm">10</text>
+<rect class="box" x="196" y="150" width="52" height="32" rx="5"/><text x="222" y="166" class="t-c">3</text>
+<rect class="box" x="254" y="150" width="52" height="32" rx="5"/><text x="280" y="166" class="t-c">+</text>
+<rect class="box" x="312" y="150" width="52" height="32" rx="5"/><text x="338" y="166" class="t-c">5</text>
+<rect class="box" x="370" y="150" width="52" height="32" rx="5"/><text x="396" y="166" class="t-c">=</text>
+<rect class="box enc" x="444" y="150" width="52" height="32" rx="5"/><text x="470" y="166" class="t-c">8</text>
+<rect class="tk mask" x="502" y="150" width="52" height="32" rx="5"/>
+<rect x="500" y="148" width="56" height="36" rx="6" style="fill:none;stroke:var(--c-loss);stroke-width:2.5"/>
+<rect class="tk mask" x="560" y="150" width="52" height="32" rx="5"/>
+<rect x="558" y="148" width="56" height="36" rx="6" style="fill:none;stroke:var(--c-loss);stroke-width:2.5"/>
+<rect class="box enc" x="618" y="150" width="52" height="32" rx="5"/><text x="644" y="166" class="t-c">the</text>
+<rect class="tk mask" x="692" y="150" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="750" y="150" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="808" y="150" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="866" y="150" width="52" height="32" rx="5"/>
+<text x="557" y="200" class="t-c t-xs" style="fill:var(--c-loss)">红框 = 要预测、算损失的位置</text>
+<rect class="box" x="196" y="218" width="52" height="32" rx="5"/><text x="222" y="234" class="t-c">3</text>
+<rect class="box" x="254" y="218" width="52" height="32" rx="5"/><text x="280" y="234" class="t-c">+</text>
+<rect class="box" x="312" y="218" width="52" height="32" rx="5"/><text x="338" y="234" class="t-c">5</text>
+<rect class="box" x="370" y="218" width="52" height="32" rx="5"/><text x="396" y="234" class="t-c">=</text>
+<rect class="tk mask" x="444" y="218" width="52" height="32" rx="5"/>
+<rect x="442" y="216" width="56" height="36" rx="6" style="fill:none;stroke:var(--c-loss);stroke-width:2.5"/>
+<rect class="box enc" x="502" y="218" width="52" height="32" rx="5"/><text x="528" y="234" class="t-c">,</text>
+<rect class="box enc" x="560" y="218" width="52" height="32" rx="5"/><text x="586" y="234" class="t-c">so</text>
+<rect class="tk mask" x="618" y="218" width="52" height="32" rx="5"/>
+<rect x="616" y="216" width="56" height="36" rx="6" style="fill:none;stroke:var(--c-loss);stroke-width:2.5"/>
+<rect class="tk mask" x="692" y="218" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="750" y="218" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="808" y="218" width="52" height="32" rx="5"/>
+<rect class="tk mask" x="866" y="218" width="52" height="32" rx="5"/>
+<text x="20" y="288" class="t-xs">取 t = 0.5、窗口长 4：老师到第 4 + 2 = 6 步时，块 2 里已揭开的是第 5 步的“8”和第 6 步的“the”；d3LLM 就照这个状态遮，让学生预测“,”和“so”。</text>
+<text x="20" y="308" class="t-xs">随机遮盖同样遮一半，却可能遮掉老师最先写出的“8”、留下老师最后才写的“so”；在“按把握先后揭开”的推理过程中，模型很少遇到这样的状态。</text>
+  </svg>
+  <div class="dia-note">本站示意图，句子和揭开顺序都是编的（真实设置里块长 32、答案长 256）。斜纹格是 [MASK]。注意第三行里可见位置显示的是<b>数据集答案</b>的内容，老师只决定“哪些位置可见”。对应 <a href="https://arxiv.org/html/2601.07568#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>，原图用 “I think Diffusion LLM is good” 的例子画了同一件事。</div>
+</div>
+<p>为什么这样做能提高并行度？论文给的解释是，学生学会了按照和老师一致的顺序揭开 token，生成因此“更顺、更高效”。本站补一句更具体的理解：推理时，学生总是先揭开最有把握的位置，它遇到的中间状态和老师当年走过的状态很像；训练时专门在这类状态上练习“把剩下的补出来”，并且配合确定性强制把这些位置的预测压得更尖，推理时就有更多位置在同一步越过阈值。随机遮盖则把相当一部分训练花在推理时几乎不出现的状态上。</p>
+<p>老师和学生是什么关系？附录 A.11 说，d3LLM 以一个块大小为 32 的块扩散模型（LLaDA 或 Dream）作为老师；因为老师和学生是同一个网络结构，老师的轨迹反映的就是“这个模型自己”的解码偏好，所以对学生来说是一个合理的生成顺序。换句话说，这是一种<b>自蒸馏</b>：学生是在老师的权重上加 LoRA 微调出来的，蒸馏的并不是老师的概率分布，而是老师的解码顺序。</p>
+<div class="callout code-note"><span class="callout-title">据官方代码：论文没写的几个细节</span>
+<ul>
+  <li><b>老师就是原版 LLaDA-8B-Instruct。</b>轨迹生成脚本（<code>distill_1_data_prepare/</code>）用 256 步填满 256 个位置、块长 32、按置信度挑位置、贪心解码；如果老师的答案和参考答案对不上，就把温度依次调到 0.1、0.2……重试，最多 5 次，最后一次不论对错都保留。训练时“只用答对的轨迹”的过滤被注释掉了，所以答错的轨迹也会被用上，这和论文“即使答案不同也用”的说法一致。</li>
+  <li><b>“标准答案”也是模型自己写的。</b>训练脚本读取的答案来自 dParallel 公开的蒸馏数据集（<code>Zigeng/dParallel_LLaDA_Distill_Data</code> 的 <code>llm_response</code> 字段）。按该数据集的说明，这些回答是用 LLaDA-8B-Instruct 自己以半自回归方式生成的，提示取自 GSM8K、PRM12K 和部分 Numina-Math。所以“顺序”和“内容”都出自同一个模型，只是来自两次不同的生成。</li>
+  <li><b>窗口就是一个块。</b>代码每条样本随机选一个块作为窗口，它之前的块显示答案，之后的块全遮；窗口里取老师第“块起点 + \(\lfloor(1-t)\cdot\text{块长}\rfloor\)”步的状态决定遮哪些位置。</li>
+  <li><b>总损失</b>是（伪轨迹交叉熵 + 互补遮盖交叉熵 + 权重 × 确定性强制熵项）÷ 4，熵项的温度 0.5，权重 LLaDA 2.0、Dream 1.0（附录 A.11 也写了这组数）。</li>
+</ul></div>
+<div class="note-warn"><b>读公式时容易卡住的地方：</b>
+<ul>
+  <li><b>下标里的 \(t\) 和 \(1-t\)。</b>\(\mathcal T_j\) 表示老师走完第 \(j\) 步、已经揭开 \(j\) 个位置。按字面，第 \(s+\lceil kt\rceil\) 步时窗口里已经揭开了约 \(kt\) 个位置，被遮的比例是 \(1-t\)，和“\(t\) 是掩码率”的说法正好相反。官方代码取的是“揭开 \((1-t)k\) 个”的那一步，与掩码率的含义一致。示意图里取 \(t=0.5\)，两种读法结果相同。</li>
+  <li><b>窗口里的掩码率不一定恰好是 \(t\)。</b>老师是按 32 的块解码的，当训练窗口比 32 小（课程早期窗口只有 16）时，老师在第 \(s+\lceil kt\rceil\) 步揭开的位置可能有一部分落在窗口之外，窗口内实际被遮的比例就会偏离 \(t\)。作者在附录 A.11 承认这一点，并解释说他们故意保留老师的全局顺序，不在小窗口里重新排序，因为重新排序会和推理时块长 32 的真实解码顺序对不上。</li>
+  <li><b>“蒸馏”一词的含义。</b>这里没有用老师的 logits 或概率分布做目标，监督信号仍然是数据集答案的交叉熵加熵项；老师只贡献了“遮哪里”。这和 CDLM 等用老师分布做 KL 蒸馏的方法不同（见 <a href="../legacy/tracks/dllm/15-learned-parallel.html#cdlm">旧版拆解页 §3.5</a>）。</li>
+</ul></div>
+
+<h4 id="n-3-2">3.1（续）两个课程：先学容易的掩码率，再学大的窗口</h4>
+<div class="note-pre"><b>先补一点背景：课程学习。</b>
+<p>课程学习（curriculum learning）是指训练时先给模型容易的样本，再逐渐加大难度，就像先学加法再学乘法。对掩码扩散来说，“难度”可以用两个旋钮控制：掩码率越高，可见的信息越少，补全越难；窗口越大，一次要处理的空位越多、跨度越长，也越难。</p>
+</div>
+<p><b>掩码率课程。</b>训练过程中，把掩码率 \(t\) 从 0.0 逐渐增加到 0.8，让模型先在“大部分位置都可见”的简单状态下学，再面对“大部分都遮着”的困难状态。作者说这让 TPF 比固定掩码率再提高约 12%，并且观察到不用这个课程时，蒸馏过程不稳定，更容易掉点。第 4 节表 6 比较了几种调度：固定 \(t=0.5\) 时 TPF 7.49、精度 72.8%；从 0.0 升到 0.8 时 TPF 9.11、精度 73.1%。</p>
+<p><b>窗口课程。</b>受同组的 Jacobi Forcing（一种让 AR 模型学会并行解码的渐进蒸馏方法）启发，解码窗口长度 \(k\) 也不是固定的，而是在训练中从 16 逐渐增加到 32，让模型逐步适应更大的上下文跨度。作者说这又带来约 8% 的 TPF 提升。表 7 显示，直接固定 \(k=32\) 时 TPF 8.22、精度只有 69.8%；从 16 升到 32 时 TPF 9.11、精度 73.1%。</p>
+<p>据官方代码，两个课程的具体实现是：LLaDA 训练 6 个 epoch，每个 epoch 的窗口（块）长度依次是 16、16、24、24、32、32，在每个 epoch 内部线性插值；掩码率则是每一步从区间 [当前下限, 0.8] 里均匀抽取，下限随训练步数从 0.0 线性升到 0.8。也就是说，训练前期各种掩码率都会抽到，后期才集中在 0.8 附近。</p>
+
+<h4 id="n-3-3">3.2 熵阈值多块并行解码：后面的块不用等前面的块写完</h4>
+<div class="note-pre"><b>先补一点背景：用“熵”而不是“最大概率”判断有没有把握。</b>
+<p>Fast-dLLM 和 D2F 用<b>置信度</b>（预测分布里最大的那个概率）判断一个位置能不能揭开：比如超过 0.9 就揭开。d3LLM 改用<b>熵</b>：\(H=-\sum_v p_v\ln p_v\)，熵越低越有把握，低于阈值才揭开，阈值取 0.4–0.5（官方代码用自然对数）。两者大多数时候一致，但熵会把“尾巴”也算进去。举几个算出来的例子（推算）：两个候选各占 0.8 和 0.2，熵约 0.50；各占 0.9 和 0.1，熵约 0.33；最大概率同样是 0.9，但剩下的 0.1 平均分给 10 个候选，熵约 0.56，会被 0.5 的阈值挡住。也就是说，熵阈值对“第一名不突出、后面一大群候选”的情况更谨慎。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：D2F 的流水线多块解码。</b>
+<p>常规的块式解码一块写完才开始下一块。<a href="d2f.html">D2F</a> 让几个块同时处于不同的完成度：最后一块已经定下一定比例（比如 10%）时，就在后面追加一个新块；新块先处于“半激活”状态，只揭开把握很大的位置；等它前面那块定下了大部分（比如 95%）时，再转为“全激活”，每步至少揭开一个。这样后一块不必等前一块写完，并行度就上去了（详见 <a href="d2f.html#n-4-3">D2F 精读 §4.3</a>）。但 D2F 的学生模型是“块间因果”的，前面的块看不到后面的块；而 d3LLM 的学生仍是 LLaDA / Dream 原来的全双向注意力，这一点在下面讲 KV 缓存时很重要。</p>
+</div>
+<p>d3LLM 的多块解码受 D2F 启发，规则如下。每个块在任一时刻处于五种状态之一：</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个块在多块解码中依次经过的五种状态</div>
+  <div class="dia-flow">
+    <span class="dia-box">① 未激活<small>还没加进解码窗口，全是 [MASK]</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box pred">② 激活<small>条件：前一块完成 10%<br>保守解码：只揭开熵低于阈值的位置，可以一个都不揭</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box enc">③ 完全激活<small>条件：前一块完成 95%<br>激进解码：每次前向至少揭开 1 个（熵最低的）</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box reg">④ 完成·稳定中<small>条件：本块全部揭开<br>1–2 轮内不写入缓存，并刷新之前的缓存</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box act">⑤ 完成<small>本块的 K/V 写入缓存，之后只读不算</small></span>
+  </div>
+  <div class="dia-note">本站示意图，按论文 §3.2 与附录 A.11 的文字整理；阈值 10% 和 95% 对应代码里的 <code>block_add_threshold=0.1</code> 与 <code>decoded_token_threshold=0.95</code>，与 D2F 的默认值相同。紧跟在提示后面的第一个块，因为“前一块”（提示）已经 100% 完成，一开始就处于完全激活状态。对应 <a href="https://arxiv.org/html/2601.07568#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>。</div>
+</div>
+<p>状态之间的转换是这样的：当前一块完成 10% 时，创建一个新的“激活”块，对它采用保守策略，只有满足熵阈值的 token 才揭开。当前一块完成 95% 时，这个块转为“完全激活”，改用激进策略：每次前向至少揭开一个 token，不管它是否满足阈值。一个块的所有位置都揭开后，进入“完成但稳定中”状态：这期间的前向不使用这个块的 KV 缓存，并刷新之前的缓存。过 1–2 轮后，块才算真正“完成”，它的 key/value 被存进缓存。作者说这种多块解码让 TPF 提高约 30%。</p>
+<div class="dia">
+  <div class="dia-title">示意图：四个块在时间上怎样重叠（每格是一次前向）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th></tr>
+    <tr><td class="lbl">块 1</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td></tr>
+    <tr><td class="lbl">块 2</td><td></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td></tr>
+    <tr><td class="lbl">块 3</td><td></td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td><td style="background:var(--c-act-bg)"></td><td style="background:var(--c-act-bg)"></td></tr>
+    <tr><td class="lbl">块 4（含 EOS）</td><td></td><td></td><td></td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="p"></td><td class="p"></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">斜纹 = 激活（保守，只揭开熵低于阈值的位置）；深蓝 = 完全激活（每步至少揭开 1 个）；浅红 = 完成·稳定中（不写缓存，这一步做整段前向刷新）；浅绿 = 已写入 KV 缓存。本站示意，步数是编的。块 4 里出现了结束符，所以不再追加块 5，并且结束符之后的位置直接填成结束符（早停）。如果一块一块串行地写，每块都要从头完全激活，总步数会更多。</div>
+</div>
+
+<h4 id="n-3-4">3.2（续）KV 缓存、定期刷新，以及遇到结束符就停</h4>
+<div class="note-pre"><b>先补一点背景：双向注意力的模型为什么不能像 AR 模型那样精确缓存。</b>
+<p>AR 模型用因果注意力：每个位置只看它左边的位置。所以一个 token 一旦写出，它在每一层的 key 和 value 就再也不会变，存下来以后每一步直接读就行，这就是 KV 缓存（原理见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。LLaDA、Dream 用的是双向注意力：每个位置都看整段序列，包括它右边的位置。右边又揭开了新 token，左边位置在第二层以后的 key/value 也会跟着变一点。所以严格来说不能缓存，每一步都得整段重算。</p>
+<p>实践中人们发现，已经揭开的 token 的 key/value 在后续步骤里变化很小，于是有了<b>近似缓存</b>：<a href="fast-dllm.html">Fast-dLLM</a> 按块缓存，并在每写完一块后整段重算一次来校正；<a href="dkv-cache.html">dKV-Cache</a> 则发现刚揭开的 token 那一步的表示变化最大，于是<b>延迟一步</b>再缓存。这些办法都是用一点精度换速度，而且缓存放得越久，误差越可能积累。</p>
+</div>
+<p>d3LLM 把这两种思路结合起来，作者称之为“混合策略”：每写完一个块，先等一小段时间再缓存它的 key/value，保证缓存可靠、不拖累精度；在稳定期的块之前，用整段前向刷新已有的缓存；此外再每隔几轮做一次<b>定期刷新</b>，把所有缓存重算一遍。作者说这套机制在长上下文场景下把 TPS 提高了约 35%，同时保住了精度。</p>
+<p><b>遇到结束符就停。</b>标准的 dLLM 解码会一直跑到预先设定的步数，哪怕答案早就写完了，后面还在一步步填结束符。d3LLM 在每一步检查生成的内容，一旦出现结束符（EOS）就立即停止。作者说这一项简单的优化让 TPF 提高约 5%。</p>
+<p>推理时的设置（附录 A.11）：大多数任务最大生成长度 256，Dream-Coder 实验 512；贪心解码，温度取 0.0 或 0.1（视任务而定）；块长固定为 32；熵阈值 0.4–0.5；追加新块的阈值 0.1；转为完全激活的阈值 0.95；缓存延迟通常 1–2 轮。</p>
+<div class="callout code-note"><span class="callout-title">据官方代码：一次前向到底算多少东西</span>
+<p>以 LLaDA 版的 <code>generate_multi_block_kv_cache</code> 为例：每次前向的输入，从“最早一个还没缓存的位置”一直到 256 长画布的末尾，后面还没激活的块也以 [MASK] 的形式一起送进去，只是它们的预测不被使用。只要有块处在稳定期，或者到了定期刷新的步数（评测脚本里 <code>refresh_interval=3</code>、<code>cache_delay_iter=2</code>），这一步就把“提示 + 整段画布”完整算一遍，用来重建缓存，同时直接拿这次的输出来解码，所以前向次数（NFE）只记一次。换句话说，TPF 的分母是前向的<b>次数</b>，而这些前向里有相当一部分是整段计算。块长 32、TPF 约 9 时，平均每 3–4 次前向就有一个块写完（推算），再加上 2 轮的稳定期，整段前向在全部前向里占的比例不会小。仓库里同时给了不带缓存的 <code>generate_multi_block</code> 版本，论文没有说明表 1 的数字是用哪一版测的。</p></div>
+<div class="note-warn"><b>论文里几个效果数字的出处：</b>“多块解码 +30% TPF”可以从表 5 下半部分对上（7.01 → 9.07，+29%）；“伪轨迹 +18%”“噪声课程 +12%”“窗口课程 +8%”也能从表 5 上半部分对上（6.41 → 7.55 → 8.46 → 9.11）。但“早停 +5% TPF”与表 5 不符，表 5 里加上早停只是 9.07 → 9.11（约 +0.4%）；“KV 刷新在长上下文下 +35% TPS”没有对应的表格。这两个数可能来自不同的设置，论文没有交代。</div>
+
+<h4 id="n-3-5">放在一起看：d3LLM 和 dParallel、D2F、Fast-dLLM v2 的区别</h4>
+<p>论文没有这样一张表。下面是本站把 d3LLM 和它在实验里对比的三个训练式加速方法排在一起，方便看清 d3LLM 继承了什么、改了什么。“评测表现”一行是 d3LLM 论文在 GSM8K-CoT 上的统一测量。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>维度</th><th>dParallel</th><th>D2F</th><th>Fast-dLLM v2</th><th>d3LLM</th></tr></thead>
+  <tbody>
+    <tr><td>起点模型</td><td>LLaDA-8B-Instruct / Dream-7B-Instruct</td><td>LLaDA-8B-Instruct / Dream-7B-Base</td><td>Qwen2.5-7B-Instruct（AR 模型）</td><td>LLaDA-8B-Instruct / Dream-7B-Instruct / Dream-Coder-7B-Instruct</td></tr>
+    <tr><td>训练数据</td><td>数学、代码题提示 + 模型自己生成的回答</td><td>数学与编程题，LoRA 蒸馏</td><td>约 13 亿 token 的 LLaMA-Nemotron 后训练数据</td><td>直接用 dParallel 的数据：LLaDA 约 9.2 万条 / 4000 万 token，Dream 约 12.2 万条 / 6500 万 token</td></tr>
+    <tr><td>训练信号</td><td>当前块随机遮一半 + 交叉熵 + 确定性强制</td><td>块间因果的学生模仿全双向的老师（非对称蒸馏）</td><td>把 AR 模型微调成块扩散（块对齐、互补遮盖）</td><td>按老师的解码顺序遮 + 交叉熵 + 确定性强制 + 互补遮盖 + 两个课程</td></tr>
+    <tr><td>注意力</td><td>全双向，不改结构</td><td>块内双向、块间因果</td><td>块内双向、块间因果</td><td>全双向，不改结构</td></tr>
+    <tr><td>KV 缓存</td><td>（本身不涉及缓存）</td><td>已完成的块精确缓存</td><td>块级精确缓存 + 块内子块缓存</td><td>近似缓存：延迟写入 + 稳定期与定期整段刷新</td></tr>
+    <tr><td>解码方式</td><td>逐块，熵阈值</td><td>流水线多块，置信度阈值</td><td>逐块，块内置信度阈值</td><td>多块（五种状态），熵阈值，遇 EOS 停</td></tr>
+    <tr><td>评测表现（TPF / 精度）</td><td>LLaDA 5.14 / 72.6%；Dream 3.02 / 82.1%</td><td>LLaDA 2.88 / 73.2%</td><td>2.21 / 77.5%</td><td>LLaDA 9.11 / 73.1%；Dream 4.94 / 81.4%</td></tr>
+  </tbody>
+</table></div>
+<p>从表里可以看出，d3LLM 和 dParallel 的关系最近：同样的起点模型、同样的数据、同样的确定性强制损失，区别只在“遮哪里”（随机 vs 老师的顺序）、两个课程，以及推理时的多块解码和缓存。它从 D2F 借来的是多块解码的调度方式，但没有借 D2F 的块间因果结构，所以只能用近似缓存。Fast-dLLM v2 则走了另一条路：从 AR 模型出发，靠结构改造拿到精确缓存。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2601.07568#S3.SS1" target="_blank" rel="noopener">§3.1 ↗</a> · <a href="https://arxiv.org/html/2601.07568#S3.SS2" target="_blank" rel="noopener">§3.2 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A1.SS11" target="_blank" rel="noopener">附录 A.11 ↗</a> · <a href="https://github.com/hao-ai-lab/d3LLM/tree/main/d3llm" target="_blank" rel="noopener">官方训练与解码代码 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 实验：AUP 高了多少，墙钟快了多少，各个部件各贡献多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者给自己提了三个问题：AUP 这个指标合不合理？d3LLM 的 AUP 表现如何？每个部件是否都有用？读这一节时还要多问一句：每个数字是在什么条件下、和谁比出来的？</div>
+
+<h4 id="n-4-1">4.1 实验是怎么设的</h4>
+<p><b>三个模型。</b>在三个开源基础 dLLM 上分别做出 d3LLM：LLaDA（8B，从零训练的掩码扩散模型）、Dream（7B，用 AR 模型 Qwen2.5-7B 初始化）和 Dream-Coder（7B，代码模型），得到 d3LLM-LLaDA、d3LLM-Dream、d3LLM-Coder。三者用同样的蒸馏配方和多块解码策略。</p>
+<p><b>对手。</b>原版 LLaDA 和 Dream；不需要训练的加速方法 Fast-dLLM；以及需要训练的 Fast-dLLM v2、dParallel、D2F。附录 A.9 说明，这些方法都用官方发布的权重，按各自的默认设置和超参接入同一套评测框架。附录另外比较了 SDTT 和 EAGLE-3（第 4.6 节）。</p>
+<p><b>训练配置（附录 A.11）。</b>LoRA，秩 256、\(\alpha=256\)，作用于所有线性层；AdamW，学习率 \(2\times10^{-5}\)、权重衰减 0.01。d3LLM-LLaDA 训 6 个 epoch、恒定学习率、最大序列长 384；d3LLM-Dream 训 3 个 epoch、余弦学习率（5% 预热）、最大序列长 512。有效 batch 64（每卡 16 × 梯度累积 4），DeepSpeed ZeRO-2 加 CPU 优化器卸载，H100、bfloat16。论文没有报告训练时长和 GPU 数。</p>
+<p><b>测量条件。</b>推理时所有模型都用<b>单张 GPU、batch 固定为 1</b>。并行度用 TPF，精度用解题率或 pass@1（视基准而定），再算 AUP。表 1、表 2 的每个数都是三次运行的均值和标准差。</p>
+<div class="note-pre"><b>先补一点背景：五个基准分别考什么。</b>
+<ul>
+  <li><b>GSM8K-CoT</b>（0-shot）：小学数学应用题，要求先写推理过程再给答案；测试集 1,319 题。</li>
+  <li><b>MATH</b>（4-shot）：高中数学竞赛题，覆盖代数、几何等，比 GSM8K 难得多。“4-shot”是指提示里先放 4 道带解答的例题。</li>
+  <li><b>HumanEval</b>（0-shot）：164 道手写的 Python 函数题，给函数签名和说明，用单元测试判对错。Dream 组用的是指令版 HumanEval-Instruct。</li>
+  <li><b>MBPP</b>（LLaDA 组 3-shot；Dream 组用 0-shot 的 MBPP-Instruct）：约 1,000 道入门级 Python 编程题，带自动测试。</li>
+  <li><b>Long-GSM8K</b>（5-shot）：仍是 GSM8K，但提示里放 5 道例题，提示长度约 1,000 个 token，用来考察长上下文下的表现。</li>
+</ul>
+<p>作者选这些任务，是因为它们的输出比较长，能看出并行解码的效果。它们也都是答案比较确定的数学和代码任务；第 4.7 节会说到，这一点和训练数据的来源有关。</p>
+</div>
+
+<h4 id="n-4-2">4.2 LLaDA 组：原文表 1</h4>
+<p>下图把表 1 里各方法的 TPF 和精度画在一起，表格给出对应的 AUP。</p>
+<div class="dia">
+  <div class="dia-title">简图：LLaDA 组五个任务上的 TPF 与精度（按论文表 1 重画）</div>
+  <svg class="dg" viewBox="0 0 960 460" role="img" aria-label="LLaDA 组各方法在五个任务上的 TPF 条形图，条末标注精度" style="--dg-min:760px">
+<line x1="250" y1="30" x2="250" y2="424" class="grid-ln"/><text x="250" y="436" class="t-c t-xs">1</text>
+<line x1="350" y1="30" x2="350" y2="424" class="grid-ln"/><text x="350" y="436" class="t-c t-xs">3</text>
+<line x1="450" y1="30" x2="450" y2="424" class="grid-ln"/><text x="450" y="436" class="t-c t-xs">5</text>
+<line x1="550" y1="30" x2="550" y2="424" class="grid-ln"/><text x="550" y="436" class="t-c t-xs">7</text>
+<line x1="650" y1="30" x2="650" y2="424" class="grid-ln"/><text x="650" y="436" class="t-c t-xs">9</text>
+<line x1="200" y1="30" x2="200" y2="424" style="stroke:var(--text-3);stroke-width:1"/>
+<rect x="200" y="8" width="14" height="12" style="fill:var(--c-tgt)"/><text x="220" y="14" class="t-sm">Fast-dLLM</text>
+<rect x="330" y="8" width="14" height="12" style="fill:var(--c-act)"/><text x="350" y="14" class="t-sm">D2F</text>
+<rect x="460" y="8" width="14" height="12" style="fill:var(--c-reg)"/><text x="480" y="14" class="t-sm">dParallel</text>
+<rect x="590" y="8" width="14" height="12" style="fill:var(--c-enc)"/><text x="610" y="14" class="t-sm">d3LLM</text>
+<text x="760" y="14" class="t-sm">原版 LLaDA 的精度</text>
+<text x="20" y="64" class="t-b">GSM8K-CoT</text>
+<text x="760" y="64" class="t-sm">72.6%</text>
+<rect x="200" y="34" width="138.5" height="13" style="fill:var(--c-tgt)"/><text x="344.5" y="41" class="t-xs">2.77 · 74.7%</text>
+<rect x="200" y="50" width="144.0" height="13" style="fill:var(--c-act)"/><text x="350.0" y="57" class="t-xs">2.88 · 73.2%</text>
+<rect x="200" y="66" width="257.0" height="13" style="fill:var(--c-reg)"/><text x="463.0" y="73" class="t-xs">5.14 · 72.6%</text>
+<rect x="200" y="82" width="455.5" height="13" style="fill:var(--c-enc)"/><text x="661.5" y="89" class="t-xs">9.11 · 73.1%</text>
+<text x="20" y="142" class="t-b">MATH</text>
+<text x="760" y="142" class="t-sm">32.2%</text>
+<rect x="200" y="112" width="98.5" height="13" style="fill:var(--c-tgt)"/><text x="304.5" y="119" class="t-xs">1.97 · 30.8%</text>
+<rect x="200" y="128" width="119.0" height="13" style="fill:var(--c-act)"/><text x="325.0" y="135" class="t-xs">2.38 · 28.7%</text>
+<rect x="200" y="144" width="158.5" height="13" style="fill:var(--c-reg)"/><text x="364.5" y="151" class="t-xs">3.17 · 30.2%</text>
+<rect x="200" y="160" width="287.0" height="13" style="fill:var(--c-enc)"/><text x="493.0" y="167" class="t-xs">5.74 · 30.4%</text>
+<text x="20" y="220" class="t-b">MBPP</text>
+<text x="760" y="220" class="t-sm">41.7%</text>
+<rect x="200" y="190" width="106.5" height="13" style="fill:var(--c-tgt)"/><text x="312.5" y="197" class="t-xs">2.13 · 38.6%</text>
+<rect x="200" y="206" width="97.0" height="13" style="fill:var(--c-act)"/><text x="303.0" y="213" class="t-xs">1.94 · 38.0%</text>
+<rect x="200" y="222" width="117.5" height="13" style="fill:var(--c-reg)"/><text x="323.5" y="229" class="t-xs">2.35 · 40.0%</text>
+<rect x="200" y="238" width="210.5" height="13" style="fill:var(--c-enc)"/><text x="416.5" y="245" class="t-xs">4.21 · 40.6%</text>
+<text x="20" y="298" class="t-b">HumanEval</text>
+<text x="760" y="298" class="t-sm">38.3%</text>
+<rect x="200" y="268" width="128.0" height="13" style="fill:var(--c-tgt)"/><text x="334.0" y="275" class="t-xs">2.56 · 37.8%</text>
+<rect x="200" y="284" width="134.5" height="13" style="fill:var(--c-act)"/><text x="340.5" y="291" class="t-xs">2.69 · 36.6%</text>
+<rect x="200" y="300" width="246.5" height="13" style="fill:var(--c-reg)"/><text x="452.5" y="307" class="t-xs">4.93 · 39.0%</text>
+<rect x="200" y="316" width="297.5" height="13" style="fill:var(--c-enc)"/><text x="503.5" y="323" class="t-xs">5.95 · 39.6%</text>
+<text x="20" y="376" class="t-b">Long-GSM8K</text>
+<text x="760" y="376" class="t-sm">78.6%</text>
+<rect x="200" y="346" width="122.5" height="13" style="fill:var(--c-tgt)"/><text x="328.5" y="353" class="t-xs">2.45 · 78.0%</text>
+<rect x="200" y="362" width="135.0" height="13" style="fill:var(--c-act)"/><text x="341.0" y="369" class="t-xs">2.70 · 73.7%</text>
+<rect x="200" y="378" width="224.5" height="13" style="fill:var(--c-reg)"/><text x="430.5" y="385" class="t-xs">4.49 · 76.7%</text>
+<rect x="200" y="394" width="347.5" height="13" style="fill:var(--c-enc)"/><text x="553.5" y="401" class="t-xs">6.95 · 74.2%</text>
+<text x="425" y="452" class="t-c t-sm">TPF（每次前向写出的 token 数）；条末数字为 TPF · 精度</text>
+  </svg>
+  <div class="dia-note">本站按论文表 1 的均值重画（标准差 0.1–0.6，未画出）。原版 LLaDA 的 TPF 记为 1，精度列在右侧。原文的雷达图与直方图见 <a href="https://arxiv.org/html/2601.07568#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a> 与 <a href="https://arxiv.org/html/2601.07568#A1.F6" target="_blank" rel="noopener">附录图 6 ↗</a>。</div>
+</div>
+<div class="table-wrap"><table>
+  <thead><tr><th>AUP（论文表 1）</th><th>GSM8K-CoT</th><th>MATH</th><th>MBPP</th><th>HumanEval</th><th>Long-GSM8K</th></tr></thead>
+  <tbody>
+    <tr><td>LLaDA</td><td>72.6</td><td>32.2</td><td>41.7</td><td>38.3</td><td>78.6</td></tr>
+    <tr><td>Fast-dLLM-LLaDA</td><td>205.8</td><td>47.2</td><td>56.6</td><td>54.0</td><td>175.4</td></tr>
+    <tr><td>D2F-LLaDA</td><td>213.8</td><td>45.5</td><td>50.0</td><td>62.0</td><td>168.5</td></tr>
+    <tr><td>dParallel-LLaDA</td><td>358.1</td><td>64.5</td><td>60.5</td><td>83.7</td><td>309.1</td></tr>
+    <tr><td><b>d3LLM-LLaDA</b></td><td><b>637.7</b></td><td><b>107.6</b></td><td><b>88.4</b></td><td><b>96.6</b></td><td><b>441.1</b></td></tr>
+  </tbody>
+</table></div>
+<p>d3LLM-LLaDA 在五个任务上 AUP 都最高。GSM8K-CoT 上是 637.7，第二名 dParallel 是 358.1；MATH 上是 107.6，dParallel 是 64.5；HumanEval 和 Long-GSM8K 上也有类似的领先。作者把这归因于两点：伪轨迹蒸馏让模型学到了老师揭开 token 的顺序；多块解码在 KV 刷新的配合下提高了并行度，又保住了精度。</p>
+<p>按图来读，领先几乎全部来自 TPF：d3LLM 的 TPF 是 dParallel 的 1.2–1.8 倍、Fast-dLLM 和 D2F 的 2–3.3 倍（推算），精度则和其他方法处在同一档，有高有低。精度上要单独看的是 Long-GSM8K：d3LLM 是 74.2%，比原版 LLaDA 的 78.6% 低 4.4 个百分点，也低于 dParallel 的 76.7% 和 Fast-dLLM 的 78.0%。</p>
+<p>作者用 MBPP 来说明 AUP 的合理性（第一个问题）：在 LLaDA 组的 MBPP 上，很多方法的 TPF 都大于 1，但和这个任务上最好的模型 Qwen-2.5-7B-Instruct 相比，精度差得很多，所以它们的 AUP 都不高。也就是说，靠牺牲精度换来的并行度会被惩罚，保住精度的并行度才会被奖励。原文图 4(a) 画的是 MATH 上的精度–并行度曲线，d3LLM-LLaDA（红线）占据右上方；图 4(b) 的雷达图里，d3LLM-LLaDA 在五个任务上覆盖的面积最大。</p>
+
+<h4 id="n-4-3">4.3 Dream 组：原文表 2</h4>
+<div class="table-wrap"><table>
+  <thead><tr><th>TPF / 精度 / AUP（论文表 2）</th><th>GSM8K-CoT</th><th>MATH</th><th>MBPP-Instruct</th><th>HumanEval-Instruct</th><th>Long-GSM8K</th></tr></thead>
+  <tbody>
+    <tr><td>Dream</td><td>1.00 / 83.9 / 83.9</td><td>1.00 / 39.6 / 39.6</td><td>1.00 / 57.2 / 57.2</td><td>1.00 / 55.2 / 55.2</td><td>1.00 / 79.0 / 79.0</td></tr>
+    <tr><td>Fast-dLLM-Dream</td><td>1.44 / 79.0 / 116.5</td><td>1.78 / 38.3 / 55.2</td><td>1.20 / 53.2 / 63.6</td><td>1.33 / 54.3 / 63.5</td><td>1.79 / 76.6 / 130.4</td></tr>
+    <tr><td>Fast-dLLM v2</td><td>2.21 / 77.5 / 176.1</td><td>2.61 / 48.7 / <b>126.7</b></td><td>2.04 / 50.1 / 81.9</td><td>2.58 / 61.7 / 128.9</td><td>2.58 / 81.0 / 207.2</td></tr>
+    <tr><td>dParallel-Dream</td><td>3.02 / 82.1 / 245.7</td><td>2.94 / 38.7 / 77.9</td><td>2.24 / 55.4 / 108.0</td><td>2.57 / 54.3 / 98.8</td><td>3.49 / 78.6 / 262.4</td></tr>
+    <tr><td><b>d3LLM-Dream</b></td><td>4.94 / 81.4 / <b>391.3</b></td><td>3.92 / 38.2 / 97.5</td><td>2.96 / 55.6 / <b>141.4</b></td><td>3.20 / 57.1 / <b>129.5</b></td><td>4.80 / 77.2 / <b>348.6</b></td></tr>
+  </tbody>
+</table></div>
+<p>d3LLM-Dream 在五个任务中的四个上 AUP 最高。例如 GSM8K-CoT 上是 391.3，高于 dParallel 的 245.7 和 Fast-dLLM v2；MBPP-Instruct 上是 141.4，高于 dParallel 的 108.0。作者据此回答第二个问题：d3LLM 在不同的基础模型和任务上都有效。HumanEval-Instruct 上的领先很小（129.5 对 128.9），Fast-dLLM v2 在这一项的精度（61.7%）明显更高，只是 TPF 低一些。</p>
+<p>唯一的例外是 MATH：Fast-dLLM v2 的 AUP 最高（126.7），因为它的精度（48.7%）比其他 Dream 系方法高出约 10 个百分点。作者推测原因是 Fast-dLLM v2 直接从 Qwen-2.5-7B 微调而来，并额外用了约 10 亿 token 的 LLaMA-Nemotron 后训练数据（Fast-dLLM v2 论文附录给出的 7B 模型精确数字约 13.1 亿，见 <a href="fast-dllm-v2.html#n-4-1">Fast-dLLM v2 精读 §4.1</a>）；而 d3LLM-Dream 是在原版 Dream 上蒸馏的，只多用了 6500 万 token。作者认为，即使有这个数据劣势，d3LLM-Dream 仍在大多数任务上最好。</p>
+<div class="note-warn"><b>表 2 和正文里几处对不上的数字：</b>
+<ul>
+  <li>正文写“Fast-dLLM v2（156.0）”，表 2 里是 176.1。</li>
+  <li>表 2 中 Fast-dLLM v2 在 GSM8K-CoT 上的精度写作 77.5%（表 4 也是 77.5%），但按论文公式，AUP 176.1 只有在这个点的精度约为 81.5% 时才算得出来；官方仓库数据里这一点正是 81.48%。如果精度真是 77.5%，它比 Fast-dLLM v2 自己逐个解码时的 82.82% 低了 5 分以上，会被截断，AUP 只剩 82.8（推算）。类似地，MBPP-Instruct 一格的 50.1% 也算不出 81.9。</li>
+  <li>LLaDA 组也有几处：表 1 中 D2F 在 HumanEval 上的精度是 36.6%，而 AUP 62.0 对应的是仓库数据里的 40.64%；D2F 在 MATH、MBPP、Long-GSM8K 上的 TPF 或精度也和仓库数据不同（例如 MATH 的 TPF，表 1 是 2.38，仓库是 2.66），按仓库数据算出的 AUP 分别是 49.0、53.0、176.9，而不是表 1 的 45.5、50.0、168.5（推算）。后来的 CForce 论文引用 D2F 时用的是仓库里的那一版。</li>
+</ul>
+这说明表格的各列可能来自不同轮次的测量。在 GSM8K-CoT 上，如果按仓库数据，Fast-dLLM v2 的精度（81.5%）其实和 d3LLM-Dream（81.4%）几乎一样。</div>
+
+<h4 id="n-4-4">4.4 墙钟速度：原文表 3、表 4 与附录表 15</h4>
+<p>AUP 用的是 TPF，不是真实时间。为了看墙钟速度，作者在 H100 和 A100 上测了 GSM8K-CoT 的 TPS（每秒 token 数），并以 AR 模型 Qwen-2.5-7B-Instruct 为 1 倍。</p>
+<div class="dia">
+  <div class="dia-title">简图：GSM8K-CoT 上的每秒 token 数（按论文表 3、表 4 重画）</div>
+  <svg class="dg" viewBox="0 0 960 305" role="img" aria-label="LLaDA 组与 Dream 组各方法在 H100 和 A100 上的每秒 token 数" style="--dg-min:760px">
+<text x="270" y="16" class="t-c t-b">LLaDA 组（论文表 3）</text>
+<text x="750" y="16" class="t-c t-b">Dream 组（论文表 4）</text>
+<text x="145" y="50" class="t-r t-sm">Qwen-2.5-7B-it</text>
+<rect x="150" y="36" width="48.7" height="13" style="fill:var(--c-enc)"/><text x="203.7" y="43" class="t-xs">57.3（1.0×）</text>
+<rect x="150" y="51" width="42.8" height="13" style="fill:var(--c-tgt)"/><text x="197.8" y="58" class="t-xs">50.4（1.0×）</text>
+<text x="145" y="90" class="t-r t-sm">LLaDA</text>
+<rect x="150" y="76" width="23.7" height="13" style="fill:var(--c-enc)"/><text x="178.7" y="83" class="t-xs">27.9（0.5×）</text>
+<rect x="150" y="91" width="16.3" height="13" style="fill:var(--c-tgt)"/><text x="171.3" y="98" class="t-xs">19.2（0.4×）</text>
+<text x="145" y="130" class="t-r t-sm">Fast-dLLM-LLaDA</text>
+<rect x="150" y="116" width="97.2" height="13" style="fill:var(--c-enc)"/><text x="252.2" y="123" class="t-xs">114.3（2.0×）</text>
+<rect x="150" y="131" width="67.2" height="13" style="fill:var(--c-tgt)"/><text x="222.2" y="138" class="t-xs">79.1（1.6×）</text>
+<text x="145" y="170" class="t-r t-sm">D2F-LLaDA</text>
+<rect x="150" y="156" width="86.8" height="13" style="fill:var(--c-enc)"/><text x="241.8" y="163" class="t-xs">102.1（1.8×）</text>
+<rect x="150" y="171" width="64.8" height="13" style="fill:var(--c-tgt)"/><text x="219.8" y="178" class="t-xs">76.2（1.5×）</text>
+<text x="145" y="210" class="t-r t-sm">dParallel-LLaDA</text>
+<rect x="150" y="196" width="146.4" height="13" style="fill:var(--c-enc)"/><text x="301.4" y="203" class="t-xs">172.2（3.0×）</text>
+<rect x="150" y="211" width="90.0" height="13" style="fill:var(--c-tgt)"/><text x="245.0" y="218" class="t-xs">105.9（2.1×）</text>
+<text x="145" y="250" class="t-r t-sm">d3LLM-LLaDA</text>
+<rect x="150" y="236" width="245.6" height="13" style="fill:var(--c-enc)"/><text x="400.6" y="243" class="t-xs">288.9（5.0×）</text>
+<rect x="150" y="251" width="155.8" height="13" style="fill:var(--c-tgt)"/><text x="310.8" y="258" class="t-xs">183.3（3.6×）</text>
+<text x="625" y="50" class="t-r t-sm">Qwen-2.5-7B-it</text>
+<rect x="630" y="36" width="48.7" height="13" style="fill:var(--c-enc)"/><text x="683.7" y="43" class="t-xs">57.3（1.0×）</text>
+<rect x="630" y="51" width="42.8" height="13" style="fill:var(--c-tgt)"/><text x="677.8" y="58" class="t-xs">50.4（1.0×）</text>
+<text x="625" y="90" class="t-r t-sm">Dream</text>
+<rect x="630" y="76" width="23.5" height="13" style="fill:var(--c-enc)"/><text x="658.5" y="83" class="t-xs">27.6（0.5×）</text>
+<rect x="630" y="91" width="7.1" height="13" style="fill:var(--c-tgt)"/><text x="642.1" y="98" class="t-xs">8.3（0.2×）</text>
+<text x="625" y="130" class="t-r t-sm">Fast-dLLM-Dream</text>
+<rect x="630" y="116" width="65.7" height="13" style="fill:var(--c-enc)"/><text x="700.7" y="123" class="t-xs">77.3（1.3×）</text>
+<rect x="630" y="131" width="43.9" height="13" style="fill:var(--c-tgt)"/><text x="678.9" y="138" class="t-xs">51.6（1.0×）</text>
+<text x="625" y="170" class="t-r t-sm">Fast-dLLM v2</text>
+<rect x="630" y="156" width="127.5" height="13" style="fill:var(--c-enc)"/><text x="762.5" y="163" class="t-xs">150.0（2.6×）</text>
+<rect x="630" y="171" width="93.2" height="13" style="fill:var(--c-tgt)"/><text x="728.2" y="178" class="t-xs">109.7（2.2×）</text>
+<text x="625" y="210" class="t-r t-sm">dParallel-Dream</text>
+<rect x="630" y="196" width="143.1" height="13" style="fill:var(--c-enc)"/><text x="778.1" y="203" class="t-xs">168.4（2.9×）</text>
+<rect x="630" y="211" width="68.2" height="13" style="fill:var(--c-tgt)"/><text x="703.2" y="218" class="t-xs">80.2（1.6×）</text>
+<text x="625" y="250" class="t-r t-sm">d3LLM-Dream</text>
+<rect x="630" y="236" width="200.0" height="13" style="fill:var(--c-enc)"/><text x="835.0" y="243" class="t-xs">235.3（4.1×）</text>
+<rect x="630" y="251" width="109.0" height="13" style="fill:var(--c-tgt)"/><text x="744.0" y="258" class="t-xs">128.2（2.5×）</text>
+<rect x="150" y="286" width="14" height="12" style="fill:var(--c-enc)"/><text x="170" y="292" class="t-sm">H100</text>
+<rect x="240" y="286" width="14" height="12" style="fill:var(--c-tgt)"/><text x="260" y="292" class="t-sm">A100</text>
+<text x="340" y="292" class="t-xs">单位：token/秒；括号里是相对同一 GPU 上 Qwen-2.5-7B-Instruct 的倍数。HuggingFace 后端，单卡，batch 1，GSM8K-CoT。</text>
+  </svg>
+  <div class="dia-note">本站按论文表 3、表 4 重画。对应的精度：Qwen 74.1%；LLaDA 组 72.6 / 74.7 / 73.2 / 72.6 / 73.1%（依次为 LLaDA、Fast-dLLM、D2F、dParallel、d3LLM）；Dream 组 83.9 / 79.0 / 77.5 / 82.1 / 81.4%（依次为 Dream、Fast-dLLM、Fast-dLLM v2、dParallel、d3LLM）。</div>
+</div>
+<p>d3LLM-LLaDA 在 H100 上每秒 288.9 个 token，是 Qwen-2.5-7B-Instruct 的 5.0 倍，在 A100 上是 183.3、3.6 倍；相对原版 LLaDA（H100 上 27.9）快 10.3 倍。d3LLM-Dream 在 H100 上 235.3（4.1 倍）、A100 上 128.2（2.5 倍），相对原版 Dream（H100 上 27.6）快 8.5 倍。作者的总结是：d3LLM 在 AUP 最高、精度下降可以忽略的同时，在 H100 上比 AR 解码最多快 5 倍，在 A100 上约快 3.6 倍。</p>
+<p><b>换成 SGLang 推理引擎（附录 A.8）。</b>上面的数字都用 HuggingFace Transformers 后端，这个环境方便但没有为 dLLM 专门优化。作者又把 d3LLM 接进了 SGLang（一个高性能推理服务框架，见 <a href="sglang.html">SGLang 精读</a>），做了三件事：在 SGLang 里加上双向注意力的支持；把多块解码算法直接实现在 SGLang 运行时里；为 dLLM 的解码模式做算子融合等内核级优化。测量仍是 GSM8K-CoT（0-shot）、单卡（TP=1）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型（附录表 15）</th><th>阈值</th><th>batch</th><th>B200 TPS</th><th>H100 TPS</th><th>A100 TPS</th><th>TPF</th><th>精度</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen-2.5-7B-Instruct</td><td>—</td><td>1</td><td>274.7（1.0×）</td><td>108.6（1.0×）</td><td>96.8（1.0×）</td><td>1.00</td><td>74.1%</td></tr>
+    <tr><td>Qwen3-8B</td><td>—</td><td>1</td><td>234.2（0.9×）</td><td>98.3（0.9×）</td><td>90.0（0.9×）</td><td>1.00</td><td>93.6%</td></tr>
+    <tr><td>d3LLM-LLaDA（8B）</td><td>0.5</td><td>1</td><td>1241.0（4.5×）</td><td>545.3（5.0×）</td><td>251.6（2.6×）</td><td>9.91</td><td>75.4%</td></tr>
+    <tr><td>d3LLM-LLaDA（8B）</td><td>0.5</td><td>4</td><td>1310.2（4.8×）</td><td>551.9（5.1×）</td><td>250.0（2.6×）</td><td>8.56</td><td>75.1%</td></tr>
+    <tr><td>d3LLM-Dream（7B）</td><td>0.4</td><td>1</td><td>586.8（2.1×）</td><td>280.5（2.6×）</td><td>125.6（1.3×）</td><td>4.89</td><td>80.9%</td></tr>
+    <tr><td>d3LLM-Dream（7B）</td><td>0.4</td><td>4</td><td>676.8（2.5×）</td><td>281.8（2.6×）</td><td>127.9（1.3×）</td><td>4.22</td><td>80.8%</td></tr>
+  </tbody>
+</table></div>
+<p>作者说 SGLang 在所有硬件上都大幅提高了吞吐，而且越强的 GPU 加速越明显：d3LLM-LLaDA 在 B200 上最高 1310 TPS、H100 上 551、A100 上 251，约为 AR 基线的 4.8 倍、5.1 倍和 2.6 倍，精度相当。</p>
+<p><b>为什么 A100 上倍数小得多？</b>论文没有分析，本站用 TPS ÷ TPF 推算每次前向的耗时来解释（均为推算）：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>设置</th><th>d3LLM-LLaDA 每次前向</th><th>Qwen 每生成 1 个 token</th><th>前者是后者的几倍</th></tr></thead>
+  <tbody>
+    <tr><td>HuggingFace，H100</td><td>288.9 ÷ 9.11 → 约 31.5 毫秒</td><td>约 17.5 毫秒</td><td>1.8</td></tr>
+    <tr><td>HuggingFace，A100</td><td>183.3 ÷ 9.11 → 约 49.7 毫秒</td><td>约 19.8 毫秒</td><td>2.5</td></tr>
+    <tr><td>SGLang，B200</td><td>1241.0 ÷ 9.91 → 约 8.0 毫秒</td><td>约 3.6 毫秒</td><td>2.2</td></tr>
+    <tr><td>SGLang，H100</td><td>545.3 ÷ 9.91 → 约 18.2 毫秒</td><td>约 9.2 毫秒</td><td>2.0</td></tr>
+    <tr><td>SGLang，A100</td><td>251.6 ÷ 9.91 → 约 39.4 毫秒</td><td>约 10.3 毫秒</td><td>3.8</td></tr>
+  </tbody>
+</table></div>
+<p>AR 模型在 batch 1 时每一步只算一个新 token，耗时主要花在从显存读参数上，受<b>显存带宽</b>限制；d3LLM 的一次前向要处理几百个位置，计算量大得多，更多地受<b>算力</b>限制。按 NVIDIA 官方规格（SXM 版本），A100 的 BF16 稠密算力约为 H100 的三分之一，显存带宽约为六成。所以换到 A100 时，d3LLM 每次前向慢得比 AR 每一步多，同样的 TPF 换来的墙钟倍数就小了（上表 SGLang 一栏：H100 上一次前向约等于 AR 两步，A100 上约等于四步）。这也说明了第 2 节的那个提醒：TPF 本身不能直接换算成速度。</p>
+
+<h4 id="n-4-5">4.5 消融与超参：原文表 5–8</h4>
+<p><b>蒸馏配方的消融（表 5 上半部分）。</b>都在 d3LLM-LLaDA、GSM8K-CoT 上测，解码都用多块解码加早停。</p>
+<div class="dia">
+  <div class="dia-title">示意图：TPF 是怎样一步步加上去的（按论文表 5 的数字）</div>
+  <div class="dia-row"><span class="lbl">训练配方<br>（解码都用多块 + 早停）</span><div class="dia-track"><span class="dia-seg oth" style="flex:6.41">不含蒸馏组件 6.41</span><span class="dia-seg kv" style="flex:1.14">+伪轨迹</span><span class="dia-seg cmp" style="flex:0.91">+噪声课程</span><span class="dia-seg w" style="flex:0.65">+窗口</span></div></div>
+  <div class="dia-out">TPF 6.41 → 7.55 → 8.46 → 9.11；精度 72.2% → 72.1% → 69.8% → 73.1%；AUP 441.4 → 517.7 → 551.3 → 637.7</div>
+  <div class="dia-row"><span class="lbl">解码策略<br>（训练都用完整配方）</span><div class="dia-track"><span class="dia-seg oth" style="flex:7.01">单块解码 7.01</span><span class="dia-seg kv" style="flex:2.06">+多块解码</span></div></div>
+  <div class="dia-out">TPF 7.01 → 9.07 → 9.11（加早停）；精度 73.2% → 73.1% → 73.1%；AUP 492.9 → 635.0 → 637.7</div>
+  <div class="dia-note">本站按论文表 5 画的示意，条的长度正比于 TPF 9.11。早停只多了 0.04，在条上画不出来。</div>
+</div>
+<p>没有任何蒸馏组件的基线 TPF 6.41、精度 72.2%。加上伪轨迹蒸馏，TPF 提高 17.8%（到 7.55），精度基本不变，说明学习老师的揭开顺序确实提高了并行度。再加上噪声课程，TPF 升到 8.46，但精度掉到 69.8%，作者的解读是课程让模型能更激进地并行解码。最后加上窗口课程，就是完整模型：TPF 9.11、精度 73.1%，并行度继续提高，精度也恢复了，说明窗口课程既提高并行度、又稳定了蒸馏过程。</p>
+<p><b>解码策略的消融（表 5 下半部分）。</b>训练配方都是完整的。只用普通的单块解码时，TPF 7.01；加上多块解码，TPF 升到 9.07，因为未来块里有把握的 token 可以和当前块同时揭开；再加上早停，去掉了结束符之后多余的前向，TPF 9.11，AUP 最高。作者据此回答第三个问题：每个部件都有实质贡献。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>掩码率调度（表 6）</th><th>TPF</th><th>精度</th><th>AUP</th></tr></thead>
+  <tbody>
+    <tr><td>固定 \(t=0.5\)</td><td>7.49</td><td>72.8%</td><td>521.7</td></tr>
+    <tr><td>课程 0.2 → 0.5</td><td>8.03</td><td>72.7%</td><td>557.7</td></tr>
+    <tr><td>课程 0.0 → 0.5</td><td>8.85</td><td>72.9%</td><td>616.9</td></tr>
+    <tr><td><b>课程 0.0 → 0.8</b></td><td><b>9.11</b></td><td><b>73.1%</b></td><td><b>637.7</b></td></tr>
+  </tbody>
+</table></div>
+<div class="table-wrap"><table>
+  <thead><tr><th>窗口调度（表 7）</th><th>TPF</th><th>精度</th><th>AUP</th></tr></thead>
+  <tbody>
+    <tr><td>固定 \(k=32\)</td><td>8.22</td><td>69.8%</td><td>536.0</td></tr>
+    <tr><td>课程 0 → 32</td><td>8.67</td><td>72.8%</td><td>603.1</td></tr>
+    <tr><td><b>课程 16 → 32</b></td><td><b>9.11</b></td><td><b>73.1%</b></td><td><b>637.7</b></td></tr>
+    <tr><td>课程 24 → 32</td><td>8.58</td><td>71.9%</td><td>584.9</td></tr>
+  </tbody>
+</table></div>
+<p><b>超参分析。</b>和固定掩码率 0.5 相比，0.0 → 0.8 的课程把 TPF 提高 21.6%、AUP 提高 22.2%。作者的解释是：逐步提高掩码率，让模型先学会基本的 token 依赖，再去处理更难的遮盖模式。窗口方面，16 → 32 的课程比固定 32 的 AUP 高 19.0%，精度也从 69.8% 回到 73.1%。从太小的窗口起步（0 → 32）或起点太大（24 → 32）都更差，说明窗口的起点要选得合适。（正文这里把两张表都写成“表 7”，第一处应为表 6。）</p>
+<p><b>AUP 权重形式的分析（表 8）。</b>为了说明结论不依赖于指数形式的权重，作者又试了幂函数 \(W(y)=(y/y_{\max})^{\alpha}\) 和线性函数 \(W(y)=\max(1-\alpha(1-y/y_{\max}),0)\)，各取三个 \(\alpha\)。在 LLaDA 组 GSM8K-CoT 上，九种配置下的排名完全一致，d3LLM 始终第一（例如指数 \(\alpha=1\) 时 659.4，线性 \(\alpha=10\) 时 557.4）。本站用两点数据复核了这张表，九个 d3LLM 数值全部能算出来（推算）。</p>
+<div class="note-warn"><b>读消融时要注意的地方：</b>
+<ul>
+  <li><b>“不含蒸馏组件”的基线是什么模型，论文没有说清。</b>它的 TPF 6.41 远高于原版 LLaDA 配 Fast-dLLM 的 2.77，也高于 dParallel 的 5.14，所以不太可能是原版 LLaDA。比较合理的猜测是“沿用 dParallel 的损失、但用随机遮盖”训练出来的模型，再配上多块解码（这只是本站的推断）。如果是这样，那么在同样的解码方式下，伪轨迹加两个课程带来的提升是 6.41 → 9.11。</li>
+  <li><b>一个相对干净的对照。</b>表 5 下半部分的“单块解码”一行（TPF 7.01、精度 73.2%）和 dParallel-LLaDA（TPF 5.14、精度 72.6%）用的是同样的起点模型、同样的训练数据和损失，解码也都是单块的熵阈值解码（官方评测脚本里 dParallel 的熵阈值是 0.5；表 5 单块那一行用的阈值论文没写，d3LLM 多块解码用的是 0.5）。两者相比，单是训练配方的差别就让 TPF 提高约 36%（推算）。这是论文里最能单独说明“伪轨迹 + 课程”作用的一组数，但论文自己没有这样对比。</li>
+  <li><b>噪声课程那一步掉了 2.3 个百分点</b>（72.1% → 69.8%），是窗口课程把精度拉回来的。三个训练组件之间有相互作用，单独看某一步的增益不一定能叠加。</li>
+  <li>所有消融只在 LLaDA 和 GSM8K-CoT 这一个组合上做，没有在 Dream 或代码任务上重复。</li>
+</ul></div>
+
+<h4 id="n-4-6">4.6 附录里的其他对照：代码模型、SDTT、EAGLE-3 与 AUP 的敏感性</h4>
+<p><b>代码模型（附录 A.3，表 9）。</b>d3LLM-Coder 基于 Dream-Coder-7B，生成长度 512，对比的 AR 模型是 Qwen2.5-Coder-7B：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>精度（表 9）</th><th>HumanEval</th><th>HumanEval+</th><th>MBPP</th><th>MBPP+</th></tr></thead>
+  <tbody>
+    <tr><td>Qwen2.5-Coder-7B（AR，TPF 1）</td><td>86.6</td><td>82.3</td><td>83.5</td><td>70.1</td></tr>
+    <tr><td>Dream-Coder-7B（TPF 1）</td><td>82.9</td><td>76.8</td><td>79.9</td><td>68.8</td></tr>
+    <tr><td>d3LLM-Coder-7B</td><td>79.7（TPF 2.88）</td><td>71.3（TPF 2.88）</td><td>80.1（TPF 2.50）</td><td>69.3（TPF 2.50）</td></tr>
+  </tbody>
+</table></div>
+<p>d3LLM-Coder 的 TPF 只有 2.5–2.9，比数学任务低得多。精度方面，MBPP 和 MBPP+ 与原版 Dream-Coder 持平略高，HumanEval 低 3.2 个百分点，HumanEval+ 低 5.5 个百分点；和 Qwen2.5-Coder-7B 相比，四项都更低。论文正文没有交代 d3LLM-Coder 的训练数据；按它在 Hugging Face 上的模型卡，用的是一个名为 <code>d3LLM/Ling-Coder-dParallel-merged-512-120k</code> 的数据集。</p>
+<p><b>和 SDTT 比（附录 A.5，表 12）。</b>SDTT（Self-Distillation Through Time）是一种离散扩散模型的蒸馏方法：让学生用更少的步数去匹配老师多步预测的 KL 散度。为了公平，作者用和 d3LLM-LLaDA 相同的蒸馏数据、epoch 数、有效 batch、优化器训练 SDTT-LLaDA，学习率在 {5e-6, 2e-5, 4e-5, 6e-5} 里网格搜索选了 2e-5，并分别试了 SDTT 原文用的反向 KL 和正向 KL。结果在 GSM8K-CoT 上：反向 KL 71.62% / TPF 4.53 / AUP 309.71；正向 KL 72.17% / 4.29 / 310.33；d3LLM-LLaDA 73.09% / 9.11 / 637.65。SDTT 在几乎不掉点的前提下比原版 LLaDA 快了不少，说明蒸馏本身对加速 dLLM 普遍有效；d3LLM 的优势被归因于伪轨迹提供的中间监督和课程学习。论文没有说明 SDTT 推理时用的是哪种解码方式，如果它没有用多块解码，那么两者 TPF 的差距里有一部分来自解码策略而不是训练。</p>
+<p><b>和投机解码 EAGLE-3 比（附录 A.7，表 14）。</b>作者在同样五个数据集上测了 EAGLE-3（目标模型是 LLaMA-3.1-8B-Instruct）。投机解码的原理是用一个小的草稿模型一次猜几个 token，再由大模型一次前向验证、只接受对的部分，所以输出和大模型自己逐个生成完全一致（见 <a href="speculative-decoding.html">投机解码精读</a>、<a href="eagle.html">EAGLE 精读</a>）。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>TPF / 精度 / AUP（表 14）</th><th>GSM8K-CoT</th><th>MATH</th><th>MBPP</th><th>HumanEval</th><th>Long-GSM8K</th></tr></thead>
+  <tbody>
+    <tr><td>d3LLM-LLaDA</td><td>9.11 / 73.1 / <b>637.7</b></td><td>5.74 / 30.4 / 107.6</td><td>4.21 / 40.6 / 88.4</td><td>5.95 / 39.6 / 96.6</td><td>6.95 / 74.2 / <b>441.1</b></td></tr>
+    <tr><td>d3LLM-Dream</td><td>4.94 / 81.4 / 391.3</td><td>3.92 / 38.2 / 97.5</td><td>2.96 / 55.6 / 141.4</td><td>3.20 / 57.1 / 129.5</td><td>4.80 / 77.2 / 348.6</td></tr>
+    <tr><td>EAGLE-3（LLaMA-3.1-8B）</td><td>5.12 / 76.6 / 319.0</td><td>5.72 / 39.8 / <b>142.1</b></td><td>5.69 / 60.2 / <b>298.6</b></td><td>5.98 / 67.6 / <b>344.8</b></td><td>5.57 / 80.5 / 422.2</td></tr>
+  </tbody>
+</table></div>
+<p>作者坦承 EAGLE-3 的总体 AUP 最高，并认为这在意料之中：投机解码有验证这一步，并行度再高也不掉点，而 dLLM 会掉。作者还指出，这个比较没有约束总计算量，投机解码可能比扩散方法花更多 FLOPs。他们的结论是：d3LLM 大幅缩小了扩散模型和最强投机解码方法之间的差距。按表 14 的数字，d3LLM 只在 GSM8K-CoT 和 Long-GSM8K 两项上 AUP 高于 EAGLE-3，在两个代码任务上差距很大（MBPP 141.4 对 298.6，HumanEval 129.5 对 344.8），主要是因为精度落后。</p>
+<p><b>AUP 对 \(\alpha\) 和 \(y_{\min}\) 的敏感性（附录 A.4、A.6，表 10、11、13）。</b>\(\alpha\) 取 1、2、3、5、10 时，LLaDA 组和 Dream 组的 d3LLM 都始终第一：\(\alpha\) 越大，掉点多的方法分数下降越快，d3LLM-LLaDA 从 659.4（\(\alpha=1\)）降到 568.4（\(\alpha=10\)），dParallel 从 370.9 降到 318.3。截断阈值方面，作者把 \(y_{\min}=y_1-\Delta y\) 中的 \(\Delta y\) 取 1、2、3、5、8、10，排名也完全不变（表 13，这张表还加入了 SDTT，排在第三）。作者据此认为 AUP 对这些超参是稳健的。</p>
+<div class="note-warn"><b>关于这些敏感性分析：</b>
+<ul>
+  <li>表 8、表 10、表 11 的数值都能用“两点数据 + 论文公式”复现（推算）。但在只有两个点、而且第二个点只比第一个点低 0.93 分的情况下，\(\Delta y\) 从 1 变到 10 根本不会改变 d3LLM-LLaDA 的 AUP，它应该一直是 637.7。表 13 却给出了 454.8（\(\Delta y=1\)）到 723.3（\(\Delta y=10\)）的变化，而且如果曲线只到 TPF 9.11，面积不可能超过 9.11×74.02≈674。所以表 13 用的数据或算法和主表不同（比如加入了更激进阈值下的点），论文没有交代。</li>
+  <li>“排名不变”本身不太令人意外：在 GSM8K-CoT 上，各方法精度都在最高分附近，AUP 几乎就是 TPF 乘一个相近的精度，换什么权重形式都改变不了 TPF 的排序。真正考验权重设计的是精度差距大的任务（比如 Dream 组的 MATH），而敏感性分析只做了 GSM8K-CoT。</li>
+</ul></div>
+
+<h4 id="n-4-7">4.7 结果的份量</h4>
+<p>这一部分不打分，只把每个数字背后“和谁比、在什么条件下比”说清楚。</p>
+<p><b>“比 AR 快 5 倍”的条件。</b>它成立的条件是：GSM8K-CoT 一个任务；单张 GPU、batch 1；生成长度上限 256；两边都用 HuggingFace Transformers 后端，在 H100 上测。论文没有写 H100 / A100 是 SXM 还是 PCIe 版本。HuggingFace 后端下 AR 基线只有每秒 57.3 个 token，而附录表 15 里同一个 Qwen 模型在 SGLang 中是 108.6，说明 HuggingFace 的 AR 实现大约只发挥了一半速度（推算）。好在作者也给了双方都用 SGLang 时的结果，H100 上的倍数仍是 5.0–5.1 倍，这一点比很多只和未经优化的 AR 实现比较的论文更扎实；但 A100 上只有 2.6 倍，B200 上 4.5–4.8 倍。</p>
+<p><b>batch 变大以后会怎样。</b>表 15 里 d3LLM 有 batch 1 和 batch 4 两行，AR 只有 batch 1。论文没说 TPS 是所有请求加起来的总吞吐，还是单条请求的速度。如果是总吞吐（从数字上看更像），那么 batch 从 1 加到 4，d3LLM 的吞吐只多了 0–15%（推算），说明它在 batch 1 时就已经把 GPU 的算力用得差不多了；而 AR 模型在小 batch 下受显存带宽限制，总吞吐通常会随 batch 近似成比例增长。所以在多用户并发的服务场景里，d3LLM 相对 AR 的优势很可能明显缩小，但论文没有测 AR 在 batch 4 及以上的数字，这只是推断（同样的现象在 <a href="fast-dllm.html">Fast-dLLM</a> 和 <a href="d2f.html#n-5-6">D2F</a> 中也被讨论过）。另外，附录表 15 的这些数字在官方提交给 SGLang 的合并请求（PR #20615）描述里标注的 GPU 是 H800 和 A800，而论文写的是 H100 和 A100；单卡推理时两者差别主要在多卡互联上，影响应该不大，但标注不一致。</p>
+<p><b>和哪个 AR 模型比、同等条件吗。</b>速度对比的基线是 Qwen-2.5-7B-Instruct。它在 18T token 上预训练；LLaDA 是从零训练的 8B 模型，预训练只有 2.3T token；Dream 由 Qwen2.5-7B 初始化，再用 580B token 继续训练（见 <a href="llada.html">LLaDA 精读</a>、<a href="dream.html">Dream 精读</a>）。所以“d3LLM-LLaDA 对 Qwen”在参数量上接近，在训练数据量上相差很大。精度上，测速用的 GSM8K-CoT 恰好是双方最接近的任务（73.1% 对 74.1%）；按官方仓库的数据，Qwen 在其他四个任务上明显更高：MATH 41.2%、MBPP 63.6%、HumanEval 67.7%、Long-GSM8K 82.6%，对应的 d3LLM-LLaDA 是 30.4%、40.6%、39.6%、74.2%。表 15 还顺带列了 Qwen3-8B：同样 batch 1，速度和 Qwen2.5 相近，GSM8K-CoT 精度 93.6%，远高于 d3LLM 的 75%。所以“快 5 倍而精度损失不大”是相对 Qwen-2.5-7B-Instruct、在 GSM8K-CoT 上成立的结论，不能推广成“d3LLM 能替代同等大小的 AR 模型”。</p>
+<p><b>和自己的原版比，掉了多少。</b>论文反复说精度下降“可以忽略”。按表 1、表 2：d3LLM-LLaDA 相对原版 LLaDA，GSM8K-CoT +0.5、MATH −1.8、MBPP −1.1、HumanEval +1.3、Long-GSM8K −4.4 个百分点；d3LLM-Dream 相对原版 Dream，GSM8K-CoT −2.5、MATH −1.4、MBPP-Instruct −1.6、HumanEval-Instruct +1.9、Long-GSM8K −1.8 个百分点。多数在 2 个百分点以内，但长提示的 Long-GSM8K 在 LLaDA 上掉了 4.4。分数的统计意义也要心里有数：标准差在 0.1–0.6 之间；HumanEval 只有 164 题，1 道题约 0.61 分，所以 39.6% 和 39.0% 只差一道题左右；GSM8K 1,319 题，1 个百分点约 13 题（推算）。</p>
+<p><b>训练数据和测试任务是同一类。</b>蒸馏数据来自 PRM12K、AceCode、GSM8K 训练集和 Numina-Math，全部是数学和代码题，而测试的五个任务也全是数学和代码。官方 README 也提醒，因为蒸馏数据主要是代码和数学推理，加速可能只在这类提示上出现。论文没有测通用对话、知识问答或长文写作，也没有检查学生在这些领域是否保持了原模型的能力。</p>
+<p><b>对手的设置。</b>附录 A.9 说各对手都用官方权重和默认设置。读官方评测脚本能发现，LLaDA 组 GSM8K-CoT 上 D2F 一行用的是 1-shot 的 <code>gsm8k_cot</code> 任务加聊天模板，而其他方法用 0-shot 的 <code>gsm8k_cot_zeroshot</code>，提示并不完全相同。D2F 的作者里有本文的两位作者（Hao Zhang、Zhijie Deng），这有助于正确使用 D2F，但也意味着并非完全独立的比较。Fast-dLLM v2 是从 AR 模型 Qwen2.5-7B-Instruct 改造来的，用了约 13 亿 token 训练，起点和 d3LLM-Dream 不同；第 4.3 节提到的表格数字不一致也集中在 Fast-dLLM v2 和 D2F 这两行。</p>
+<p><b>AUP 本身的份量。</b>第 2 节已经说过：每个方法只有两个点；在精度接近时，AUP 的排名基本就是 TPF 的排名；\(y_{\max}\) 取决于把哪些方法放进比较，跨论文不能直接比。所以“10 个任务中 9 个 AUP 最高”最好读成“在 10 个任务中的 9 个上，d3LLM 的 TPF 最高，而且精度没有落后到足以被权重拉下来”。这仍然是一个实实在在的结果，只是它说的主要是并行度。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2601.07568#S4.SS1" target="_blank" rel="noopener">§4.1 ↗</a> · <a href="https://arxiv.org/html/2601.07568#S4.SS2" target="_blank" rel="noopener">§4.2 ↗</a> · <a href="https://arxiv.org/html/2601.07568#S4.SS3" target="_blank" rel="noopener">§4.3 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A1" target="_blank" rel="noopener">附录 A ↗</a> · <a href="https://github.com/hao-ai-lab/d3LLM/tree/main/eval_scripts" target="_blank" rel="noopener">官方评测脚本 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 结论、相关工作与局限</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后怎样概括这项工作？附录里的相关工作和局限性说明，又把 d3LLM 放在了怎样的位置上？把前面的内容合起来看，它真正改变了什么，留下了哪些没有回答的问题？</div>
+<p><b>作者的结论。</b>dLLM 天生存在精度–并行度的权衡，而已有方法往往只顾一头。随机遮盖的训练不告诉模型哪些 token 可以早点揭开，已有的多块解码又因为前文不完整或有错而损害质量。d3LLM 在训练时用伪轨迹蒸馏，借老师的揭开顺序教模型哪些 token 可以放心地早点揭开；在推理时用基于熵的多块解码加 KV 缓存刷新，在保住精度的同时提高并行度。作者还提出 AUP 来同时衡量精度和并行度。在 LLaDA、Dream、Dream-Coder 上，d3LLM 在 10 个任务中的 9 个上 AUP 最高，相对 AR 模型快 3.6–5 倍（取决于 GPU），相对原版 LLaDA / Dream 快约 10 倍，精度下降可以忽略。</p>
+<p><b>相关工作（附录 B）。</b>作者把相关工作分成两大块。第一块是扩散语言模型本身：掩码扩散是核心技术（<a href="d3pm.html">D3PM</a>、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM / MD4</a>），RADD 等工作完善了训练目标；为减少推理步数，SDTT 把多步老师蒸馏成少步学生，<a href="duo.html">Duo</a> 把一致性蒸馏搬到离散设置并配了课程学习；开源基础模型方面有从零训练的 <a href="llada.html">LLaDA</a>、由 AR 模型初始化的 <a href="dream.html">Dream</a>，以及扩展到 100B 的 <a href="llada2.html">LLaDA2.0</a>。加速方面有 <a href="fast-dllm.html">Fast-dLLM</a>（近似块级缓存）、<a href="dkv-cache.html">dKV-Cache</a>（延迟缓存）、dInfer（系统级优化）和 <a href="dparallel.html">dParallel</a>；ParallelBench 则专门测出并行解码可能带来严重的质量下降。提升能力的一线有 <a href="mmada.html">MMaDA</a>、ReFusion、<a href="tracerl.html">TraDo</a> 等。第二块是 AR 模型的投机解码：<a href="speculative-decoding.html">经典的草稿–验证框架</a>、<a href="eagle.html">EAGLE</a> 与 EAGLE-3、在线投机解码 OSD、<a href="medusa.html">Medusa</a> 与 Hydra、用 Jacobi 轨迹训练并行解码的 CLLM，以及不用草稿模型、直接从上下文取候选的 REST、Lookahead decoding、PLD+。作者强调，投机解码的关键特点是有目标模型的验证，所以能在高吞吐下保持生成质量。</p>
+<p><b>未来方向（附录 A.12）。</b>作者提出两个方向：一是和投机解码结合，例如用一个小 dLLM 当草稿、大模型验证；二是用到更强的基础 dLLM 上（例如 ReFusion、LLaDA2.0），或者结合强化学习、持续学习、量化等技术。作者也说，接入 SGLang 的结果说明系统级优化还能显著放大这些收益。</p>
+<p><b>局限（附录 C）。</b>作者承认实验主要在 LLaDA 和 Dream 上做，它们是研究最多、可比工作最多的两个开源 dLLM；更新、可能更强的模型（SDAR、ReFusion、LLaDA2.0）没有测。作者认为 d3LLM 的蒸馏配方和推理策略与具体模型无关，可以即插即用地用到这些新模型上，但这一点没有实验支持。</p>
+<p><b>站在今天回看。</b>d3LLM 的贡献可以分成三层。第一层是一个训练上的小而清楚的改动：在 dParallel 的确定性强制蒸馏里，把“随机遮”换成“按模型自己的揭开顺序遮”，再加两个课程；在同样的单块解码下，它让 TPF 从 dParallel 的 5.14 提到 7.01（第 4.5 节的推算对照）。第二层是工程上的组合：把 D2F 的多块调度和 dKV-Cache 式的延迟缓存搬到不改结构的全双向模型上，多块解码又带来约 30% 的 TPF。第三层是一个评测指标 AUP，它让“又快又准”有了一个可以排序的数，后来也被其他论文采用（见下一节）。留下的问题主要在评测上：batch 大于 1 时相对 AR 的优势、数学和代码之外的任务、和更强的 AR 模型（如表 15 里的 Qwen3-8B）在同等精度下的比较，以及 AUP 对“每次前向成本”的忽略。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07568#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A1.SS12" target="_blank" rel="noopener">附录 A.12 ↗</a> · <a href="https://arxiv.org/html/2601.07568#A2" target="_blank" rel="noopener">附录 B ↗</a> · <a href="https://arxiv.org/html/2601.07568#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇论文 2026 年 1 月才发到 arXiv，到 2026-10 不到一年，所以下面说的都是早期情况。</p>
+<p><b>发表与版本。</b>论文被 ICML 2026 接收为 poster（首尔，2026-07-07 的海报场次），v3 的页脚标注为 PMLR 306。arXiv 上共有三个版本：v1（2026-01-12）、v2（2026-01-29）、v3（2026-08-06）。对比 v1 和 v3 可以看到，v3 新增了 AUP 对 \(\alpha\) 和 \(y_{\min}\) 的敏感性分析（附录 A.4、A.6）、与 SDTT 的对比（A.5）、接入 SGLang 的测速（A.8）以及局限性一节（附录 C），这些多半是为回应审稿意见补充的。</p>
+<p><b>开源。</b>官方仓库在 2025-12-10 创建，2025-12-11 发布了三个模型（d3LLM-LLaDA、d3LLM-Dream、d3LLM-Coder）、训练脚本、训练数据和评测代码，早于论文的 arXiv 首版；老师轨迹数据也已上传到 Hugging Face。截至 2026-10-20，仓库有 157 个 star、12 个 fork。作者还维护了一个按 AUP 排序的 dLLM 排行榜（Hugging Face Space）和一篇实验室博客。</p>
+<p><b>接入推理引擎。</b>官方 README 在 2026-03-15 宣布“SGLang 支持”，对应的是向 SGLang 提交的合并请求 PR #20615，它新增了 <code>EntropyThreshold</code> 和 <code>FullAttnMultiBlock</code> 两种解码算法，并修改了调度器、KV 缓存和 CUDA Graph 的逻辑。但这个 PR 一直没有被合并，2026-08-23 因 160 天无更新被自动关闭。官方 README 的安装说明至今仍指向这个 PR 的分支；本站没有查到主线 SGLang 以其他方式加入了 d3LLM 的支持。</p>
+<p><b>AUP 被别人用起来了。</b>据本站查到的引用，至少两篇后续论文直接采用了 AUP：同为 2026 年的 Multi-Block Diffusion Language Models（arXiv 2606.29215）在实验里报告 AUP，并注明“沿用 d3LLM 的做法”；CForce（arXiv 2608.13925，用“一致性强制”提升 dLLM 的并行解码）也报告 AUP，并把 d3LLM-LLaDA、d3LLM-Dream 列为对比基线，它引用的 D2F 数字与 d3LLM 仓库里的数据一致。<a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a> 等工作在相关工作里引用了 d3LLM。这几篇本站尚未精读，这里只列事实。截至 2026-10，我们没有找到对 d3LLM 速度或精度的独立复现。</p>
+<p><b>同组的后续工作。</b>附录 A.12 提到的“和投机解码结合”这个方向，同组随后发表了 JetSpec（arXiv 2606.18394，标题意为“用并行树形草稿突破投机解码的扩展上限”），第一作者 Lanxiang Hu，Yu-Yang Qian 也是作者之一。本站尚未精读，这里只列标题。</p>
+<p>想看 d3LLM 与 dParallel、CDLM 放在一起的结构拆解、AUP 的公式整理和配套简答题，见<a href="../legacy/tracks/dllm/15-learned-parallel.html#d3llm">旧版结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v3）。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及论文自己的参考文献。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Yu-Yang Qian</b>（第一作者）<div class="aff">南京大学；论文署名同时列加州大学圣地亚哥分校</div>据个人主页，是南京大学 LAMDA 组博士生，导师周志华教授；Hao AI Lab 成员页把他列为访问博士生，论文致谢也说部分工作在访问 UCSD 期间完成。此前的工作包括非平稳在线学习、在线 RLHF、持续学习方法 TreeLoRA（ICML 2025），以及把投机解码与在线学习结合的工作。</div>
+  <div class="author-card"><b>Junda Su</b><div class="aff">加州大学圣地亚哥分校（论文署名）</div></div>
+  <div class="author-card"><b>Lanxiang Hu</b><div class="aff">加州大学圣地亚哥分校</div>Hao AI Lab 博士生（实验室成员页）。按本文参考文献，是 Jacobi Forcing（启发了本文的窗口课程）和 JetSpec 的第一作者，也是 CLLMs（ICML 2024）和在线投机解码（ICML 2024）的作者之一。</div>
+  <div class="author-card"><b>Peiyuan Zhang</b><div class="aff">加州大学圣地亚哥分校</div>Hao AI Lab 成员页把他列在校友（alumni）一栏。小模型 TinyLlama（arXiv 2401.02385）的第一作者。</div>
+  <div class="author-card senior"><b>Zhijie Deng</b><div class="aff">上海交通大学副教授</div><a href="d2f.html">D2F</a> 的通讯作者，本文对比的 D2F 即出自他的组；与 Hao Zhang 此前合作过 CLLMs 等并行解码工作。</div>
+  <div class="author-card senior"><b>Peng Zhao</b>（通讯作者）<div class="aff">南京大学人工智能学院助理教授，LAMDA 组</div>据个人主页，2021 年在南京大学获博士学位，导师周志华教授；研究机器学习的理论基础，近期关注在线学习、老虎机与在线博弈、优化（包括大模型优化）以及强化学习与推理。</div>
+  <div class="author-card senior"><b>Hao Zhang</b>（通讯作者）<div class="aff">加州大学圣地亚哥分校助理教授（HDSI 与 CSE），Hao AI Lab 负责人</div>LMSYS 核心成员；<a href="vllm.html">vLLM</a>、Vicuna、Chatbot Arena、<a href="distserve.html">DistServe</a> 等工作的作者；在并行解码方向还有 Lookahead decoding（ICML 2024）、CLLMs（ICML 2024），也是 D2F 的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/hao-ai-lab/d3LLM" target="_blank" rel="noopener">hao-ai-lab/d3LLM</a> 157 个 star、12 个 fork（截至 2026-10-20），仓库创建于 2025-12-10；GitHub 上没有识别到许可证文件。Hugging Face 上的 <a href="https://huggingface.co/d3LLM/d3LLM_LLaDA" target="_blank" rel="noopener">d3LLM-LLaDA</a>、<a href="https://huggingface.co/d3LLM/d3LLM_Dream" target="_blank" rel="noopener">d3LLM-Dream</a>、<a href="https://huggingface.co/d3LLM/d3LLM_Dream_Coder" target="_blank" rel="noopener">d3LLM-Coder</a> 模型卡标注 Apache-2.0；老师轨迹数据集与 <a href="https://huggingface.co/spaces/d3LLM/dLLM_Leaderboard" target="_blank" rel="noopener">AUP 排行榜</a> 也在 Hugging Face 上。</li>
+  <li><b>推理引擎</b>：SGLang 支持以 <a href="https://github.com/sgl-project/sglang/pull/20615" target="_blank" rel="noopener">PR #20615</a> 的形式提交，2026-08-23 未合并即被自动关闭。</li>
+  <li><b>指标的采用</b>：AUP 已被至少两篇后续论文（arXiv 2606.29215、2608.13925）用作评测指标。</li>
+  <li><b>发表</b>：ICML 2026（poster），<a href="https://openreview.net/forum?id=rzBAQT2Fkg" target="_blank" rel="noopener">OpenReview</a>、<a href="https://icml.cc/virtual/2026/poster/61269" target="_blank" rel="noopener">会议页面</a>。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/15-learned-parallel.html#d3llm">旧版结构拆解：训练式并行解码（dParallel、d3LLM、CDLM）</a>，其中 <a href="../legacy/tracks/dllm/15-learned-parallel.html#c-aup">AUP 一节</a> 与 <a href="../legacy/tracks/dllm/15-learned-parallel.html#q30">简答题 Q30</a> 专门讨论 TPF 与墙钟速度的区别。</li>
+  <li><a href="dparallel.html">dParallel 精读</a>：d3LLM 直接沿用的确定性强制蒸馏与训练数据。</li>
+  <li><a href="d2f.html">D2F 精读</a>：多块流水线解码的来源，以及块间因果、精确缓存的另一种做法。</li>
+  <li><a href="fast-dllm-v2.html">Fast-dLLM v2 精读</a>：从 AR 模型改造块扩散，本文 Dream 组最强的对手。</li>
+  <li><a href="fast-dllm.html">Fast-dLLM 精读</a>、<a href="dkv-cache.html">dKV-Cache 精读</a>：双向 dLLM 上的近似 KV 缓存与延迟缓存；<a href="../legacy/tracks/dllm/14-kv-cache.html">旧版拆解页</a>。</li>
+  <li><a href="llada.html">LLaDA 精读</a>、<a href="dream.html">Dream 精读</a>：d3LLM 的两个主要起点模型；第三个起点 Dream-Coder 见<a href="../legacy/tracks/dllm/18-code.html#dream-coder">旧版拆解页：代码 dLLM</a>。</li>
+  <li><a href="../legacy/tracks/dllm/16-order-limits.html">旧版拆解页：顺序与并行的极限</a>：一步揭开多个 token 时的因子分解误差，以及 ParallelBench。</li>
+  <li><a href="speculative-decoding.html">投机解码精读</a>、<a href="eagle.html">EAGLE 精读</a>：附录 A.7 的对照对象，AR 模型一侧的“无损并行”。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2601.07568" target="_blank" rel="noopener">arXiv:2601.07568</a>（v3）。论文以 arXiv 非独占许可（arXiv.org perpetual non-exclusive license）发布，本页没有转载原图；所有示意图与简图均为本站绘制，其中的数据取自论文表格和官方仓库公开的 AUP 数据，标“推算”的数字为本站计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>
