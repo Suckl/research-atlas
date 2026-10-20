@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R-MDM 掩码扩散的递归扩展 精读</title>
+<meta name="description" content="Carballo-Castro、Piskorz、Rauba、van der Schaar、Frossard 的 arXiv 2606.18022（v2）逐节精读：在掩码扩散模型的每个去噪步里把同一块 Transformer 反复用 L 遍；同参数、同 FLOPs、同前向次数三种对比各自匹配了什么；依赖误差与保真误差的分解；用熵同时决定循环次数和提交哪些 token 的解码器；以及这些数字在小规模结构化任务上的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="looped" data-node="r-mdm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 循环 Transformer × 扩散 LLM · arXiv 预印本 2026</div>
+  <h1>掩码扩散模型的递归扩展：在每个去噪步里把同一块网络反复用 L 遍</h1>
+  <p class="en-title">Recursive Scaling in Masked Diffusion Models</p>
+  <div class="paper-authors">Alba Carballo-Castro<sup>1,*</sup>, Julianna Piskorz<sup>2</sup>, Paulius Rauba<sup>2</sup>, Mihaela van der Schaar<sup>2</sup>, Pascal Frossard<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>洛桑联邦理工学院 LTS4 实验室（LTS4, EPFL，瑞士洛桑）　<sup>2</sup>剑桥大学（University of Cambridge，英国剑桥）　<sup>*</sup>通讯作者（按论文脚注）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2606.18022" target="_blank" rel="noopener">arXiv 2606.18022 ↗</a>
+    <a class="pill" href="https://arxiv.org/abs/2606.18022v2" target="_blank" rel="noopener">本页依据 v2（2026-09-28）↗</a>
+    <a class="pill" href="https://icml.cc/virtual/2026/72319" target="_blank" rel="noopener">ICML 2026 研讨会（HiLD）↗</a>
+  </div>
+  <div class="paper-stats" data-stats></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">论文目前是 arXiv 预印本，v2 首页标注“Preprint. Under review.”；它也以研讨会论文的形式出现在 ICML 2026 的三个研讨会上（见文末“影响力”）。截至 2026-10-20，论文里没有代码链接，我们也没有在 GitHub 上找到官方代码。本页依据第 2 版（v2）。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍，附录里用得上的内容（证明、训练细节、完整结果表）放到正文相应的位置。原文第 3、4、5 节都比较长，本页各拆成两节：本页第 3–4 节对应原文第 3 节，第 5–6 节对应原文第 4 节，第 7–8 节对应原文第 5 节；文中说“原文第几节”和“本页第几节”时会分别注明。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 CC BY 4.0 许可发布，所以原图直接放在讲到它的地方，并说明这张图怎么看；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>掩码扩散模型（masked diffusion model，MDM）生成一段序列的方式，和自回归模型“一个接一个往后写”不同。它先拿出一张全是空格（[MASK]）的“画布”，然后分 \(T\) 步把空格填上：每一步，模型同时看整张画布，给每个空格猜一个答案，再挑出其中一部分“落子”（论文叫 commit，本页译作“提交”），其余空格留到下一步再猜。所以 MDM 天生有两种加算力的办法：一是把模型做大，二是把步数 \(T\) 加多。步数越多，每一步要同时提交的 token 就越少，同时落子造成的冲突也越少，质量通常越好。</p>
+<p>这篇论文加了第三种办法：<b>在每个去噪步之内，把同一块 Transformer 反复用 \(L\) 遍</b>。这就是循环 Transformer（looped transformer）在扩散模型里的版本，作者把它叫作递归掩码扩散模型（Recursive Masked Diffusion Model，R-MDM）。循环不增加参数，只增加计算：模型每多循环一遍，就多算一遍整块网络。关键的区别在于，循环时画布上哪些位置已经落子、哪些还是空格，是<b>完全不变</b>的；循环只是让模型对同一个局面“多想几遍”，把每个空格的预测变得更准、更尖锐。而去噪步会真的落子，改变局面。</p>
+<p>论文分三层回答“这第三种算力该怎么用”。第一层是实验：在数独和 Countdown（用给定的几个数凑出目标数）这两类结构化任务上，同样的参数量下，循环越多质量越好；同样的每步计算量下，一个循环 \(L\) 遍的小块大体能追平甚至超过 \(L\) 倍深、\(L\) 倍参数的普通模型；同样的总前向次数下，把计算花在循环上有时比花在去噪步上更划算。第二层是解释：作者把并行解码的误差严格拆成两块，一块叫<b>依赖误差</b>（几个位置本来相互牵制，却被当成互不相关同时落子），一块叫<b>保真误差</b>（模型对每个位置单独的判断本身就不准）。循环只能降低保真误差，降不了依赖误差；依赖误差只有靠少落子、多分几步才能降。第三层是方法：既然两者分工不同，那么解码时每一步都该做两个决定，“再循环一遍还是停下来”和“这一步提交哪些位置”。作者用模型预测的熵同时指导这两个决定，得到一个叫 entropy_entropy 的解码器，在数独、Countdown、RNA 序列补全和 TinyGSM 数学程序生成四个任务上，用更少的前向次数拿到接近最好的质量。</p>
+<p>读这篇论文时要记住它的规模：最大的模型只有 1.61 亿参数（TinyGSM），数独和 Countdown 的模型只有 550 万到 1080 万参数，所有任务都是结构化的填空问题，没有开放式文本生成，也没有和自回归模型比较。它是一篇“机制和用法”的论文，而不是一篇“把扩散语言模型做大”的论文。</p>
+
+<h4 id="n-0-1">先分清两种“循环”</h4>
+<p>本站这一批一共有五篇把“循环”和扩散语言模型结合起来的论文（<a href="loopholing.html">Loopholing</a>、<a href="loopmdm.html">LoopMDM</a>、本篇 R-MDM、<a href="alodlm.html">ALoDLM</a>、<a href="loop-distill.html">Loop-Distill</a>），但“循环”这个词在里面指的不是同一件事。扩散模型本来就要跑 \(T\) 个去噪步，所以“循环”可以发生在两个不同的方向上：</p>
+<ul>
+  <li><b>沿深度循环</b>：在<b>一个</b>去噪步之内，把同一组层重复用几遍，就像 <a href="huginn.html">Huginn</a>、<a href="ouro.html">Ouro</a> 这类循环语言模型在一次前向里做的那样。画布不变，只是对它多算几遍。</li>
+  <li><b>跨去噪步传递状态</b>：每个去噪步只算一遍网络，但把上一步算出来的连续隐状态（而不仅仅是采样出来的离散 token）带到下一步，让信息不因为“采样成一个具体的词”而丢失。自条件（self-conditioning）和 Loopholing 属于这一类。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：两种“循环”发生在两个不同的方向上</div>
+  <svg class="dg" viewBox="0 0 960 360" role="img" aria-label="左：一个去噪步内把共享块重复 L 遍，状态不变；右：每步只算一遍，但把连续隐状态传到下一步" style="--dg-min:720px">
+    <rect class="panel" x="8" y="8" width="462" height="344" rx="10"/>
+    <text x="239" y="30" class="t-c t-b">① 沿深度循环（R-MDM、LoopMDM、ALoDLM）</text>
+    <text x="239" y="50" class="t-c t-sm">一个去噪步之内，同一块网络反复算 L 遍</text>
+    <rect class="tk data" x="98" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="134" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="170" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="206" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="242" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="278" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="314" y="64" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="350" y="64" width="30" height="24" rx="3"/>
+    <text x="239" y="102" class="t-c t-xs">状态：已提交的 token（实色）+ 空格 [MASK]（斜纹）</text>
+    <path class="edge" d="M239,110 L239,128"/>
+    <g class="enc"><rect class="box" x="164" y="130" width="150" height="48" rx="8"/></g>
+    <text x="239" y="154" class="t-c t-b">共享块 fθ（K 层）</text>
+    <path class="edge enc" d="M316,170 C 392,182 392,112 300,127"/>
+    <text x="388" y="140" class="t-sm">重复 L 遍</text>
+    <text x="388" y="156" class="t-sm">状态不变</text>
+    <path class="edge" d="M239,180 L239,206"/>
+    <text x="250" y="193" class="t-xs">每一遍都能读出预测 q⁽ℓ⁾</text>
+    <rect class="tk data" x="98" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk pred" x="134" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk pred" x="170" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="206" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk pred" x="242" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="278" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk pred" x="314" y="210" width="30" height="24" rx="3"/>
+    <rect class="tk pred" x="350" y="210" width="30" height="24" rx="3"/>
+    <path class="edge" d="M239,238 L239,262"/>
+    <text x="250" y="250" class="t-xs">只提交其中一部分（最有把握的）</text>
+    <rect class="tk data" x="98" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk enc" x="134" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="170" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="206" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="242" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk data" x="278" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk enc" x="314" y="266" width="30" height="24" rx="3"/>
+    <rect class="tk mask" x="350" y="266" width="30" height="24" rx="3"/>
+    <text x="239" y="312" class="t-c t-sm">→ 下一个去噪步：隐状态从 token 嵌入重新算起</text>
+    <text x="239" y="332" class="t-c t-sm">代价：每步 L 遍；参数量不变</text>
+
+    <rect class="panel" x="490" y="8" width="462" height="344" rx="10"/>
+    <text x="721" y="30" class="t-c t-b">② 跨去噪步传递（Loopholing、自条件）</text>
+    <text x="721" y="50" class="t-c t-sm">每个去噪步只算一遍，但把连续隐状态带到下一步</text>
+    <text x="570" y="78" class="t-c t-sm">第 t 步</text>
+    <text x="721" y="78" class="t-c t-sm">第 t+1 步</text>
+    <text x="872" y="78" class="t-c t-sm">第 t+2 步</text>
+    <rect class="tk mask" x="528" y="90" width="18" height="18" rx="2"/><rect class="tk mask" x="550" y="90" width="18" height="18" rx="2"/><rect class="tk data" x="572" y="90" width="18" height="18" rx="2"/><rect class="tk mask" x="594" y="90" width="18" height="18" rx="2"/>
+    <rect class="tk enc" x="679" y="90" width="18" height="18" rx="2"/><rect class="tk mask" x="701" y="90" width="18" height="18" rx="2"/><rect class="tk data" x="723" y="90" width="18" height="18" rx="2"/><rect class="tk mask" x="745" y="90" width="18" height="18" rx="2"/>
+    <rect class="tk enc" x="830" y="90" width="18" height="18" rx="2"/><rect class="tk mask" x="852" y="90" width="18" height="18" rx="2"/><rect class="tk data" x="874" y="90" width="18" height="18" rx="2"/><rect class="tk enc" x="896" y="90" width="18" height="18" rx="2"/>
+    <path class="edge" d="M570,110 L570,128"/><path class="edge" d="M721,110 L721,128"/><path class="edge" d="M872,110 L872,128"/>
+    <g class="tgt"><rect class="box" x="515" y="130" width="110" height="44" rx="8"/><rect class="box" x="666" y="130" width="110" height="44" rx="8"/><rect class="box" x="817" y="130" width="110" height="44" rx="8"/></g>
+    <text x="570" y="152" class="t-c t-sm">网络（1 遍）</text>
+    <text x="721" y="152" class="t-c t-sm">网络（1 遍）</text>
+    <text x="872" y="152" class="t-c t-sm">网络（1 遍）</text>
+    <path class="edge" d="M614,99 L676,99"/>
+    <path class="edge" d="M765,99 L827,99"/>
+    <path class="edge enc" d="M626,160 L664,160"/>
+    <path class="edge enc" d="M777,160 L815,160"/>
+    <path class="edge" d="M560,214 L600,214"/>
+    <text x="608" y="214" class="t-sm">灰箭头：采样后的离散 token（一个具体的词）</text>
+    <path class="edge enc" d="M560,240 L600,240"/>
+    <text x="608" y="240" class="t-sm">蓝箭头：上一步的连续隐状态</text>
+    <text x="608" y="258" class="t-xs">（不经过采样，“各候选有多可能”这类信息不丢）</text>
+    <text x="721" y="312" class="t-c t-sm">额外计算很少：每步仍只算一遍</text>
+    <text x="721" y="332" class="t-c t-sm">改变的是“步与步之间传什么”</text>
+  </svg>
+  <div class="dia-note">本站示意图。R-MDM 只属于左边这一类：按论文式 (1)，每个去噪步开始时隐状态都由当前画布的 token 嵌入重新算出，上一步的隐状态不会传下来。同期的 Fixed-Point MGM（Miele 等，arXiv 2605.31215）则两种都用：步内用不动点迭代反复算共享的层，步与步之间再用上一步的解做“热启动”。</div>
+</div>
+<p>R-MDM 是最纯粹的第一类：它不碰步与步之间传什么，只问“在一个固定的局面上多算几遍，值不值、什么时候值、该怎么花”。这让它可以和去噪步数 \(T\) 干净地分开讨论，这也是论文第 4 节（本页第 5 节）那套误差分解能成立的前提。</p>
+
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>掩码扩散模型生成时，“去噪步”和“循环”各自改变了什么、没改变什么？</li>
+  <li>“\(K\otimes L\)”是什么意思？同参数、同 FLOPs、同前向次数三种对比，分别给了循环模型什么样的待遇？</li>
+  <li>为什么循环在去噪步少的时候帮助最大，步数多了以后帮助变小？</li>
+  <li>依赖误差和保真误差怎么定义？为什么循环只能降后者，而把一次提交拆成两次能精确地降低前者？</li>
+  <li>熵为什么能同时用来决定“要不要再循环一遍”和“这一步提交哪些位置”？</li>
+  <li>“数独从 80.7% 到 100%”“TinyGSM 从 13.7% 到 24.0%”这类数字，比的是什么和什么？训练算力、推理算力、墙钟时间各自对齐了没有？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2606.18022" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：掩码扩散已有两条加算力的路，为什么还要第三条</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散模型想变强，过去要么加参数，要么加去噪步。循环 Transformer 在自回归模型里已经证明，“同一组层多用几遍”可以在不加参数的前提下加计算。把这件事搬到掩码扩散模型里，它扮演的角色和在自回归模型里一样吗？它和“多走几个去噪步”是不是同一回事，能不能互相替代？如果不能，推理时该怎么在两者之间分配算力？这一节先把这些问题和需要的背景交代清楚。</div>
+
+<div class="note-pre"><b>先补一点背景：掩码扩散模型怎么生成一段序列。</b>
+<p>把一段长度为 \(n\) 的序列想成 \(n\) 个格子。训练时，随机挑一部分格子换成特殊符号 [MASK]（挑多少由一个“噪声水平”决定，从几乎不挑到全部挑），让一个<b>双向</b> Transformer 根据没被遮住的格子，去猜被遮住的格子原来是什么，用交叉熵打分。这个损失恰好是一个对数似然下界（ELBO）的化简形式，细节见本站的 <a href="mdlm.html">MDLM 精读</a>。</p>
+<p>生成时反过来：从全是 [MASK] 的画布出发（填空类任务则从“题目已知、答案部分全是 [MASK]”出发），分 \(T\) 步完成。每一步做三件事：</p>
+<ol>
+  <li>模型看一遍整张画布，给<b>每个</b>还空着的格子输出一个概率分布（在词表上），这叫这个位置的“边缘分布”（marginal）。</li>
+  <li>按某个规则挑出一部分空格，比如“最有把握的那几个”，这叫<b>提交集合</b> \(U\)。</li>
+  <li>对 \(U\) 里的每个格子，<b>各自独立地</b>从自己的边缘分布里抽一个 token 填上。填上的格子以后不再改。</li>
+</ol>
+<p>如果总共有 \(|M_0|\) 个空格、走 \(T\) 步，最简单的做法是每步提交 \(|M_0|/T\) 个。步数越少，每步要同时填的格子越多。第 3 步里的“各自独立”是问题的根源：两个格子如果本来相互牵制（比如数独同一行的两个空格不能填同一个数），各自独立地抽，就可能抽出一对单看都合理、放在一起却矛盾的答案。所以步数 \(T\) 本身就是一条“加算力换质量”的轴：步数越多，每步同时填的越少，冲突越少，但每多一步就多一次完整的网络前向。</p>
+<p>一次“网络前向”在扩散模型里叫一次<b>函数求值</b>（number of function evaluations，NFE）。普通 MDM 生成一条序列的 NFE 就是 \(T\)。注意每次前向都要把<b>整条</b>序列（\(n\) 个位置）重新算一遍，因为双向注意力下，任何一个格子被填上都会改变其他所有位置的表示，没法像自回归模型那样只算新的一个 token。</p>
+</div>
+
+<div class="note-pre"><b>再补一点背景：循环 Transformer 与“\(K\otimes L\)”记号。</b>
+<p>普通 Transformer 的每一层都有自己的一份参数。循环 Transformer 只造一个 \(K\) 层的“块”，然后让数据把这个块连续穿过 \(L\) 遍：第一遍的输出当第二遍的输入，依此类推。这样每个 token 实际经历了 \(K\times L\) 层计算，模型里却只存了 \(K\) 层的参数。这个想法最早可以追溯到 <a href="universal-transformers.html">Universal Transformer</a>（2019）和 ALBERT 的跨层参数共享；近两年的 <a href="huginn.html">Huginn</a>、<a href="ouro.html">Ouro</a> 把它做到了几十亿参数的语言模型上。</p>
+<p>本文沿用 <a href="reasoning-latent-thoughts.html">Saunshi 等（2025）</a>的记号：\((K\otimes L)\) 表示“一个 \(K\) 层的块循环 \(L\) 遍”。于是 \((K\otimes 1)\) 是只有 \(K\) 层的普通小模型，\((KL\otimes 1)\) 是有 \(KL\) 个独立层的普通深模型，\((K\otimes L)\) 是循环模型。后两者每次前向的计算量一样，参数量差 \(L\) 倍；前两者参数量一样，每次前向的计算量差 \(L\) 倍。下面这张图把三者的关系画在“参数—计算”平面上。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：加层沿对角线走，循环竖直往上走（对应原文图 1 的意思）</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="参数-计算平面：K⊗1 在左下，加层到 KL⊗1 走对角线，循环到 K⊗L 竖直向上" style="--dg-min:680px">
+    <path class="axis" d="M90,250 L520,250"/>
+    <path class="axis" d="M90,250 L90,28"/>
+    <text x="520" y="268" class="t-r t-sm">参数量 →</text>
+    <text x="98" y="22" class="t-sm">每次前向的计算量 ↑</text>
+    <g class="data"><rect class="box" x="110" y="196" width="96" height="36" rx="8"/></g>
+    <text x="158" y="214" class="t-c t-b">K⊗1</text>
+    <g class="enc"><rect class="box" x="110" y="52" width="96" height="36" rx="8"/></g>
+    <text x="158" y="70" class="t-c t-b">K⊗L</text>
+    <g class="tgt"><rect class="box" x="404" y="52" width="104" height="36" rx="8"/></g>
+    <text x="456" y="70" class="t-c t-b">KL⊗1</text>
+    <path class="edge enc" d="M158,194 L158,92"/>
+    <text x="168" y="146" class="t-sm">循环：只涨计算</text>
+    <path class="edge" d="M210,196 L402,90"/>
+    <text x="316" y="160" class="t-sm">加层：参数和计算一起涨</text>
+    <path class="edge idx no-head" d="M208,70 L402,70"/>
+    <text x="305" y="58" class="t-c t-xs">计算相同，参数差 L 倍</text>
+    <text x="560" y="60" class="t-b">数独 9×9 的实际配置（K = 6，宽度 384）</text>
+    <text x="560" y="90" class="t-sm">6⊗1（普通小模型）：1060 万参数，每步算 1 份 6 层</text>
+    <text x="560" y="114" class="t-sm">6⊗5（R-MDM）：1080 万参数，每步算 5 份 6 层</text>
+    <text x="560" y="138" class="t-sm">30⊗1（普通深模型）：5310 万参数，每步算 5 份 6 层</text>
+    <text x="560" y="170" class="t-xs">1080 万比 1060 万多出的部分，是循环步嵌入</text>
+    <text x="560" y="186" class="t-xs">那个小 MLP（约 15 万参数，见本页第 3 节）。</text>
+    <text x="560" y="216" class="t-xs">数字来自原文表 2 和表 9。</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2606.18022#S3.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。原文图 1 只画了三个点和两个箭头；这里补上了数独实验里三种模型的真实参数量，方便后面对照。</div>
+</div>
+
+<p>论文强调，循环在 MDM 里扮演的角色和在自回归模型里不同。在自回归模型里，循环加深的是“预测下一个 token”这一次计算，算完了照样只出一个 token。在 MDM 里，因为注意力是双向的，每一遍循环都在<b>同时</b>改进所有空格的预测，而且空格之间还能互相“通气”：第一遍里格子 A 的预测变清楚了，第二遍里格子 B 就能参考它。与此同时，循环期间一个格子都不填，局面纹丝不动；真正把局面往前推的，只有去噪步的提交。</p>
+<p>这就引出了全文的中心问题：循环和去噪步都在花算力，一个改进“对当前局面的判断”，一个改变“局面本身”，它们是不是可以互相替代？如果每一步的判断更准了，能不能少走几步？如果不能完全替代，各自擅长解决哪种错误？推理时又该怎么分配？</p>
+
+<div class="note-pre"><b>标题里的 “scaling” 是什么意思：这篇论文没有拟合扩展律。</b>
+<p>在大模型文献里，“扩展律”（scaling law）通常指这样一套做法：在许多不同规模（参数量 \(N\)、训练数据量 \(D\)、训练算力 \(C\)）上各训一个模型，量出损失，再拟合一条形如 \(\mathcal{L}(N,D)=E+A/N^{\alpha}+B/D^{\beta}\) 的幂律曲线，用它外推到更大的规模，或者求出给定算力下最优的参数和数据配比。本站的 <a href="iso-depth-scaling.html">Iso-Depth 精读</a>就是这种做法：它在固定训练算力下拟合出“一遍循环值 \(\varphi=0.46\) 个独立块”（95% 置信区间 0.41–0.53）。</p>
+<p>这篇论文标题里的 “Recursive Scaling” 不是这个意思。它没有拟合任何幂律，也没有在一系列模型规模上做对照；它所说的“扩展”是“沿着递归深度这条轴往模型里加计算”，证据是在几个固定的小模型上扫 \(L\) 和 \(T\) 画出来的曲线。所以它能回答“加循环有没有用、在什么条件下有用、推理时怎么花”，但回答不了“循环的收益随模型变大是变多还是变少”。这一点在读原文第 3、5 节（本页第 4、8 节）的数字时要一直记着。</p>
+</div>
+
+<p>论文的三项贡献按章节对应：原文第 3 节（本页第 3、4 节）提出 R-MDM 并消融它的设计选择，用实验说明递归深度在同参数下提高质量、在同 FLOPs 下追平更大的非递归模型；原文第 4 节（本页第 5、6 节）把并行解码的误差拆开，说明循环和去噪步各管哪一种错误、为什么循环在步数少时最有用；原文第 5 节（本页第 7、8 节）把这个分析变成一个用熵同时决定“循环几遍”和“提交哪些”的解码器，并在四个任务上验证。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>摘要里说 R-MDM “在匹配 FLOPs 时追平明显更大的非递归模型”。这里的“更大”指参数更多，“匹配 FLOPs”指每次前向的计算量相同（\((K\otimes L)\) 对 \((KL\otimes 1)\)），并且去噪步数 \(T\) 也相同。它不是说一个小模型用更少的计算追平了大模型；两者花的计算一样多，循环模型省下的只是参数（也就是显存里存的权重）。另一组“同参数”对比里，循环模型花的推理计算是基线的 \(L\) 倍，训练计算也是 \(L\) 倍左右。本页第 4 节末尾会把每组对比匹配了什么列成一张表。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：解码顺序、循环网络与两项同期工作</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这篇论文站在两条研究线的交叉点上：一条研究掩码扩散模型“每步该提交哪些、提交多少”，另一条研究“同一组层反复用”的循环网络。它从前一条线借来了提交规则，从后一条线借来了最简单的循环结构。那么它和这两条线上的已有工作、以及同时期也在扩散模型里加循环的工作，到底差在哪里？</div>
+
+<h4 id="n-2-1">2.1 每步提交哪些、提交多少</h4>
+<p>因为 MDM 的训练并不规定生成顺序，“每一步揭开哪些格子”就成了推理时可以自由设计的东西，这方面的工作很多。论文附录 B 把它们分成几类，与本文关系最近的是这几项：</p>
+<ul>
+  <li><b>按置信度揭开</b>：MaskGIT（2022）开创的做法，每步揭开模型最有把握的那些格子（top-1 概率最高的）。本文的 confidence 提交规则就是“揭开所有 top-1 概率超过阈值 \(c\) 的格子”。</li>
+  <li><b>自适应顺序</b>：Kim 等（2025）证明了在数独这类结构化问题上，推理时按难易挑顺序能大幅提高正确率，详见本站的 <a href="token-ordering.html">Token Ordering 精读</a>。</li>
+  <li><b>用熵限定一次揭开多少</b>：EB-Sampler（Ben-Hamu 等，2025）用一个基于熵的上界，决定一次前向之后最多能安全地揭开多少个格子；Cai 与 Li（2026）给“熵之和”规则证明了迭代次数的保证。本文原文第 4 节的误差分解（本页第 5 节）沿用的就是 EB-Sampler 的分解，原文第 5 节的 entropy 提交规则（本页第 7 节）也来自这条线。作者明确说，他们不提出新的提交规则。</li>
+  <li><b>提交之后再反悔</b>：ReMDM、WINO 等允许把已经填上的格子重新遮住再猜。作者强调这和循环是两回事：重遮是在提交<b>之后</b>纠错，循环是在提交<b>之前</b>多想几遍，把提交推迟到更有把握的时候。</li>
+  <li><b>免训练的快速采样器</b>：比如 <a href="fast-dllm.html">Fast-dLLM</a> 用 KV 缓存复用加并行解码，并指出“同时解码打破了 token 之间的依赖”是质量下降的主要原因。这类方法省的是每次求值的成本或总求值次数，而本文研究的是“给定求值次数，怎么在循环和去噪之间分配”。</li>
+</ul>
+
+<h4 id="n-2-2">2.2 循环网络</h4>
+<p>从 Universal Transformer、ALBERT 到近年的循环 Transformer（<a href="looped-programmable-computers.html">Giannou 等，2023</a>；Yang 等，2024；<a href="huginn.html">Geiping 等的 Huginn</a>，2025；等等），一条主线是：一个 \(K\) 层块循环 \(L\) 遍，能接近 \(KL\) 层模型的效果，参数却少得多。<a href="reasoning-latent-thoughts.html">Saunshi 等（2025）</a>进一步把每一遍循环解释成一步“潜在的推理”。这些变体里有很多花样（前奏层与尾声层、输入注入、随机循环次数等），本文<b>有意选了最朴素的一种</b>：整个网络就是一个共享块，反复调用，不做任何结构搜索。作者的理由是，他们想单独看清“循环”这件事本身的作用，而不是比较哪种循环结构更好。</p>
+
+<h4 id="n-2-3">2.3 同期工作与本文的定位</h4>
+<p>同一时期，至少有两项工作也把重复计算放进了掩码生成模型。<a href="loopmdm.html">LoopMDM</a>（Lee 等，2026）只循环 Transformer 中的一部分层，并且在固定去噪步数下自适应地决定循环几遍，它用隐状态的相对变化当停止信号（本文原文第 5 节把这个信号当作对照，称为 hidden 规则，见本页第 7 节）。Fixed-Point Masked Generative Modeling（Miele 等，2026）在去噪器里嵌了一个不动点求解器。作者说，这两项工作都已经说明重复计算对掩码生成有用；本文想回答的是另一个问题：循环和提交 token 之间是什么关系，什么时候循环能替代去噪步、什么时候不能，推理时又该怎么同时分配两者。</p>
+<p>结构上，本文和 LoopMDM 有两点不同：它循环的是<b>整个</b>共享块（所以每一遍之后都能接同一个输出头读出预测，方便对每一遍都加监督），并且显式地给共享块加了一个“现在是第几遍”的循环步嵌入。附录 B 还提到，Sahoo 等（2026）的扩展律研究发现均匀噪声扩散在大规模下可能比掩码扩散更省参数（见本站 <a href="scaling-beyond-masked.html">超越掩码扩散的扩展律</a>），作者仍然选择掩码扩散，理由是它训练稳定、并行去噪的结构让双向循环最自然。</p>
+<div class="note-warn"><b>一个值得知道的背景：</b>同期的 Fixed-Point MGM 论文（arXiv 2605.31215）的作者里也有本文的第一作者 Carballo-Castro 和最后一位作者 Frossard。两篇论文作者重叠，可以看成同一批人在同一问题上走的两条路线，而不是相互独立的验证。本文正文没有和这两项同期工作做数值对比。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A2" target="_blank" rel="noopener">附录 B ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 R-MDM 的定义：结构、损失、训练时循环几遍</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把一个普通的掩码扩散模型改成循环版，具体要改哪几处？共享块循环 \(L\) 遍之后，每一遍的输出要不要监督、怎么监督？共享块怎么知道自己正在跑第几遍？训练时该固定循环几遍，还是让次数变化？训练时的循环次数和推理时的循环次数必须一样吗？最后，一个既循环又走去噪步的模型，它的计算该怎么记账？这一节把论文 §3.1 和附录 D、G.3 放在一起讲。</div>
+
+<h4 id="n-3-1">3.1 前向过程与模型结构</h4>
+<p>数据部分和标准的掩码扩散完全一样。设干净序列为 \(x_0\)，长度 \(n\)，词表为 \(\mathcal{V}\)。前向“加噪”过程把每个 token 独立地以一定概率换成 [MASK]：</p>
+<div class="formula">$$q(x_t\mid x_0)=\prod_{i=1}^{n}\mathrm{Cat}\Big(x_t^{(i)};\ \alpha_t\,x_0^{(i)}+(1-\alpha_t)\,\mathbf{e}_{[\mathrm{MASK}]}\Big)$$</div>
+<p>这里 \(\alpha_t\) 是“保留原 token 的概率”，从 \(t=0\) 时的 1 单调降到 \(t=1\) 时的 0；\(\mathrm{Cat}\) 表示类别分布，\(\mathbf{e}_{[\mathrm{MASK}]}\) 是 [MASK] 对应的独热向量。整句话的意思是：时间越往后，每个位置被遮住的概率越大，到 \(t=1\) 时全部被遮住。去噪器是一个双向 Transformer，用 <a href="mdlm.html">MDLM</a> 的掩码 ELBO 训练。实际实现里，不同任务抽遮挡比例的方式略有不同：数独、Countdown、RNA 每条序列从 \([0,1)\) 里均匀抽一个遮挡概率；TinyGSM 用 MDLM 的 log-linear 噪声表。Countdown 和 TinyGSM 只遮答案部分，题目部分始终可见。</p>
+<p>结构上的唯一改动，是把“\(KL\) 层网络算一遍”换成“\(K\) 层共享块 \(f_\theta\) 算 \(L\) 遍”。写成公式：</p>
+<div class="formula">$$\mathbf{h}^{(0)}=\mathrm{Norm}\big(E_\theta(x_t)+P_\theta(x_t)\big),\qquad \mathbf{h}^{(\ell)}=f_\theta\Big(\mathrm{Norm}\big(\mathbf{h}^{(\ell-1)}+\mathbf{v}^{(\ell)}\big)\Big),\qquad \hat{\mathbf{y}}^{(\ell)}=W_\theta\,\mathrm{Norm}\big(\mathbf{h}^{(\ell)}\big),\qquad \ell=1,\dots,L$$</div>
+<p>逐项解释：\(E_\theta\) 是 token 嵌入，\(P_\theta\) 是位置编码，\(\mathrm{Norm}\) 是 RMS 归一化；\(\mathbf{h}^{(\ell)}\) 是第 \(\ell\) 遍之后整条序列的隐状态（形状 \(n\times d\)）；\(\mathbf{v}^{(\ell)}\) 是下面要讲的“循环步嵌入”；\(W_\theta\) 是输出头，把隐状态变成词表上的 logits。因为 \(f_\theta\) 和 \(W_\theta\) 在每一遍都是同一份参数，模型的参数量和一个只算一遍的 \((K\otimes 1)\) 模型完全一样（只多一个很小的循环步嵌入网络）。</p>
+<p>有两个细节值得强调。第一，<b>每一遍之后都能读出一份预测</b> \(\hat{\mathbf{y}}^{(\ell)}\)，所以推理时可以在任意一遍停下来，直接用当时的预测。第二，<b>遍与遍之间唯一传递的信息就是隐状态</b> \(\mathbf{h}^{(\ell)}\)：画布 \(x_t\) 在这 \(L\) 遍里不变，每一遍也不会把输入 token 重新注入一次（不同于 Huginn 那种“每遍都把输入再看一眼”的输入注入）。而一个去噪步结束、提交了一批 token 之后，下一步又从 \(\mathbf{h}^{(0)}\)，也就是新画布的嵌入，重新算起。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：一个去噪步之内，把 R-MDM 按遍展开</div>
+  <svg class="dg" viewBox="0 0 960 380" role="img" aria-label="R-MDM 展开图：输入嵌入后，共享块 fθ 依次算 L 遍，每遍加循环步嵌入，每遍都接输出头和交叉熵损失" style="--dg-min:760px">
+    <g class="act"><rect class="box" x="190" y="24" width="120" height="44" rx="8"/><rect class="box" x="380" y="24" width="120" height="44" rx="8"/><rect class="box" x="660" y="24" width="120" height="44" rx="8"/></g>
+    <text x="250" y="40" class="t-c t-sm">v⁽¹⁾ = MLP(s₁)</text>
+    <text x="250" y="57" class="t-c t-xs">s₁ = 0</text>
+    <text x="440" y="40" class="t-c t-sm">v⁽²⁾ = MLP(s₂)</text>
+    <text x="440" y="57" class="t-c t-xs">s₂ = 1/(L−1)</text>
+    <text x="720" y="40" class="t-c t-sm">v⁽ᴸ⁾ = MLP(s_L)</text>
+    <text x="720" y="57" class="t-c t-xs">s_L = 1</text>
+    <path class="edge act" d="M250,70 L250,148"/>
+    <path class="edge act" d="M440,70 L440,148"/>
+    <path class="edge act" d="M720,70 L720,148"/>
+    <g class="data"><rect class="box" x="10" y="150" width="130" height="52" rx="8"/></g>
+    <text x="75" y="168" class="t-c t-sm">画布 xt</text>
+    <text x="75" y="186" class="t-c t-xs">嵌入 + 位置 → Norm</text>
+    <path class="edge" d="M142,176 L183,176"/>
+    <text x="162" y="164" class="t-c t-xs">h⁽⁰⁾</text>
+    <rect class="frame" x="178" y="140" width="614" height="72" rx="10"/>
+    <g class="enc"><rect class="box" x="185" y="150" width="130" height="52" rx="8"/><rect class="box" x="375" y="150" width="130" height="52" rx="8"/><rect class="box" x="655" y="150" width="130" height="52" rx="8"/></g>
+    <text x="250" y="168" class="t-c t-xs">加 v⁽¹⁾ → Norm</text>
+    <text x="250" y="186" class="t-c t-b">fθ（K 层）</text>
+    <text x="440" y="168" class="t-c t-xs">加 v⁽²⁾ → Norm</text>
+    <text x="440" y="186" class="t-c t-b">fθ（K 层）</text>
+    <text x="720" y="168" class="t-c t-xs">加 v⁽ᴸ⁾ → Norm</text>
+    <text x="720" y="186" class="t-c t-b">fθ（K 层）</text>
+    <path class="edge" d="M317,176 L373,176"/>
+    <text x="345" y="164" class="t-c t-xs">h⁽¹⁾</text>
+    <path class="edge" d="M507,176 L560,176"/>
+    <text x="533" y="164" class="t-c t-xs">h⁽²⁾</text>
+    <text x="580" y="177" class="t-c t-b">…</text>
+    <path class="edge" d="M600,176 L653,176"/>
+    <text x="627" y="164" class="t-c t-xs">h⁽ᴸ⁻¹⁾</text>
+    <text x="580" y="226" class="t-c t-xs">虚线框里的 fθ 是同一份权重</text>
+    <path class="edge" d="M250,204 L250,248"/>
+    <path class="edge" d="M440,204 L440,248"/>
+    <path class="edge" d="M720,204 L720,248"/>
+    <g class="pred"><rect class="box" x="190" y="250" width="120" height="40" rx="8"/><rect class="box" x="380" y="250" width="120" height="40" rx="8"/><rect class="box" x="660" y="250" width="120" height="40" rx="8"/></g>
+    <text x="250" y="270" class="t-c t-sm">输出头 → ŷ⁽¹⁾</text>
+    <text x="440" y="270" class="t-c t-sm">输出头 → ŷ⁽²⁾</text>
+    <text x="720" y="270" class="t-c t-sm">输出头 → ŷ⁽ᴸ⁾</text>
+    <path class="edge" d="M250,292 L250,318"/>
+    <path class="edge" d="M440,292 L440,318"/>
+    <path class="edge" d="M720,292 L720,318"/>
+    <g class="loss"><rect class="box" x="190" y="320" width="120" height="40" rx="8"/><rect class="box" x="380" y="320" width="120" height="40" rx="8"/><rect class="box" x="660" y="320" width="120" height="40" rx="8"/></g>
+    <text x="250" y="340" class="t-c t-sm">CE（掩码位置）</text>
+    <text x="440" y="340" class="t-c t-sm">CE（掩码位置）</text>
+    <text x="720" y="340" class="t-c t-sm">CE（掩码位置）</text>
+    <text x="808" y="282" class="t-sm">训练：L 份交叉熵</text>
+    <text x="808" y="300" class="t-sm">取平均（ℒ_all）</text>
+    <text x="808" y="330" class="t-sm">推理：任意一遍</text>
+    <text x="808" y="348" class="t-sm">都可读出并停下</text>
+  </svg>
+  <div class="dia-note">本站示意图，依据论文式 (1) 和附录 D.3、D.4 绘制。绿色是循环步嵌入（输入只有“进度” \(s_\ell\)），蓝色是共享块，橙色是共享的输出头，红色是每一遍的损失。论文的原文图 1 只画了参数—计算平面，没有画这种展开图。</div>
+</div>
+
+<h4 id="n-3-2">3.2 三个设计选择</h4>
+<p>把循环加进 MDM，训练时要做三个决定。作者在 9×9 数独上逐一做了消融（附录 D），结论如下。</p>
+
+<p><b>（一）共享块怎么知道自己在第几遍：循环步嵌入。</b>如果什么都不加，共享块每一遍收到的“条件”完全一样，只能从隐状态本身的统计特征去猜现在是第几遍。作者加了一个小网络：先把“第几遍”换算成 0 到 1 之间的进度 \(s_\ell\)，再用两层 MLP 变成一个 \(d\) 维向量，加到每一遍的输入上：</p>
+<div class="formula">$$\mathbf{v}^{(\ell)}=W_2\,\sigma\big(W_1 s_\ell+b_1\big),\qquad s_\ell=\frac{\ell-1}{L-1}\in[0,1]$$</div>
+<p>其中 \(\sigma\) 是 SiLU 激活，\(W_1\in\mathbb{R}^{d\times 1}\)，\(W_2\in\mathbb{R}^{d\times d}\)，所以它大约有 \(d^2\) 个参数；宽度 384 时约 15 万，相对整个模型可以忽略。用“进度”而不是“第几遍”的原始编号，是为了让推理时换一个总遍数 \(L\) 也不至于完全陌生：无论 \(L\) 是 5 还是 20，第一遍都是 0、最后一遍都是 1。消融（原文图 10）比较了可学习的嵌入、固定的嵌入（直接用 \(s_\ell\) 构造，不学习）和不加嵌入三种。结果是可学习的和不加的很接近，都明显好于固定的；固定嵌入在只循环一遍（\(L=1\)）、\(T=5\) 和 \(T=20\) 时数独有效率掉到 0%。作者最终选了可学习的嵌入，但也承认“不加”同样有竞争力，所以这不是一个关键设计。</p>
+
+<p><b>（二）\(L\) 份预测怎么监督：对每一遍都算损失。</b>作者比较了四种方式：只监督最后一遍（Final）；对所有遍的交叉熵取平均（All）；加权平均，越往后的遍权重越大（Weighted，线性或指数两种权重）；只监督最后 \(k\) 遍（Truncated）。All 的写法是：</p>
+<div class="formula">$$\mathcal{L}_{\mathrm{all}}(\theta)=\mathbb{E}_{t,\,x_0,\,x_t}\Big[\frac{1}{L}\sum_{\ell=1}^{L}\frac{1}{|\mathcal{M}|}\sum_{i\in\mathcal{M}}\mathrm{CE}\big(\hat{\mathbf{y}}^{(\ell)}_i,\ x_0^{(i)}\big)\Big]$$</div>
+<p>这里 \(\mathcal{M}\) 是被遮住的位置集合，\(\mathrm{CE}\) 是交叉熵。这种“每一层（每一遍）都直接接受监督”的做法叫<b>深监督</b>（deep supervision，Lee 等 2015），本站 <a href="tiny-recursive-model.html">TRM 精读</a>里的递归推理模型也用了类似的思路。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_recursion_depth_sweep.svg" alt="原文图 11" loading="lazy"></div>
+<figcaption><b>原文图 11。怎么看：</b>三个子图分别是去噪步数 \(T=1\)、5、20；横轴是推理时的循环次数 \(L\)（模型训练时固定循环 5 遍），纵轴是 9×9 数独的有效率（VPR，下一节定义）。每条线是一种监督方式。最该看的是左端 \(L=1\) 和 \(L=3\)：只监督最后一遍的 Final（深蓝实线）在这里远低于其他方式，例如 \(T=20\)、\(L=1\) 时 Final 只有约 5%，All（橙色虚线）约 81%。原因是只监督最后一遍时，前几遍的隐状态只被训练成“方便后面继续加工的中间产物”，直接拿来读预测就不准；All 强迫每一遍都给出能用的预测。循环次数加大以后，各条线收拢到 95% 以上，差别消失。作者据此选 All 作为默认，后文所有实验都用它。</figcaption></figure>
+<p>论文说 All 不增加前向计算，只是因为要对每一遍反传而略增显存。这在“共享块”的意义上是对的。严格地说，All 要在每一遍之后都过一次输出头；数独、Countdown 的词表只有 10–26 个符号，这部分计算可以忽略，但 TinyGSM 的词表有 49,154 个符号，输出头就不便宜了（见本节 3.4 的推算）。</p>
+
+<p><b>（三）训练时循环几遍：递减课程最好。</b>训练时每步循环的次数记为 \(L_t\)，推理时的记为 \(L_s\)（这里的下标 \(t\)、\(s\) 指 train 和 sample，不是时间步）。作者比较了五种安排：固定 \(L_t=5\)；每个批次随机抽（均匀分布，或 Huginn 式的泊松分布）；线性递增课程（训练初期循环 1 遍，逐渐增加到 10 遍，记作 Schedule 1→10）；线性递减课程（从 10 遍逐渐减到 1 遍，记作 Schedule 10→1）。课程的公式是 \(L_t=\mathrm{round}\big(L_{\text{start}}+\alpha(i)\,(L_{\text{end}}-L_{\text{start}})\big)\)，\(\alpha(i)\) 随训练迭代 \(i\) 从 0 线性涨到 1。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_recursive_scheme_ablation.svg" alt="原文图 9" loading="lazy"></div>
+<figcaption><b>原文图 9。怎么看：</b>三个子图同样是 \(T=1\)、5、20；横轴是推理时的循环次数 \(L_s\)，纵轴是数独有效率；每条线是一种训练时的循环安排。粉色点划线（Schedule 10→1，递减课程）在 \(T=1\) 子图里一路领先：\(L_s=5\) 时 63.6%，而固定 \(L_t=5\)（蓝色实线）只有 21.2%，泊松随机 21.0%，递增课程（橙色点线）只有 8.0%；\(L_s=7\) 时递减课程 89.8%，固定 \(L_t=5\) 61.6%，递增课程 33.2%。到 \(T=5\)、\(L_s=3\)，递减课程仍有 95.6%，固定和递增分别是 79.4% 和 73.8%。到 \(T=20\) 时各条线基本重合。也就是说，训练方式的差别主要体现在“去噪步很少、只能靠循环”的情形。</figcaption></figure>
+<p>作者的解释是：训练初期循环很多遍，逼着模型学会多遍协同的复杂计算；后期减到一遍，再让它学会“每一遍都尽量有用”。这个解释是作者的推测，论文没有给出直接证据。另外值得注意的是训练成本：线性地从 10 遍减到 1 遍，平均每步约循环 5.5 遍（推算），和固定 \(L_t=5\) 的训练计算相近，所以这组比较大致是训练算力对齐的。但递减课程训练出来的模型如果推理时只循环 1 遍，表现明显不如一个从没循环过的普通模型（原文表 8 与表 7 的对比：\(T=40\) 时 85.2% 对 95.8%）。所以“灵活”是有代价的，原文第 5 节（本页第 7、8 节）用的循环模型都是这种递减课程训出来的（数独、Countdown 用 10→1，RNA、TinyGSM 用 5→1）。</p>
+
+<h4 id="n-3-3">3.3 训练时循环 \(L_t\) 遍，推理时可以循环 \(L_s\neq L_t\) 遍吗</h4>
+<p>既然每一遍都能读出预测、循环步嵌入又只依赖进度，推理时自然可以换一个遍数。附录 G.3 用固定 \(L_t\) 训练出的几个数独模型，交叉测试了不同的 \(L_s\)。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_crossrec_heatmaps_T1_T5.png" alt="原文图 14" loading="lazy"></div>
+<figcaption><b>原文图 14。怎么看：</b>上下两张热力图分别是 \(T=1\)（一步生成整张数独）和 \(T=5\)。纵轴是训练时的循环次数 \(L_t\)（Baseline 是不循环的普通模型，Rec 2 到 Rec 10 是 \(L_t=2\) 到 10），横轴是推理时的循环次数 \(L_s\)，格子里的数字是有效率（%）。读三个规律。第一，推理遍数远少于训练遍数时会崩：\(L_t=5\) 的模型只循环 1 遍，\(T=5\) 时只有 28%，说明前几遍的隐状态是为“继续加工”而优化的，不适合直接读出。第二，\(T=1\) 时推理遍数多于训练遍数几乎一直有好处：\(L_t=5\) 的模型循环 10、20、25 遍分别得到 89%、94%、96%。第三，\(T=5\) 时适度多循环有帮助，过度就会变差：\(L_t=2\) 的模型循环 3 遍从 83% 升到 92%，循环 5 遍反而降到 67%；\(L_t=3\) 的模型循环 15 遍只有 70%。</figcaption></figure>
+<p>作者把第三点解释为：模型的表示被校准成大约在 \(L_t\) 遍左右收敛，远远超出这个范围就会“走过头”；循环步嵌入按进度编码，也可能是外推能力有限的原因之一。这个现象和本站 <a href="elastic-latent-recurrence.html">ELR 精读</a>讨论的“一个模型、多种深度”是同一类问题：想要推理时随意调深度，训练时就得专门为此做安排，本文的递减课程是一种做法。</p>
+
+<h4 id="n-3-4">3.4 模型规模、训练配置与计算怎么记账</h4>
+<p>论文所有模型都很小。下表根据原文表 1、表 2 整理；参数量包含循环步嵌入（非循环基线没有这部分，例如数独基线是 1060 万）。</p>
+<div class="table-wrap"><table>
+<thead><tr><th>任务</th><th>块的层数 K</th><th>宽度 d</th><th>参数量</th><th>序列长度</th><th>词表</th><th>训练集</th><th>训练轮数</th><th>硬件</th></tr></thead>
+<tbody>
+<tr><td>数独 9×9</td><td>6</td><td>384</td><td>10.8M</td><td>81</td><td>10</td><td>180 万盘</td><td>10</td><td>1×A100-80GB</td></tr>
+<tr><td>数独 25×25</td><td>6</td><td>384</td><td>10.8M</td><td>625</td><td>26</td><td>10 万盘</td><td>75</td><td>1×A100-80GB</td></tr>
+<tr><td>Countdown（3/4/5 个数）</td><td>3</td><td>384</td><td>5.5M</td><td>48 / 64</td><td>18</td><td>每种 10 万题</td><td>300</td><td>1×A100-80GB</td></tr>
+<tr><td>RNA</td><td>12</td><td>480</td><td>33.7M</td><td>256</td><td>25</td><td>3879 万条</td><td>1</td><td>1×H200</td></tr>
+<tr><td>TinyGSM</td><td>12</td><td>768</td><td>161M</td><td>512</td><td>49,154</td><td>1170 万题</td><td>1.4</td><td>8×H200</td></tr>
+</tbody></table></div>
+<p>所有任务共用 AdamW、学习率 \(3\times10^{-4}\)、余弦退火加 2000 步预热。数独用二维旋转位置编码（行、列分开）再加一个“第几宫”的可学习嵌入，其余任务用一维 RoPE。RNA 借用 RiNALMo-micro 的编码器结构从头训练。</p>
+
+<div class="note-pre"><b>先把账算清楚：一个既循环又走去噪步的模型，生成一次花多少计算。</b>
+<p>记 \(C_{\text{blk}}\) 为共享块对整条序列算一遍的计算量。普通 MDM 的 \((K\otimes 1)\) 生成一次，要走 \(T\) 步，每步算一遍块，总计 \(T\cdot C_{\text{blk}}\)。R-MDM 在第 \(t\) 步循环 \(\ell_t\) 遍（\(\ell_t\le L\)），总计算就是</p>
+<div class="formula">$$C_{\text{gen}}\approx\Big(\sum_{t}\ell_t\Big)\cdot C_{\text{blk}}=\mathrm{NFE}\cdot C_{\text{blk}},\qquad \mathrm{NFE}=\sum_t \ell_t$$</div>
+<p>论文就是这样记账的：把“共享块算一遍”记作一次函数求值（NFE），不管它发生在同一步的第几遍，还是新的一步的第一遍。于是：</p>
+<ul>
+  <li>固定每步循环 \(L\) 遍、走 \(T\) 步：\(\mathrm{NFE}=L\cdot T\)。</li>
+  <li>线性递减（第一步 \(L\) 遍，最后一步 1 遍）：\(\mathrm{NFE}\approx T(L+1)/2\)。</li>
+  <li>深模型 \((KL\otimes 1)\) 走 \(T\) 步：它自己只前向 \(T\) 次，但每次的计算是 \(L\cdot C_{\text{blk}}\)，换成同一单位也是 \(L\cdot T\)。这就是本页第 4 节“同 FLOPs”对比成立的原因。</li>
+</ul>
+<p>这套记账忽略了三样东西，读数字时心里要有数。第一，<b>输出头</b>：用熵来决定停不停，就必须在每一遍之后算一次 logits。数独、Countdown 的词表很小，可以忽略；TinyGSM 的输出头每个位置约 \(2\times768\times49{,}154\approx7{,}550\) 万次浮点运算，而 12 层共享块每个位置约 1.89 亿次（推算，按每层 \(24d^2+4nd\) 估计，\(n=512\)），所以如果对所有位置都算，输出头相当于又加了约 40% 的一遍（推算）；实际只需对还空着的位置算，比例会小一些。第二，<b>每次求值都处理整条序列</b>：标准 MDM 没有自回归模型那种精确的 KV 缓存（<a href="fast-dllm.html">Fast-dLLM</a> 一类方法用的是近似缓存，本文没有用），所以 NFE 和“生成的 token 数”不是一回事。第三，<b>NFE 不是墙钟时间</b>：循环省下的是参数（显存里的权重），不是时间，同样的 NFE 下循环模型并不会更快。论文在数独上测了批大小为 1 时的延迟，基本和 NFE 成正比，例如普通模型 \(T=40\) 约 0.169 秒，\((6\otimes5)\) 在 \(T=5\) 时约 0.210 秒，深模型 \((30\otimes1)\) 在 \(T=5\) 时约 0.160 秒（原文表 7、表 9）。</p>
+</div>
+<div class="note-warn"><b>容易忽略的一点：</b>训练成本同样会被循环放大。用固定 \(L_t=L\) 训练，每个训练步要把共享块算 \(L\) 遍并对 \(L\) 遍都反传，训练计算和激活显存都大约是普通模型的 \(L\) 倍，只有参数显存不变。所以“同参数”对比里，循环模型在训练和推理两头都多花了约 \(L\) 倍的计算；“同 FLOPs”对比里，它和 \(L\) 倍深的模型训练步数相同、每步计算相同，两头都对齐了。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A4" target="_blank" rel="noopener">附录 D ↗</a> · <a href="https://arxiv.org/html/2606.18022#A7.SS3" target="_blank" rel="noopener">附录 G.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 递归深度能不能当一条扩展轴：同参数、同 FLOPs、同前向次数</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>给 MDM 加循环，到底有没有用？“有用”至少有三种不同的问法，答案也不一样。第一，参数一样多时，多循环几遍会不会更好（这等于问“多花计算值不值”）？第二，计算一样多时，循环一个小块和直接用一个深的大模型哪个好（这等于问“共享参数亏不亏”）？第三，总前向次数一样多时，把计算花在循环上和花在多走几个去噪步上哪个好（这等于问“两种算力能不能互换”）？论文 §3.2 和附录 G.1–G.5 在数独和 Countdown 上回答了这三个问题。</div>
+
+<div class="note-pre"><b>先补一点背景：两个任务和它们的指标。</b>
+<p><b>数独。</b>9×9 数独用的是 Shah 等（2024）整理的 180 万盘，评测时题目给出的数字保持可见，其余格子遮住让模型填。指标是<b>有效率</b>（Valid Puzzle Rate，VPR）：填完的盘面每一行、每一列、每一宫都恰好包含 1 到 9 各一次，才算有效。论文还报告一个更细的“软约束损失”（SCL），统计每一行、列、宫缺了多少个数字。另外还有一个 25×25 的大数独，是作者用一个固定解加随机的行列与数字置换合成的 10 万盘，评测时分别遮住 70%、80%、90% 的格子。</p>
+<p><b>Countdown。</b>给出 \(k\) 个 1 到 100 之间的数（\(k=3,4,5\)）和一个目标数，要求用加减乘除一步步把它们合并成目标数，每一步的结果必须是整数，用过的数不能再用。比如（本站自拟的例子）给出 3、5、8，目标 64，一个解是“5+3=8, 8×8=64”。模型看到题目，补全后面的算式。指标是<b>达标率</b>（Reaches Target Rate，RTR）：每一步算术正确、每一步用到的数当时确实还在“池子”里、最后池子里只剩目标数，三条都满足才算对。</p>
+<p>两个任务都有很强的“全局约束”：数独里一个格子的值牵动同行、同列、同宫的其他格子；Countdown 里前一步的结果决定后一步能用什么数。所以“同时填好几个格子”的风险很高，非常适合研究并行解码的错误。所有数字都是 5 次采样、每次 100 个样本的均值和标准差；标准差只反映采样的随机性，每种配置只训练了一个模型，没有反映训练随机种子的差异。</p>
+</div>
+
+<h4 id="n-4-1">4.1 同参数：循环越多越好，步数越少越明显</h4>
+<p>第一个对比固定参数量：同一个结构，训练和推理都循环 \(L\) 遍（\(L=L_t=L_s\)），和不循环的普通模型比，去噪步数 \(T\) 相同，每步提交最有把握的那些 token。这个对比给循环模型多花了 \(L\) 倍的计算，问的是“这些额外计算换来了多少质量”。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_rq1_sudoku_countdown_4panels.svg" alt="原文图 2" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>四个子图依次是 9×9 数独和 3、4、5 个数的 Countdown；横轴是去噪步数 \(T\)（注意刻度不均匀），纵轴是有效率或达标率。灰色虚线是不循环的基线，其余实线从浅到深依次是 \(L=2,3,5,10\)。要看两件事。第一，几乎在每个 \(T\) 上，循环的曲线都在基线上方，并且越难的任务（从 Countdown-3 到 Countdown-5）差距越大。第二，差距在 \(T\) 小的一端最大，\(T\) 大了以后曲线互相靠拢：数独在 \(T=5\) 时基线 65.2%、\(L=5\) 有 93.6%，到 \(T=40\) 时只是 95.8% 对 98.0%。</figcaption></figure>
+<p>几个具体数字（原文表 7、表 12）：Countdown-3 在 \(T=10\) 时，基线 59.4%，\(L=3\) 已到 92.4%；更难的 Countdown-5 在 \(T=30\) 时，基线只有 15.6%，\(L=10\) 有 56.4%；数独一步生成（\(T=1\)）时，基线是 0%，\(L=10\) 有 46.4%。为什么步数越少，循环越有用？下一节会给出严格的解释，这里先给直觉：步数少，意味着每一步要同时填很多格子；每个格子的预测哪怕只有一点不准，同时填的格子多了，错误就会叠加，很快把整盘做坏。循环让每个格子在落子前被“多想几遍”，单个格子的预测更准，叠加起来的错误就少了。步数多的时候，每步只填一两个格子，本来就不容易出错，循环能改进的空间自然变小。</p>
+
+<h4 id="n-4-2">4.2 同 FLOPs：循环的小块对上同样深的大模型</h4>
+<p>第二个对比把计算对齐：\((K\otimes L)\) 对 \((KL\otimes 1)\)，两者每次前向的计算相同、去噪步数相同、训练步数也相同，区别只在于前者把同一份 \(K\) 层参数用了 \(L\) 遍，后者有 \(KL\) 层各不相同的参数，多了 \(L\) 倍。这个对比问的是：共享参数之后，同样的计算能不能保持同样的能力。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_paper_results_rtr_by_steps.svg" alt="原文图 3" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>同样四个任务，横轴是去噪步数 \(T\)。颜色表示<b>有效深度</b>（每次前向实际经过的层数，从浅绿的 6 层到深蓝的 30 层）；实线圆点是普通的深模型，点线方块是循环模型。同一种颜色的实线和点线就是“计算相同、参数差 \(L\) 倍”的一对。数独子图里，点线几乎都在同色实线的上方，\(T=1\) 和 \(T=5\) 时差距最大。Countdown 子图里情况要混杂得多：Countdown-4 在 \(T=10\) 时，最深的实线（30 层）明显高于对应的点线，到 \(T=30\) 时点线才反超。</figcaption></figure>
+<p>论文正文挑出的例子都对循环有利：数独 \(T=5\) 时，\((6\otimes5)\) 用 1080 万参数达到 93.6%，30 层的普通模型用 5310 万参数只有 77.8%；Countdown-4 在 \(T=20\) 时，\((3\otimes5)\) 和 \((3\otimes10)\) 分别是 70.2% 和 74.4%，对应的 15 层和 30 层普通模型是 69.4% 和 69.6%，参数少 5 到 10 倍。把附录的完整表格（表 7、9、12、13）对齐来看，结论要更细一些：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>任务与步数</th><th>循环模型（参数）</th><th>同深度普通模型（参数）</th><th>谁更好</th></tr></thead>
+<tbody>
+<tr><td>数独 \(T=1\)</td><td>6⊗5：21.2%（10.8M）</td><td>30 层：0.2%（53.1M）</td><td>循环</td></tr>
+<tr><td>数独 \(T=5\)</td><td>6⊗5：93.6%</td><td>30 层：77.8%</td><td>循环</td></tr>
+<tr><td>数独 \(T=5\)</td><td>6⊗3：92.4%</td><td>18 层：80.6%（31.9M）</td><td>循环</td></tr>
+<tr><td>数独 \(T=40\)</td><td>6⊗5：98.0%</td><td>30 层：97.2%</td><td>接近</td></tr>
+<tr><td>Countdown-3 \(T=10\)</td><td>3⊗5：91.0%（5.5M）</td><td>15 层：94.4%（26.7M）</td><td>接近，普通略好</td></tr>
+<tr><td>Countdown-4 \(T=10\)</td><td>3⊗5：37.0%；3⊗10：43.6%</td><td>15 层：48.2%；30 层：58.0%（53.3M）</td><td>普通模型</td></tr>
+<tr><td>Countdown-4 \(T=20\)</td><td>3⊗5：70.2%；3⊗10：74.4%</td><td>15 层：69.4%；30 层：69.6%</td><td>接近（在标准差内）／循环略好</td></tr>
+<tr><td>Countdown-4 \(T=30\)</td><td>3⊗5：81.8%；3⊗10：86.2%</td><td>15 层：80.0%；30 层：72.6%</td><td>接近／循环</td></tr>
+<tr><td>Countdown-5 \(T=30\)</td><td>3⊗5：44.4%；3⊗10：56.4%</td><td>15 层：42.2%；30 层：45.4%</td><td>接近／循环</td></tr>
+</tbody></table></div>
+<p>所以更准确的说法是：<b>在数独上，同样的计算下循环模型几乎全面占优；在 Countdown 上，步数少时深的普通模型可能更好，步数多时循环模型追平或反超。</b>论文用“matches or outperforms”概括，对数独是准确的，对 Countdown-4 的小步数情形则不成立。</p>
+<p>作者还指出一个现象，说明循环的好处不只是“深度更深”：数独 \(T=40\) 时，把普通模型从 18 层加深到 30 层，有效率只从 96.6% 升到 97.2%；而保持 6 层参数、把循环从 1 遍加到 5 遍，有效率从 95.8% 升到 98.0%。作者把这解读为“在固定的局面上反复精炼”带来了深度之外的收益。</p>
+<div class="note-warn"><b>读这组对比时要留意基线本身：</b>附录表 9 里，普通模型的“越深越好”并不单调。\(T=5\) 时 18 层 80.6%、24 层 82.8%，30 层反而降到 77.8%；\(T=40\) 时 12 层（93.8%）还不如 6 层（95.8%）。所有深度用的是同一套学习率与训练步数，没有按深度单独调参。深层普通模型可能并没有被训到最好，这会让“循环小块胜过深模型”的差距显得偏大。这组对比能说明的是：在这套训练配方下，循环模型更好；它不能说明调好参的深模型做不到。</div>
+
+<h4 id="n-4-3">4.3 同前向次数：把计算花在循环上还是花在去噪步上</h4>
+<p>第三个对比最贴近“两种算力能不能互换”这个问题。作者固定一次生成的总前向次数 \(x=T\times L_s\)（也就是 NFE），比较两种花法：一个不循环的普通模型把 \(x\) 全部花在去噪步上（\(T=x\)）；一个用递减课程（10→1）训练出的循环模型，在不同的 \(L_s\) 下用 \(T=x/L_s\) 步。两者参数相同，推理计算相同，但循环模型的训练计算大约是普通模型的 5.5 倍（推算，见本页 3.2 节）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_compute_budget_tradeoff_improved.svg" alt="原文图 15" loading="lazy"></div>
+<figcaption><b>原文图 15。怎么看：</b>横轴是总前向次数 \(x\)（对数刻度），纵轴是 9×9 数独有效率。黑线是普通模型（每个点对应一个 \(T\)），彩色线是循环模型在 \(L_s=3,5,7,10\) 下改变 \(T\) 得到的曲线。在左半边（\(x\) 小于 20），彩色点明显高于黑线：同样 10 次前向，普通模型（\(T=10\)）85.0%，循环模型一步生成、循环 10 遍（\(L_s=10,T=1\)）94.2%。再往右，黑线在 \(x=40\) 左右停在 95.8% 附近，而彩色线能继续升到 99% 以上，最高 99.8%（\(L_s=5,T=40\)）。但也有例外：\(x=5\) 时 \(L_s=5,T=1\) 只有 63.6%，和普通模型 \(T=5\) 的 65.2% 差不多。</figcaption></figure>
+<div class="dia">
+  <div class="dia-title">示意图：同一张数独，各种配置花了多少次“6 层块前向”、换来多少有效率</div>
+  <div class="dia-row"><span class="lbl">6⊗1，T=40</span><div class="dia-track"><span class="dia-seg w" style="flex:40">40 次 → 95.8%</span></div></div>
+  <div class="dia-row"><span class="lbl">6⊗1，T=10</span><div class="dia-track"><span class="dia-seg w" style="flex:10">10 次 → 85.0%</span><span class="dia-seg" style="flex:30"></span></div></div>
+  <div class="dia-row"><span class="lbl">30⊗1，T=5</span><div class="dia-track"><span class="dia-seg oth" style="flex:25">折合 25 次 → 77.8%（53.1M 参数）</span><span class="dia-seg" style="flex:15"></span></div></div>
+  <div class="dia-row"><span class="lbl">6⊗5，T=5</span><div class="dia-track"><span class="dia-seg kv" style="flex:25">25 次 → 93.6%（固定 L=5 训练）</span><span class="dia-seg" style="flex:15"></span></div></div>
+  <div class="dia-row"><span class="lbl">课程模型 L_s=3，T=5</span><div class="dia-track"><span class="dia-seg kv" style="flex:15">15 次 → 95.6%</span><span class="dia-seg" style="flex:25"></span></div></div>
+  <div class="dia-row"><span class="lbl">课程模型 L_s=10，T=1</span><div class="dia-track"><span class="dia-seg kv" style="flex:10">10 次 → 94.2%</span><span class="dia-seg" style="flex:30"></span></div></div>
+  <div class="dia-note">条的长度 = 一次生成的 6 层块前向次数（30 层模型每次前向折合 5 次）；数字来自原文表 7、8、9 和图 15。“课程模型”指用递减课程 10→1 训练的循环模型，它的训练计算约为普通模型的 5.5 倍（推算）。灰色条那一行和它下面一行就是“同 FLOPs”对比；第一行和最后两行是“同前向次数”对比。墙钟延迟（批大小 1，单张 A100）大致与条长成正比：例如普通模型 \(T=40\) 约 0.169 秒，课程模型 \(L_s=3,T=5\) 约 0.081 秒。</div>
+</div>
+<p>作者从这张图读出两点。第一，<b>小预算下循环更划算</b>：课程模型 \(L_s=3,T=5\) 用 15 次前向达到 95.6%，普通模型要 40 次才到 95.8%，前向次数省了约 2.7 倍。第二，<b>循环抬高了天花板</b>：普通模型再加步数也停在 96% 左右，循环模型能接近 100%。两种算力每一份的价钱一样（都是一次前向），效果却不一样，这正是下一节要解释的现象。</p>
+
+<h4 id="n-4-4">4.4 更大的数独：遮得越多，循环越关键</h4>
+<p>在 25×25 的大数独上，作者用固定 \(L\) 训练和推理（\(L_t=L_s=L\)），分别遮住 70%、80%、90% 的格子测试。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/fig_sudoku25_masking_line.svg" alt="原文图 16" loading="lazy"></div>
+<figcaption><b>原文图 16。怎么看：</b>三个子图依次是遮住 70%、80%、90%；横轴是去噪步数 \(T\)（1 到 100），纵轴是有效率。紫色方块是普通模型，青色三角是 \(L=3\)，浅绿菱形是 \(L=5\)。遮 70% 时，两个循环模型一步（\(T=1\)）就是 100%，普通模型走 100 步也只有 95.2%。遮 80% 时普通模型 \(T=100\) 只有 69.6%，\(L=3\) 在 \(T=10\) 就有 99.6%。遮 90% 时所有模型都很吃力，但普通模型几乎是 0（\(T=100\) 时 2.0%），\(L=3\) 有 52.2%。</figcaption></figure>
+<p>作者的解读是：给出的数字越少，模型越需要把全局约束在整张盘面上传开，每一遍循环都是一次完整的 6 层双向计算，正好提供了这种“传话”的机会，所以循环的价值随遮挡比例上升而放大。</p>
+<div class="note-warn"><b>图上有个论文没有解释的地方：</b>循环模型的曲线在 \(T=5\) 处出现了明显的下凹。遮 80% 时，\(L=3\) 在 \(T=1\) 是 98.8%，\(T=5\) 掉到 70.6%，\(T=10\) 又回到 99.6%；遮 70% 时也有 100%→95.8%→100% 的小凹陷。按“步数越多越好”的常识，这不应该发生。可能和每步提交数在 \(T=5\) 时的特定取值、或采样温度有关，但论文没有讨论，读者不要把它当成规律。</div>
+
+<h4 id="n-4-5">4.5 这些对比各自匹配了什么</h4>
+<p>把本节和原文第 5 节（本页第 8 节）用到的几组对比放在一起看（训练计算一栏为本站推算）：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>对比</th><th>循环模型 vs 对照</th><th>参数</th><th>每次前向的计算</th><th>一次生成的计算</th><th>训练计算</th><th>论文结论</th></tr></thead>
+<tbody>
+<tr><td>同参数（原文图 2）</td><td>\(K\otimes L\) vs \(K\otimes1\)，\(T\) 相同</td><td>相同</td><td>\(L\) 倍</td><td>\(L\) 倍</td><td>约 \(L\) 倍</td><td>质量提高，\(T\) 小时最明显</td></tr>
+<tr><td>同 FLOPs（原文图 3）</td><td>\(K\otimes L\) vs \(KL\otimes1\)，\(T\) 相同</td><td>\(1/L\)</td><td>相同</td><td>相同</td><td>相同（训练步数相同）</td><td>数独上更好；Countdown 上互有胜负</td></tr>
+<tr><td>同前向次数（原文图 15）</td><td>课程模型 \(6\otimes L_s\) vs \(6\otimes1\)，\(T\times L_s\) 相同</td><td>相同</td><td>\(L_s\) 倍</td><td>相同</td><td>约 5.5 倍</td><td>小预算下更好，上限更高</td></tr>
+<tr><td>原文第 5 节的解码器（原文图 8）</td><td>课程模型 vs 单独训练的普通模型，横轴是实际 NFE</td><td>相同</td><td>可变</td><td>看横轴</td><td>约 5.5 倍（数独、Countdown）／约 3 倍（RNA、TinyGSM）</td><td>见本页第 8 节</td></tr>
+</tbody></table></div>
+<p>没有任何一组对比和自回归模型比较，也没有一组对齐墙钟时间（延迟只在数独上、批大小为 1 时测过）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A7" target="_blank" rel="noopener">附录 G.1–G.5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 并行解码的误差可以拆成两块：依赖误差与保真误差</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节看到，多一遍循环和多一个去噪步价钱相同（都是一次前向），效果却不同：循环在步数少时特别有用，步数多了就帮不上什么忙。为什么？作者的回答是把“一个去噪步犯的错”精确地拆成两部分，一部分只有改变提交方式（少填、分几步填）才能降低，另一部分只有让模型对每个位置判断得更准才能降低。循环属于后者，去噪步属于前者。这一节先补信息论的背景，再讲这个分解（论文 §4.1 和附录 A），并用一个两格的小例子把每一项都算出来。</div>
+
+<div class="note-pre"><b>先补一点背景：熵、KL 散度、互信息、总相关。</b>
+<p>下面都用自然对数，单位是“奈特”（nats）。</p>
+<ul>
+  <li><b>熵</b> \(H(p)=-\sum_v p(v)\log p(v)\) 衡量一个分布有多“拿不准”。确定的分布（某个值概率为 1）熵为 0；两个值各一半，熵是 \(\ln 2\approx0.693\)。</li>
+  <li><b>KL 散度</b> \(D_{\mathrm{KL}}(p\,\|\,q)=\sum_v p(v)\log\frac{p(v)}{q(v)}\) 衡量“真实分布是 \(p\)，却按 \(q\) 去抽样或编码”要付出的额外代价。它总是非负，只有 \(q=p\) 时为 0。一个常用的等式是：交叉熵 = 熵 + KL，也就是 \(-\sum_v p(v)\log q(v)=H(p)+D_{\mathrm{KL}}(p\,\|\,q)\)。</li>
+  <li><b>互信息</b> \(I(X;Y)=H(X)-H(X\mid Y)\) 衡量“知道 \(Y\) 之后，\(X\) 的不确定性少了多少”。两者独立时为 0。</li>
+  <li><b>总相关</b>（total correlation，也叫多元互信息）把互信息推广到多个变量：\(\mathrm{TC}(p)=\sum_i H(p_i)-H(p)\)，即“各个变量各自的熵之和”减去“它们合在一起的熵”。各变量相互独立时，合起来的熵正好等于各自熵之和，TC 为 0；它们越相互牵制，合起来的熵就比各自之和小得越多，TC 越大。它也等于 \(D_{\mathrm{KL}}\big(p\,\big\|\,\prod_i p_i\big)\)：把一个联合分布硬当成“各自独立”时损失的信息。</li>
+</ul>
+</div>
+
+<h4 id="n-5-1">5.1 一步之内的误差分解</h4>
+<p>把解码过程写得精确一点。某一步时，画布的状态是 \(s=(x_O,M)\)：\(O\) 是已经填好的位置，\(M\) 是还空着的位置。这一步先在 \(s\) 上循环若干遍，读出每个空位 \(i\) 的边缘分布 \(q_i\)；再选一个提交集合 \(U\subseteq M\)；最后对 \(U\) 里的每个位置<b>独立地</b>抽样。理想的做法应该是从“真实的条件联合分布” \(p^\star(x_U\mid s)=\pi_{\text{data}}(x_U\mid x_O)\) 里一起抽，也就是考虑这些位置之间的相互牵制。实际做法用的却是 \(\prod_{i\in U}q_i\)：既用了模型自己估计的边缘，又假设它们相互独立。论文的引理 4.1（沿用 EB-Sampler 的分解）说，这一步的误差正好拆成两项：</p>
+<div class="formula">$$D_{\mathrm{KL}}\Big(p^{\star}(x_U\mid s)\ \Big\|\ \prod_{i\in U}q_i\Big)=\underbrace{\mathrm{TC}\big(p^{\star}(x_U\mid s)\big)}_{D_{\mathrm{dep}}(U\mid s)\ \text{依赖误差}}+\underbrace{\sum_{i\in U}D_{\mathrm{KL}}\big(p^{\star}_i\,\big\|\,q_i\big)}_{D_{\mathrm{fid}}(U\mid s,q)\ \text{保真误差}}$$</div>
+<p>证明只有一行：把左边的 KL 展开，联合分布的熵单独拿出来，剩下的交叉熵按位置拆开，每个位置用“交叉熵 = 熵 + KL”，重新组合就得到右边。两项都非负。</p>
+<ul>
+  <li><b>保真误差</b> \(D_{\mathrm{fid}}\)：模型对每个提交位置<b>单独看</b>时猜得有多不准。它衡量的是模型的边缘分布 \(q_i\) 离真实边缘 \(p^\star_i\) 有多远；如果模型的每个边缘都和真实边缘一模一样，它就是 0。</li>
+  <li><b>依赖误差</b> \(D_{\mathrm{dep}}\)：就算每个位置单独看都猜得完全对，把本来相互牵制的几个位置当成独立的来同时抽，也会损失信息。它等于真实条件联合分布的总相关，<b>完全不依赖模型</b>，只取决于任务本身（\(p^\star\)）、当前局面 \(s\) 和这一步选了哪些位置一起提交（\(U\)）。</li>
+</ul>
+
+<div class="dia">
+  <div class="dia-title">示意图：两个空格的小例子，把两项误差都算出来</div>
+  <p style="margin:4px 0 8px">设数独某一行只剩两个空格 A、B，剩下的候选数都是 {1, 2}。同一行不能重复，所以合法的填法只有两种：(A=1, B=2) 和 (A=2, B=1)，各占一半。</p>
+  <div class="table-wrap"><table>
+  <thead><tr><th>填法</th><th>真实联合分布 \(p^\star\)</th><th>真实边缘各自独立抽（完美边缘）</th><th>模型边缘 \(q_A=(0.8,0.2)\)、\(q_B=(0.5,0.5)\) 独立抽</th></tr></thead>
+  <tbody>
+  <tr><td>A=1, B=2 ✓</td><td>0.5</td><td>0.25</td><td>0.40</td></tr>
+  <tr><td>A=2, B=1 ✓</td><td>0.5</td><td>0.25</td><td>0.10</td></tr>
+  <tr><td>A=1, B=1 ✗</td><td>0</td><td>0.25</td><td>0.40</td></tr>
+  <tr><td>A=2, B=2 ✗</td><td>0</td><td>0.25</td><td>0.10</td></tr>
+  <tr><td><b>冲突概率</b></td><td>0</td><td><b>50%</b></td><td><b>50%</b></td></tr>
+  </tbody></table></div>
+  <div class="dia-flow">
+    <span class="dia-box pred">依赖误差 \(D_{\mathrm{dep}}=H(A)+H(B)-H(A,B)=\ln2+\ln2-\ln2\approx0.693\)<small>和模型无关：两格同时提交就一定有这一项</small></span>
+    <span class="dia-arrow">+</span>
+    <span class="dia-box enc">保真误差 \(D_{\mathrm{fid}}=D_{\mathrm{KL}}(p^\star_A\|q_A)+0\approx0.223\)<small>模型把 A 估成 0.8/0.2，真实是 0.5/0.5</small></span>
+    <span class="dia-arrow">=</span>
+    <span class="dia-box">总误差 \(\approx0.916\) 奈特<small>直接按 KL 定义算出来也是 0.916</small></span>
+  </div>
+  <div class="dia-flow">
+    <span class="dia-box reg">改成分两步提交：先抽 A，落子之后 B 只剩一个可能，冲突概率变成 0<small>依赖误差减少的量正好是 \(I(A;B)=\ln2\)</small></span>
+  </div>
+  <div class="dia-note">本站构造的例子，所有数字为推算。完美边缘那一列说明：哪怕模型对每个格子的判断完全正确，两格同时抽仍有一半概率冲突，这一半全部来自依赖误差，再多循环几遍也去不掉。</div>
+</div>
+
+<h4 id="n-5-2">5.2 两项误差各听谁的话</h4>
+<p>分解的价值在于它把“谁能降低哪一项”说清楚了。</p>
+<p><b>循环只能动保真误差。</b>多循环一遍，画布状态 \(s\) 没变，提交集合 \(U\) 也没变（在提交顺序固定的前提下），只有模型的边缘分布 \(q_i\) 变了。而依赖误差根本不含 \(q\)，所以循环对它无能为力。循环能做的，是把 \(q_i\) 推向真实边缘 \(p^\star_i\)，降低保真误差。</p>
+<p><b>去噪步只能动依赖误差。</b>把一次提交 \(U\) 拆成先提交 \(A\)、再提交 \(B\)（\(A\cup B=U\)），依赖误差会精确地减少 \(B\) 中每个位置与 \(A\) 之间的互信息之和（附录 A 的引理 A.6 与推论 A.7）：</p>
+<div class="formula">$$D_{\mathrm{dep}}(U\mid s)-\Big(D_{\mathrm{dep}}(A\mid s)+\mathbb{E}_{x_A}\big[D_{\mathrm{dep}}(B\mid s_A)\big]\Big)=\sum_{i\in B}I\big(x_i;\,x_A\mid s\big)\ \ge 0$$</div>
+<p>这里 \(s_A\) 是先把 \(A\) 填好之后的新局面。因为互信息非负，所以“拆开提交”永远不会让依赖误差变大。极端情况有两个：一步把所有空格全填完（\(T=1\)），依赖误差等于整个答案的总相关，最大；每步只填一个格子，单个变量的总相关为 0，依赖误差整个消失。这正是“步数越多质量越好”的严格版本。</p>
+<p>把整条解码轨迹上每一步的误差加起来（定理 A.5），总误差等于“沿轨迹累积的依赖误差”加上“沿轨迹累积的保真误差”。前者只由提交计划决定，后者由模型决定。丢掉非负的后者，就得到一个<b>依赖误差的下限</b>：提交计划一旦定了，模型再好、循环再多，总误差也低不过这个下限。论文把它叫作“依赖地板”（dependence floor）。</p>
+<p>这就解释了本页第 4 节的现象。步数少时，每步提交很多格子。对于只有唯一解的数独，真实条件分布是一个确定的点，依赖误差恒为 0，所有错误都来自保真误差，而大批量提交把保真误差放大了，所以循环特别有用。步数多时，每步提交很少，保真误差被放大得少，循环的收益也就小了。而对于有多个合法答案的问题，循环把保真误差压低以后，剩下的就是依赖地板，这时只有减小每步提交量才有用。</p>
+
+<h4 id="n-5-3">5.3 为什么熵能当“提交多少”的信号</h4>
+<p>实际解码时既不知道 \(p^\star\)，也就算不出依赖误差。EB-Sampler 的思路是用熵给它一个上界。附录 A 的命题 A.3 把这个上界写得更完整：</p>
+<div class="formula">$$D_{\mathrm{dep}}(U\mid s)\ \le\ \sum_{i\in U}H_i-\max_{i\in U}H_i+\varepsilon,\qquad \varepsilon=\sum_{i\in U}\big|H(p^\star_i)-H_i\big|$$</div>
+<p>其中 \(H_i=H(q_i)\) 是模型自己预测的熵，是能算出来的。直觉是：总相关不可能超过“各自的熵之和减去其中最大的那个”（因为联合熵至少和任何一个变量的熵一样大）。如果用真实边缘的熵，这个上界就是 EB-Sampler 的；换成模型的熵，就要多付一个修正项 \(\varepsilon\)，即模型熵和真实熵之差的总和。论文进一步证明，在每个位置的保真误差不太大的条件下，\(\varepsilon\) 被平均每个位置的保真误差控制住，保真误差趋于 0 时它也趋于 0（证明用到 Pinsker 不等式和 Fannes 型的熵连续性不等式）。</p>
+<p>这给了循环第二个作用：<b>循环把保真误差压低，模型的熵就变得更可信</b>，于是“按熵挑低熵位置一起提交”这条规则的保证也更可靠。在上面两格的例子里，\(H_A+H_B-\max(H_A,H_B)=\ln2\)，上界恰好等于真实的依赖误差。本页第 7 节的解码器用的提交规则“熵之和不超过 \(\delta\)”比这个上界更严格（因为少减了最大的那一项），所以也能控制依赖误差。</p>
+
+<div class="note-warn"><b>这套理论证明了什么、没证明什么（论文附录 A.5 自己也说得很清楚）：</b>
+<ul style="margin:4px 0">
+  <li>分解本身是一个恒等式，加上“丢掉非负项”得到的下界。它不是最优性结果：它<b>没有</b>证明循环一定会让保真误差单调下降（这是一个关于训练好的模型的经验问题，下一节用实验检查），也<b>没有</b>给出在固定 NFE 下 \(T\) 和 \(L\) 该怎么分配的最优解。</li>
+  <li>“循环不改变依赖误差”的前提是提交集合不随循环变化。实际常用的按置信度提交，会因为循环改变了预测而改变 \(U\)，从而间接改变依赖误差。所以下一节的实验特意固定了随机的提交顺序。</li>
+  <li>理论分析的是直接从 softmax 分布 \(q_i\) 抽样的采样器。实验里实际用的是加了温度和 top-\(k\) 截断的分布，Countdown 和 TinyGSM 甚至是 \(k=1\)（贪心）。截断后的分布支撑集变小，真实值落在支撑集外时 KL 是无穷大，这些有限值的结论对它们并不直接成立（附录 A 的注 A.2）。</li>
+  <li>任务指标（有效率、达标率、正确率）不是 KL 的单调函数，所以实验只用任务指标检验理论的定性预测，而不是去估计两项误差的大小。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S4.SS1" target="_blank" rel="noopener">英文原文 §4.1 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A1" target="_blank" rel="noopener">附录 A（证明）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 受控实验：在多解数独上把两项误差精确算出来</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节的分解是数学恒等式，但“循环确实在降低保真误差”“降到多低会碰到依赖地板”是经验问题，需要实验回答。要检验它，必须知道真实分布 \(p^\star\)。本页第 4 节（原文 §3.2）的数独每盘只有唯一解，依赖误差恒为 0，看不出两项的分工。作者于是专门构造了有多个合法解、而且所有解都能枚举出来的数独盘面，在上面把两项误差逐项精确算出（论文 §4.2 和附录 E）。</div>
+
+<h4 id="n-6-1">6.1 盘面怎么造</h4>
+<p>作者从留出的已解数独出发，随机挖掉一定数量的格子，再用精确求解器枚举所有合法的填法。挖得越多，解越多（原文表 3，每行 300 个随机挖法）：挖 40 格时 43% 的盘面仍是唯一解；挖 48 格时只剩 6%，56% 有 6–50 个解，11% 有 51–500 个解；挖 52 格时 12% 的盘面超过 500 个解。作者固定挖 48 格，因为这时各种解数都会出现，而且每组的空格数相同，每步提交 \(k=48/T\) 个格子，解的个数不会和空格数混在一起。按解的个数 \(S\) 分成四组（1、2–5、6–50、51–500），每组用拒绝采样凑满 50 盘；唯一解的一组当对照，它的依赖误差恒为 0。</p>
+<p>真实分布取“所有合法填法上的均匀分布”。严格说，数据分布应该是 180 万盘训练集的经验分布，但 9×9 数独的合法终盘约有 \(6.7\times10^{21}\) 种，一个盘面的各个填法几乎不可能出现在训练集里，均匀分布是最自然的读法。有了所有合法填法，任何局面下的真实条件联合分布、真实边缘、依赖误差、保真误差都能精确算出。</p>
+<p>实验用的是一个训练时固定循环 5 遍的数独模型，推理时取 \(L\in\{1,3,5,10\}\)、\(T\in\{1,2,4,8,16,48\}\)。关键的控制是：每盘、每个样本在解码前先抽一个随机的填格顺序，每步按这个顺序填接下来的 \(k\) 个格子，而且这个顺序在不同的 \(L\)、\(T\) 之间共享。这样提交集合与模型预测无关，依赖误差在不同 \(L\) 之间<b>按构造完全相同</b>，任何差别都只能来自保真误差。作者还设置了一个参照：“完美边缘”采样器，它对每个格子都用真实边缘 \(p^\star_i\)，但同样在一步之内独立地抽，所以它犯的错全是依赖错误。每个配置是 50 盘 × 64 个样本。</p>
+
+<h4 id="n-6-2">6.2 两项误差各自怎么变</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/paper_fig_dep_fid.svg" alt="原文图 4" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>上图（a）横轴是每步提交的格子数 \(k=48/T\)（从 1 到 48，即 \(T\) 从 48 到 1），纵轴是沿轨迹累积的依赖误差（奈特），每条线是一组解数。唯一解组（最浅的线）贴着 0；解越多，依赖误差越大，并且随每步提交数急剧上升。图题强调“对每个 \(L\) 都一样”，因为提交顺序固定，依赖误差与循环无关。下图（b）固定 \(T=8\)，横轴是循环次数 \(L\)，纵轴是保真误差（对数刻度）。从 \(L=1\) 到 \(L=5\)，保真误差下降了 6 到 43 倍；唯一解组在 \(L=10\) 继续下降到约 0.02 奈特，多解的三组则在 \(L=5\) 之后基本走平，\(L=10\) 甚至略有回升。</figcaption></figure>
+<p>这两张图正好对应理论的两条预测：依赖误差只听提交大小的，保真误差只听循环的。保真误差在多解盘面上走平，说明循环的收益本身是有尽头的，这也启发了原文第 5 节（本页第 7 节）“该停就停”的自适应循环规则。</p>
+
+<h4 id="n-6-3">6.3 失败率逼近“依赖地板”</h4>
+<p>理论说的是 KL，实际关心的是盘面会不会填坏。作者把失败分成两类：<b>同步冲突</b>（parallel clash，同一步里同时填的两个格子相互矛盾）和<b>旧格冲突</b>（old-cell clash，新填的格子和之前填好的格子矛盾），一盘在第一次违规时就算失败。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/paper_fig_errors_survival.svg" alt="原文图 5" loading="lazy"></div>
+<figcaption><b>原文图 5。怎么看：</b>只看多解盘面（\(S=6\)–500）。左边（a）是 \(T=8\) 和 \(T=16\) 时的失败率，横轴是循环次数 \(L\)，柱子按失败类型堆叠（橙色是同步冲突，紫色是旧格冲突），红色虚线是完美边缘采样器的失败率，也就是依赖地板。随着 \(L\) 增大，柱子迅速变矮，并贴近红线：\(T=8\) 时 \(L=5\) 的失败率约 64%，地板是 59%；\(T=16\) 时约 35%，地板是 30%。右边（b）是“存活率”，横轴是解码进度（填了多少比例的格子），纵轴是到这时还没违规的比例。\(T=8\) 时，最终存活率从 \(L=1\) 的 14% 提高到 36%，完美边缘是 41%；\(T=16\) 时从 30% 提高到 65%，完美边缘是 70%。</figcaption></figure>
+<p>附录 E 还做了一个更细的标注：因为所有合法填法已知，可以判断盘面<b>在哪一步变得不可能完成</b>。如果某个填上的值在任何合法填法里都不出现，那是“边缘错误”（单独填也会错）；如果每个值单独看都可能出现，但没有一个合法填法同时包含它们，那是“联合错误”（依赖错误）。用这套标注得到三个发现：</p>
+<ul>
+  <li>旧格冲突几乎从来不是最初的错误：在 97%–100% 的旧格冲突里，盘面在更早的某一步就已经不可能完成了，只是当时没有表面上的冲突（论文叫“无声的死路”）。</li>
+  <li>同步冲突大多就是最初的错误。在多解盘面上、\(L=5\) 时，83%–88% 的同步冲突是联合错误；在唯一解盘面上这个比例是 0%，因为那里不可能有联合错误。</li>
+  <li>\(L=5\) 时，模型沿轨迹犯联合错误的总概率已经达到完美边缘采样器的 93%–98%，\(L=10\) 也不再变化。也就是说，循环把能消掉的错误基本都消掉了。</li>
+</ul>
+<p>作者还注意到，循环在解码的<b>中段</b>最有用：开始时填好的格子很少，真实边缘本身就很分散，预测再尖锐也没多少可改进的；接近结束时预测已经很尖锐了。这个观察后面会在熵的实验里再次出现。</p>
+<p>完成率（盘面最终被填成合法终盘的比例）的完整表格（原文表 4）里，有几行特别能说明问题：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>解数组</th><th>\(T\)</th><th>\(L=1\)</th><th>\(L=3\)</th><th>\(L=5\)</th><th>\(L=10\)</th><th>完美边缘（上限）</th></tr></thead>
+<tbody>
+<tr><td>\(S=1\)</td><td>1</td><td>0.4</td><td>50.3</td><td>89.9</td><td>97.9</td><td>100</td></tr>
+<tr><td>\(S=1\)</td><td>16</td><td>27.5</td><td>85.9</td><td>97.8</td><td>99.0</td><td>100</td></tr>
+<tr><td>\(S=2\)–5</td><td>4</td><td>7.6</td><td>33.4</td><td>42.4</td><td>43.4</td><td>47.0</td></tr>
+<tr><td>\(S=6\)–50</td><td>1</td><td>0.0</td><td>0.0</td><td>0.0</td><td>0.0</td><td>0.0</td></tr>
+<tr><td>\(S=6\)–50</td><td>16</td><td>31.6</td><td>65.9</td><td>70.6</td><td>71.7</td><td>76.1</td></tr>
+<tr><td>\(S=51\)–500</td><td>16</td><td>27.0</td><td>54.4</td><td>59.6</td><td>61.1</td><td>64.7</td></tr>
+</tbody></table></div>
+<p>第一行最醒目：唯一解时一步填完 48 格，不循环的模型几乎从不成功（0.4%），循环 10 遍就有 97.9%。这说明唯一解问题里“一步生成”的瓶颈完全是保真误差，循环可以把它几乎消除。第四行则相反：有 6–50 个解时一步填完，连完美边缘采样器也是 0%，因为 48 个格子各自独立地从“正确的”边缘里抽，几乎不可能恰好凑成同一个合法解，这是纯粹的依赖地板，循环毫无办法。其余几行在中间：循环把完成率推到离上限只差 2–6 个百分点的地方，然后就停住了。</p>
+<div class="note-warn"><b>这组实验的边界：</b>它用的是固定的随机提交顺序，而不是实际解码常用的按置信度提交，所以它隔离了机制，却不代表实际解码器的表现；实际解码时循环还会通过改变“先填哪些”间接影响依赖误差。它只在 9×9 数独、一个训练时固定循环 5 遍的模型、每组 50 盘上做。“完美边缘”的最终存活率是沿真实过程逐步相乘得到的近似值，论文也说明了这一点。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S4.SS2" target="_blank" rel="noopener">英文原文 §4.2 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A5" target="_blank" rel="noopener">附录 E ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 两轴解码器：用熵决定“再想一遍”还是“落子”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>前两节说明，循环的收益在不同局面下差别很大：在某些局面上多循环几遍很有用，在另一些局面上预测早就不再变化，或者剩下的全是循环降不了的依赖误差。那么每一步都固定循环 \(L\) 遍就会浪费计算。能不能让解码器在每一步自己决定两件事：这一步循环几遍，以及循环完以后提交哪些位置？决定需要一个推理时能观察到的信号，作者选的是预测的熵。这一节讲这个解码器（论文 §5.1 和附录 F）。</div>
+
+<h4 id="n-7-1">7.1 把解码写成两个规则</h4>
+<p>作者把任何一个 R-MDM 解码器都写成一对规则，命名为“循环规则_提交规则”：循环规则决定在当前局面 \(s_t\) 上循环几遍（\(\ell_t\le L\)），提交规则决定填哪些空位（\(U_t\subseteq M_t\)）。每步至少提交一个位置，保证解码一定会结束。计算量按 \(\mathrm{NFE}=\sum_t\ell_t\) 记。</p>
+<div class="dia">
+  <div class="dia-title">示意图：解码的两个方向，横着走是去噪步，竖着走是循环</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="两个 4×4 网格：左边每列都算满 4 遍，NFE=16；右边每列在熵不再下降时停下，循环 3、4、2、1 遍，NFE=10" style="--dg-min:720px">
+    <text x="194" y="24" class="t-c t-b">固定循环：每步都算满 L = 4 遍</text>
+    <text x="664" y="24" class="t-c t-b">按熵增益停：熵不再明显下降就停</text>
+    <text x="113" y="62" class="t-c t-sm">t=1</text><text x="165" y="62" class="t-c t-sm">t=2</text><text x="217" y="62" class="t-c t-sm">t=3</text><text x="269" y="62" class="t-c t-sm">t=4</text>
+    <text x="583" y="62" class="t-c t-sm">t=1</text><text x="635" y="62" class="t-c t-sm">t=2</text><text x="687" y="62" class="t-c t-sm">t=3</text><text x="739" y="62" class="t-c t-sm">t=4</text>
+    <text x="80" y="95" class="t-r t-sm">ℓ=1</text><text x="80" y="131" class="t-r t-sm">ℓ=2</text><text x="80" y="167" class="t-r t-sm">ℓ=3</text><text x="80" y="203" class="t-r t-sm">ℓ=4</text>
+    <text x="550" y="95" class="t-r t-sm">ℓ=1</text><text x="550" y="131" class="t-r t-sm">ℓ=2</text><text x="550" y="167" class="t-r t-sm">ℓ=3</text><text x="550" y="203" class="t-r t-sm">ℓ=4</text>
+    <g class="enc">
+      <rect class="box" x="90" y="80" width="46" height="30" rx="4"/><rect class="box" x="142" y="80" width="46" height="30" rx="4"/><rect class="box" x="194" y="80" width="46" height="30" rx="4"/><rect class="box" x="246" y="80" width="46" height="30" rx="4"/>
+      <rect class="box" x="90" y="116" width="46" height="30" rx="4"/><rect class="box" x="142" y="116" width="46" height="30" rx="4"/><rect class="box" x="194" y="116" width="46" height="30" rx="4"/><rect class="box" x="246" y="116" width="46" height="30" rx="4"/>
+      <rect class="box" x="90" y="152" width="46" height="30" rx="4"/><rect class="box" x="142" y="152" width="46" height="30" rx="4"/><rect class="box" x="194" y="152" width="46" height="30" rx="4"/><rect class="box" x="246" y="152" width="46" height="30" rx="4"/>
+      <rect class="box" x="90" y="188" width="46" height="30" rx="4"/><rect class="box" x="142" y="188" width="46" height="30" rx="4"/><rect class="box" x="194" y="188" width="46" height="30" rx="4"/><rect class="box" x="246" y="188" width="46" height="30" rx="4"/>
+      <rect class="box" x="560" y="80" width="46" height="30" rx="4"/><rect class="box" x="612" y="80" width="46" height="30" rx="4"/><rect class="box" x="664" y="80" width="46" height="30" rx="4"/><rect class="box" x="716" y="80" width="46" height="30" rx="4"/>
+      <rect class="box" x="560" y="116" width="46" height="30" rx="4"/><rect class="box" x="612" y="116" width="46" height="30" rx="4"/><rect class="box" x="664" y="116" width="46" height="30" rx="4"/>
+      <rect class="box" x="560" y="152" width="46" height="30" rx="4"/><rect class="box" x="612" y="152" width="46" height="30" rx="4"/>
+      <rect class="box" x="612" y="188" width="46" height="30" rx="4"/>
+    </g>
+    <rect class="frame" x="716" y="116" width="46" height="30" rx="4"/>
+    <rect class="frame" x="664" y="152" width="46" height="30" rx="4"/><rect class="frame" x="716" y="152" width="46" height="30" rx="4"/>
+    <rect class="frame" x="560" y="188" width="46" height="30" rx="4"/><rect class="frame" x="664" y="188" width="46" height="30" rx="4"/><rect class="frame" x="716" y="188" width="46" height="30" rx="4"/>
+    <text x="191" y="240" class="t-c t-sm">每步提交 |M₀|/T 个最有把握的位置</text>
+    <text x="191" y="264" class="t-c t-b">NFE = 4 × 4 = 16</text>
+    <text x="661" y="240" class="t-c t-sm">每步提交低熵位置，直到熵之和超过 δ</text>
+    <text x="661" y="264" class="t-c t-b">NFE = 3 + 4 + 2 + 1 = 10</text>
+    <text x="800" y="140" class="t-sm">虚线格：</text>
+    <text x="800" y="158" class="t-sm">省掉的循环</text>
+    <text x="480" y="300" class="t-c t-sm">→ 横向：去噪步。每步末尾提交一批 token，画布状态改变（降依赖误差靠这里：少提交、多分步）</text>
+    <text x="480" y="322" class="t-c t-sm">↓ 纵向：同一步内的循环。画布不变，只让预测更尖锐（降保真误差靠这里）</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2606.18022#S5.F6" target="_blank" rel="noopener">原文图 6 ↗</a>。右边每列循环几遍（3、4、2、1）是示意值；原文图 6 用的是另一组示意值，同样得到 NFE 16 对 10。</div>
+</div>
+
+<h4 id="n-7-2">7.2 熵为什么能同时指导两件事</h4>
+<p>真正想监控的是保真误差，但它需要真实边缘，推理时拿不到。作者退而求其次，监控“预测还在不在变尖锐”：对当前所有空位的熵取平均，看相邻两遍之间下降了多少：</p>
+<div class="formula">$$\bar H\big(q^{(\ell)}\big)=\frac{1}{|M_t|}\sum_{i\in M_t}H\big(q^{(\ell)}_i\big),\qquad \overline{\Delta H}^{(\ell)}_t=\bar H\big(q^{(\ell-1)}\big)-\bar H\big(q^{(\ell)}\big)$$</div>
+<p>熵的增益大，说明这一遍还在让预测变确定；增益很小，说明再循环收益不大。熵有一个实际的好处：每一遍之后本来就要读出各位置的分布，算熵不需要额外的网络前向。另一方面，本页第 5 节的命题说明，低熵位置一起提交，依赖误差就有上界；而循环让模型的熵更可信。于是同一个量，既能决定“要不要再循环”，又能决定“提交哪些”。</p>
+<div class="note-pre"><b>先补一点背景：AUROC。</b>
+<p>想知道“熵高低”能不能预测“这个位置会不会填错”，可以这样检验：随机拿一个最终填错的位置和一个填对的位置，看填错的那个熵更高的概率是多少。这个概率就是 ROC 曲线下面积（AUROC）。0.5 表示熵和对错毫无关系（等于抛硬币），1 表示熵能完美区分对错。</p>
+</div>
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/entropy_fig_sudoku_within_state.svg" alt="原文图 7" loading="lazy"></div>
+<figcaption><b>原文图 7。怎么看：</b>左图（a）在固定的数独局面上，横轴是循环到第几遍，纵轴是空位平均熵相对第一遍的变化（奈特，越往下越确定）。颜色表示解码进行到哪个阶段：橙色是早期（约 80% 的格子还空着），紫色是中期（约 50%），绿色是后期（约 20%），黑色是合在一起。所有曲线都单调下降；合在一起看，第一遍额外循环就贡献了十遍总降幅的 60%。中期的紫线在后面几遍仍在明显下降，早期和后期的线很快走平，这正好对应上一节“循环在中段最有用”的观察。右图（b）横轴是一个位置的预测熵，纵轴是这个位置最终填错的比例：熵接近 0 时错误率约 7%，熵高时上升到约 85%，AUROC 为 0.86。</figcaption></figure>
+<p>作者特意提醒：一遍循环可能让某些位置更确定、让另一些位置更不确定，平均熵只是一个标量摘要，两个熵相同的分布也可能差得很远。所以熵增益只是一个实用的停止信号，不是“已经收敛”的证明。</p>
+
+<h4 id="n-7-3">7.3 entropy_entropy 解码器</h4>
+<p>把两条规则都换成基于熵的版本，就是本文的解码器 entropy_entropy（原文算法 2）。在每个去噪步：</p>
+<ol>
+  <li><b>循环规则</b>：第一遍无条件执行；从第二遍起，每遍之后算平均熵增益，一旦小于阈值 \(\lambda\)（或者已经循环满 \(L\) 遍）就停下。</li>
+  <li><b>提交规则</b>：把空位按熵从低到高排序，依次加入提交集合，直到加入下一个会让熵之和超过预算 \(\delta\) 为止，即保持 \(\sum_{i\in U_t}H\big(q^{(\ell_t)}_i\big)\le\delta\)；如果连熵最低的那一个都超预算，也强制提交它一个（单个位置的依赖误差为 0）。</li>
+  <li>对 \(U_t\) 里的每个位置独立抽样，填上，进入下一步，直到没有空位。</li>
+</ol>
+<pre><code class="lang-py"># 原文算法 2 的结构（本站改写的示意，提交时用当前这一遍的分布）
+while masked:                                  # 去噪步：直到没有空位
+    h = embed(canvas)                          # 每一步都从当前画布的嵌入重新开始
+    for l in range(1, L + 1):                  # 循环：同一局面上最多 L 遍
+        h = f(norm(h + v[l]))                  # 共享块再算一遍
+        q = softmax(head(norm(h)))             # 读出每个空位的分布 q_i
+        if l >= 2 and mean_H(q_prev) - mean_H(q) &lt; lam:
+            break                              # 平均熵几乎不降了：停止循环
+        q_prev = q
+    U = lowest_entropy_set(q, budget=delta)    # 熵之和 &lt;= delta，至少 1 个
+    canvas = commit(canvas, sample_independently(q, U))   # 填上，画布改变
+</code></pre>
+<p>两个规则都不需要事先指定去噪步数 \(T\)：步数由提交规则自己决定，难的局面一步提交得少，容易的局面一步提交得多。以数独为例，论文选的预算是 \(\delta=0.25\) 奈特（原文表 6）；一个还在两个数之间犹豫的格子，熵是 \(\ln2\approx0.693\)，单独一个就超预算，只有在没有更确定的格子可填时才会被强制单独提交（推算的例子）。这正是在避免本页第 5 节小例子里那种“两个犹豫的格子同时落子”的冲突。</p>
+<p>附录 F.4 还有两个小消融。第一，循环规则在第 \(\ell\) 遍触发停止时，用哪一遍的分布去提交：用当前这一遍（curr）、上一遍（prev），还是两者中熵改善了的那个（best）？结果 curr 最好，作者选了它。第二，提交规则用“熵之和不超过 \(\delta\)”，还是 EB-Sampler 式的“熵之和减最大熵不超过 \(\gamma\)”？后者允许一次提交更多，但在数独上更容易造成无法挽回的冲突：熵循环加熵提交在 \(L=7\) 和 \(L=10\) 时有效率为 0.90 和 0.94，换成 EB 式提交是 0.76 和 0.92（每个配置 50 盘），所以作者保留了更严格的熵之和规则。</p>
+
+<h4 id="n-7-4">7.4 对照的解码器与阈值怎么选</h4>
+<p>为了看清“哪一条轴自适应更重要”，作者把循环规则和提交规则做成一张交叉表（原文附录 F，共 10 种组合）：</p>
+<ul>
+  <li><b>循环规则</b>：fixed（每步循环满 \(L\) 遍）；sched（从第一步的 \(L\) 遍线性减到最后一步的 1 遍，平均约 \((L+1)/2\) 遍）；entropy（熵增益小于 \(\lambda\) 就停）；hidden（隐状态的相对变化 \(\|\mathbf{h}^{(\ell)}-\mathbf{h}^{(\ell-1)}\|/\|\mathbf{h}^{(\ell)}\|\) 小于 \(\varepsilon\) 就停，来自 LoopMDM）。</li>
+  <li><b>提交规则</b>：uniform（每步提交 \(|M_0|/T\) 个置信度最高的位置，需要指定 \(T\)）；confidence（提交所有 top-1 概率超过 \(c\) 的位置，MaskGIT 式）；entropy（上面的熵预算）。</li>
+</ul>
+<p>只有 uniform 提交和 sched 循环会用到 \(T\)。凡是用阈值提交（confidence、entropy）的组合都不读 \(T\)，一直解到没有空位为止，所以它们的质量和 NFE 不随 \(T\) 变，只随 \(L\) 和阈值变。论文正文图 8 主要比较四种：fixed_uniform（本页第 4 节那些实验默认的做法）、fixed_entropy（只让提交自适应）、entropy_uniform（只让循环自适应）、entropy_entropy（两者都自适应）。hidden 规则的质量和 entropy 规则差不多，但 NFE 更高（附录 G.6），这是作者选择熵的理由之一。</p>
+<p>四个阈值按数据集各选一个值，候选是 \(\lambda\in\{10^{-3},\dots,0.5\}\)、\(\delta\in\{0.25,\dots,8\}\)、\(\varepsilon\in\{0.01,\dots,1\}\)、\(c\in\{0.5,\dots,0.99\}\)，从验证集上的“质量—NFE”图里挑靠近前沿、\(L\) 适中、NFE 较低的设置。采样温度和 top-\(k\) 则按数据集固定，不调：数独和 RNA 是温度 0.8、top-2，Countdown 是温度 0.5、top-1，TinyGSM 是温度 0.8、top-1。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A6" target="_blank" rel="noopener">附录 F ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 四个任务上的验证，以及这些数字的份量</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>两轴自适应的解码器在数独、Countdown 之外是否也有用？论文加了两个新任务：RNA 序列补全（碱基配对造成长距离依赖，正好考验并行提交）和 TinyGSM（生成能运行的 Python 程序解小学数学题，是全文最大的模型）。这一节看结果，再把全文所有对比放在一起掂量：比的是什么、对齐了什么、哪些数字需要打折扣（论文 §5.2 和附录 G.6–G.8）。</div>
+
+<div class="note-pre"><b>先补一点背景：RNA 补全怎么打分。</b>
+<p>RNA 是由 A、C、G、U 四种碱基组成的链。链上相隔很远的碱基可以配对（A 配 U，G 配 C），让整条链折叠成稳定的二级结构，折叠越稳定，“最小自由能”（MFE，单位 kcal/mol）越低。所以如果随机遮住一段 RNA 的 40% 碱基让模型补全，补得好不好不能只看“和原序列一样不一样”（那会鼓励死记硬背），而要看补出来的序列能不能折叠得和原来一样稳定。</p>
+<p>直接比 MFE 也不行，因为它强烈依赖序列长度和碱基组成。作者用一个标准化的分数：把序列的碱基随机打乱 20 次，算打乱后序列的 MFE 均值和标准差，再看原序列比打乱的低了几个标准差：</p>
+<div class="formula">$$Z(s)=\frac{\mathrm{MFE}(s)-\mu_{\text{shuffle}}(s)}{\sigma_{\text{shuffle}}(s)},\qquad \Delta Z=Z\big(s^{\text{inf}}\big)-Z\big(s^{\text{nat}}\big)$$</div>
+<p>\(Z\) 越负，说明折叠得比“同样成分的随机序列”稳定得越多。\(\Delta Z\) 是补全序列和原生序列的 \(Z\) 之差：等于 0 表示补得和原生分子一样有结构，越大越差。MFE 用 ViennaRNA 计算。数据来自 RNAcentral，评测时在 76、110、254 个碱基三种长度上各取 500 条，分别用 \(T=6\)、9、20 步，使每步大约提交 5 个碱基。论文同时报告“遮住位置的还原率”（约 60%，远高于随机猜的 25%）和“完全还原率”（约 2%），后者很低说明好的 \(\Delta Z\) 不是靠背出原序列得来的。</p>
+</div>
+<p><b>TinyGSM</b> 是一个由 GPT-3.5 生成的合成数据集，题目是小学数学应用题，答案是一段 Python 程序。作者用 1170 万条训练一个 1.61 亿参数的 R-MDM（12 层块，序列长 512，SmolLM 分词器，词表 49,154），在 GSM8K 测试集的 512 道题上评测：题目作为前缀固定，后面 512 个位置全部遮住让模型生成程序，抽出名为 simple_math_problem 的函数在沙箱里运行，返回值等于标准答案才算对。</p>
+<p>原文第 5 节用的循环模型都是递减课程训练的（数独、Countdown 用 10→1，RNA、TinyGSM 用 5→1），因为解码器要在推理时改变循环次数。不循环的基线是一个结构相同、单独训练、从不循环的模型。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="recursive-mdm/fig/decoding_pareto_all_tasks.svg" alt="原文图 8" loading="lazy"></div>
+<figcaption><b>原文图 8。怎么看：</b>六个子图是六个任务，标题里注明了 uniform 提交用的步数 \(T\)。横轴是实际花掉的 NFE（对数刻度），纵轴是质量（RNA 子图纵轴是 \(\Delta Z\)，<b>越往上越好</b>，因为坐标轴是倒过来画的）。标记形状表示解码器：圆点 fixed_uniform、方块 fixed_entropy、三角 entropy_uniform、菱形 entropy_entropy；颜色表示循环上限 \(L\)，最浅的黄绿色是不循环的基线（\(L=1\)）。灰色虚线是帕累托前沿（同样的 NFE 下没有更好的点）。紫色菱形在每个子图里都落在前沿上或很靠近前沿，并且大多在左边（NFE 小）。数独子图里，基线最好也只有约 81%，循环模型的菱形用不到 10 次 NFE 就到了 100%。TinyGSM 子图里，fixed_uniform 的圆点挤在 NFE 几百到上千的右边，而方块和菱形在 NFE 几十处就到了 22%–24%。</figcaption></figure>
+
+<h4 id="n-8-1">8.1 论文报告的主要数字</h4>
+<p>正文说，最好的循环结果在每个任务上都超过不循环的基线：数独有效率从 80.7% 到 100%；Countdown-4 达标率从 50.0% 到 82.0%；RNA 的 \(\Delta Z\) 从 0.453 降到 0.140，相当于把和原生分子之间的差距缩小了 69%（\((0.453-0.140)/0.453\)）；TinyGSM 的 GSM8K 正确率从 13.7% 到 24.0%。关于效率，作者强调了两点：</p>
+<ul>
+  <li><b>长序列上，提交规则的自适应贡献了大部分节省。</b>TinyGSM 上 fixed_entropy 在 \(L=3\) 时用 69 次 NFE 拿到 24.0%，和 fixed_uniform 的最好成绩 24.2%（\(L=3,T=256\)，768 次 NFE）几乎一样，计算省了约 11 倍。而在此基础上再让循环自适应（entropy_entropy），每步只少循环约半遍，正确率反而略降到 22.3%（57 次 NFE）。</li>
+  <li><b>允许很大的 \(L\) 时，循环规则的自适应就必不可少。</b>Countdown-4 上，fixed_entropy 的 NFE 从 \(L=3\) 的 37 涨到 \(L=7\) 的 98，而 entropy_entropy 始终在 40 左右。附录 G.6 还指出，在 Countdown-4/5 上 fixed_uniform 循环太多反而变差（质量下降、NFE 继续上涨），熵门控的循环避免了这种“过度精炼”。但 Countdown-5 上绝对最高的达标率仍然是 fixed_uniform 拿到的，代价是好几倍的 NFE。</li>
+</ul>
+<p>TinyGSM 的完整结果（原文表 15）值得列出来，因为正文的“13.7% 到 24.0%”只是其中两格：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>模型</th><th>解码器</th><th>\(L\)</th><th>\(T\)</th><th>GSM8K 正确率</th><th>NFE</th><th>512 题总采样时间</th></tr></thead>
+<tbody>
+<tr><td>不循环基线</td><td>fixed_uniform</td><td>1</td><td>128</td><td>15.0% ± 1.6</td><td>128</td><td>1118 s</td></tr>
+<tr><td>不循环基线</td><td>fixed_uniform</td><td>1</td><td>448</td><td>10.5% ± 1.4</td><td>440</td><td>3792 s</td></tr>
+<tr><td>不循环基线</td><td>fixed_entropy</td><td>1</td><td>—</td><td>13.7% ± 1.5</td><td>22</td><td>218 s</td></tr>
+<tr><td>R-MDM</td><td>fixed_uniform</td><td>3</td><td>256</td><td>24.2% ± 1.9</td><td>768</td><td>4407 s</td></tr>
+<tr><td>R-MDM</td><td>fixed_entropy</td><td>3</td><td>—</td><td>24.0% ± 1.9</td><td>69</td><td>412 s</td></tr>
+<tr><td>R-MDM</td><td>entropy_entropy</td><td>3</td><td>—</td><td>22.3% ± 1.8</td><td>57</td><td>374 s</td></tr>
+<tr><td>R-MDM</td><td>fixed_uniform</td><td>5</td><td>128</td><td>16.0% ± 1.6</td><td>640</td><td>3623 s</td></tr>
+<tr><td>R-MDM</td><td>entropy_entropy</td><td>5</td><td>—</td><td>17.2% ± 1.7</td><td>63</td><td>406 s</td></tr>
+</tbody></table></div>
+<p>从表里还能读出两件正文没有强调的事：其一，这个用 5→1 课程训练的模型在 \(L=5\) 时明显不如 \(L=3\)（例如 entropy_entropy 17.2% 对 22.3%），循环多了反而变差；其二，不循环的基线在 \(T=128\) 之后继续加步数会变差（15.0% → 11.5% → 10.5%）。</p>
+<p>RNA（原文表 14，遮 40%）的情况类似：不循环基线用 fixed_uniform 时 \(\Delta Z=0.478\)（11.7 次 NFE），用 fixed_entropy 时 0.453（13.2 次）；循环模型最好的是 fixed_entropy、\(L=5\)，\(\Delta Z=0.140\)，花了 50.3 次 NFE；entropy_entropy 在 \(L=3\) 和 \(L=5\) 时分别是 0.247 和 0.200，只花约 26 次 NFE。遮 50% 和 60% 时，循环的收益更大（例如遮 60% 时 fixed_entropy、\(L=5\) 的 \(\Delta Z\) 为 −0.014 ± 0.063，和原生分子在误差范围内持平）。</p>
+
+<h4 id="n-8-2">8.2 结果的份量</h4>
+<p><b>规模与任务。</b>模型从 550 万到 1.61 亿参数，任务全是有明确约束的填空：数独、Countdown、RNA 局部补全、固定前缀下的程序生成。没有开放式文本生成，没有困惑度或似然评估，也没有通用语言模型的基准。数独和 Countdown 恰恰是“不按从左到右顺序生成更有利”的任务，并行提交的冲突在这里最致命，所以循环的收益在这里可能偏大。作者自己在结论里也说，能否推广到开放式语言生成还有待验证。</p>
+<p><b>没有和自回归模型或同期循环方法比较。</b>全文的对照都是作者用同一套代码训练的掩码扩散模型（不循环的、更深的），没有一个自回归基线，也没有和 LoopMDM、Fixed-Point MGM 比较。作为参照（不是同条件比较）：TinyGSM 原论文报告，用这份数据微调一个 13 亿参数的生成模型、再配一个 13 亿参数的验证器，GSM8K 能到 81.5%；本文从零训练的 1.61 亿参数 MDM 是 24%，绝对水平还很低。成本方面也要有数：TinyGSM 上 fixed_uniform、\(L=3\)、\(T=256\) 要 768 次 NFE，每次都把 512 个位置的 12 层块算一遍；一个同样大小、带 KV 缓存的自回归模型生成同样长度大约只需把每个位置算一遍，相差的“位置×块”计算量在几十倍（69 次 NFE 的 fixed_entropy）到几百倍（768 次 NFE）的量级（推算，非常粗略，且自回归模型并未在本文中训练和评测）。</p>
+<p><b>匹配了什么。</b>见本页第 4 节末尾的表。“同 FLOPs”一组对齐得最干净（参数之外全部相同），但只在数独上一边倒，在 Countdown 上互有胜负，而且深层基线没有单独调参。“同参数”和“同前向次数”两组都让循环模型多花了训练计算：固定 \(L\) 训练约 \(L\) 倍，10→1 课程约 5.5 倍，5→1 课程约 3 倍（推算）。NFE 不计输出头的计算，这在 TinyGSM 的大词表上不可忽略（本页 3.4 节推算约为一遍块的 40%，如对所有位置计算）。墙钟时间只在数独上以批大小 1 测过，大体和 NFE 成正比；论文没有在大批量下测吞吐。</p>
+<p><b>正文的“从 A 到 B”比的是什么。</b>几个标题数字都是“循环模型的某个最好配置”对“基线的某个配置”，两边的解码器、步数、NFE 并不相同，需要逐个拆开看：</p>
+<ul>
+  <li>TinyGSM 的 13.7% 是基线用熵提交、只花 22 次 NFE 的结果；基线在表 15 里的最好成绩是 15.0%（\(T=128\)）。图 8 的 TinyGSM 子图用的是 \(T=448\)，基线的 uniform 解码在这里只有 10.5%。所以更公平的差距是 15.0% 对 24.0%（或 24.2%），约 9 个百分点；好在循环模型用的 NFE（69）还少于基线最好那一格（128），这个结论站得住。</li>
+  <li>RNA 的 0.453 → 0.140 对应的 NFE 是 13.2 → 50.3，约 3.8 倍；基线没有在更大的 NFE 下测试，所以这不是同计算比较。</li>
+  <li>数独的基线 80.7% 是 fixed_uniform、\(T=20\) 的结果。但原文表 7（本页第 4 节引用过）里，同样不循环、同样 \(T=20\) 的基线是 92.2%；80.7% 反而和递减课程模型只循环 1 遍的 81.4%（表 8）很接近。论文说原文第 5 节的基线是单独训练的不循环模型，没有解释这个差距。这意味着“80.7% → 100%”里有一部分可能来自一个较弱的基线配置。</li>
+</ul>
+<p><b>阈值在哪里选、在哪里测。</b>四个阈值是在验证集的“质量—NFE”图上挑的。RNA 的评测明确是在验证集上做的；数独和 Countdown 的评测用的是留出的盘面，论文没有说明它们和调阈值用的是否是同一批。TinyGSM 在 GSM8K 测试集上评测，与调参数据分开。如果调参和评测用了同一批数据，自适应解码器的优势会被高估一些。</p>
+<p><b>统计与复现。</b>大部分表格的 ± 只来自重复采样（数独、Countdown 是 5 次 × 100 个样本，TinyGSM 是 512 题的二项标准误），每种配置只训了一个模型。截至 2026-10-20，没有公开代码，也没有找到独立复现。</p>
+<p>综合起来，这篇论文最扎实的部分是机制层面：依赖误差与保真误差的分解是严格的，多解数独上的受控实验干净地验证了“循环只降保真误差、碰到依赖地板就停”的预测。“循环是一条可用的扩展轴”在小型结构化任务上有一致的证据，但离“在扩散语言模型上值得这么做”还隔着规模、开放文本和与自回归模型的成本比较这几步。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S5.SS2" target="_blank" rel="noopener">英文原文 §5.2 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A7.SS6" target="_blank" rel="noopener">附录 G.6–G.8 ↗</a> · <a href="https://arxiv.org/html/2606.18022#A3" target="_blank" rel="noopener">附录 C（数据与指标）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 结论、局限与未来工作</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后怎么总结自己的发现？他们承认了哪些局限？本站读下来还要补充哪些？</div>
+<p>作者的总结有三层。第一，在每个去噪步里把同一块 Transformer 用 \(L\) 遍，可以在不加参数的前提下加深有效深度；在数独和 Countdown 上，它在同参数下提高质量，在同 FLOPs 下追平明显更大的非递归模型，并且能减少达到某个质量所需的去噪步数。第二，这些收益可以用两种计算的不同角色解释：循环在固定局面上改进模型的边缘分布，去噪步通过提交 token 改变局面，所以它们降低的是并行解码误差里不同的两项；循环能减少预测的熵和同一步内的冲突，尤其是在每步要解决很多依赖的时候，但它消除不了一起提交的 token 之间的依赖误差。第三，这启发了按局面自适应的解码，同时选择循环几遍和提交哪些，在四个领域都改善了质量与计算的权衡。</p>
+<p>作者明确的局限是：结论建立在结构化任务上，未来需要把这套框架推到更大的模型，并检验它在开放式语言生成这类结构更松散的场景里是否仍然成立。</p>
+<p>本站补充三点。第一，论文的模型最大 1.61 亿参数，没有扩展律拟合，所以“递归深度的收益随规模如何变化”完全没有回答；<a href="iso-depth-scaling.html">Iso-Depth</a> 在自回归语言模型上测得的“一遍循环约值 0.46 个独立块”提示，规模大了以后共享参数未必还这么划算。第二，循环在这里的收益和“并行提交的冲突”紧密相关；在扩散语言模型的实际部署中，人们往往用块扩散、置信度阈值等办法控制每步提交量（例如 <a href="fast-dllm.html">Fast-dLLM</a>、<a href="block-diffusion.html">块扩散</a>），这时依赖误差已经被压得比较低，循环的边际收益可能小于本文的结构化任务。第三，循环省的是参数显存，不是时间；扩散语言模型本来就以“少步数、高吞吐”为卖点，再把每步的计算乘上 \(L\)，需要非常有利的质量收益才划算，这笔账论文没有在语言任务上算过。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2606.18022#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇论文 2026 年 6 月 16 日首次挂到 arXiv，9 月 28 日更新了 v2，v2 首页标注为“Preprint. Under review.”，即正在投稿审稿中。在此之前，它已经在 ICML 2026 的研讨会上出现过三次：以同名标题入选 “High Dimensional Learning Dynamics: the Science of Scaling” 研讨会（海报），以 “Scaling with Recursion in Masked Discrete Diffusion Models” 的标题入选第 4 届 “Structured Probabilistic Inference &amp; Generative Modeling” 研讨会（海报）和 “Foundations of Deep Generative Models” 研讨会（口头报告）。研讨会论文一般不算正式发表。截至 2026-10-20，没有公开代码，我们也没有找到独立的复现或后续的实证检验。</p>
+<p>在同一方向上，几项工作形成了一个小的“循环扩散语言模型”群：</p>
+<ul>
+  <li><a href="loopmdm.html">LoopMDM</a>（2026-05，早于本文）只循环一部分层，并按隐状态变化自适应地决定循环次数，本文把它的停止规则当作对照。</li>
+  <li>Fixed-Point Masked Generative Modeling（arXiv 2605.31215）用不动点求解器加跨步热启动，与本文有作者重叠；据第一作者主页，它已被 NeurIPS 2026 接收。</li>
+  <li><a href="alodlm.html">ALoDLM</a>（2026-10）在相关工作里把本文归为“为参数效率而循环”的一类，并指出本文和 LoopMDM 等在同一个去噪步里对所有位置用同样的循环深度；ALoDLM 的改进方向正是让每个 token 自己决定何时退出循环。</li>
+  <li>另一类“循环”，即跨去噪步传递连续状态的 <a href="loopholing.html">Loopholing</a>，以及 <a href="loop-distill.html">Loop-Distill</a>，见各自的精读页。</li>
+</ul>
+<p>本文最可能留下的东西，是原文第 4 节（本页第 5、6 节）的分析框架：把并行解码误差拆成“循环能降的保真误差”和“只有改提交计划才能降的依赖误差”，这为任何在扩散模型里加推理计算的方法（循环、重遮、规划顺序）提供了一个统一的记账方式。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及论文本身的致谢。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Alba Carballo-Castro</b>（第一作者）<div class="aff">EPFL LTS4 实验室，博士生</div>据其个人主页，她在 EPFL 计算机与通信博士项目读博，导师是 Pascal Frossard，并通过 ELLIS 博士项目由 Mihaela van der Schaar 联合指导，2026 年 2 月起在剑桥大学访问。此前在苏黎世联邦理工学院获统计学硕士，在塞维利亚大学获数学与统计学士。主页列出的近期论文有 Directed Graph Generation（ICLR 2026）和同期的 Fixed-Point Masked Generative Modeling（NeurIPS 2026）。论文致谢里写明她受 ELSA 交流项目以及 EPFL AI Center 与 Swiss AI Initiative 博士奖学金资助。</div>
+  <div class="author-card"><b>Julianna Piskorz</b><div class="aff">剑桥大学，van der Schaar 实验室博士生</div>据实验室网站，她本科在帝国理工学院读数学与统计，硕士在牛津大学读统计科学。论文致谢写明她的博士奖学金由 AstraZeneca 资助。</div>
+  <div class="author-card"><b>Paulius Rauba</b><div class="aff">剑桥大学，van der Schaar 实验室博士生</div>据实验室网站，他 2022 年加入该实验室，此前在牛津大学获社会数据科学硕士，曾在欧盟委员会等机构担任人工智能专家。</div>
+  <div class="author-card senior"><b>Mihaela van der Schaar</b><div class="aff">剑桥大学</div>John Humphrey Plummer 机器学习、人工智能与医学讲席教授，同时是艾伦·图灵研究所研究员、UCLA Chancellor's Professor（据其实验室网站）。实验室长期研究机器学习在医学中的应用。</div>
+  <div class="author-card senior"><b>Pascal Frossard</b><div class="aff">EPFL LTS4 实验室</div>EPFL 正教授，信号处理第四实验室（LTS4）负责人，兼任 EPFL AI Center 学术联合主任等职（据 EPFL 人员页面）。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。已知引用它的工作包括 <a href="alodlm.html">ALoDLM</a>（2026-10）。</li>
+  <li><b>发表</b>：arXiv v1 于 2026-06-16 发布，v2 于 2026-09-28 发布，首页标注 “Preprint. Under review.”。它也以研讨会论文的形式出现在 ICML 2026 的三个研讨会：<a href="https://icml.cc/virtual/2026/72319" target="_blank" rel="noopener">High Dimensional Learning Dynamics（海报）↗</a>、<a href="https://icml.cc/virtual/2026/74195" target="_blank" rel="noopener">Structured Probabilistic Inference &amp; Generative Modeling（海报）↗</a>、<a href="https://icml.cc/virtual/2026/70380" target="_blank" rel="noopener">Foundations of Deep Generative Models（口头报告）↗</a>，后两者用的标题是 “Scaling with Recursion in Masked Discrete Diffusion Models”。</li>
+  <li><b>开源 / 采用</b>：截至 2026-10-20，论文和研讨会页面都没有代码链接，我们在 GitHub 上也没有找到官方实现；没有找到独立复现。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>同一批“循环 × 扩散语言模型”的精读：<a href="loopholing.html">Loopholing</a>（跨去噪步传递连续状态）、<a href="loopmdm.html">LoopMDM</a>（循环部分层）、<a href="alodlm.html">ALoDLM</a>（按 token 自适应循环深度）、<a href="loop-distill.html">Loop-Distill</a>。</li>
+  <li>掩码扩散的基础与解码：<a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>、<a href="token-ordering.html">Token Ordering</a>（数独上的自适应顺序）、<a href="fast-dllm.html">Fast-dLLM</a>（并行解码的依赖问题）、<a href="block-diffusion.html">块扩散</a>、<a href="scaling-beyond-masked.html">超越掩码扩散的扩展律</a>。</li>
+  <li>循环 Transformer：<a href="universal-transformers.html">Universal Transformer</a>、<a href="looped-programmable-computers.html">循环 Transformer 作为可编程计算机</a>、<a href="reasoning-latent-thoughts.html">潜在思考（\(K\otimes L\) 记号的来源）</a>、<a href="huginn.html">Huginn</a>、<a href="ouro.html">Ouro</a>、<a href="iso-depth-scaling.html">Iso-Depth 扩展律</a>、<a href="loops-vs-parameters.html">循环能替代多少参数</a>、<a href="elastic-latent-recurrence.html">ELR（一个模型、多种深度）</a>、<a href="tiny-recursive-model.html">TRM（深监督的递归推理）</a>、<a href="mixture-of-recursions.html">Mixture-of-Recursions</a>。</li>
+  <li>旧版扩散语言模型路线：<a href="../legacy/tracks/dllm/01-foundations.html">扩散语言模型基础：画布、掩码与并行解码</a>、<a href="../legacy/tracks/dllm/03-mdlm.html">MDLM 与 MD4</a>、<a href="../legacy/tracks/dllm/15-learned-parallel.html">学会早定稿</a>、<a href="../legacy/tracks/dllm/16-order-limits.html">任意顺序的利与弊</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Alba Carballo-Castro, Julianna Piskorz, Paulius Rauba, Mihaela van der Schaar, Pascal Frossard. <em>Recursive Scaling in Masked Diffusion Models.</em> arXiv 预印本，2026。<a href="https://arxiv.org/abs/2606.18022" target="_blank" rel="noopener">arXiv:2606.18022</a>，以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布。本页的原文图 2、3、4、5、7、8、9、11、14、15、16 取自 arXiv HTML 版（v2）原文，未做修改；图注为本站撰写。其余示意图由本站根据论文内容绘制，标“推算”的数字为本站计算。正文是本站撰写的中文精读笔记，并非翻译，数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

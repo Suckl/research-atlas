@@ -245,7 +245,9 @@ Widgets must be deterministic for a given seed and must not fetch anything.
 
 - The library (`index.html`) lists every non-concept node as a card; a node with `reading` links to its reading page,
   otherwise to its legacy page. Shelves (未读 / 在读 / 已读 / 收藏) and progress are per viewer in localStorage
-  (`atlas-paper:<node id>`); categories are the registry tracks (including `papers-only` ones).
+  (`atlas-paper:<node id>`); categories are the registry tracks (including `papers-only` ones). A cross-field paper
+  can also appear under other categories: list their track ids in the node's optional `also` array (e.g.
+  `"also": ["dllm"]`); the card then shows both labels.
 - `papers/metrics.js` is a Semantic Scholar snapshot (citations, highly influential citations) keyed by arXiv id;
   `scripts/fetch_metrics.py` refreshes it (rate-limited without a key; it backs off). When a full refresh keeps
   getting rate-limited, `python scripts/fetch_metrics.py --missing` fetches only the papers absent from the snapshot

@@ -857,6 +857,26 @@ window.ATLAS_METRICS = {
    "citations": 107,
    "influential": 4,
    "s2": "e79f9541258bb9fc026c129f8a0920cfac7a2063"
+  },
+  "2510.19304": {
+   "citations": 11,
+   "influential": 3,
+   "s2": "cde3fd42c60d02d13877dd87f37c3c9f50ebd3ab"
+  },
+  "2605.26106": {
+   "citations": 2,
+   "influential": 1,
+   "s2": "75d437ccd0a48a607a2c311fa1c97f235a6ca352"
+  },
+  "2606.18022": {
+   "citations": 2,
+   "influential": 0,
+   "s2": "dba991dd06be04f19fac52356c6a9d56836e1cc5"
+  },
+  "2610.04198": {
+   "citations": 0,
+   "influential": 0,
+   "s2": "d770ca6af26d35738ae806dae143846853bebe98"
   }
  }
 };

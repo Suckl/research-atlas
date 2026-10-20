@@ -1,0 +1,1206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loop-Distill 精读</title>
+<meta name="description" content="Loop-Distill（ICLR 2027 匿名投稿，审稿中）的逐节精读：自回归模型改造成块扩散模型之后，[MASK] 位置的表示为什么在浅层“过早定型”；训练时让浅层多算几遍当教师、再蒸馏回单次前向的做法怎么运作；约 2 分的准确率提升和 11% 的提速分别是在什么条件下测出来的。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="looped" data-node="loop-distill">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 循环 Transformer × 扩散 LLM · ICLR 2027 投稿（审稿中）</div>
+  <h1>Loop-Distill：用浅层循环自蒸馏，疏通扩散语言模型的信息流</h1>
+  <p class="en-title">Loop-Distill: Refining Information Flow in Diffusion Language Models</p>
+  <div class="paper-authors">匿名作者（ICLR 2027 双盲评审中）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">OpenReview w9AtxUbfFB ↗</a>
+    <span class="pill">ICLR 2027 投稿（审稿中）</span>
+  </div>
+  <div class="paper-stats" data-stats></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">这是一篇尚未经过同行评审的匿名投稿。本站撰写时（2026-10-20）OpenReview 页面拒绝脚本访问，无法核实是否已有公开的审稿意见；文中数字可能在修改稿中变化。代码和模型论文承诺“接收后发布”。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文是匿名投稿，没有授予转载许可，所以本页所有图都是本站自己画的示意图；涉及数据的图只是把论文报告的数字重新画出来，并注明对应的原图或原表。标“推算”的数字是本站根据论文数据算出来的，标“读图”的数字是从原图读出的近似值，都不是论文原话。每节末尾有英文原文（OpenReview PDF）的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>扩散语言模型（diffusion language model，DLM）不像自回归（AR）模型那样一次只写一个 token。它先在要生成的位置上放一排特殊符号 [MASK]，再经过若干轮“去噪”，每轮同时把好几个位置填上。从零训练这样的大模型很贵，所以最近一年的主流做法是拿一个已经训练好的 AR 大模型，把它改造成<b>块扩散</b>（block diffusion）模型：块与块之间仍然从左往右写，块内部的几个位置并行去噪。本站 <a href="fast-dllm-v2.html">Fast-dLLM v2</a>、<a href="sdar.html">SDAR</a>、<a href="llada2.html">LLaDA2.0</a> 的精读页讲的都是这条路线。</p>
+<p>这篇论文问的是一个更细的问题：改造之后，模型内部的一次前向到底在做什么？作者在一个改造好的模型里逐层测量 [MASK] 位置的隐藏状态，发现了一个反常的现象。这些状态在第 1 层被大幅改写（相对变化平均 69%），之后的几层却几乎不动（第 2 层平均只变了 0.74%），像是“过早定型”了。与此同时，如果直接用输出头去读第 1 层的状态，一半以上的位置会以超过 0.8 的置信度给出某个 token，可其中只有约 19% 和最终输出一致，大多数都押在同一个空格 token 上。作者把这种现象称为浅层的<b>信息流瓶颈</b>：[MASK] 位置还没把上下文吸收够，它的表示就已经不怎么变了。</p>
+<p>方法叫 Loop-Distill。训练的每一步里，作者用<b>同一套权重</b>临时搭一个“教师”：它从学生第 1 层的输出出发，把选定的 2–3 个浅层各连续算 2 或 3 遍（同一层反复作用在自己的输出上），然后照常走完剩下的层；整条教师支路不求梯度。学生就是平常那个每层只算一遍的模型。训练要求学生在这几层、只在 [MASK] 位置上，让自己的隐藏状态朝教师的方向靠（用余弦距离衡量）。这个蒸馏信号只在“教师在这批数据上的掩码交叉熵确实比学生低”时才打开，作者称之为<b>损失门</b>。训练结束后教师支路整个丢掉，部署的模型结构、参数量和每次前向的计算量都和原来一模一样。</p>
+<p>实验用了两个总参数约 30B、每个 token 约激活 3B 参数的 MoE 指令模型：GLM-4.7-Flash 和 Qwen3-30B-A3B-2507。改造只是一轮 1200 步的监督微调（SFT）。在 13 个评测、块长 32 和块长 4 两种设置下，Loop-Distill 比同样流程、只用标准块扩散损失训练的对照组（论文叫 Vanilla）平均分别高 2.05 分（GLM）和 2.21 分（Qwen）。因为每次前向能定稿更多 token，在 SGLang 上以 batch size 1 解码时，吞吐量平均提高 11.0%。代价是训练的墙钟时间多了约 10%。</p>
+<p>放在本站“循环 × 扩散”这一组论文里看，需要先分清它的“循环”是哪一种。Loop-Distill 循环的是<b>深度</b>：在一次前向内部把某几层重复算几遍，和 <a href="huginn.html">Huginn</a>、<a href="ouro.html">Ouro</a> 属于同一类。但这个循环<b>只存在于训练时的教师支路里</b>，部署的模型并不循环。论文还把块扩散的多步解码比作一个“外层循环”（整个模型被一遍遍调用），这只是动机上的类比：Loop-Distill 没有在去噪步之间传递任何额外的状态，那是 <a href="loopholing.html">Loopholing</a> 做的事。第 1 节末尾有一张图把这几篇论文放在一起对照。</p>
+<p>还需要先说清楚：这是一篇正在 ICLR 2027 双盲评审中的匿名投稿，没有公开的代码和权重（论文写的是接收后发布），文中的数字可能在修改稿中变化。本页在“结果的份量”一节里会逐条说明这些数字对齐了什么、没对齐什么。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>AR 模型的一次前向和块扩散模型的一次前向，各自要完成什么任务？为什么说改造之后“前向的角色变了”？</li>
+  <li>论文说的“信息流瓶颈”是用哪几个量测出来的？这些量各自能说明什么，不能说明什么？</li>
+  <li>教师和学生共用同一套参数，教师只是“浅层多算了几遍”，学生凭什么能从它身上学到东西？损失门起什么作用？</li>
+  <li>循环放在哪几层、绕几圈，论文是怎么定下来的？这些规则里有多少是事后挑出来的？</li>
+  <li>约 2 分的准确率提升和 11% 的提速，各自是和谁比、在什么条件下测的？训练多花了多少？</li>
+  <li>这篇论文的“循环”和 LoopMDM、R-MDM、ALoDLM、Loopholing 的循环有什么不同？</li>
+</ul>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">OpenReview 论文页（摘要与 PDF）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：改造之后，一次前向要干的活变了</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把 AR 模型改造成块扩散模型，是目前得到大规模扩散语言模型最省事的办法。前人的工作大多关心“怎么改才不丢能力”：注意力怎么改、损失怎么设计、要不要对齐原模型的表示。这篇论文换了一个角度，去看改造之后模型的每一层到底对 [MASK] 位置做了什么。作者认为这里藏着一个此前没被注意的缺陷，方法就是针对它设计的。这一节先交代两种模型的一次前向分别在干什么，再说明这个缺陷是用什么工具、什么数字测出来的，最后说明“在浅层加一个循环”的想法从哪里来。</div>
+
+<div class="note-pre"><b>先补一点背景：自回归模型的一次前向。</b>
+<p>AR 语言模型由 \(L\) 层 Transformer 堆成。每个位置先查词表得到一个向量（词嵌入），然后逐层往上走。每一层先做注意力：这个位置去看它左边所有位置的信息；再过一个前馈网络（FFN）。在 MoE（混合专家）模型里，FFN 换成了很多个“专家”小网络，由一个路由器为每个 token 挑出其中几个来算。每一层的输出都等于“这一层的输入”加上“这一层算出来的增量”，这条一路累加上去的向量叫<b>残差流</b>。论文把第 \(\ell\) 层之后的隐藏状态写成 \(h^{(\ell)}\)，\(h^{(0)}\) 就是词嵌入。最后一层的状态经过一次归一化和一个输出矩阵（合称 LM 头），变成词表上的概率分布。</p>
+<p>训练时，第 \(i\) 个位置的输出要预测第 \(i+1\) 个 token。生成时，每次前向只用最右边那个位置的输出来决定下一个 token，把它接到序列末尾，再做下一次前向。所以在 AR 模型里，<b>每个位置的输入都是一个真实的 token</b>，它的表示从第 0 层起就带着“我是哪个词”的信息；一次前向只需要为一个新位置做出预测。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：块扩散，以及“从 AR 改造”。</b>
+<p>块扩散把要生成的回答切成长度为 \(B\) 的块（论文实验用 \(B=32\) 和 \(B=4\)）。生成一块时，先把这一块的 \(B\) 个位置全部填成 [MASK]，然后反复调用整个模型。每调用一次叫一个<b>去噪步</b>：模型给每个仍是 [MASK] 的位置预测一个 token 和这个预测的置信度，把有把握的位置定下来（下文叫“定稿”），其余位置留到下一次。一块填完，再开始下一块。块与块之间从左往右，前面的块定稿后不再修改；块内部的位置可以互相看（双向注意力），所以能并行。</p>
+<p>“从 AR 改造”的意思是：拿一个训练好的 AR 模型的权重做起点，把注意力掩码改成“块内双向、块间因果”，把训练目标换成“猜回被遮住的 token”，再继续训练一段时间。这样做比从零训练一个扩散模型便宜得多，因为语言知识已经在权重里了。几种具体做法见本站的 <a href="fast-dllm-v2.html">Fast-dLLM v2</a>、<a href="sdar.html">SDAR</a> 和 <a href="llada2.html">LLaDA2.0</a> 精读页，更早的块扩散原型见 <a href="block-diffusion.html">BD3-LM</a>。</p>
+</div>
+
+<p>两相对照，改造之后一次前向要完成的任务变了。AR 模型的一次前向面对的是一串完全已知的输入，只需要为最右边一个位置给出下一个词。块扩散模型的一次前向，要同时为当前块里好几个 [MASK] 位置各自形成一个表示。这些位置的输入一模一样，都是 [MASK] 的词嵌入；能把它们区分开的，只有位置编码和周围已知的上下文，也就是提示词、前面的块，以及本块里已经定稿的 token。更麻烦的是，[MASK] 这个符号在 AR 预训练里从没出现过，原模型的各层都没学过怎么处理它。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同样是“一次前向”，两种模型要做的事不同</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="左：自回归模型一次前向只为最右边位置预测下一个 token；右：块扩散模型一次前向要为当前块里的多个 [MASK] 位置同时给出候选和置信度" style="--dg-min:720px">
+    <rect x="10" y="8" width="460" height="284" rx="8" class="frame"/>
+    <text x="240" y="26" class="t-c t-b t-sm">自回归：一次前向</text>
+    <rect x="346" y="42" width="110" height="30" rx="6" class="box pred"/>
+    <text x="401" y="57" class="t-c t-sm">下一个：上</text>
+    <rect x="30" y="96" width="420" height="50" rx="6" class="box"/>
+    <text x="240" y="114" class="t-c t-sm">L 层 Transformer</text>
+    <text x="240" y="132" class="t-c t-xs">每个位置只看自己和左边（因果注意力）</text>
+    <path d="M406,96 L406,76" class="edge pred"/>
+    <rect x="40" y="180" width="52" height="52" rx="6" class="box enc"/><text x="66" y="206" class="t-c">猫</text>
+    <rect x="125" y="180" width="52" height="52" rx="6" class="box enc"/><text x="151" y="206" class="t-c">坐</text>
+    <rect x="210" y="180" width="52" height="52" rx="6" class="box enc"/><text x="236" y="206" class="t-c">在</text>
+    <rect x="295" y="180" width="52" height="52" rx="6" class="box enc"/><text x="321" y="206" class="t-c">垫</text>
+    <rect x="380" y="180" width="52" height="52" rx="6" class="box enc"/><text x="406" y="206" class="t-c">子</text>
+    <path d="M66,180 L66,150" class="edge enc"/><path d="M151,180 L151,150" class="edge enc"/><path d="M236,180 L236,150" class="edge enc"/><path d="M321,180 L321,150" class="edge enc"/><path d="M406,180 L406,150" class="edge enc"/>
+    <text x="240" y="266" class="t-c t-xs">输入全是真实 token：每个位置一开始就知道自己是哪个字</text>
+    <text x="240" y="282" class="t-c t-xs">生成时只用最右边位置的输出：一次前向 → 1 个新 token</text>
+
+    <rect x="490" y="8" width="460" height="284" rx="8" class="frame"/>
+    <text x="720" y="26" class="t-c t-b t-sm">块扩散：一次前向（块长 B = 4）</text>
+    <text x="680" y="57" class="t-r t-xs">候选 + 置信度</text>
+    <rect x="689" y="42" width="52" height="30" rx="6" class="box act"/><text x="715" y="57" class="t-c t-xs">垫 .97</text>
+    <rect x="801" y="42" width="52" height="30" rx="6" class="box"/><text x="827" y="57" class="t-c t-xs">上 .71</text>
+    <rect x="857" y="42" width="52" height="30" rx="6" class="box"/><text x="883" y="57" class="t-c t-xs">。.40</text>
+    <rect x="500" y="96" width="430" height="50" rx="6" class="box"/>
+    <text x="715" y="114" class="t-c t-sm">L 层 Transformer</text>
+    <text x="715" y="132" class="t-c t-xs">块内互相看（双向），块与块之间只看左边</text>
+    <path d="M715,96 L715,76" class="edge act"/><path d="M827,96 L827,76" class="edge"/><path d="M883,96 L883,76" class="edge"/>
+    <rect x="502" y="180" width="50" height="50" rx="6" class="box data"/><text x="527" y="205" class="t-c">猫</text>
+    <rect x="558" y="180" width="50" height="50" rx="6" class="box data"/><text x="583" y="205" class="t-c">坐</text>
+    <rect x="614" y="180" width="50" height="50" rx="6" class="box data"/><text x="639" y="205" class="t-c">在</text>
+    <rect x="690" y="180" width="50" height="50" rx="6" class="tk mask"/><text x="715" y="205" class="t-c t-xs">[M]</text>
+    <rect x="746" y="180" width="50" height="50" rx="6" class="box enc"/><text x="771" y="205" class="t-c">子</text>
+    <rect x="802" y="180" width="50" height="50" rx="6" class="tk mask"/><text x="827" y="205" class="t-c t-xs">[M]</text>
+    <rect x="858" y="180" width="50" height="50" rx="6" class="tk mask"/><text x="883" y="205" class="t-c t-xs">[M]</text>
+    <path d="M527,180 L527,150" class="edge"/><path d="M583,180 L583,150" class="edge"/><path d="M639,180 L639,150" class="edge"/><path d="M715,180 L715,150" class="edge"/><path d="M771,180 L771,150" class="edge"/><path d="M827,180 L827,150" class="edge"/><path d="M883,180 L883,150" class="edge"/>
+    <text x="583" y="246" class="t-c t-xs">提示与前面的块（已定）</text>
+    <text x="799" y="246" class="t-c t-xs">当前块</text>
+    <text x="720" y="266" class="t-c t-xs">3 个 [MASK] 的输入完全相同，只能靠位置和上下文区分</text>
+    <text x="720" y="282" class="t-c t-xs">置信度 ≥ τ 的位置定稿（这里是“垫”），其余留到下一次前向</text>
+  </svg>
+  <div class="dia-note">本站示意图，例句和置信度是虚构的。对应的论述在原文 §1 第二段；论文没有画这样的对比图。</div>
+</div>
+
+<p>作者把生成过程看成两个嵌套的时间尺度。在一次前向之内，Transformer 的各层一层层地改写每个位置的状态；在多次前向之间，去噪过程一遍遍调用整个模型，把位置一个个定下来。理想情况下这两者应该配合好：每一层都在吸收更多上下文，前向结束时的预测尽量准，于是每一步都能定稿更多的位置。作者的测量显示，这种配合在浅层出了问题。他们用了两类工具。</p>
+
+<div class="note-pre"><b>先补一点背景：怎么“看”一个模型的中间层——逐层变化量与 logit lens。</b>
+<p><b>逐层变化量。</b>把同一个位置相邻两层的隐藏状态 \(h^{(\ell)}\) 和 \(h^{(\ell+1)}\) 拿来比较，可以算两个数。一个是余弦相似度 \(S_{\ell}=\cos\big(h^{(\ell)},h^{(\ell+1)}\big)\)：两个向量方向越接近，它越接近 1；方向越不同，越接近 0。另一个是相对更新幅度 \(U_{\ell}=\lVert h^{(\ell+1)}-h^{(\ell)}\rVert_2/\lVert h^{(\ell)}\rVert_2\)：这一层加上去的增量，占原来向量长度的百分之几。论文把相邻两层之间的这一步叫作第 \(\ell\) 次<b>转换</b> \(T_{\ell}\)：\(T_0\) 是从词嵌入到第 1 层输出，\(T_1\) 是从第 1 层到第 2 层，依此类推。两个量都对“最终会被定稿的 [MASK] 位置”取平均（论文 §5.4 与附录 D 给出定义）。</p>
+<p><b>logit lens。</b>模型最后用 LM 头把最后一层的状态翻译成词表上的概率。logit lens 的做法是：拿任意一层的状态，直接套上同一个 LM 头，看“如果在这一层就输出，模型会说什么”。在 AR 模型里，越深的层读出来的结果通常越接近最终答案。需要知道的是，这个工具在很浅的层上本来就不太可靠：浅层状态还没有被“对齐”到输出头所在的空间，读出来的往往是高频词或无意义的片段（Belrose 等人 2023 年提出 tuned lens 时专门讨论过这一点）。所以，浅层读出来的结果“和最终答案不一致”本身并不奇怪；值得注意的是它读出来时<b>有多自信</b>。</p>
+</div>
+
+<p>在一个只用标准块扩散损失改造好的 GLM-4.7-Flash（块长 32，也就是论文的 Vanilla 模型）上，作者看到了两件事：</p>
+<ul>
+  <li><b>第一次更新特别大，之后几乎不动。</b>[MASK] 位置在 \(T_0\) 上的相对更新幅度平均是 69.31%，在 \(T_1\) 上只有 0.74%，差了将近 100 倍（原文图 1、表 7）。也就是说，一个 [MASK] 的表示在第 1 层被一次性改写成某个样子，到了第 2 层就基本不再变化。作者称之为“过早稳定”（premature stabilization）。</li>
+  <li><b>浅层的“预测”又自信又不靠谱。</b>用 logit lens 读第 1 层，56.39% 的 [MASK] 位置的最高概率超过 0.8；但在这些高置信的位置里，只有 18.98% 和最后一层的首选 token 一致。最常见的读数是编号 220 的 token，也就是一个单独的空格（原文 §5.4、表 11）。原文图 1 的例句“[MASK] is a [MASK] language model”里，[MASK] 在第 1 层被读成了“# ifdefine”一类的代码碎片。</li>
+</ul>
+
+<div class="dia">
+  <div class="dia-title">示意图：Vanilla 模型浅层的两个症状（GLM-4.7-Flash，块长 32）</div>
+  <div class="dia-row"><span class="lbl">\(T_0\) 更新幅度</span><div class="dia-track"><span class="dia-seg frag" style="flex:69.31">69.31%</span><span style="flex:30.69"></span></div></div>
+  <div class="dia-row"><span class="lbl">\(T_1\) 更新幅度</span><div class="dia-track"><span class="dia-seg frag" style="flex:0.74"></span><span style="flex:99.26"></span></div></div>
+  <div class="dia-out">\(T_1\) 只有 0.74%，约为 \(T_0\) 的 1/94（推算：69.31 ÷ 0.74）；原文图 1 把它标成“缩小到 1/100”。</div>
+  <div class="dia-row"><span class="lbl">第 1 层读数</span><div class="dia-track"><span class="dia-seg cmp" style="flex:10.70">高置信且一致 10.7%</span><span class="dia-seg frag" style="flex:45.69">高置信但与最终输出不一致 45.7%</span><span class="dia-seg oth" style="flex:43.61">置信度 &lt; 0.8：43.6%</span></div></div>
+  <div class="dia-note">数据：原文表 7（更新幅度）与表 11（第 1 层置信度 ≥ 0.8 的位置占 56.39%，其中 18.98% 与最后一层一致）。第三行把两个百分比相乘，换算成占全部 [MASK] 位置的比例（推算：56.39% × 18.98% ≈ 10.7%）。本站示意图，对应原文图 1。</div>
+</div>
+
+<p>作者把这两点合起来解读成一个<b>浅层信息流瓶颈</b>：[MASK] 位置的表示还没从上下文里吸收足够的证据，就已经“定型”了，后面的浅层只是做些小修小补。作者认为这在扩散模型里尤其有害，因为每一步去噪都靠这些 [MASK] 位置的最终预测来决定定稿哪些位置。状态没精炼好，一方面单步的预测更差；另一方面，置信度够高的位置更少，每一步能定稿的 token 就少，需要的前向次数就多。</p>
+<p>方法的出发点由此而来。整个去噪过程本身就像一个“外层循环”：同一个模型被一遍遍地整体调用，用来精炼还没定稿的位置。那么在出问题的浅层再加一个“局部循环”，让这几层多算几遍，就是一种有针对性的补救。可是如果真在推理时加循环，每次前向都会变慢，而且现成的推理引擎（SGLang）和定制 CUDA kernel 都要跟着改。所以作者只在训练时搭一个循环的教师，让正常的单次前向模型去学它，训练完就把教师丢掉。作者列出的贡献有三条：发现这个瓶颈；提出只在训练时使用的在线蒸馏方法 Loop-Distill；给出选择循环位置和圈数的规则，并在两个 30B-A3B 的 MoE 模型、13 个评测上做了验证。</p>
+
+<h4 id="n-1-loops">两种“循环”：这篇论文属于哪一种</h4>
+<p>本站“循环 × 扩散”这一组里的五篇论文都叫“loop”，但循环的对象不一样，计算代价也完全不同。第一种是<b>沿深度循环</b>：在一次前向内部，把某一层或某一段层重复算几遍，用同样的参数换来更深的计算。Huginn、Ouro 属于这一类；扩散模型里的 <a href="loopmdm.html">LoopMDM</a>、<a href="recursive-mdm.html">R-MDM</a> 和 <a href="alodlm.html">ALoDLM</a> 也主要是这一类，它们推理时真的在循环，所以每个去噪步的计算量随圈数增加。第二种是<b>跨去噪步传递</b>：标准的扩散模型在两步之间只传递“哪些位置定成了哪个 token”，模型对未定稿位置的连续表示在每步结束时都被丢掉；<a href="loopholing.html">Loopholing</a> 额外开了一条通道，把连续的隐藏状态带到下一步。Loop-Distill 属于第一种，但它的循环只发生在训练时的教师里；论文说的“外层循环”只是把标准的去噪过程比作循环，并没有增加跨步传递的状态。</p>
+<div class="dia">
+  <div class="dia-title">示意图：沿深度循环 vs 跨去噪步传递</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="上：沿深度循环，第 2 层重复 K 次；下：跨去噪步传递，步与步之间传已定稿 token，Loopholing 还额外传连续隐状态" style="--dg-min:760px">
+    <rect x="10" y="8" width="940" height="150" rx="8" class="frame"/>
+    <text x="24" y="28" class="t-sm t-b">① 沿深度循环：在一次前向里，把某几层重复算几遍</text>
+    <rect x="30" y="62" width="70" height="40" rx="6" class="box data"/><text x="65" y="82" class="t-c t-sm">输入</text>
+    <rect x="130" y="62" width="86" height="40" rx="6" class="box enc"/><text x="173" y="82" class="t-c t-sm">第 1 层</text>
+    <rect x="246" y="62" width="86" height="40" rx="6" class="box pred"/><text x="289" y="82" class="t-c t-sm">第 2 层</text>
+    <path d="M314,62 C334,28 244,28 264,62" class="edge pred"/>
+    <text x="336" y="44" class="t-sm" style="fill:var(--c-pred)">×K</text>
+    <rect x="362" y="62" width="86" height="40" rx="6" class="box enc"/><text x="405" y="82" class="t-c t-sm">第 3 层</text>
+    <text x="478" y="82" class="t-c t-sm">…</text>
+    <rect x="500" y="62" width="86" height="40" rx="6" class="box enc"/><text x="543" y="82" class="t-c t-sm">第 L 层</text>
+    <rect x="616" y="62" width="70" height="40" rx="6" class="box data"/><text x="651" y="82" class="t-c t-sm">输出</text>
+    <path d="M100,82 L128,82" class="edge"/><path d="M216,82 L244,82" class="edge"/><path d="M332,82 L360,82" class="edge"/><path d="M448,82 L466,82" class="edge"/><path d="M490,82 L498,82" class="edge"/><path d="M586,82 L614,82" class="edge"/>
+    <text x="24" y="134" class="t-xs">Huginn、Ouro 等自回归循环模型也属于这一种</text>
+    <text x="712" y="56" class="t-sm t-b">LoopMDM、R-MDM、ALoDLM：</text>
+    <text x="712" y="74" class="t-xs">推理时真的循环，每步计算随圈数增加</text>
+    <text x="712" y="100" class="t-sm t-b" style="fill:var(--c-pred)">Loop-Distill：</text>
+    <text x="712" y="118" class="t-xs">只在训练时的教师支路里循环，</text>
+    <text x="712" y="134" class="t-xs">部署的模型每层只算一遍</text>
+
+    <rect x="10" y="172" width="940" height="160" rx="8" class="frame"/>
+    <text x="24" y="192" class="t-sm t-b">② 跨去噪步传递：第 s 步算出的东西，怎样带到第 s+1 步</text>
+    <rect x="40" y="222" width="190" height="40" rx="6" class="box enc"/><text x="135" y="242" class="t-c t-sm">第 s 步：整个模型算一遍</text>
+    <rect x="330" y="222" width="190" height="40" rx="6" class="box enc"/><text x="425" y="242" class="t-c t-sm">第 s+1 步：整个模型</text>
+    <rect x="620" y="222" width="150" height="40" rx="6" class="box enc"/><text x="695" y="242" class="t-c t-sm">第 s+2 步 …</text>
+    <path d="M230,232 L328,232" class="edge"/><path d="M520,232 L618,232" class="edge"/>
+    <text x="280" y="216" class="t-c t-xs">已定稿的 token</text>
+    <text x="570" y="216" class="t-c t-xs">已定稿的 token</text>
+    <path d="M230,254 L328,254" class="edge pred" style="stroke-dasharray:6 4"/><path d="M520,254 L618,254" class="edge pred" style="stroke-dasharray:6 4"/>
+    <text x="425" y="284" class="t-c t-xs" style="fill:var(--c-pred)">虚线：连续隐状态（Loopholing 额外传递）</text>
+    <text x="790" y="226" class="t-xs">标准块扩散只传 token；</text>
+    <text x="790" y="244" class="t-xs">论文把这条“整个模型被</text>
+    <text x="790" y="260" class="t-xs">反复调用”的链称为外层循环</text>
+    <text x="790" y="290" class="t-xs">Loop-Distill 没有加</text>
+    <text x="790" y="306" class="t-xs">虚线这条通道</text>
+  </svg>
+  <div class="dia-note">本站示意图。各篇的归类依据它们的论文（详见各自的精读页）；对 LoopMDM 的描述还可参考本文 §2.2 的概括。</div>
+</div>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>原文图 1 和上面引用的数字都来自改造之后的 Vanilla 模型。论文没有给出原始 AR 模型在同样文本上的同样统计，所以“第一次更新特别大”有多少是块扩散改造造成的、有多少是这类模型本来就有的特点，从论文里看不出来。（AR 模型的第 1 层通常也会大幅改写词嵌入。）</li>
+  <li>“浅层预测过度自信”说的是 logit lens 的读数，并不是模型真的在第 1 层做了什么决定。解码时定不定稿只看最后一层的置信度；浅层读数只是一个症状指标。论文 §5.4 把它叫作“过早的 token 承诺”（premature token commitments），也是一种比喻说法。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §1 与图 1（OpenReview PDF 第 1–2 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：改造路线与循环路线，各自做了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这篇论文站在两条工作线的交叉处。一条是“怎样把 AR 模型改造成块扩散模型”，另一条是“循环（递归深度）语言模型”。前人在这两条线上分别解决了什么问题？Loop-Distill 和它们的区别落在哪里？</div>
+
+<h4 id="n-2-1">2.1 从 AR 到块扩散：前人主要在解决“怎么改才不丢能力”</h4>
+<p>块扩散之所以成了主流，是因为它两头都占：块与块之间保留了从左到右的依赖，可以像 AR 模型一样缓存前面块的 KV；块内部又能并行去噪。这也让“从现成 AR 模型改造”变得自然，因为块长取 1 时它就退化成 AR。常见的做法是在 AR 检查点上继续预训练，再做监督微调。论文把已有的改造工作分成四条线：</p>
+<ul>
+  <li><b>处理注意力的不匹配。</b>AR 模型只见过左边的上下文，改成块内双向以后，右边突然也能看了。一类做法是在训练中逐步放开右边的上下文（Gong 等 2025，即 DiffuLLaMA 一文），另一类是从一开始就保留块结构的依赖关系（Fu 等 2025，Efficient-DLM）。</li>
+  <li><b>渐进式课程。</b>LLaDA2.0 把 AR 看成块长为 1 的块扩散，训练中逐步把块长调大，让模型慢慢适应扩散式的去噪（见 <a href="llada2.html#n-4">LLaDA2.0 精读页第 4 节</a>）。</li>
+  <li><b>表示对齐。</b>加一个辅助损失，让改造后模型的隐藏状态尽量贴近原 AR 模型（Peng 等 2026）。</li>
+  <li><b>AR 与扩散联合训练。</b>不再是单纯的“改造”，而是同时用 AR 损失和扩散损失训练，让模型既保留 AR 的行为又学会扩散解码（Yu 等 2026；Fu 等 2026，即本站精读过的 <a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a>）。</li>
+</ul>
+<p>作者强调自己的问题和这些工作是互补的：前人关心的是怎样保住原 AR 模型的表示、怎样让转换过程更平滑；这篇论文关心的是，在改造后的模型内部，[MASK] 位置的信息是怎样一层层形成和精炼的。</p>
+
+<h4 id="n-2-2">2.2 循环与递归深度模型</h4>
+<p>循环（looped）或递归深度（recurrent-depth）模型反复使用同一组参数，用更多的计算换来更深的“潜在推理”，而不按比例增加参数。经典的做法是把一个共享的块重复好几遍（见 <a href="universal-transformers.html">Universal Transformers</a>、<a href="huginn.html">Huginn</a>）。较新的语言模型会更聪明地分配循环：提前退出（<a href="ouro.html">Ouro</a>），按 token 决定深度（与本站 <a href="mixture-of-recursions.html">Mixture-of-Recursions</a> 同一路线；论文引用的是同组的 Relaxed Recursive Transformers），或者只共享中间的一部分层（论文引用的 DnD）。</p>
+<p>作者认为，这些工作大多是在 AR 模型上做的，而 AR 模型的一次前向是围绕“预测下一个 token”定义的，不是一个“精炼”过程，所以循环和它并不天然契合；扩散模型的一次前向本来就是在精炼 [MASK] 位置，循环更自然。和本文最接近的是 LoopMDM（Lee 等 2026）：它在扩散语言模型里内置了一个循环结构（本文说是单层循环）。按本文的概括，LoopMDM 主要在 100M 参数量级、纯扩散（不分块）的设置下研究，而不是在大参数量的块扩散模型上。（据本站 <a href="loopmdm.html">LoopMDM 精读页</a>，它实际循环的是靠前的两层，实验都在 1.7 亿参数以下，推理时每个去噪步的计算随圈数增加。）</p>
+<p>Loop-Distill 和上面这些工作在两点上不同。在<b>用途</b>上，循环只用来在训练时从同一个块扩散模型构造一个教师，而且只在信息流有缺陷的浅层循环。在<b>部署</b>上，推理时没有任何循环结构，原模型保持不变，因此不增加推理开销，也和 SGLang 等加速栈、底层的定制 CUDA kernel 完全兼容。</p>
+<div class="table-wrap"><table>
+<thead><tr><th>本组页面</th><th>循环的是什么</th><th>推理时是否多算</th></tr></thead>
+<tbody>
+<tr><td><a href="loopholing.html">Loopholing</a></td><td>主要是跨去噪步传递连续隐状态</td><td>几乎不多算（每步多传一个隐状态）</td></tr>
+<tr><td><a href="loopmdm.html">LoopMDM</a></td><td>主要沿深度循环</td><td>是，随圈数增加</td></tr>
+<tr><td><a href="recursive-mdm.html">R-MDM</a></td><td>主要沿深度循环</td><td>是，随圈数增加</td></tr>
+<tr><td><a href="alodlm.html">ALoDLM</a></td><td>主要沿深度循环，圈数自适应</td><td>是，随实际圈数增加</td></tr>
+<tr class="hl"><td>Loop-Distill（本页）</td><td>沿深度循环，只在训练时的教师里</td><td>否，部署模型与原模型相同</td></tr>
+</tbody></table></div>
+<p class="w-note">各篇细节以它们自己的精读页为准；这张表只说明“循环”的类型。</p>
+<div class="note-warn"><b>读的时候注意：</b>“AR 模型的前向不是精炼过程，所以循环不自然”是作者的论证，不是实验结论；Ouro、Huginn 等 AR 循环模型在推理类任务上确实从循环中得到了好处。另外，相关工作里 Ouro 被列了两次（参考文献中 Zhu 2025b 与 2025c 是同一篇），属于引用上的小错。</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §2（OpenReview PDF 第 2–3 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 预备知识：块扩散怎么训练、怎么解码</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>方法和实验都建立在块扩散的三个部件上：注意力掩码、训练损失、按置信度阈值定稿的解码规则。后面反复出现的效率指标“每次前向定稿多少 token”（TPF），也直接由解码规则决定。这一节把三个部件讲清楚，再用一个小例子把解码走一遍，说明为什么“[MASK] 状态精炼得更好”会变成“前向次数更少”。</div>
+
+<h4 id="n-3-1">3.1 注意力掩码：块内双向，块间因果</h4>
+<p>设一条“提示 + 回答”的序列是 \(x=(x_1,\dots,x_N)\)，切成长度为 \(B\) 的连续块，位置 \(i\) 所在的块号是 \(b(i)=\lfloor (i-1)/B\rfloor\)。论文的式 (1) 规定：位置 \(i\) 能看位置 \(j\)，当且仅当 \(j\) 所在的块不在 \(i\) 所在的块后面，</p>
+<div class="formula">$$A_{ij}=1 \iff b(j)\le b(i).$$</div>
+<p>换句话说，一个位置能看前面所有块，也能看自己块里的所有位置（包括右边的），但看不到后面的块。</p>
+<div class="dia">
+  <div class="dia-title">示意图：6 个位置、块长 2 时的注意力掩码</div>
+  <svg class="dg" viewBox="0 0 960 240" role="img" aria-label="6 乘 6 的块注意力掩码：对角线上的 2 乘 2 块和它左下方全部可见" style="--dg-min:680px">
+    <text x="234" y="16" class="t-c t-xs">列：被看的位置 j</text>
+    <text x="100" y="124" class="t-c t-xs" transform="rotate(-90 100 124)">行：正在看的位置 i</text>
+    <text x="164" y="32" class="t-c t-xs">1</text><text x="192" y="32" class="t-c t-xs">2</text><text x="220" y="32" class="t-c t-xs">3</text><text x="248" y="32" class="t-c t-xs">4</text><text x="276" y="32" class="t-c t-xs">5</text><text x="304" y="32" class="t-c t-xs">6</text>
+    <text x="140" y="54" class="t-r t-xs">1</text><text x="140" y="82" class="t-r t-xs">2</text><text x="140" y="110" class="t-r t-xs">3</text><text x="140" y="138" class="t-r t-xs">4</text><text x="140" y="166" class="t-r t-xs">5</text><text x="140" y="194" class="t-r t-xs">6</text>
+    <rect x="150" y="40" width="28" height="28" class="box enc"/>
+    <rect x="178" y="40" width="28" height="28" class="box enc"/>
+    <rect x="206" y="40" width="28" height="28" class="tk off"/>
+    <rect x="234" y="40" width="28" height="28" class="tk off"/>
+    <rect x="262" y="40" width="28" height="28" class="tk off"/>
+    <rect x="290" y="40" width="28" height="28" class="tk off"/>
+    <rect x="150" y="68" width="28" height="28" class="box enc"/>
+    <rect x="178" y="68" width="28" height="28" class="box enc"/>
+    <rect x="206" y="68" width="28" height="28" class="tk off"/>
+    <rect x="234" y="68" width="28" height="28" class="tk off"/>
+    <rect x="262" y="68" width="28" height="28" class="tk off"/>
+    <rect x="290" y="68" width="28" height="28" class="tk off"/>
+    <rect x="150" y="96" width="28" height="28" class="box enc"/>
+    <rect x="178" y="96" width="28" height="28" class="box enc"/>
+    <rect x="206" y="96" width="28" height="28" class="box enc"/>
+    <rect x="234" y="96" width="28" height="28" class="box enc"/>
+    <rect x="262" y="96" width="28" height="28" class="tk off"/>
+    <rect x="290" y="96" width="28" height="28" class="tk off"/>
+    <rect x="150" y="124" width="28" height="28" class="box enc"/>
+    <rect x="178" y="124" width="28" height="28" class="box enc"/>
+    <rect x="206" y="124" width="28" height="28" class="box enc"/>
+    <rect x="234" y="124" width="28" height="28" class="box enc"/>
+    <rect x="262" y="124" width="28" height="28" class="tk off"/>
+    <rect x="290" y="124" width="28" height="28" class="tk off"/>
+    <rect x="150" y="152" width="28" height="28" class="box enc"/>
+    <rect x="178" y="152" width="28" height="28" class="box enc"/>
+    <rect x="206" y="152" width="28" height="28" class="box enc"/>
+    <rect x="234" y="152" width="28" height="28" class="box enc"/>
+    <rect x="262" y="152" width="28" height="28" class="box enc"/>
+    <rect x="290" y="152" width="28" height="28" class="box enc"/>
+    <rect x="150" y="180" width="28" height="28" class="box enc"/>
+    <rect x="178" y="180" width="28" height="28" class="box enc"/>
+    <rect x="206" y="180" width="28" height="28" class="box enc"/>
+    <rect x="234" y="180" width="28" height="28" class="box enc"/>
+    <rect x="262" y="180" width="28" height="28" class="box enc"/>
+    <rect x="290" y="180" width="28" height="28" class="box enc"/>
+    <line x1="206" y1="40" x2="206" y2="208" style="stroke:var(--text);stroke-width:1.6"/>
+    <line x1="262" y1="40" x2="262" y2="208" style="stroke:var(--text);stroke-width:1.6"/>
+    <line x1="150" y1="96" x2="318" y2="96" style="stroke:var(--text);stroke-width:1.6"/>
+    <line x1="150" y1="152" x2="318" y2="152" style="stroke:var(--text);stroke-width:1.6"/>
+    <text x="380" y="52" class="t-sm">块长 B = 2：6 个位置分成 3 块，b(i) = ⌊(i−1)/B⌋</text>
+    <text x="380" y="80" class="t-sm">第 i 行第 j 列可见 ⇔ b(j) ≤ b(i)（式 1），蓝格 = 可见</text>
+    <text x="380" y="108" class="t-sm">块内双向：位置 3 能看位置 4，位置 4 也能看位置 3</text>
+    <text x="380" y="136" class="t-sm">块间因果：位置 3、4 能看 1、2，看不到 5、6</text>
+    <text x="380" y="164" class="t-sm">推理时，当前块的 [MASK] 就靠这种掩码互相交换信息</text>
+    <text x="380" y="192" class="t-xs">训练时的实际实现常把加噪序列和干净序列拼在一起算（见 BD3-LM 精读页）</text>
+  </svg>
+  <div class="dia-note">本站示意图，按式 (1) 画出。</div>
+</div>
+<p>式 (1) 描述的是推理时“当前块对前文”的关系。训练时，为了一次前向就给每个块都提供干净的前文，具体实现通常把加噪序列和干净序列拼起来，用一张更大的掩码一起算（见 <a href="block-diffusion.html#n-4-2">BD3-LM 精读页 4.2 节</a> 和 <a href="fast-dllm-v2.html#n-4-6">Fast-dLLM v2 精读页 4.6 节</a>）。这篇论文没有交代训练掩码的实现细节，只写了式 (1)。</p>
+
+<h4 id="n-3-2">3.2 训练损失：只在被遮住的位置算交叉熵</h4>
+<p>做监督微调时，回答部分的 token 被随机遮住一部分，提示和前面已完成的块保持可见。记加噪后的序列为 \(\tilde x\)，被遮住的回答位置集合为 \(\mathcal M=\{i:\tilde x_i=[\mathrm{MASK}]\}\)。训练目标是论文的式 (2)：</p>
+<div class="formula">$$\mathcal L_{\mathrm{BD}}(\theta)=-\frac{1}{|\mathcal M|}\sum_{i\in\mathcal M}\log p_{\theta}\big(x_i\mid \tilde x;A\big).$$</div>
+<p>意思很直接：在每个被遮住的位置上，模型要给正确答案 \(x_i\) 分配尽量高的概率，再对所有被遮位置取平均。这里没有扩散理论里常见的“按遮盖比例加权”的系数，和 Fast-dLLM v2 等改造工作的做法一致。这个 \(\mathcal L_{\mathrm{BD}}\) 后面会出现两次：它是学生的主损失，也是损失门用来比较教师和学生的尺子。</p>
+
+<h4 id="n-3-3">3.3 解码：置信度过阈值就定稿，一个都不过就兜底</h4>
+<p>推理时，当前块先填满 \(B\) 个 [MASK]，然后一步步去噪。第 \(s\) 步，模型处理当前序列 \(x^{(s)}\)，为每个仍被遮住的位置 \(i\) 给出首选 token \(\hat x_i^{(s)}\) 和它的概率，也就是置信度 \(c_i^{(s)}=p_{\theta}(\hat x_i^{(s)}\mid x^{(s)};A)\)。给定阈值 \(\tau\)，置信度不低于 \(\tau\) 的位置一起定稿：</p>
+<div class="formula">$$\mathcal C^{(s)}=\{\,i\in\mathcal M^{(s)}: c_i^{(s)}\ge\tau\,\}.$$</div>
+<p>如果这一步一个都不过阈值，就用兜底规则：定稿置信度最高的那一个位置。定稿的 token 填进序列，成为下一步的可见上下文（式 3）；没定稿的位置保持 [MASK]。整块填完再进入下一块。论文主实验用 \(\tau=0.95\)（附录 E），解码分析还看了 \(\tau=0.90\)。这条规则和 <a href="fast-dllm.html">Fast-dLLM</a> 提出的置信度阈值并行解码是同一种思路。</p>
+<div class="dia">
+  <div class="dia-title">示意图：块长 4、阈值 τ = 0.95 时，一块是怎样填完的（数字是虚构的）</div>
+  <div class="dia-row"><span class="lbl">第 1 次前向</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">垫 0.98 ✓</span><span class="dia-seg res" style="flex:1">子 0.71</span><span class="dia-seg res" style="flex:1">上 0.55</span><span class="dia-seg res" style="flex:1">。0.40</span></div></div>
+  <div class="dia-out">只有 1 个位置过阈值 → 定稿 1 个</div>
+  <div class="dia-row"><span class="lbl">第 2 次前向</span><div class="dia-track"><span class="dia-seg kv" style="flex:1">垫</span><span class="dia-seg cmp" style="flex:1">子 0.97 ✓</span><span class="dia-seg cmp" style="flex:1">上 0.96 ✓</span><span class="dia-seg res" style="flex:1">。0.62</span></div></div>
+  <div class="dia-out">“垫”可见之后，“子”的置信度从 0.71 涨到 0.97 → 定稿 2 个</div>
+  <div class="dia-row"><span class="lbl">第 3 次前向</span><div class="dia-track"><span class="dia-seg kv" style="flex:1">垫</span><span class="dia-seg kv" style="flex:1">子</span><span class="dia-seg kv" style="flex:1">上</span><span class="dia-seg cmp" style="flex:1">。0.88（兜底）</span></div></div>
+  <div class="dia-out">没有位置过阈值 → 兜底规则定稿置信度最高的一个</div>
+  <div class="dia-note">3 次前向定稿 4 个 token，TPF = 4 ÷ 3 ≈ 1.33。蓝 = 之前已定稿；绿 = 这一步定稿；橙色斜纹 = 仍是 [MASK]（格里是模型此刻的首选和置信度）。本站示意图。</div>
+</div>
+<div class="note-pre"><b>先补一点背景：TPF 和 TPS 这两个效率指标。</b>
+<p><b>TPF</b>（tokens per forward）是平均每次前向定稿的 token 数。因为有兜底规则，它至少是 1；块长 32 时它能到多大，取决于模型对每个位置有多大把握。论文表 5 报告的 TPF 在 1.8 到 3.1 之间，意味着填完一个 32 位置的块大约要 10 到 18 次前向（推算：32 ÷ 3.1 ≈ 10，32 ÷ 1.8 ≈ 18）。</p>
+<p><b>TPS</b>（tokens per second）是每秒生成的 token 数，是在真实推理引擎上测出来的墙钟指标。batch size 为 1 时，同一个模型每次前向的耗时大致固定，所以 TPS 大体随 TPF 成比例变化；但提示的预填充、上下文变长、回答的长短都会让两者偏离。第 9 节会看到，这篇论文里 TPS 的提升就明显大于 TPF 的提升。</p>
+</div>
+<p>论文在这里点出了一个贯穿全文的说法：块扩散本身就是一个<b>外层精炼循环</b>，同一个完整模型被反复用在一个还没填完的块上。把这一点和上面的例子连起来，就能看出方法的动机：如果 [MASK] 位置的状态在每次前向里精炼得更好，更多的位置就能在同一步里越过阈值，TPF 上升，前向次数下降，解码就更快；同时每个位置的首选也更准，准确率也会上去。</p>
+<div class="note-warn"><b>读的时候注意：</b>阈值 \(\tau\) 越高，每一步越保守，TPF 越低，但定稿的 token 越可靠；所以比较两个模型的 TPF 时必须在同一个 \(\tau\) 下比，论文就是这样做的。另外，TPF 和准确率是同一次解码的两个侧面：一个模型可以靠“更敢下结论”抬高 TPF，代价是准确率下降。Loop-Distill 的结果是两者同时提高，这一点比单看 TPF 更有说服力。</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §3（OpenReview PDF 第 3 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 方法（4.1–4.2）：在浅层局部循环，再把结果蒸馏回单次前向</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>如果浅层“精炼不够”，最直接的办法是让浅层多算几遍。可是推理时多算会变慢，所以论文只在训练时多算，并要求正常的单次前向去学多算的结果。教师具体怎样从同一个模型里构造出来？学生在哪里、用什么损失去学？为什么还需要一个“损失门”？这样做在训练和推理上各要多付出多少计算？</div>
+
+<h4 id="n-4-1">4.1 只在浅层做“局部精炼”</h4>
+<p>把 Transformer 写成 \(L\) 个带残差的层 \(F_{1:L}=f_L\circ\cdots\circ f_1\)。部署的模型做的是标准的逐层前向（式 4）：</p>
+<div class="formula">$$h^{(0)}=\mathrm{Embed}(\tilde x),\qquad h^{(\ell)}=f_{\ell}\big(h^{(\ell-1)}\big),\quad \ell=1,\dots,L.$$</div>
+<p>对 [MASK] 位置来说，这条轨迹要把一个所有位置共用的 [MASK] 嵌入，改造成一个针对具体上下文的表示。按第 1 节的诊断，毛病出在浅层：第一次更新过大，紧接着的几个浅层几乎不动，而它们的 token 偏好还很不稳定。</p>
+<p>作者的选择是：不去寻求“再整体跑一遍模型”（那等于再做一次外层去噪步），而只在出问题的浅层上多算几遍。把选中的层 \(f_{\ell}\) 反复作用在它自己的输出上，得到一条局部精炼轨迹（式 5）：</p>
+<div class="formula">$$h\;\to\; f_{\ell}(h)\;\to\; f_{\ell}^{2}(h)\;\to\;\cdots\;\to\; f_{\ell}^{K}(h),$$</div>
+<p>其中 \(f_{\ell}^{K}\) 表示同一层连续算 \(K\) 次。这条轨迹的终点，就是给学生的“更精炼的浅层状态”这一目标。</p>
+<div class="note-pre"><b>先补一点背景：把同一层“再算一遍”到底意味着什么。</b>
+<p>Transformer 的一层作用于整条序列：先做注意力，每个位置按当前所有位置的状态去收集信息；再过 FFN 或 MoE，每个位置各自变换；两步都把增量加回残差流。把这一层再算一遍，参数完全不变，但输入变了：第二遍的注意力读到的是已经被这一层更新过一次的状态，所以一个 [MASK] 位置可以从“已经精炼过一次的邻居”那里再收集一次信息。在 MoE 层里，路由器看到的输入也变了，第二遍可能选中不同的专家，相当于换一组专家再加工一次。这和人读一个难句子时“再读一遍”有点像：第二遍读的还是同样的字，但带着第一遍的理解。</p>
+<p>代价也很清楚：这一层的计算量变成 \(K\) 倍。Huginn、Ouro 等循环模型就是把整段层这样重复使用；Loop-Distill 只在训练时对一两层这样做。</p>
+</div>
+
+<h4 id="n-4-2">4.2 损失门控的掩码状态蒸馏</h4>
+<p><b>教师从哪里来。</b>每个训练步，作者都用当前这一步的模型临时构造一个教师支路。教师和学生处理同一个加噪样本，共用全部参数，区别只在计算方式：教师在选中的浅层上循环，并且整条支路被 stop-gradient（下文写作 \(\mathrm{sg}\)）截断，不产生梯度。记选中的浅层集合为 \(S\subset\{1,\dots,L\}\)，其中最浅的一层是 \(\ell_0=\min S\)；循环次数 \(K\) 每步从一个分布 \(q\) 中抽取（实验里在 \(\{2,3\}\) 中均匀抽）。教师从学生进入循环之前的状态出发（式 6）：</p>
+<div class="formula">$$\tilde h^{(\ell_0-1,K)}=\mathrm{sg}\big(h^{(\ell_0-1)}\big),$$</div>
+<p>然后一层层往上走（式 7）：选中的层连算 \(K\) 次，其余层照常各算一次，一直走到最后一层 \(L\)：</p>
+<div class="formula">$$\tilde h^{(\ell,K)}=\begin{cases} f_{\ell}^{K}\big(\tilde h^{(\ell-1,K)}\big), & \ell\in S,\\[2pt] f_{\ell}\big(\tilde h^{(\ell-1,K)}\big), & \ell\notin S,\end{cases}\qquad \ell=\ell_0,\dots,L.$$</div>
+<p>拿 GLM-4.7-Flash 的默认设置走一遍：\(S=\{2,3\}\)，假设这一步抽到 \(K=3\)。学生照常把第 1 到第 47 层各算一遍。教师直接拿学生第 1 层的输出（截断梯度）当起点，把第 2 层连算 3 遍，再把第 3 层连算 3 遍，然后第 4 到第 47 层各算一遍，最后过同一个 LM 头。</p>
+
+<p><b>学生学什么。</b>对每个循环层 \(\ell\in S\)，让学生在这一层的输出 \(h^{(\ell)}\) 去靠近教师在同一层的输出 \(\tilde h^{(\ell,K)}\)，只在被遮住的位置 \(i\in\mathcal M\) 上算，用余弦距离衡量（式 8）：</p>
+<div class="formula">$$d^{(\ell,K)}_i=1-\frac{\big\langle h^{(\ell)}_i,\ \mathrm{sg}\big(\tilde h^{(\ell,K)}_i\big)\big\rangle}{\lVert h^{(\ell)}_i\rVert_2\,\lVert \tilde h^{(\ell,K)}_i\rVert_2+\epsilon},\qquad \mathcal L^{(K)}_{\mathrm{traj}}=\frac{1}{|S|\,|\mathcal M|}\sum_{\ell\in S}\sum_{i\in\mathcal M} d^{(\ell,K)}_i .$$</div>
+<p>余弦距离只比较方向，不比较长度，所以学生不必复制教师状态的“大小”。这一点有实际意义：同一层多算几遍，残差流会多加几份增量，向量长度通常会变；用余弦距离就不会逼着学生去模仿这种长度变化（这是本站的理解，论文没有解释为什么选余弦距离）。因为损失要对多个层取平均，作者称它为<b>轨迹</b>损失：学生要在每个循环层上都对齐，而不只是对齐最后的结果。</p>
+<p>为什么只在被遮住的位置上蒸馏？作者给了两个理由。第一，这些位置正是式 (2) 的块扩散损失要重建的对象。第二，[MASK] 这个符号在 AR 预训练中从未出现，这些位置的隐藏状态最需要直接调整；而可见的提示 token 和已定稿的 token 主要是在提供上下文，本身不是预测目标。</p>
+
+<p><b>损失门：教师确实更好才学。</b>一条循环出来的轨迹，只有在它最终带来更好的预测时才值得学。为此，作者把教师的最后一层状态也送进同一个最终归一化和输出矩阵 \(W_{\mathrm{out}}\)，用和式 (2) 一样的掩码交叉熵给教师打分（式 9）：</p>
+<div class="formula">$$\tilde{\mathcal L}^{(K)}_{\mathrm{BD}}=-\frac{1}{|\mathcal M|}\sum_{i\in\mathcal M}\log\Big[\mathrm{softmax}\big(W_{\mathrm{out}}\,\mathrm{Norm}(\tilde h^{(L,K)}_i)\big)\Big]_{x_i},$$</div>
+<p>下标 \(x_i\) 表示取正确 token 那一项的概率。然后只在教师比学生好时打开蒸馏（式 10）：</p>
+<div class="formula">$$g_K=\mathbb I\big[\tilde{\mathcal L}^{(K)}_{\mathrm{BD}}&lt;r\,\mathcal L_{\mathrm{BD}}\big],\qquad r=1.0 .$$</div>
+<p>\(\mathbb I[\cdot]\) 是指示函数，条件成立取 1，否则取 0。\(r=1\) 的意思是：在同一批数据、同一组被遮位置上，教师的交叉熵严格低于学生时 \(g_K=1\)，否则这一步不加蒸馏信号。最终的训练目标是（式 11）：</p>
+<div class="formula">$$\mathcal L_{\mathrm{LoopDistill}}=\mathcal L_{\mathrm{BD}}+\lambda\,\mathbb E_{K\sim q}\big[g_K\,\mathcal L^{(K)}_{\mathrm{traj}}\big],\qquad \lambda=1.0 .$$</div>
+<p>对 \(K\) 取期望，意思是学生面对的不是某一个固定圈数的教师，而是一族圈数不同的教师。作者的理由是：多少局部精炼才有益，会随样本和训练阶段变化。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：Loop-Distill 的一个训练步（以 GLM-4.7-Flash、\(S=\{2,3\}\) 为例）</div>
+  <svg class="dg" viewBox="0 0 960 470" role="img" aria-label="左列学生每层算一遍并计算块扩散损失；右列教师从学生第 1 层输出出发，第 2、3 层各连算 K 次后走完其余层；中间在第 2、3 层算余弦距离，损失门比较两者的交叉熵" style="--dg-min:760px">
+    <g class="loss"><rect x="330" y="8" width="300" height="42" rx="6" class="box"/></g>
+    <text x="480" y="23" class="t-c t-sm t-b">总损失 = L_BD + λ · g · L_traj</text>
+    <text x="480" y="40" class="t-c t-xs">λ = 1；K 每步从 {2, 3} 中均匀抽取</text>
+
+    <rect x="40" y="70" width="260" height="40" rx="6" class="box loss"/><text x="170" y="90" class="t-c t-sm">输出头 → 掩码交叉熵 L_BD</text>
+    <rect x="40" y="140" width="260" height="40" rx="6" class="box enc"/><text x="170" y="160" class="t-c t-sm">第 4–47 层（各算一次）</text>
+    <rect x="40" y="210" width="260" height="40" rx="6" class="box enc"/><text x="170" y="230" class="t-c t-sm">第 3 层（MoE），算一次</text>
+    <rect x="40" y="280" width="260" height="40" rx="6" class="box enc"/><text x="170" y="300" class="t-c t-sm">第 2 层（MoE），算一次</text>
+    <rect x="40" y="350" width="260" height="40" rx="6" class="box enc"/><text x="170" y="370" class="t-c t-sm">第 1 层（稠密）</text>
+    <rect x="40" y="420" width="260" height="36" rx="6" class="box data"/><text x="170" y="438" class="t-c t-sm">输入 x̃：部分位置是 [MASK]</text>
+    <path d="M170,420 L170,392" class="edge enc"/><path d="M170,350 L170,322" class="edge enc"/><path d="M170,280 L170,252" class="edge enc"/><path d="M170,210 L170,182" class="edge enc"/><path d="M170,140 L170,112" class="edge enc"/>
+    <path d="M170,70 L170,29 L328,29" class="edge loss"/>
+    <text x="180" y="125" class="t-xs" style="fill:var(--c-enc)">学生 = 部署的模型（求梯度）</text>
+
+    <rect x="640" y="56" width="300" height="348" rx="8" class="frame"/>
+    <g class="tgt">
+      <rect x="660" y="70" width="260" height="40" rx="6" class="box"/>
+      <rect x="660" y="140" width="260" height="40" rx="6" class="box"/>
+      <rect x="660" y="210" width="260" height="40" rx="6" class="box"/>
+      <rect x="660" y="280" width="260" height="40" rx="6" class="box"/>
+      <rect x="660" y="350" width="260" height="40" rx="6" class="box frozen"/>
+    </g>
+    <text x="790" y="90" class="t-c t-sm">同一个输出头 → L̃_BD</text>
+    <text x="790" y="160" class="t-c t-sm">第 4–47 层（各算一次）</text>
+    <text x="790" y="230" class="t-c t-sm">第 3 层，连算 K 次</text>
+    <text x="790" y="300" class="t-c t-sm">第 2 层，连算 K 次</text>
+    <text x="790" y="370" class="t-c t-sm">起点：学生第 1 层的输出</text>
+    <path d="M920,222 C950,222 950,240 922,240" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path d="M920,292 C950,292 950,310 922,310" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path d="M790,350 L790,322" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><path d="M790,280 L790,252" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><path d="M790,210 L790,182" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><path d="M790,140 L790,112" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text x="790" y="420" class="t-c t-xs" style="fill:var(--c-tgt)">教师：同一套参数，不求梯度，训练后丢弃</text>
+
+    <path d="M300,370 L658,370" class="edge sg"/>
+    <g class="sg-badge"><rect x="430" y="358" width="100" height="22" rx="4"/><text x="480" y="369" class="t-c">sg：截断梯度</text></g>
+
+    <path d="M300,300 L398,300" class="edge no-head" style="stroke-dasharray:4 3"/><path d="M562,300 L660,300" class="edge no-head" style="stroke-dasharray:4 3"/>
+    <path d="M300,230 L398,230" class="edge no-head" style="stroke-dasharray:4 3"/><path d="M562,230 L660,230" class="edge no-head" style="stroke-dasharray:4 3"/>
+    <rect x="400" y="216" width="160" height="98" rx="6" class="box reg"/>
+    <text x="480" y="244" class="t-c t-sm t-b">余弦距离</text>
+    <text x="480" y="264" class="t-c t-xs">在第 2、3 层各算一次</text>
+    <text x="480" y="282" class="t-c t-xs">只看 [MASK] 位置</text>
+    <rect x="390" y="140" width="180" height="40" rx="6" class="box reg"/>
+    <text x="480" y="154" class="t-c t-sm">轨迹损失 L_traj</text>
+    <text x="480" y="170" class="t-c t-xs">各层、各 [MASK] 位置平均</text>
+    <path d="M480,216 L480,182" class="edge reg"/>
+    <path d="M570,160 L610,160 L610,52" class="edge reg"/>
+    <rect x="370" y="70" width="220" height="40" rx="6" class="box act"/>
+    <text x="480" y="84" class="t-c t-sm">损失门 g</text>
+    <text x="480" y="100" class="t-c t-xs">L̃_BD &lt; r · L_BD（r = 1）时 g = 1</text>
+    <path d="M300,90 L368,90" class="edge loss"/><path d="M660,90 L592,90" class="edge" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path d="M480,70 L480,52" class="edge act"/>
+  </svg>
+  <div class="dia-note">本站示意图，按式 (6)–(11) 画出，对应原文图 2。梯度只沿左列（学生）回传；轨迹损失的梯度会经过学生的第 2、3 层一直传到第 1 层和词嵌入。</div>
+</div>
+
+<p>下面是按式 (6)–(11) 写的示意伪代码，便于对照每个量是怎么来的（本站撰写，不是官方代码）：</p>
+<pre><code class="lang-py"># 一个训练步。S = 循环层集合（GLM 为 {2, 3}），mask_pos = 被遮住的位置
+def loop_distill_step(model, x, x_tilde, mask_pos, S=(2, 3), Ks=(2, 3), r=1.0, lam=1.0):
+    # 学生：标准前向，每层算一遍（式 4）
+    h = model.embed(x_tilde)
+    hs = {0: h}
+    for l in range(1, L + 1):
+        h = model.layer[l](h)
+        hs[l] = h
+    loss_bd = masked_ce(model.head(h), x, mask_pos)              # 式 (2)
+
+    # 教师：同一套参数，不求梯度（式 6、7）
+    K = random.choice(Ks)
+    with no_grad():
+        t = hs[min(S) - 1].detach()
+        ts = {}
+        for l in range(min(S), L + 1):
+            for _ in range(K if l in S else 1):
+                t = model.layer[l](t)
+            ts[l] = t
+        loss_teacher = masked_ce(model.head(t), x, mask_pos)     # 式 (9)
+
+    gate = 1.0 if loss_teacher &lt; r * loss_bd else 0.0            # 式 (10)，整批一个值
+    traj = mean(1 - cos(hs[l][i], ts[l][i]) for l in S for i in mask_pos)   # 式 (8)
+    return loss_bd + lam * gate * traj                           # 式 (11)
+</code></pre>
+
+<h4 id="n-4-3">4.3 学生凭什么能学到东西</h4>
+<p>乍看之下有点奇怪：教师就是学生自己，只是浅层多算了几遍，学生能从“自己”身上学到什么？关键在于两者的计算量不同。教师用同样的参数做了更多的计算，所以在浅层能把 [MASK] 状态精炼得更充分；学生只能算一遍，于是它被要求“用一遍算出原来要算几遍才得到的方向”。梯度会改动学生的第 2、3 层（以及它们下面的第 1 层和词嵌入），让单次作用就把状态推到更靠近“多次作用之后”的位置。因为教师和学生共用参数，学生一变，教师也跟着变，所以这是一个不断移动的目标；stop-gradient 保证只有学生朝教师移动，而不是教师反过来迁就学生。这类“用自己更费力的版本当老师”的做法通常叫<b>自蒸馏</b>；这里的特别之处是“更费力”来自浅层循环，而且教师每一步都直接用当前权重，没有单独训练，也没有用权重的滑动平均。</p>
+<p>损失门在这里起把关作用。学生要降低轨迹损失，可以有两种方式：一种是真的学会“一遍到位”的精炼；另一种是让这一层变得“再算几遍也差不多”，即让多算几遍不再改变方向。两种方式都会让教师和学生趋于一致。损失门只在教师的预测确实更好时才打开，这保证了学生被拉去的方向至少在当前这批数据上是一个更好的方向。</p>
+
+<h4 id="n-4-4">4.4 要多付多少计算</h4>
+<p><b>推理：零。</b>部署的就是学生，结构、参数、每次前向的计算量、KV 缓存都和 Vanilla 完全相同，可以直接用原来的推理引擎和 kernel。推理变快只能来自“每次前向定稿更多 token”，也就是更少的前向次数。</p>
+<p><b>训练：一次额外的、不求梯度的前向。</b>为了算式 (9) 的教师损失，教师必须一直走到最后一层，所以每个训练步多出大约一次完整的前向（只有 \(\ell_0\) 以下的层可以复用学生的结果；GLM 只省了第 1 层），再加上循环层的重复：每步多算 \((K-1)\times|S|\) 层，GLM 是 2 到 4 层，相对 47 层不多。按“反向传播的计算量约为前向的 2 倍”这条常用经验，一个训练步原本约等于 3 份前向，教师多出约 1 份，按计算量粗算多出三分之一左右（推算）。论文附录 E 报告的墙钟时间是 Vanilla 约 7.5 小时、Loop-Distill 约 8.2 小时，只多 9%（论文说约 10%）。两者的差距可能来自通信、数据加载等不随计算量增长的固定开销，也可能来自实现上的优化，论文没有拆分。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>损失门是整批一个开关，不是逐个样本筛选。</b>式 (10) 比较的是整批数据上的平均交叉熵，原文图 3 的纵轴也是“满足条件的批次比例”。正文 §5.3 说去掉门会给“相当一部分样本”带来有害监督，这个说法比门实际做的事要细。</li>
+  <li><b>“循环 \(S\) 中的层”有两种可能的读法。</b>式 (7) 写的是每个选中的层各自连算 \(K\) 次（GLM：2、2、2、3、3、3）；而 §4.3 又说一次循环可以是“一个层或一小段层”，那样就成了整段重复（2、3、2、3、2、3）。原文图 2 只画了“浅层 → Loop × K”，无法区分。本页按式 (7) 画图和写伪代码。</li>
+  <li><b>教师的“更好”是在同一批训练数据上判断的。</b>门打开的条件和随后的蒸馏用的是同一批数据，没有留出一部分数据来检验教师是否真的更好。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §4.1–4.2、图 2（OpenReview PDF 第 4–5 页）↗</a> · 训练耗时见附录 E（PDF 第 17 页）</p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 方法（4.3）：循环从哪一层开始、绕几圈、包几层</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节的公式只说了教师“怎么用”，没说三个设计选择怎么定：循环从哪一层开始，每层连算几次，一共包含几层。论文从“局部精炼的动力学”出发给出了三条规则，并且在训练开始之前就用它们把配置定死。这些规则各自在量什么？用到的阈值又是从哪里来的？</div>
+<p>作者把每一层对 [MASK] 位置的作用写成一个状态转移（式 12）：\(h^{(\ell+1)}_{\mathcal M}=T_{\ell}\big(h^{(\ell)}_{\mathcal M};c^{(\ell)}\big)\)。这里 \(h^{(\ell)}_{\mathcal M}\in\mathbb R^{|\mathcal M|\times d}\) 是第 \(\ell\) 层之后所有被遮位置的隐藏状态，\(d\) 是隐藏维度；\(c^{(\ell)}\) 是这一层能看到的上下文状态，包括提示、已解码的历史和当前块里的其他位置。把一层或一小段层重复使用，就在 [MASK] 位置上定义了一条局部精炼轨迹；三条规则都是在这条轨迹上量出来的。</p>
+
+<h4 id="n-5-1">5.1 从哪一层开始：尽量浅，且选第一个 MoE 层</h4>
+<p>瓶颈集中在浅层，所以循环应当放得尽量早，放在“已经在做上下文精炼”的层里最浅的那一个。在论文用的 MoE 模型里，这对应最浅的 MoE 层。作者还给了第二个理由：MoE 的路由让同一层在不同的循环轮次里可以选中不同的专家，每一轮得到的更新不一样，循环因此更有意义。</p>
+<p>具体到两个模型：GLM-4.7-Flash 的第 1 层是普通的稠密层，不是 MoE 层（Hugging Face 上的模型配置也写明第 1 层用稠密 MLP），所以循环从第 2 层开始；Qwen3-30B-A3B-2507 的 48 层全是 MoE 层，循环从第 1 层开始。</p>
+
+<h4 id="n-5-2">5.2 绕几圈：再多绕一圈的收益小于第一圈的 5% 就停</h4>
+<p>先固定一个循环算子 \(T\)（可以是一层，也可以是几层），从循环前的 [MASK] 状态出发反复作用（式 13）：\(h^{(k+1)}_{\mathcal M}=T(h^{(k)}_{\mathcal M};c)\)。每作用一次的变化量是 \(\Delta_k=\lVert h^{(k+1)}_{\mathcal M}-h^{(k)}_{\mathcal M}\rVert_2\)（式 14）。如果循环是一个稳定的局部精炼过程，[MASK] 状态应当很快吸收完有用的上下文，后面每一次的增量都会变小。于是作者用第一次的变化量做分母，定义相对增益（式 15、16）：</p>
+<div class="formula">$$R_k=\frac{\Delta_k}{\Delta_0+\epsilon}\ (k\ge 1),\qquad K_{\max}=\min\{k: R_k\le\eta\}.$$</div>
+<p>\(R_k\) 衡量“第 \(k+1\) 次作用带来的变化，相当于第 1 次的几分之几”。当它第一次跌到阈值 \(\eta\) 以下，就认为再绕也没多少用了，此时的 \(k\) 就是最大有用圈数 \(K_{\max}\)。论文表 4 在 GLM 上给出了诊断值：\(R_2=0.31\)，\(R_3=0.04\)，\(R_4=0.01\)。默认 \(\eta=0.05\) 时，第一个不超过 0.05 的是 \(R_3\)，所以 \(K_{\max}=3\)；如果把 \(\eta\) 放宽到 0.40，会在 \(R_2\) 处停下，\(K_{\max}=2\)；收紧到 0.02 则停在 \(R_4\)，\(K_{\max}=4\)。训练时 \(K\) 在 \(\{2,3\}\) 中均匀抽取；\(K=1\) 不需要考虑，因为那就是学生自己。</p>
+
+<h4 id="n-5-3">5.3 包几层：教师偏离学生的程度不超过预算</h4>
+<p>把更多的层放进循环，教师会更强，但它离学生的单次前向轨迹也更远。作者指出这里有一个和损失门有关的取舍：教师越激进，在掩码重建上可能越好，但它和部署模型的原生路径相差太远时，学生学起来更难，门打开的次数也会变少。所以作者用循环带来的“漂移”来控制跨度。设循环层是从 \(\ell_0\) 开始的连续 \(m\) 层 \(S_m=\{\ell_0,\dots,\ell_0+m-1\}\)，漂移定义为这些层上学生与教师状态的平均余弦距离（式 17），和式 (8) 的轨迹损失是同一个量：</p>
+<div class="formula">$$D_m(K)=\frac{1}{|S_m|\,|\mathcal M|}\sum_{\ell\in S_m}\sum_{i\in\mathcal M}\left(1-\frac{\langle h^{(\ell)}_i,\ \mathrm{sg}(\tilde h^{(\ell,K)}_i)\rangle}{\lVert h^{(\ell)}_i\rVert_2\,\lVert\tilde h^{(\ell,K)}_i\rVert_2+\epsilon}\right),\qquad D_m(K)\le\delta .$$</div>
+<p>默认预算 \(\delta=0.15\)。GLM 上，循环 1 层的漂移是 0.04，2 层是 0.13，3 层是 0.38；不超过 0.15 的最大跨度是 2 层，所以 \(S=\{2,3\}\)。对应的门开启率依次是 27.0%、23.7%、18.8%，和“跨度越大、门越少打开”的说法一致。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两条选择规则背后的诊断数字（GLM-4.7-Flash，原文表 4）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="左：再多绕一圈带来的相对增益 R_k；右：循环跨度与漂移、门开启率、准确率" style="--dg-min:720px">
+<text x="40" y="22" class="t-b t-sm">绕几圈：第 k+1 次重复带来的变化 ÷ 第 1 次的变化（R_k）</text>
+<line x1="70" y1="240" x2="450" y2="240" class="axis"/>
+<text x="62" y="240" class="t-r t-xs">0.0</text>
+<text x="62" y="200.0" class="t-r t-xs">0.1</text>
+<text x="62" y="160.0" class="t-r t-xs">0.2</text>
+<text x="62" y="120.0" class="t-r t-xs">0.3</text>
+<text x="62" y="80.0" class="t-r t-xs">0.4</text>
+<line x1="70" y1="80.0" x2="450" y2="80.0" style="stroke:var(--c-loss);stroke-width:1.2;stroke-dasharray:5 4"/>
+<text x="448" y="72.0" class="t-r t-xs" style="fill:var(--c-loss)">η = 0.40</text>
+<line x1="70" y1="220.0" x2="450" y2="220.0" style="stroke:var(--c-loss);stroke-width:1.2;stroke-dasharray:5 4"/>
+<text x="448" y="212.0" class="t-r t-xs" style="fill:var(--c-loss)">η = 0.05（默认）</text>
+<rect x="110" y="116.0" width="60" height="124.0" class="box enc"/>
+<text x="140" y="108.0" class="t-c t-xs">0.31</text>
+<text x="140" y="256" class="t-c t-sm">R2</text>
+<text x="140" y="274" class="t-c t-xs">→ K 最多 2</text>
+<text x="140" y="292" class="t-c t-xs">准确率 40.27</text>
+<rect x="230" y="224.0" width="60" height="16.0" class="box pred"/>
+<text x="260" y="216.0" class="t-c t-xs">0.04</text>
+<text x="260" y="256" class="t-c t-sm">R3</text>
+<text x="260" y="274" class="t-c t-xs">→ K 最多 3</text>
+<text x="260" y="292" class="t-c t-xs">准确率 41.40</text>
+<rect x="350" y="236.0" width="60" height="4.0" class="box enc"/>
+<text x="380" y="228.0" class="t-c t-xs">0.01</text>
+<text x="380" y="256" class="t-c t-sm">R4</text>
+<text x="380" y="274" class="t-c t-xs">→ K 最多 4</text>
+<text x="380" y="292" class="t-c t-xs">准确率 41.46</text>
+<text x="40" y="318" class="t-xs">R1 论文未报告；准确率为表 4 的四项平均</text>
+<text x="510" y="22" class="t-b t-sm">包几层：教师与学生在这些层上的平均漂移 D_m</text>
+<line x1="540" y1="240" x2="930" y2="240" class="axis"/>
+<text x="532" y="240" class="t-r t-xs">0.0</text>
+<text x="532" y="200.0" class="t-r t-xs">0.1</text>
+<text x="532" y="160.0" class="t-r t-xs">0.2</text>
+<text x="532" y="120.0" class="t-r t-xs">0.3</text>
+<text x="532" y="80.0" class="t-r t-xs">0.4</text>
+<line x1="540" y1="180.0" x2="930" y2="180.0" style="stroke:var(--c-loss);stroke-width:1.2;stroke-dasharray:5 4"/>
+<text x="548" y="172.0" class="t-xs" style="fill:var(--c-loss)">δ = 0.15（默认预算）</text>
+<rect x="580" y="224.0" width="60" height="16.0" class="box enc"/>
+<text x="610" y="216.0" class="t-c t-xs">0.04</text>
+<text x="610" y="256" class="t-c t-sm">1 层</text>
+<text x="610" y="274" class="t-c t-xs">门开启 27.0%</text>
+<text x="610" y="292" class="t-c t-xs">准确率 41.01</text>
+<rect x="700" y="188.0" width="60" height="52.0" class="box pred"/>
+<text x="730" y="180.0" class="t-c t-xs">0.13</text>
+<text x="730" y="256" class="t-c t-sm">2 层</text>
+<text x="730" y="274" class="t-c t-xs">门开启 23.7%</text>
+<text x="730" y="292" class="t-c t-xs">准确率 41.40</text>
+<rect x="820" y="88.0" width="60" height="152.0" class="box enc"/>
+<text x="850" y="80.0" class="t-c t-xs">0.38</text>
+<text x="850" y="256" class="t-c t-sm">3 层</text>
+<text x="850" y="274" class="t-c t-xs">门开启 18.8%</text>
+<text x="850" y="292" class="t-c t-xs">准确率 40.36</text>
+<text x="510" y="318" class="t-xs">均为 GLM-4.7-Flash；漂移在训练前用初始检查点测得</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>左图每根柱子是“再多绕一圈”带来的变化占第一圈的比例，红色虚线是两个可选的阈值 \(\eta\)；柱子第一次落到虚线以下的位置，就是该阈值下的最大圈数。右图每根柱子是循环 1、2、3 层时教师相对学生的平均漂移，红色虚线是预算 \(\delta=0.15\)；柱下标出训练中门的平均开启率和最终的四项平均准确率。橙色柱是默认配置。本站根据原文表 4 的数字重画。</div>
+</div>
+
+<h4 id="n-5-4">5.4 默认配置怎么定出来</h4>
+<p>论文的流程是：对每个模型，在训练开始前，把初始 AR 检查点直接放在扩散模式下运行，从最早的做上下文精炼的层开始，用式 (16) 定 \(K_{\max}\)，再在漂移不超预算的前提下扩展连续的浅层跨度（附录 E）。结果是 GLM-4.7-Flash 用 \(S=\{2,3\}\)，Qwen3-30B-A3B-2507 用 \(S=\{1,2,3\}\)，两者都是 \(K_{\max}=3\)。配置定下来后，整个训练过程都不再改。第 8 节的消融会检验这些选择。</p>
+<div class="note-warn"><b>读的时候注意：</b>
+<ul>
+  <li><b>“最小”还是“最大”。</b>式 (18) 下面的文字说“选择漂移不超预算的<b>最小</b>跨度”，可默认流程又说“在预算之内<b>扩展</b>跨度”。漂移随跨度增加而增大，按“最小”的读法永远会选 1 层；实际选的是 2 层，所以论文真正用的是“预算内最大”的规则。</li>
+  <li><b>阈值本身是挑出来的。</b>表 4 给每个备选配置都配了一个能“推出”它的阈值：1 层对应 \(\delta=0.05\)，2 层对应 0.15，3 层对应 0.40；\(K_{\max}=2,3,4\) 分别对应 \(\eta=0.40,0.05,0.02\)。也就是说，规则本身不能自动给出答案，\(\eta=0.05\) 和 \(\delta=0.15\) 这两个数最终是靠表 4 的下游准确率选出来的，而且只在 GLM 上做了消融；Qwen 用的 3 层跨度没有单独验证。</li>
+  <li><b>“最早做上下文精炼的层”。</b>GLM 的第 1 层虽然是稠密层，但它同样有注意力，同样在做上下文精炼；论文实际采用的标准更接近“第一个 MoE 层”。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §4.3（OpenReview PDF 第 5–6 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实验设置（5.1 与附录 E）：两个 30B-A3B 模型，一轮 1200 步的 SFT</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>实验用了哪两个模型、什么数据、多大的训练量？对照组 Vanilla 是怎么来的？准确率和速度分别怎么测？为了后面判断结果的份量，这一节还要列清楚：Loop-Distill 和 Vanilla 之间，哪些条件对齐了，哪些没交代。</div>
+
+<div class="note-pre"><b>先补一点背景：“30B-A3B”是什么意思。</b>
+<p>MoE 模型的总参数和每个 token 实际用到的参数不一样多。“30B-A3B”表示总参数约 300 亿，但每个 token 只经过路由器选中的少数专家，实际激活的参数约 30 亿。所以它的存储量像一个 30B 模型，每个 token 的计算量却接近一个 3B 的稠密模型。</p>
+</div>
+
+<p><b>两个起点模型。</b>两个都是已经做过指令微调的 MoE 模型。下面的结构数字来自 Hugging Face 上的官方模型配置（本站 2026-10-20 查看），论文本身只写了“30B-A3B”：</p>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>GLM-4.7-Flash</th><th>Qwen3-30B-A3B-2507</th></tr></thead>
+<tbody>
+<tr><td>层数</td><td class="num">47</td><td class="num">48</td></tr>
+<tr><td>第 1 层</td><td>稠密 MLP</td><td>MoE</td></tr>
+<tr><td>专家</td><td>64 个路由专家选 4 个，外加 1 个共享专家</td><td>128 个专家选 8 个</td></tr>
+<tr><td>隐藏维度</td><td class="num">2048</td><td class="num">2048</td></tr>
+<tr><td>循环层 \(S\)（论文）</td><td>{2, 3}</td><td>{1, 2, 3}</td></tr>
+</tbody></table></div>
+<p class="w-note">论文把第二个模型写作“Qwen-30B-A3B-2507”，并说它是指令模型，所以应当是 Qwen3-30B-A3B-Instruct-2507（本站推断）。</p>
+
+<p><b>训练。</b>改造只用监督微调，没有额外的继续预训练。数据是 Step-3.5-Flash 的完整 SFT 数据集，约 162 万条，覆盖推理、代码和通用指令跟随。两个模型用同一套优化设置：Megatron-LM，128 张 NVIDIA B200，序列长度 16,384，全局 batch size 128，训练 1200 步，Muon 优化器，bfloat16 精度；辅助损失权重 \(\lambda=1.0\)。按这些数字，一次训练最多处理约 25 亿个 token（推算：1200 × 128 × 16,384 ≈ 2.5B，假设每条序列都打包满）；一共 15.36 万条长序列，如果正好过一遍 162 万条数据，平均每条长序列里装了约 10 条样本（推算）。作为对照，本站精读过的 <a href="sdar.html#n-5">SDAR</a> 把 Qwen3 改造成块扩散模型用了 50B token，比这里多一个数量级以上。</p>
+<p><b>对照组。</b>Vanilla 是同一个 AR 模型、用同样的数据和设置、只用标准块扩散损失（式 2）训练出来的模型。Loop-Distill 和它的唯一区别是多了辅助损失。教师是每一步用学生当前的权重临时构造的，不需要事先训练，也就始终和学生处在同一个表示空间里。</p>
+<p><b>循环配置。</b>\(\delta=0.15\)，\(\eta=0.05\)，得到第 5 节的 \(S\)；\(K\) 在 \(\{2,3\}\) 中均匀抽取。</p>
+<p><b>评测。</b>13 个评测分四类：通用（IFBench、KorBench、MMLU-Pro）、代码（MBPP+、HumanEval+、BigCodeBench、LiveCodeBench v6）、数学（MATH、OlympiadBench）、推理（GPQA-Diamond、BBH、MuSR、ZebraLogic）。这是原文表 1 的分组；§5.1 的文字分法略有不同。准确率是多次采样的平均 pass@1，解码阈值 \(\tau=0.95\)。吞吐量用每秒生成的 token 数（TPS）衡量，在 8 张 H20-3E 上用 SGLang、batch size 1 测得。</p>
+
+<div class="table-wrap"><table>
+<thead><tr><th>对比条件</th><th>Vanilla vs Loop-Distill</th></tr></thead>
+<tbody>
+<tr><td>起点模型、参数量</td><td>相同</td></tr>
+<tr><td>训练数据、步数、优化器、序列长度</td><td>相同</td></tr>
+<tr><td>训练计算</td><td>Loop-Distill 多一次不求梯度的前向；墙钟多约 10%</td></tr>
+<tr><td>推理结构、每次前向的计算量、KV 缓存</td><td>完全相同</td></tr>
+<tr><td>解码设置（阈值、块长）</td><td>相同</td></tr>
+<tr><td>原始 AR 模型的分数</td><td>没有报告</td></tr>
+<tr><td>多次评测的方差 / 置信区间</td><td>没有报告</td></tr>
+</tbody></table></div>
+<div class="note-warn"><b>论文没有交代清楚的地方：</b>
+<ul>
+  <li><b>评测重复了几次。</b>§5.1 说每个评测“采样 4 次取平均 pass@1”，附录 E 说准确率是“3 次重复评测的平均”，两处不一致。</li>
+  <li><b>块长 4 和块长 32 是不是两个模型。</b>论文没说训练时用的块长，也没说表 1 的两种块长结果来自分别训练的模型，还是同一个模型换了解码块长。</li>
+  <li><b>吞吐量测试用的阈值。</b>附录 E 只说准确率用 \(\tau=0.95\)；TPS 的解码配置只说“和各设置相同”。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §5.1 与附录 E（OpenReview PDF 第 6–7、17 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 主结果（5.2 与附录 C）：13 个评测平均高 2 分左右</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在四种设置（两个模型 × 两种块长）下，Loop-Distill 比 Vanilla 高多少？提升是普遍的，还是集中在少数评测上？摘要里的“2.05 和 2.21”是怎么算出来的？它和 AR 对齐损失叠加起来会怎样？</div>
+<p>原文表 1 的 13 项平均分如下：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>设置</th><th class="num">Vanilla</th><th class="num">Loop-Distill</th><th class="num">提升</th><th>13 项中提升的项数</th></tr></thead>
+<tbody>
+<tr><td>GLM-4.7-Flash，块长 32</td><td class="num">46.68</td><td class="num">48.84</td><td class="num">+2.17</td><td>12（MATH −0.96）</td></tr>
+<tr><td>Qwen3-30B-A3B-2507，块长 32</td><td class="num">46.04</td><td class="num">48.37</td><td class="num">+2.33</td><td>10（KorBench −0.16、MMLU-Pro −0.89、MBPP+ −0.06）</td></tr>
+<tr><td>GLM-4.7-Flash，块长 4</td><td class="num">56.31</td><td class="num">58.24</td><td class="num">+1.93</td><td>13</td></tr>
+<tr><td>Qwen3-30B-A3B-2507，块长 4</td><td class="num">56.53</td><td class="num">58.62</td><td class="num">+2.09</td><td>13</td></tr>
+</tbody></table></div>
+<p>摘要里的 2.05 是 GLM 两种块长提升的平均（(2.17 + 1.93) ÷ 2），2.21 是 Qwen 的平均（(2.33 + 2.09) ÷ 2）。本站用表 1 的单项分数重新算了四个平均值，和论文一致。</p>
+<div class="dia">
+  <div class="dia-title">图：每个评测上 Loop-Distill 比 Vanilla 高多少（原文表 1 的数字）</div>
+  <svg class="dg" viewBox="0 0 960 478" role="img" aria-label="Loop-Distill 相对 Vanilla 在 13 个评测上的分差，四种设置分别标出" style="--dg-min:720px">
+<circle cx="250" cy="22" r="5.5" style="fill:var(--c-enc)"/>
+<text x="260" y="22" class="t-sm">GLM-4.7-Flash，块长 32</text>
+<circle cx="420" cy="22" r="5.5" style="fill:var(--c-pred)"/>
+<text x="430" y="22" class="t-sm">Qwen，块长 32</text>
+<rect x="585" y="17" width="10" height="10" style="fill:none;stroke:var(--c-enc);stroke-width:2"/>
+<text x="600" y="22" class="t-sm">GLM-4.7-Flash，块长 4</text>
+<rect x="755" y="17" width="10" height="10" style="fill:none;stroke:var(--c-pred);stroke-width:2"/>
+<text x="770" y="22" class="t-sm">Qwen，块长 4</text>
+<line x1="250.0" y1="46" x2="250.0" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="250.0" y="433.0" class="t-c t-xs">-2</text>
+<line x1="325.6" y1="46" x2="325.6" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="325.6" y="433.0" class="t-c t-xs">-1</text>
+<line x1="401.1" y1="46" x2="401.1" y2="419.0" class="axis"/>
+<text x="401.1" y="433.0" class="t-c t-xs">0</text>
+<line x1="476.7" y1="46" x2="476.7" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="476.7" y="433.0" class="t-c t-xs">+1</text>
+<line x1="552.2" y1="46" x2="552.2" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="552.2" y="433.0" class="t-c t-xs">+2</text>
+<line x1="627.8" y1="46" x2="627.8" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="627.8" y="433.0" class="t-c t-xs">+3</text>
+<line x1="703.3" y1="46" x2="703.3" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="703.3" y="433.0" class="t-c t-xs">+4</text>
+<line x1="778.9" y1="46" x2="778.9" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="778.9" y="433.0" class="t-c t-xs">+5</text>
+<line x1="854.4" y1="46" x2="854.4" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="854.4" y="433.0" class="t-c t-xs">+6</text>
+<line x1="930.0" y1="46" x2="930.0" y2="419.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="930.0" y="433.0" class="t-c t-xs">+7</text>
+<text x="590" y="451.0" class="t-c t-sm">Loop-Distill 减 Vanilla 的分差（百分点）→</text>
+<text x="190" y="62" class="t-r t-sm">IFBench</text>
+<text x="240" y="62" class="t-r t-xs">通用</text>
+<circle cx="688.2" cy="56" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="451.7" cy="60" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="542.9" y="60" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="497.6" y="64" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="88" class="t-r t-sm">KorBench</text>
+<text x="240" y="88" class="t-r t-xs">通用</text>
+<circle cx="431.3" cy="82" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="389.0" cy="86" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="626.8" y="86" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="508.9" y="90" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="114" class="t-r t-sm">MMLU-Pro</text>
+<text x="240" y="114" class="t-r t-xs">通用</text>
+<circle cx="636.8" cy="108" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="333.9" cy="112" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="586.0" y="112" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="563.3" y="116" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="140" class="t-r t-sm">MBPP+</text>
+<text x="240" y="140" class="t-r t-xs">代码</text>
+<circle cx="745.6" cy="134" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="396.6" cy="138" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="564.1" y="138" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="466.6" y="142" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="166" class="t-r t-sm">HumanEval+</text>
+<text x="240" y="166" class="t-r t-xs">代码</text>
+<circle cx="493.3" cy="160" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="873.3" cy="164" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="555.8" y="164" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="685.0" y="168" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="192" class="t-r t-sm">BigCodeBench</text>
+<text x="240" y="192" class="t-r t-xs">代码</text>
+<circle cx="685.2" cy="186" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="540.1" cy="190" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="523.3" y="190" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="715.2" y="194" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="218" class="t-r t-sm">LiveCodeBench v6</text>
+<text x="240" y="218" class="t-r t-xs">代码</text>
+<circle cx="493.3" cy="212" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="658.8" cy="216" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="481.7" y="216" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="584.5" y="220" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="244" class="t-r t-sm">MATH</text>
+<text x="240" y="244" class="t-r t-xs">数学</text>
+<circle cx="328.6" cy="238" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="438.9" cy="242" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="454.5" y="242" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="489.3" y="246" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="270" class="t-r t-sm">OlympiadBench</text>
+<text x="240" y="270" class="t-r t-xs">数学</text>
+<circle cx="509.9" cy="264" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="812.1" cy="268" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="489.3" y="268" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="492.3" y="272" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="296" class="t-r t-sm">GPQA-Diamond</text>
+<text x="240" y="296" class="t-r t-xs">推理</text>
+<circle cx="499.3" cy="290" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="708.6" cy="294" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="601.9" y="294" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="444.7" y="298" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="322" class="t-r t-sm">BBH</text>
+<text x="240" y="322" class="t-r t-xs">推理</text>
+<circle cx="697.3" cy="316" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="475.2" cy="320" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="493.1" y="320" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="483.2" y="324" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="348" class="t-r t-sm">MuSR</text>
+<text x="240" y="348" class="t-r t-xs">推理</text>
+<circle cx="609.6" cy="342" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="652.0" cy="346" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="473.4" y="346" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="448.5" y="350" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<text x="190" y="374" class="t-r t-sm">ZebraLogic</text>
+<text x="240" y="374" class="t-r t-xs">推理</text>
+<circle cx="525.8" cy="368" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="777.4" cy="372" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="668.4" y="372" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="836.1" y="376" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+<line x1="40" y1="387.0" x2="930" y2="387.0" class="axis"/>
+<text x="190" y="400" class="t-r t-sm t-b">13 项平均</text>
+<circle cx="565.1" cy="394" r="4.5" style="fill:var(--c-enc)"/>
+<circle cx="577.2" cy="398" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="542.9" y="398" width="8" height="8" style="fill:none;stroke:var(--c-enc);stroke-width:1.8"/>
+<rect x="555.0" y="402" width="8" height="8" style="fill:none;stroke:var(--c-pred);stroke-width:1.8"/>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个评测，横轴是分差，竖实线是 0。蓝色是 GLM-4.7-Flash，橙色是 Qwen3-30B-A3B-2507；实心圆是块长 32，空心方块是块长 4。点落在 0 的右边就是 Loop-Distill 更好。可以读出三件事：块长 4 时 26 个点全在 0 右边；块长 32 时有 4 个点略在 0 左边，都在 1 分以内；最大的几个提升（Qwen 块长 32 的 HumanEval+ +6.25、OlympiadBench +5.44，Qwen 块长 4 的 ZebraLogic +5.81）出现在代码、竞赛数学和逻辑推理类评测上。本站根据原文表 1 重画。</div>
+</div>
+<p>论文据此说提升是“广泛的，不是某个领域特有的”，但在代码和推理类评测上更明显；而且四种设置的方向一致，说明 Loop-Distill 修的是 AR 到块扩散改造的一个普遍缺陷，而不是某个模型或某个块长的偶然现象。除另有说明外，后面的分析都在 GLM-4.7-Flash、块长 32 上做。</p>
+<p>有一个数字关系值得单独看一眼：块长从 4 换成 32，Vanilla 的平均分要掉将近 10 分（GLM：56.31 → 46.68）。Loop-Distill 在块长 32 下的 48.84，仍然远低于 Vanilla 在块长 4 下的 56.31。也就是说，大块并行带来的质量损失主要还在那里，Loop-Distill 只把它往回拉了一小段。块长越大，每一步要同时处理的 [MASK] 越多，这正是论文关心的情形，可惜论文没有讨论这个差距。</p>
+
+<h4 id="n-7-1">7.1 和 AR 对齐损失叠加（附录 C）</h4>
+<p>前人的另一类改造方法是给改造过程加一个辅助损失，让模型保持原 AR 模型的特性。作者认为两者作用在不同层面：这类损失管的是跨范式的表示漂移，Loop-Distill 管的是扩散模型内部 [MASK] 状态的信息流，所以可能互补。他们在 Qwen3-30B-A3B-2507、块长 4 上做了一组实验，“按 Fu 等 2026 的改造配方”加了一个权重为 0.3 的 AR 损失（原文表 12）：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>方法</th><th class="num">13 项平均</th><th class="num">相对基线</th></tr></thead>
+<tbody>
+<tr><td>基线（Vanilla）</td><td class="num">56.53</td><td class="num">—</td></tr>
+<tr><td>+ AR 损失</td><td class="num">57.93</td><td class="num">+1.40</td></tr>
+<tr><td>+ Loop-Distill</td><td class="num">58.62</td><td class="num">+2.09</td></tr>
+<tr class="hl"><td>+ 两者</td><td class="num">59.87</td><td class="num">+3.34</td></tr>
+</tbody></table></div>
+<p>两者叠加比只加 AR 损失再高约 1.9 分（推算：59.87 − 57.93 = 1.94；论文写的是 1.96），作者据此认为 Loop-Distill 学到的东西和 AR 对齐信号并不重复。</p>
+<div class="note-warn"><b>读的时候注意：</b>
+<ul>
+  <li><b>叠加不是逐项都更好。</b>在 ZebraLogic（46.05 对 49.78）、BigCodeBench（36.58 对 38.68）上，两者叠加反而比只用 Loop-Distill 低两分以上，HumanEval+ 和 OlympiadBench 也略低；平均分的提升来自其余项目。</li>
+  <li><b>“AR 损失”到底是什么，论文前后说法不一。</b>附录 C 把它称为“AR 表示对齐”，说它维持原 AR 模型的隐藏状态几何；但它引用的 Fu 等 2026（<a href="nemotron-diffusion.html#n-2-1">Nemotron-Labs-Diffusion</a>）用的是干净序列上的下一个 token 预测损失，而且那篇论文里 0.3 是加在<b>扩散</b>损失上的权重，不是 AR 损失的权重。这篇论文具体实现的是哪一种，从文字里判断不了。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §5.2、表 1 与附录 C、表 12（OpenReview PDF 第 7、16 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 消融（5.3）：哪些设计真的起作用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Loop-Distill 有好几个部件：损失门、只蒸馏 [MASK] 位置、蒸馏整条轨迹而不只是终点、随机抽 \(K\)；还有三个配置选择：起点、跨度、圈数。去掉或换掉其中一个，结果会差多少？这些差别有多大把握不是噪声？</div>
+<p>所有消融都在 GLM-4.7-Flash、块长 32 上做，指标是 GPQA-Diamond、MMLU-Pro、LiveCodeBench v6 和 OlympiadBench 四项的平均准确率。下图把原文表 2、表 3、表 4 的数字放在一起：</p>
+<div class="dia">
+  <div class="dia-title">图：各消融设置的四项平均准确率（GLM-4.7-Flash，块长 32）</div>
+  <svg class="dg" viewBox="0 0 960 461" role="img" aria-label="GLM-4.7-Flash 块长 32 上各消融设置的四项平均准确率" style="--dg-min:700px">
+<line x1="330.0" y1="22" x2="330.0" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="330.0" y="433.0" class="t-c t-xs">39.0</text>
+<line x1="435.8" y1="22" x2="435.8" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="435.8" y="433.0" class="t-c t-xs">39.5</text>
+<line x1="541.5" y1="22" x2="541.5" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="541.5" y="433.0" class="t-c t-xs">40.0</text>
+<line x1="647.3" y1="22" x2="647.3" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="647.3" y="433.0" class="t-c t-xs">40.5</text>
+<line x1="753.1" y1="22" x2="753.1" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="753.1" y="433.0" class="t-c t-xs">41.0</text>
+<line x1="858.8" y1="22" x2="858.8" y2="421.0" class="grid-ln" style="stroke-dasharray:2 4"/>
+<text x="858.8" y="433.0" class="t-c t-xs">41.5</text>
+<text x="605" y="451.0" class="t-c t-sm">四项平均准确率（GPQA-D、MMLU-Pro、LCB-v6、OlympiadBench）；横轴从 39 分起画，不从 0 开始</text>
+<line x1="463.3" y1="22" x2="463.3" y2="421.0" style="stroke:var(--c-data);stroke-width:1.2;stroke-dasharray:5 3"/>
+<text x="463.3" y="14" class="t-c t-xs" style="fill:var(--c-data)">Vanilla 39.63</text>
+<line x1="837.7" y1="22" x2="837.7" y2="421.0" style="stroke:var(--c-pred);stroke-width:1.2;stroke-dasharray:5 3"/>
+<text x="837.7" y="14" class="t-c t-xs" style="fill:var(--c-pred)">完整方法 41.40</text>
+<text x="20" y="41.5" class="t-sm t-b">策略（原文表 2）</text>
+<text x="320" y="64.5" class="t-r t-sm">Vanilla（只用块扩散损失）</text>
+<rect x="330" y="57.5" width="133.3" height="14" rx="3" class="box data"/>
+<text x="469.3" y="64.5" class="t-xs">39.63</text>
+<text x="320" y="87.5" class="t-r t-sm">去掉损失门</text>
+<rect x="330" y="80.5" width="277.1" height="14" rx="3" class="box enc"/>
+<text x="613.1" y="87.5" class="t-xs">40.31</text>
+<text x="320" y="110.5" class="t-r t-sm">所有 token 都蒸馏</text>
+<rect x="330" y="103.5" width="334.2" height="14" rx="3" class="box enc"/>
+<text x="670.2" y="110.5" class="t-xs">40.58</text>
+<text x="320" y="133.5" class="t-r t-sm">只蒸馏最终状态</text>
+<rect x="330" y="126.5" width="368.1" height="14" rx="3" class="box enc"/>
+<text x="704.1" y="133.5" class="t-xs">40.74</text>
+<text x="320" y="156.5" class="t-r t-sm">固定 K = 3（不抽样）</text>
+<rect x="330" y="149.5" width="437.9" height="14" rx="3" class="box enc"/>
+<text x="773.9" y="156.5" class="t-xs">41.07</text>
+<text x="320" y="179.5" class="t-r t-sm">完整 Loop-Distill</text>
+<rect x="330" y="172.5" width="507.7" height="14" rx="3" class="box pred"/>
+<text x="843.7" y="179.5" class="t-xs">41.40</text>
+<text x="20" y="202.5" class="t-sm t-b">门阈值 r（原文表 3；r = 1.00 即完整方法）</text>
+<text x="320" y="225.5" class="t-r t-sm">r = 0.95（更严）</text>
+<rect x="330" y="218.5" width="217.9" height="14" rx="3" class="box enc"/>
+<text x="553.9" y="225.5" class="t-xs">40.03</text>
+<text x="320" y="248.5" class="t-r t-sm">r = 1.05（更松）</text>
+<rect x="330" y="241.5" width="258.1" height="14" rx="3" class="box enc"/>
+<text x="594.1" y="248.5" class="t-xs">40.22</text>
+<text x="20" y="271.5" class="t-sm t-b">循环放在哪、包几层、绕几圈（原文表 4）</text>
+<text x="320" y="294.5" class="t-r t-sm">从中层开始循环</text>
+<rect x="330" y="287.5" width="319.4" height="14" rx="3" class="box enc"/>
+<text x="655.4" y="294.5" class="t-xs">40.51</text>
+<text x="320" y="317.5" class="t-r t-sm">从深层（N−2）开始循环</text>
+<rect x="330" y="310.5" width="228.5" height="14" rx="3" class="box enc"/>
+<text x="564.5" y="317.5" class="t-xs">40.08</text>
+<text x="320" y="340.5" class="t-r t-sm">只循环 1 层</text>
+<rect x="330" y="333.5" width="425.2" height="14" rx="3" class="box enc"/>
+<text x="761.2" y="340.5" class="t-xs">41.01</text>
+<text x="320" y="363.5" class="t-r t-sm">循环 3 层</text>
+<rect x="330" y="356.5" width="287.7" height="14" rx="3" class="box enc"/>
+<text x="623.7" y="363.5" class="t-xs">40.36</text>
+<text x="320" y="386.5" class="t-r t-sm">K 最多 2</text>
+<rect x="330" y="379.5" width="268.7" height="14" rx="3" class="box enc"/>
+<text x="604.7" y="386.5" class="t-xs">40.27</text>
+<text x="320" y="409.5" class="t-r t-sm">K 最多 4</text>
+<rect x="330" y="402.5" width="520.4" height="14" rx="3" class="box enc"/>
+<text x="856.4" y="409.5" class="t-xs">41.46</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每根横条是一种设置，条越长越好；灰色虚线是 Vanilla（39.63），橙色虚线是完整方法（41.40）。注意横轴从 39 分开始画，整张图的跨度只有不到 2 分，条的长短差别被放大了。本站根据原文表 2–4 重画。</div>
+</div>
+<p><b>策略（表 2）。</b>去掉损失门，平均分从 41.40 掉到 40.31，作者的解释是：不加把关的循环教师会在相当一部分数据上给出有害的监督。所有 token 都蒸馏（包括可见位置）得到 40.58，比只蒸馏 [MASK] 位置差，这和“瓶颈在 [MASK] 状态的形成，而不在可见上下文的表示”的诊断一致。只蒸馏循环的终点状态得到 40.74，说明塑造中间的浅层精炼路径本身也有用，不只是匹配一个更好的终点。固定 \(K=3\) 得到 41.07，比随机抽 \(K\) 略差，作者认为见过一小族不同的循环轨迹更稳健。值得注意的是，去掉门的版本仍然比 Vanilla 高 0.68 分，说明不加门的蒸馏整体上也不是有害的，门是在此之上再加 1 分左右。</p>
+<p><b>门阈值（表 3）。</b>\(r=1.00\) 最好。更严的 \(r=0.95\)（教师要比学生好 5% 才打开）得到 40.03，作者解释为压掉了有用的信号；更松的 \(r=1.05\)（教师稍差也打开）得到 40.22，引入了更多噪声轨迹。不过单项上并不整齐：LiveCodeBench v6 在 \(r=1.05\) 时最高（22.14 对 21.32）。</p>
+<p><b>循环设计（表 4）。</b>从最早的浅层开始循环最好（41.40）；从中层开始得到 40.51，作者说精炼来得太晚；从倒数第 2 层（N−2）开始得到 40.08，离瓶颈太远。跨度上，1 层（41.01）精炼不足，3 层（40.36）漂移过大、门开得更少，2 层最好。圈数上，\(K_{\max}=2\) 得到 40.27，\(K_{\max}=3\) 得到 41.40，\(K_{\max}=4\) 得到 41.46。</p>
+<div class="note-warn"><b>读的时候注意：</b>
+<ul>
+  <li><b>差距和噪声的量级相近。</b>这些设置之间的差别大多在 0.3 到 1.4 分之间，论文没有报告多次运行的方差。四项里 GPQA-Diamond 只有 198 道题，一道题就是约 0.5 分；MMLU-Pro 有约 1.2 万道题，它上面的差别更可信。完整方法是被调出来的那个配置，其余设置只跑了一次，所以“完整方法最好”这件事本身带有一些选择偏差。</li>
+  <li><b>\(K_{\max}=4\) 其实略高。</b>表 4 里 \(K_{\max}=4\) 的 41.46 比默认的 41.40 还高 0.06，表格把它标成“边际收益”，正文却说是“边际下降”。合理的读法是：3 圈以后再加圈没有可见的差别，选 3 圈是为了省训练计算。</li>
+  <li><b>“中层起点”的写法不清楚。</b>表 4 把它写成“layer 2/N-1”，看起来像排版错误，可能想表达第 \(N/2-1\) 层；本页按“中层”理解。</li>
+</ul>
+</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §5.3、表 2–4（OpenReview PDF 第 7–8 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 训练动态与解码行为（5.4、附录 A 与 D）：为什么变快，内部变了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>准确率提高了，作者还想说明“为什么”：训练中教师的作用是不是逐渐被学生吸收了？每次前向是不是真的定稿了更多 token，实测速度快了多少？浅层的 [MASK] 状态是不是不再“过早定型”，浅层的读数是不是不再“乱下结论”？这一节逐个看这四组证据，并检查它们的数字能不能互相对上。</div>
+
+<h4 id="n-9-1">9.1 门开启率随训练一路下降</h4>
+<div class="dia">
+  <div class="dia-title">图：训练中满足“教师损失 &lt; 学生损失”的批次比例（GLM-4.7-Flash）</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="训练中门开启率从约 81% 降到约 2%" style="--dg-min:640px">
+<line x1="110" y1="240.0" x2="880" y2="240.0" class="grid-ln"/>
+<text x="100" y="240.0" class="t-r t-xs">0%</text>
+<line x1="110" y1="190.0" x2="880" y2="190.0" class="grid-ln"/>
+<text x="100" y="190.0" class="t-r t-xs">25%</text>
+<line x1="110" y1="140.0" x2="880" y2="140.0" class="grid-ln"/>
+<text x="100" y="140.0" class="t-r t-xs">50%</text>
+<line x1="110" y1="90.0" x2="880" y2="90.0" class="grid-ln"/>
+<text x="100" y="90.0" class="t-r t-xs">75%</text>
+<line x1="110" y1="40.0" x2="880" y2="40.0" class="grid-ln"/>
+<text x="100" y="40.0" class="t-r t-xs">100%</text>
+<text x="110.0" y="256" class="t-c t-xs">0</text>
+<text x="174.2" y="256" class="t-c t-xs">100</text>
+<text x="302.5" y="256" class="t-c t-xs">300</text>
+<text x="430.8" y="256" class="t-c t-xs">500</text>
+<text x="559.2" y="256" class="t-c t-xs">700</text>
+<text x="687.5" y="256" class="t-c t-xs">900</text>
+<text x="880.0" y="256" class="t-c t-xs">1200</text>
+<text x="495" y="278" class="t-c t-sm">训练步数 →</text>
+<text x="30" y="140" class="t-c t-sm" transform="rotate(-90 30 140)">门开启的批次占比</text>
+<line x1="110" y1="192.6" x2="880" y2="192.6" style="stroke:var(--c-pred);stroke-width:1.2;stroke-dasharray:5 4"/>
+<text x="876" y="182.6" class="t-r t-xs" style="fill:var(--c-pred)">全程平均 23.7%（原文表 4）</text>
+<polyline points="110.0,78.2 174.2,136.2 302.5,192.0 430.8,214.4 559.2,224.0 687.5,230.0 880.0,236.0" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<circle cx="110.0" cy="78.2" r="4" style="fill:var(--c-enc)"/>
+<text x="118.0" y="68.2" class="t-xs">约 80.9%</text>
+<circle cx="174.2" cy="136.2" r="4" style="fill:var(--c-enc)"/>
+<text x="182.2" y="126.2" class="t-xs">约 51.9%</text>
+<circle cx="302.5" cy="192.0" r="4" style="fill:var(--c-enc)"/>
+<text x="310.5" y="182.0" class="t-xs">约 24%</text>
+<circle cx="430.8" cy="214.4" r="4" style="fill:var(--c-enc)"/>
+<text x="438.8" y="204.4" class="t-xs">约 12.8%</text>
+<circle cx="559.2" cy="224.0" r="4" style="fill:var(--c-enc)"/>
+<text x="567.2" y="214.0" class="t-xs">约 8%</text>
+<circle cx="687.5" cy="230.0" r="4" style="fill:var(--c-enc)"/>
+<text x="695.5" y="220.0" class="t-xs">约 5%</text>
+<circle cx="880.0" cy="236.0" r="4" style="fill:var(--c-enc)"/>
+<text x="888.0" y="226.0" class="t-xs">约 2%</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是训练步数（共 1200 步），纵轴是门开启的批次占比。原图只画了 7 个点，这里的数值是从原图读出的近似值（读图）；橙色虚线是原文表 4 报告的全程平均 23.7%。本站根据原文图 3 重画。</div>
+</div>
+<p>门开启率从训练开始时的约 81% 单调降到结束时的约 2%（读图）。作者认为这正是自蒸馏成功的标志：训练初期，循环教师经常比学生的掩码重建损失低；随着学生逐渐吸收这种精炼行为，它越来越不需要教师。</p>
+<p>这张图还能读出两件论文没有展开的事。第一，在第 0 步，门就在约 81% 的批次上打开。这时的模型还只是“直接放在扩散模式下运行的 AR 检查点”，说明对这样的模型来说，让第 2、3 层多算几遍，在大多数批次上确实能降低掩码交叉熵；这是“浅层计算不够”这一诊断最直接的一条证据。第二，到第 300 步左右，门只在约四分之一的批次上打开，此后越来越少；也就是说，蒸馏信号主要集中在训练的前几百步。但为了判断门开不开，教师的前向每一步都得算，所以训练后期那 10% 左右的额外开销大部分用不上。是否可以在后期关掉教师省下计算，论文没有试。</p>
+<div class="note-warn"><b>读的时候注意：</b>门开启率下降和“学生吸收了循环”一致，但它不是唯一的解释。Vanilla 训练本身也会让学生变好，教师的相对优势也可能随之自然消失；论文没有给出 Vanilla 训练过程中“如果构造一个循环教师，它会不会更好”的对照曲线。真正说明学生变好的，是第 7 节的下游准确率。</div>
+
+<h4 id="n-9-2">9.2 每次前向定稿更多 token（TPF）</h4>
+<p>原文表 5 在 GLM-4.7-Flash、块长 32 上，对四个评测、两个阈值报告了平均每次前向定稿的 token 数：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>阈值 \(\tau\)</th><th>评测</th><th class="num">Vanilla</th><th class="num">Loop-Distill</th><th class="num">提升</th></tr></thead>
+<tbody>
+<tr><td rowspan="4">0.90</td><td>GPQA-Diamond</td><td class="num">2.887</td><td class="num">2.999</td><td class="num">+3.88%</td></tr>
+<tr><td>OlympiadBench</td><td class="num">1.903</td><td class="num">2.136</td><td class="num">+12.27%</td></tr>
+<tr><td>LiveCodeBench v6</td><td class="num">1.963</td><td class="num">2.048</td><td class="num">+4.34%</td></tr>
+<tr><td>MMLU-Pro</td><td class="num">3.029</td><td class="num">3.063</td><td class="num">+1.11%</td></tr>
+<tr><td rowspan="4">0.95</td><td>GPQA-Diamond</td><td class="num">2.876</td><td class="num">3.063</td><td class="num">+6.49%</td></tr>
+<tr><td>OlympiadBench</td><td class="num">1.990</td><td class="num">2.251</td><td class="num">+13.08%</td></tr>
+<tr><td>LiveCodeBench v6</td><td class="num">1.841</td><td class="num">1.969</td><td class="num">+6.96%</td></tr>
+<tr><td>MMLU-Pro</td><td class="num">2.974</td><td class="num">3.014</td><td class="num">+1.36%</td></tr>
+</tbody></table></div>
+<p>八个格子全部提升。作者的解释是：Loop-Distill 让浅层的精炼更有效，于是每次前向能解决更多的 [MASK] 位置，需要的完整去噪步就更少。论文报告的平均提升是 4.43%（\(\tau=0.90\)）和 6.69%（\(\tau=0.95\)）。</p>
+<div class="note-warn"><b>本站核对时发现的两个问题：</b>
+<ul>
+  <li><b>平均值对不上。</b>四个提升百分比的平均是 5.39% 和 6.98%；先把四个 TPF 平均再算提升，是 4.74% 和 6.36%（都是推算）。两种算法都得不到论文的 4.43% 和 6.69%，可能是按 token 数加权的，论文没有说明。</li>
+  <li><b>阈值越严，TPF 反而越高。</b>按常理，阈值从 0.90 提到 0.95，每步能过阈值的位置会变少，TPF 应当下降。表里有三处反过来：Vanilla 的 OlympiadBench（1.903 → 1.990），Loop-Distill 的 GPQA-Diamond（2.999 → 3.063）和 OlympiadBench（2.136 → 2.251）。一种可能是两次解码生成的内容不同（比如回答长短不同），TPF 本身就有不小的波动。无论原因是什么，这都说明单个格子里几个百分点的差别不宜过度解读。</li>
+</ul>
+</div>
+
+<h4 id="n-9-3">9.3 实测吞吐：batch size 1 时平均快 11%</h4>
+<p>原文表 6 在 8 张 H20-3E 上用 SGLang、batch size 1 测了每秒生成的 token 数，对 9 个评测取平均（表 1 的 13 个评测里，LiveCodeBench、OlympiadBench、BBH、ZebraLogic 不在其中）：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>设置</th><th class="num">Vanilla</th><th class="num">Loop-Distill</th><th class="num">提升</th></tr></thead>
+<tbody>
+<tr><td>GLM，块长 32</td><td class="num">491.91</td><td class="num">551.86</td><td class="num">+12.2%</td></tr>
+<tr><td>Qwen，块长 32</td><td class="num">266.41</td><td class="num">296.61</td><td class="num">+11.3%</td></tr>
+<tr><td>GLM，块长 4</td><td class="num">276.29</td><td class="num">304.14</td><td class="num">+10.1%</td></tr>
+<tr><td>Qwen，块长 4</td><td class="num">174.89</td><td class="num">193.29</td><td class="num">+10.5%</td></tr>
+</tbody></table></div>
+<p>摘要里的 11.0% 是这四个提升的平均。附录 A 的表 8 给出了每个评测的吞吐量，本站把它换算成逐项的变化画在下面：</p>
+<div class="dia">
+  <div class="dia-title">图：9 个评测各自的吞吐变化（原文表 8 推算）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="四种设置下 9 个评测各自的吞吐变化，以及论文报告的平均提升" style="--dg-min:720px">
+<line x1="270.0" y1="40" x2="270.0" y2="236" class="grid-ln"/>
+<text x="270.0" y="250" class="t-c t-xs">-20%</text>
+<line x1="330.0" y1="40" x2="330.0" y2="236" class="grid-ln"/>
+<text x="330.0" y="250" class="t-c t-xs">-10%</text>
+<line x1="390.0" y1="40" x2="390.0" y2="236" class="axis"/>
+<text x="390.0" y="250" class="t-c t-xs">0</text>
+<line x1="450.0" y1="40" x2="450.0" y2="236" class="grid-ln"/>
+<text x="450.0" y="250" class="t-c t-xs">+10%</text>
+<line x1="510.0" y1="40" x2="510.0" y2="236" class="grid-ln"/>
+<text x="510.0" y="250" class="t-c t-xs">+20%</text>
+<line x1="570.0" y1="40" x2="570.0" y2="236" class="grid-ln"/>
+<text x="570.0" y="250" class="t-c t-xs">+30%</text>
+<line x1="630.0" y1="40" x2="630.0" y2="236" class="grid-ln"/>
+<text x="630.0" y="250" class="t-c t-xs">+40%</text>
+<line x1="690.0" y1="40" x2="690.0" y2="236" class="grid-ln"/>
+<text x="690.0" y="250" class="t-c t-xs">+50%</text>
+<line x1="750.0" y1="40" x2="750.0" y2="236" class="grid-ln"/>
+<text x="750.0" y="250" class="t-c t-xs">+60%</text>
+<line x1="810.0" y1="40" x2="810.0" y2="236" class="grid-ln"/>
+<text x="810.0" y="250" class="t-c t-xs">+70%</text>
+<line x1="870.0" y1="40" x2="870.0" y2="236" class="grid-ln"/>
+<text x="870.0" y="250" class="t-c t-xs">+80%</text>
+<line x1="930.0" y1="40" x2="930.0" y2="236" class="grid-ln"/>
+<text x="930.0" y="250" class="t-c t-xs">+90%</text>
+<text x="600" y="272" class="t-c t-sm">Loop-Distill 相对 Vanilla 的吞吐（TPS）变化 →</text>
+<text x="20" y="20" class="t-xs">圆点 = 单个评测（由表 8 推算）；黑竖线 = 论文表 6 报告的平均提升；只标出每行的最大值和最小值</text>
+<text x="258" y="59" class="t-r t-sm">GLM，块长 32</text>
+<text x="258" y="75" class="t-r t-xs">表 6 平均 +12.2%</text>
+<line x1="270" y1="66" x2="930" y2="66" class="grid-ln"/>
+<circle cx="444.0" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="904.2" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="552.0" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="426.0" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="445.8" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="463.2" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="334.2" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="517.8" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="387.0" cy="66" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<line x1="463.2" y1="54" x2="463.2" y2="78" style="stroke:var(--text);stroke-width:2.2"/>
+<text x="910.2" y="55" class="t-r t-xs">KorBench +85.7%</text>
+<text x="334.2" y="84" class="t-c t-xs">HumanEval+ -9.3%</text>
+<text x="258" y="105" class="t-r t-sm">Qwen，块长 32</text>
+<text x="258" y="121" class="t-r t-xs">表 6 平均 +11.3%</text>
+<line x1="270" y1="112" x2="930" y2="112" class="grid-ln"/>
+<circle cx="426.0" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="434.4" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="465.6" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="434.4" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="435.0" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="465.0" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="586.2" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="424.2" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="458.4" cy="112" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<line x1="457.8" y1="100" x2="457.8" y2="124" style="stroke:var(--text);stroke-width:2.2"/>
+<text x="586.2" y="101" class="t-c t-xs">HumanEval+ +32.7%</text>
+<text x="424.2" y="130" class="t-c t-xs">BigCodeBench +5.7%</text>
+<text x="258" y="151" class="t-r t-sm">GLM，块长 4</text>
+<text x="258" y="167" class="t-r t-xs">表 6 平均 +10.1%</text>
+<line x1="270" y1="158" x2="930" y2="158" class="grid-ln"/>
+<circle cx="439.8" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="637.8" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="541.8" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="490.8" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="412.2" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="524.4" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="605.4" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="534.0" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<circle cx="362.4" cy="158" r="5" style="fill:var(--c-enc);opacity:.75"/>
+<line x1="450.6" y1="146" x2="450.6" y2="170" style="stroke:var(--text);stroke-width:2.2"/>
+<text x="637.8" y="147" class="t-c t-xs">KorBench +41.3%</text>
+<text x="362.4" y="176" class="t-c t-xs">MATH -4.6%</text>
+<text x="258" y="197" class="t-r t-sm">Qwen，块长 4</text>
+<text x="258" y="213" class="t-r t-xs">表 6 平均 +10.5%</text>
+<line x1="270" y1="204" x2="930" y2="204" class="grid-ln"/>
+<circle cx="453.0" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="562.2" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="361.8" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="547.2" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="588.0" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="517.2" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="397.8" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="466.8" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<circle cx="463.8" cy="204" r="5" style="fill:var(--c-pred);opacity:.75"/>
+<line x1="453.0" y1="192" x2="453.0" y2="216" style="stroke:var(--text);stroke-width:2.2"/>
+<text x="588.0" y="193" class="t-c t-xs">MuSR +33.0%</text>
+<text x="361.8" y="222" class="t-c t-xs">GPQA-D -4.7%</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一种设置，每个圆点是一个评测上 Loop-Distill 相对 Vanilla 的吞吐变化，黑色竖线是论文表 6 报告的平均提升。点分布得越散，说明“平均 11%”背后的差异越大。36 个点里有 4 个在 0 的左边（变慢），最右边的是 GLM 块长 32 的 KorBench（+85.7%）。本站根据原文表 8 推算并绘制。</div>
+</div>
+<div class="note-warn"><b>本站核对时发现的问题：</b>
+<ul>
+  <li><b>表 6 的平均值不能由表 8 算出。</b>把表 8 的 9 个数直接平均，GLM 块长 32 是 535.97 和 603.10（推算），表 6 写的是 491.91 和 551.86；另外三种设置的算术平均也都比表 6 高约 10%。表 6 可能是用总 token 数除以总时间算的，论文没有说明。好在相对提升差不多：按算术平均算分别是 +12.5%、+10.8%、+9.8%、+10.5%（推算）。</li>
+  <li><b>评测之间差异极大。</b>同一个模型、同样的 batch size，不同评测的吞吐从约 10 token/s（Qwen 块长 4 的 KorBench）到约 1400 token/s（GLM 块长 32 的 MATH）相差上百倍，论文没有解释原因（提示长度、回答长度、提前结束都有可能）。逐项的提升也从 −9.3% 到 +85.7% 不等，36 个评测–设置组合里有 4 个变慢。</li>
+  <li><b>吞吐的提升明显大于 TPF 的提升。</b>同样是 GLM、块长 32，GPQA-Diamond 的吞吐提高了 27.0%，TPF 只提高了 3.9% 到 6.5%；MMLU-Pro 的吞吐提高了 6.0%，TPF 只提高了约 1%。因为两个模型结构完全一样，每次前向的耗时应当基本相同，吞吐的提升本应和 TPF 的提升差不多。多出来的部分一定来自别处，比如两个模型生成的回答长短不同（回答短，上下文就短，每次前向更快）。论文没有报告回答长度，所以“提速完全来自更有效的浅层精炼”这个说法证据不足。</li>
+  <li><b>测速条件很窄。</b>只测了 batch size 1；没有更大并发下的结果，也没有和原始 AR 模型在同一引擎上的速度对比，所以看不出改造后的扩散模型本身比 AR 快多少。</li>
+</ul>
+</div>
+
+<h4 id="n-9-4">9.4 浅层的精炼被“重新分配”了</h4>
+<p>为了解释解码为什么更有效，作者对最终被定稿的 [MASK] 位置，比较了两个模型浅层的逐层变化（原文表 7，量的定义见第 1 节）：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>指标</th><th class="num">Vanilla</th><th class="num">Loop-Distill</th><th>读法</th></tr></thead>
+<tbody>
+<tr><td>\(T_0\) 余弦相似度 \(S_0\)</td><td class="num">0.02</td><td class="num">0.09</td><td>越低，变化越大</td></tr>
+<tr><td>\(T_1\) 余弦相似度 \(S_1\)</td><td class="num">0.74</td><td class="num">0.39</td><td>越低，变化越大</td></tr>
+<tr><td>\(T_0\) 更新幅度 \(U_0\)</td><td class="num">69.31%</td><td class="num">33.08%</td><td>越高，变化越大</td></tr>
+<tr><td>\(T_1\) 更新幅度 \(U_1\)</td><td class="num">0.74%</td><td class="num">7.25%</td><td>越高，变化越大</td></tr>
+</tbody></table></div>
+<p>两个指标说的是同一件事：Loop-Distill 压低了过于剧烈的第一次更新（\(U_0\) 从 69% 降到 33%，\(S_0\) 略升），把更多的精炼挪到了紧接着的第二次转换（\(U_1\) 从 0.74% 升到 7.25%，\(S_1\) 从 0.74 降到 0.39）。作者的解读是，模型学会了“推迟”精炼，等吸收了更多上下文再改写 [MASK] 的表示。附录 D 的图 4 给出了全部 47 次转换的余弦相似度曲线：</p>
+<div class="dia">
+  <div class="dia-title">图：相邻两层 [MASK] 状态的余弦相似度（GLM-4.7-Flash，读图）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="GLM-4.7-Flash 各层之间 [MASK] 状态的余弦相似度：Vanilla 与 Loop-Distill 只在前三次转换上不同" style="--dg-min:700px">
+<line x1="90" y1="250" x2="920" y2="250" class="grid-ln"/>
+<text x="80" y="250" class="t-r t-xs">0.0</text>
+<line x1="90" y1="210.0" x2="920" y2="210.0" class="grid-ln"/>
+<text x="80" y="210.0" class="t-r t-xs">0.2</text>
+<line x1="90" y1="170.0" x2="920" y2="170.0" class="grid-ln"/>
+<text x="80" y="170.0" class="t-r t-xs">0.4</text>
+<line x1="90" y1="130.0" x2="920" y2="130.0" class="grid-ln"/>
+<text x="80" y="130.0" class="t-r t-xs">0.6</text>
+<line x1="90" y1="90.0" x2="920" y2="90.0" class="grid-ln"/>
+<text x="80" y="90.0" class="t-r t-xs">0.8</text>
+<line x1="90" y1="50.0" x2="920" y2="50.0" class="grid-ln"/>
+<text x="80" y="50.0" class="t-r t-xs">1.0</text>
+<text x="90.0" y="266" class="t-c t-xs">T0</text>
+<text x="234.3" y="266" class="t-c t-xs">T8</text>
+<text x="378.7" y="266" class="t-c t-xs">T16</text>
+<text x="523.0" y="266" class="t-c t-xs">T24</text>
+<text x="667.4" y="266" class="t-c t-xs">T32</text>
+<text x="811.7" y="266" class="t-c t-xs">T40</text>
+<text x="920.0" y="266" class="t-c t-xs">T46</text>
+<text x="505" y="286" class="t-c t-sm">第几次层间转换（T0 = 词嵌入 → 第 1 层输出，T46 = 最后一次）→</text>
+<text x="26" y="150" class="t-c t-sm" transform="rotate(-90 26 150)">相邻两层的余弦相似度</text>
+<polyline points="90.0,246.0 108.0,102.0 126.1,81.0 144.1,59.0 162.2,73.2 180.2,77.0 198.3,65.8 216.3,60.0 234.3,64.6 252.4,67.0 270.4,67.2 288.5,70.8 306.5,75.6 324.6,74.6 342.6,75.0 360.7,68.8 378.7,68.6 396.7,64.8 414.8,64.8 432.8,64.0 450.9,66.8 468.9,64.2 487.0,63.0 505.0,65.4 523.0,69.8 541.1,67.2 559.1,63.8 577.2,65.6 595.2,68.2 613.3,62.4 631.3,61.8 649.3,63.6 667.4,62.0 685.4,61.6 703.5,61.0 721.5,61.8 739.6,62.8 757.6,61.4 775.7,61.4 793.7,58.0 811.7,62.0 829.8,58.6 847.8,58.4 865.9,60.8 883.9,65.0 902.0,65.8 920.0,149.4" style="fill:none;stroke:var(--c-data);stroke-width:2.6"/>
+<polyline points="90.0,232.0 108.0,172.0 126.1,98.0 144.1,68.8 162.2,70.0 180.2,74.8 198.3,65.4 216.3,60.0 234.3,65.4 252.4,67.2 270.4,67.2 288.5,70.8 306.5,77.4 324.6,76.6 342.6,76.0 360.7,70.0 378.7,68.8 396.7,65.0 414.8,65.2 432.8,64.8 450.9,67.0 468.9,64.2 487.0,63.2 505.0,65.8 523.0,70.0 541.1,67.0 559.1,63.8 577.2,65.4 595.2,68.0 613.3,62.4 631.3,61.8 649.3,63.4 667.4,61.8 685.4,61.2 703.5,60.6 721.5,61.4 739.6,62.4 757.6,61.4 775.7,61.4 793.7,58.0 811.7,62.0 829.8,58.4 847.8,58.4 865.9,60.8 883.9,65.0 902.0,65.8 920.0,149.6" style="fill:none;stroke:var(--c-pred);stroke-width:2.0"/>
+<circle cx="90.0" cy="246.0" r="4" style="fill:var(--c-data)"/>
+<circle cx="90.0" cy="232.0" r="4" style="fill:var(--c-pred)"/>
+<circle cx="108.0" cy="102.0" r="4" style="fill:var(--c-data)"/>
+<circle cx="108.0" cy="172.0" r="4" style="fill:var(--c-pred)"/>
+<circle cx="126.1" cy="81.0" r="4" style="fill:var(--c-data)"/>
+<circle cx="126.1" cy="98.0" r="4" style="fill:var(--c-pred)"/>
+<text x="100.0" y="244.0" class="t-xs">T0：0.02 → 0.09</text>
+<text x="118.0" y="176.0" class="t-xs" style="fill:var(--c-pred)">T1：0.74 → 0.39</text>
+<text x="138.1" y="126.0" class="t-xs">T2：0.85 → 0.76</text>
+<text x="912.0" y="166.0" class="t-r t-xs">最后一次转换两者都约 0.50</text>
+<rect x="560" y="196" width="14" height="4" style="fill:var(--c-data)"/><text x="580" y="198" class="t-sm">Vanilla</text>
+<rect x="660" y="196" width="14" height="4" style="fill:var(--c-pred)"/><text x="680" y="198" class="t-sm">Loop-Distill</text>
+<text x="560" y="222" class="t-xs">T4 以后两条线几乎重合（差值 ≤ 0.02，读图）</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是第几次层间转换，纵轴是相邻两层状态的余弦相似度，越低代表这一层改得越多。灰线是 Vanilla，橙线是 Loop-Distill，两条线只在最前面三次转换上明显分开（\(T_2\) 也从 0.85 降到 0.76）；从第 4 次转换往后几乎完全重合，中间各层大致在 0.87–0.96 之间；最后一次转换两者都掉到约 0.50。数值是从原图矢量数据读出的近似值，本站根据原文图 4 重画。</div>
+</div>
+<p>这张图本身也说明了一点：Loop-Distill 改动的范围非常局部。深层的逐层变化几乎没变，差别全在循环的那几层附近，这和“只在浅层蒸馏”的设计相符。</p>
+<p>作者还从注意力和 MoE 路由两个角度给了机理上的证据：浅层的 [MASK] 位置更多地看向已解码的可靠上下文，然后在块内有更丰富的相互交流；MoE 层里，同一个 [MASK] 位置在相邻去噪步之间选中的专家更稳定。细节和数字见第 12 节。</p>
+<div class="note-warn"><b>本站核对时发现：表 7 的两组数按定义不能同时成立。</b>
+<p>如果某个位置在一层里的相对更新幅度是 \(u\)，那么更新前后两个向量的余弦相似度至少是 \(1-2u\)（\(u&lt;1\) 时夹角最多是 \(\arcsin u\)，余弦至少是 \(\sqrt{1-u^2}\)，而 \(\sqrt{1-u^2}\ge 1-2u\) 对所有 \(u\) 成立；\(u\ge1\) 时余弦至少是 −1，也不小于 \(1-2u\)）。这个不等式对每个位置都成立，取平均以后仍然成立：平均余弦相似度至少是 \(1-2\times\) 平均更新幅度。Vanilla 在 \(T_1\) 上的平均更新幅度只有 0.74%，平均余弦相似度就至少是 0.985（推算），不可能是表里的 0.74；Loop-Distill 的 7.25% 对应至少 0.855，表里却是 0.39。所以 \(S\) 和 \(U\) 不可能是在同一组向量上、按论文写的定义算出来的。可能其中一个量是在别的位置测的（比如归一化之后的状态），也可能有笔误，论文没有交代。两种指标给出的<b>方向</b>是一致的，这一节的定性结论不受影响；但具体的数值大小，比如原文图 1 那个醒目的“缩小到 1/100”，需要等作者澄清。</p>
+</div>
+
+<h4 id="n-9-5">9.5 浅层不再“乱下结论”</h4>
+<p>最后一组证据回到第 1 节的 logit lens。用共享的 LM 头读第 1 层：Vanilla 有 56.39% 的位置置信度超过 0.8，其中只有 18.98% 和最终预测一致，很多都塌缩到同一个单空格 token 上；Loop-Distill 只有 0.03% 的位置超过 0.8。作者据此说，Loop-Distill 阻止了浅层在吸收足够上下文之前形成虚假的高置信“承诺”。附录 B.3 的逐 token 证据见第 12 节。</p>
+<div class="note-warn"><b>读的时候注意：</b>浅层读数的置信度下降，并不直接等于“更好”。Loop-Distill 让第 1 层的状态离“输出头能直接读懂的方向”更远，读数的置信度自然会降；第 1 节已经说过，解码时真正起作用的是最后一层的置信度。这组数字能说明的是：Vanilla 第 1 层那种整齐划一地指向空格 token 的状态被打散了，[MASK] 位置的浅层表示更“各不相同”。</div>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §5.4、图 3、表 5–7，附录 A 表 8、附录 D 图 4（OpenReview PDF 第 8–9、13、16–17 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 结果的份量：这些数字说明了什么，没说明什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>前面几节分别看了准确率、消融、速度和内部指标。这一节是本站的补充，把它们合在一起掂量：比较的双方在哪些条件上对齐了，缺了哪些参照，哪些结论比较扎实，哪些还需要更多证据。</div>
+<ul>
+  <li><b>规模与对照。</b>实验用了两个真实规模的 30B-A3B 指令模型，这在“循环”类论文里少见：本站精读过的循环模型大多在一亿到几十亿参数之间。对照组 Vanilla 用同一起点、同样的数据、步数和优化器，由作者自己训练，两者唯一的区别是辅助损失。这是一个干净的消融式对比。</li>
+  <li><b>推理成本完全对齐。</b>部署的模型和 Vanilla 结构相同：参数量、每次前向的计算量、KV 缓存、推理引擎都一样。Huginn、Ouro、LoopMDM 一类工作的比较通常是“参数相同，但推理时算得更多”（见 <a href="iso-depth-scaling.html">Iso-Depth</a> 精读页对这种比较的校准）；这里的准确率提升却是在推理计算完全不变的条件下得到的，这是这篇论文最实在的卖点。</li>
+  <li><b>训练成本没有对齐。</b>Loop-Distill 每步多一次不求梯度的前向，墙钟多约 10%（按计算量粗算可能更多，见 4.4 节）。论文没有给出“把这 10% 的计算拿去多训 Vanilla”的对照。由于门在训练后期很少打开，这部分开销还有压缩的空间。</li>
+  <li><b>缺少的参照。</b>没有原始 AR 模型的分数，所以看不出改造损失了多少、Loop-Distill 补回了其中多少；也没有和已经发布的改造模型（比如 SDAR 的 30B-A3B 版本、Fast-dLLM v2、LLaDA2.0）在同一套评测上比较。这里的改造本身很轻（最多约 2.5B token 的 SFT），在改造更充分的模型上增益会不会变小，目前不知道。</li>
+  <li><b>噪声。</b>论文没有报告方差或置信区间，评测重复的次数前后写法不一致（4 次或 3 次）。单项上 1 分左右的差别很可能落在噪声里；比较可信的是整体的一致性：四种设置的平均分都提高了约 2 分，块长 4 的两种设置下 13 个评测全部提高。</li>
+  <li><b>速度。</b>11% 是在 batch size 1、SGLang、8 张 H20-3E 上测得的；没有更大的并发，没有和 AR 原模型比速度。表 6 的平均值不能由表 8 复现，单项提升的差异很大，而且吞吐的提升明显超过 TPF 的提升，说明回答长度等其他因素可能也在起作用（9.3 节）。</li>
+  <li><b>块长的取舍。</b>块长 32 比块长 4 平均低约 10 分；Loop-Distill 的 2 分提升没有改变“块越大、质量越差”的基本格局。</li>
+  <li><b>内部指标。</b>表 7 中余弦相似度和更新幅度两组数按定义互相矛盾（9.4 节），方向一致，但具体数值存疑。机理分析的几张表也都只在 GLM、块长 32 上做。</li>
+  <li><b>开放程度。</b>代码和权重要等“接收后”才发布，目前无法独立复现。这是一篇正在评审的匿名投稿，截至 2026-10 还没有看到独立的复现或后续工作。</li>
+</ul>
+<p>综合起来，比较站得住的结论是：在 SFT 改造阶段加一个只在训练时存在的浅层循环教师，能在不改变推理成本的前提下，让两个 30B-A3B 模型的块扩散版本平均多拿约 2 分，并且每次前向定稿的 token 略多。“提速 11%”和“浅层信息流被修复”这两条，证据还不够完整。</p>
+</section>
+
+<section class="note">
+<h3 id="n-11">11 结论（第 6 节）：作者认为证明了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后怎样总结自己的发现和方法？论文还附了哪些声明？</div>
+<p>作者的总结有三层。第一，AR 到扩散的改造存在一个信息流瓶颈：[MASK] 状态在第一次更新时变化过大，随后过早稳定。第二，Loop-Distill 用一个在线的、截断梯度的循环教师，在训练时监督单次前向模型的 [MASK] 状态精炼，推理结构不变。第三，在两个 30B-A3B MoE 模型、13 个评测上，它把平均准确率分别提高了 2.05 分（GLM-4.7-Flash）和 2.21 分（Qwen3-30B-A3B-2507），把解码吞吐提高了 11.0%；定量分析表明收益主要来自单次前向里浅层信息流的改善：浅层的过早高置信被压下去，后续的 [MASK] 状态精炼更充分，于是需要的完整去噪步更少。</p>
+<p>论文还附了两条声明。AI 使用声明说大语言模型只用于改进语法、措辞和排版。可复现性声明说代码、训练好的模型权重和评测说明会在论文被接收后公开。</p>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文 §6 与声明（OpenReview PDF 第 9–10 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">12 附录 B：注意力、路由与 token 层面的证据</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>正文说 Loop-Distill 改善了“整条信息流”：从注意力里收集上下文，到 MoE 里按专家加工。附录 B 用三张表分别支持这三步。每张表测的是什么，数字怎么读？</div>
+<p>三项分析都在 GLM-4.7-Flash、块长 32 上做，对 GPQA-Diamond、LiveCodeBench v6、OlympiadBench、MMLU-Pro 四个评测取平均。</p>
+
+<h4 id="n-12-1">12.1 注意力：先锚定可靠的上下文，再在块内交流（附录 B.1、表 9）</h4>
+<p>注意力是 [MASK] 位置收集信息的地方。作者把被看的位置分成几组：当前块里的其他 [MASK]、提示、已解码的回答历史，然后统计 [MASK] 位置的注意力权重落在各组上的比例。</p>
+<div class="dia">
+  <div class="dia-title">图：浅层 [MASK] 位置的注意力分配（原文表 9）</div>
+  <div class="dia-row"><span class="lbl">第 1 层 → 已解码历史</span><div class="dia-track"><span class="dia-seg oth" style="flex:37.05">Vanilla 37.05%</span><span style="flex:62.95"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg cmp" style="flex:48.63">Loop-Distill 48.63%</span><span style="flex:51.37"></span></div></div>
+  <div class="dia-row"><span class="lbl">第 1 层 → 其他 [MASK]</span><div class="dia-track"><span class="dia-seg oth" style="flex:9.57">9.57%</span><span style="flex:90.43"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg cmp" style="flex:4.42">4.42%</span><span style="flex:95.58"></span></div></div>
+  <div class="dia-row"><span class="lbl">第 3 层 → 其他 [MASK]</span><div class="dia-track"><span class="dia-seg oth" style="flex:23.14">23.14%</span><span style="flex:76.86"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg cmp" style="flex:48.54">48.54%</span><span style="flex:51.46"></span></div></div>
+  <div class="dia-row"><span class="lbl">第 4 层 → 其他 [MASK]</span><div class="dia-track"><span class="dia-seg oth" style="flex:14.35">14.35%</span><span style="flex:85.65"></span></div></div>
+  <div class="dia-row"><span class="lbl"></span><div class="dia-track"><span class="dia-seg cmp" style="flex:23.42">23.42%</span><span style="flex:76.58"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每组两行，上面灰色是 Vanilla，下面绿色是 Loop-Distill，条长是注意力权重占比（满格 = 100%）。本站根据原文表 9 重画。</div>
+</div>
+<p>读法分两步。在第 1 层，Loop-Distill 的 [MASK] 位置更少看别的 [MASK]（9.57% → 4.42%），更多看已经解码的回答历史（37.05% → 48.63%）：先把自己锚定在可靠的已知内容上。到了第 3、4 层，[MASK] 之间的相互注意大幅增加（第 3 层 23.14% → 48.54%，第 4 层 14.35% → 23.42%）：有了初步的锚点之后，块内的位置开始互相交换信息。表 9 还报告了只在 [MASK] 之间计算的注意力熵：第 2、3、4 层分别从 0.780、0.696、0.890 升到 0.931、0.973、0.984。熵越高，注意力越分散；作者认为这说明注意力没有过早地收拢到少数几个位置上。浅层的 [MASK] 表示还很模糊，广撒网地收集线索，比早早押注在少数几个不可靠的位置上更稳妥。</p>
+
+<h4 id="n-12-2">12.2 MoE 路由：同一个位置在相邻去噪步之间选的专家更稳定（附录 B.2、表 10）</h4>
+<p>作者跟踪每个 [MASK] 位置在浅层选中的专家，看相邻两个去噪步之间专家分配保持不变的比例。Loop-Distill 在三层上都更稳定：第 1 层 81.68% → 87.01%，第 2 层 76.97% → 80.79%，第 3 层 67.83% → 72.45%。作者的解读是，信息不完整的 [MASK] 位置被更一致地交给一小组专门的专家处理；和上面的注意力证据合起来，就是“从注意力收集上下文，到专家加工”的整条路径都变了。</p>
+<div class="note-warn"><b>读的时候注意：层号的含义对不上。</b>正文明确说 GLM-4.7-Flash 的第 1 层是稠密层、不是 MoE 层，可表 10 却给出了 GLM“第 1 层”的专家路由稳定性。一个稠密层没有专家可选。可能附录里的层号是从 0 开始数的（“第 1 层”其实是第二层），也可能这张表来自另一个模型；论文没有说明。这也会影响表 9 和表 11 里“第几层”的对应关系。此外，路由“更稳定”是好是坏本身就有两种解读：可以是“更专门化”，也可以只是“状态在步与步之间变化更小”。</div>
+
+<h4 id="n-12-3">12.3 token 层面：浅层读数塌缩到少数无关 token（附录 B.3、表 11）</h4>
+<p>作者用共享的 LM 头读浅层，记录置信度超过阈值的首选 token，并和最后一层的首选比较：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>模型</th><th>层</th><th>置信度阈值</th><th class="num">高置信位置占比</th><th class="num">与最终一致</th><th>最常见的读数</th></tr></thead>
+<tbody>
+<tr><td>Vanilla</td><td>1</td><td>≥ 0.80</td><td class="num">56.39%</td><td class="num">18.98%</td><td>220（单个空格）</td></tr>
+<tr><td>Vanilla</td><td>1</td><td>≥ 0.95</td><td class="num">1.96%</td><td class="num">7.45%</td><td>220（单个空格）</td></tr>
+<tr><td>Vanilla</td><td>2</td><td>≥ 0.80</td><td class="num">2.42%</td><td class="num">1.35%</td><td>5753（#ifdef）</td></tr>
+<tr><td>Vanilla</td><td>3</td><td>≥ 0.80</td><td class="num">1.22%</td><td class="num">0.00%</td><td>26186（multi）</td></tr>
+<tr><td>Vanilla</td><td>3</td><td>≥ 0.95</td><td class="num">0.79%</td><td class="num">0.00%</td><td>26186（multi）</td></tr>
+<tr class="hl"><td>Loop-Distill</td><td>1</td><td>≥ 0.80</td><td class="num">0.03%</td><td class="num">31.11%</td><td>220（单个空格）</td></tr>
+<tr class="hl"><td>Loop-Distill</td><td>1 / 2 / 3</td><td>≥ 0.95 / ≥ 0.80 / ≥ 0.80</td><td class="num">0.00%</td><td class="num">—</td><td>—</td></tr>
+</tbody></table></div>
+<p>作者想说明，Vanilla 的问题不只是“置信度没校准好”，而是浅层的读数整齐地塌缩到少数几个无关的 token 上：第 1 层是空格，第 2、3 层是 “#ifdef”“multi” 这类子词碎片；它们置信度很高，却几乎从不和最终答案一致。Loop-Distill 几乎完全消除了这种高置信塌缩，而且不是简单地把所有置信度一起压低。</p>
+<p class="note-links"><a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">英文原文附录 B、表 9–11（OpenReview PDF 第 14–15 页）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇论文是 ICLR 2027 的投稿，本站撰写时（2026-10-20）仍在双盲评审中；OpenReview 页面拒绝脚本访问，无法核实是否已有公开的审稿意见。论文承诺接收后发布代码和权重，目前没有可核实的公开版本，也没有看到独立的复现或直接的后续工作。</p>
+<p>放在本站这一组“循环 × 扩散”论文里，它代表了一条和其他几篇都不同的路线：不在推理时循环，而是把循环当成训练信号。<a href="loopmdm.html">LoopMDM</a>、<a href="recursive-mdm.html">R-MDM</a> 和 <a href="alodlm.html">ALoDLM</a> 用推理时的深度循环换取质量，推理成本随圈数增加；<a href="loopholing.html">Loopholing</a> 在去噪步之间多传一条连续状态。两类做法并不互斥。几个值得追问的问题是：这个思路对从零训练的扩散模型（例如 <a href="llada.html">LLaDA</a>）是否同样有效；在改造更充分、块长更大的模型上，增益会不会缩小；以及能否和推理时的循环结合，用蒸馏把一部分循环的收益“预付”到单次前向里。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">本文是 ICLR 2027 的匿名投稿，双盲评审期间作者信息不公开。</p>
+<p>论文署名为“Anonymous authors”。本站不尝试推断作者身份；评审结束、论文去匿名之后再补充这一部分。</p>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>发表状态</b>：ICLR 2027 投稿，双盲评审中；本站撰写时（2026-10-20）无法用脚本打开 OpenReview 页面，未能核实是否已有公开的审稿意见。</li>
+  <li><b>引用</b>：没有 arXiv 版本，页首不显示引用数。</li>
+  <li><b>开源</b>：论文承诺接收后发布代码、训练好的模型权重和评测说明；截至 2026-10-20 无法核实是否已经发布。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>同组“循环 × 扩散”精读：<a href="loopholing.html">Loopholing</a> · <a href="loopmdm.html">LoopMDM</a> · <a href="recursive-mdm.html">R-MDM</a> · <a href="alodlm.html">ALoDLM</a></li>
+  <li>把 AR 模型改造成块扩散：<a href="fast-dllm-v2.html">Fast-dLLM v2</a> · <a href="sdar.html">SDAR</a> · <a href="llada2.html">LLaDA2.0</a> · <a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a>（AR 损失 + 扩散损失） · <a href="block-diffusion.html">BD3-LM</a>（块扩散的原型）</li>
+  <li>置信度阈值并行解码：<a href="fast-dllm.html">Fast-dLLM</a></li>
+  <li>循环 Transformer：<a href="universal-transformers.html">Universal Transformers</a> · <a href="huginn.html">Huginn</a>（其中有 logit lens 的用法） · <a href="ouro.html">Ouro</a> · <a href="mixture-of-recursions.html">Mixture-of-Recursions</a> · <a href="iso-depth-scaling.html">Iso-Depth Scaling Laws</a>（循环到底值多少计算）</li>
+  <li>旧版结构拆解：<a href="../legacy/tracks/dllm/12-ar-to-block.html">AR 转块扩散：SDAR、Fast-dLLM v2 与 WeDLM</a> · <a href="../legacy/tracks/dllm/11-block-diffusion.html">块扩散：BD3-LM 与 Eso-LM</a> · <a href="../legacy/tracks/dllm/14-kv-cache.html">dLLM 的 KV cache 与并行解码</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。论文是匿名投稿，没有授予转载许可，所以本页没有使用任何原图：所有示意图都是本站自己画的；数据图是根据论文报告的数字重画的简图，标“读图”的数值是从原图读出的近似值。模型结构数字来自 Hugging Face 上的官方模型配置（2026-10-20 查看）。数字与结论以原文为准：<a href="https://openreview.net/forum?id=w9AtxUbfFB" target="_blank" rel="noopener">OpenReview w9AtxUbfFB</a>。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

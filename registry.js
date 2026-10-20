@@ -5750,6 +5750,114 @@ window.ATLAS_REGISTRY = {
       "page": "papers/arloop.html",
       "reading": "papers/arloop.html",
       "tldr": "循环 Transformer 反复使用同一组层，每一圈的输出都被加进同一条残差流，后面的层没法挑着用。ARLoop 让每个子层用注意力从前面各块的输出里按需取用（循环较多时只看最近 3 块加词向量），在 140M/370M 受控实验中困惑度略低于 PreNorm 和 Parcae 等设计，0.6B 同数据对比中数学提升明显；论文仍在 ICLR 2027 匿名评审中。"
+    },
+    {
+      "id": "loopholing",
+      "track": "looped",
+      "also": ["dllm"],
+      "kind": "paper",
+      "lane": "",
+      "title": "Loopholing 离散扩散",
+      "full_title": "Loopholing Discrete Diffusion: Deterministic Bypass of the Sampling Wall",
+      "authors": ["Mingyu Jo", "Jaesik Yoon", "Justin Deschenaux", "Caglar Gulcehre", "Sungjin Ahn"],
+      "org": "KAIST / EPFL / Microsoft / SAP / NYU",
+      "date": "2025-10",
+      "venue": "ICLR 2026",
+      "arxiv": "2510.19304",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2510.19304" },
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=wM3Mdk2Pa5" },
+        { "label": "Code", "url": "https://github.com/ahn-ml/lddm" },
+        { "label": "项目页", "url": "https://sites.google.com/view/lddms/home" }
+      ],
+      "page": "papers/loopholing.html",
+      "reading": "papers/loopholing.html",
+      "tldr": "离散扩散每一步把预测分布采样成一个词，分布里的信息随之丢失（作者称为“采样墙”）。Loopholing 把网络最后一层的隐状态直接传给下一步，并用两遍前向的自条件化来训练，在 1.69 亿参数模型上把 1024 步的生成困惑度从 108.94 降到 49.13。"
+    },
+    {
+      "id": "loopmdm",
+      "track": "looped",
+      "also": ["dllm"],
+      "kind": "paper",
+      "lane": "",
+      "title": "LoopMDM 循环扩散语言模型",
+      "full_title": "Looped Diffusion Language Models",
+      "authors": ["Sanghyun Lee", "Chunsan Hong", "Seungryong Kim", "Jonghyun Lee", "Jongho Park", "Dongmin Park"],
+      "org": "KAIST / KRAFTON / UC Berkeley",
+      "date": "2026-05",
+      "venue": "arXiv 预印本",
+      "arxiv": "2605.26106",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2605.26106" },
+        { "label": "arXiv HTML", "url": "https://arxiv.org/html/2605.26106v1" }
+      ],
+      "page": "papers/loopmdm.html",
+      "reading": "papers/loopmdm.html",
+      "tldr": "LoopMDM 在掩码扩散语言模型里只把中间靠前的两层反复过多遍（训练时随机抽 1 到 12 圈），在 1.7 亿参数、总训练算力相同的条件下，测试 NLL 比同尺寸 MDM 更低，GSM8K 也更高。但评测时每个去噪步的计算是基线的 1.8 到 4.8 倍，按推理算力对齐后，它和基线大致打平，甚至不如让基线多走几步去噪。"
+    },
+    {
+      "id": "r-mdm",
+      "track": "looped",
+      "also": ["dllm"],
+      "kind": "paper",
+      "lane": "",
+      "title": "R-MDM 掩码扩散的递归扩展",
+      "full_title": "Recursive Scaling in Masked Diffusion Models",
+      "authors": ["Alba Carballo-Castro", "Julianna Piskorz", "Paulius Rauba", "Mihaela van der Schaar", "Pascal Frossard"],
+      "org": "EPFL LTS4 / University of Cambridge",
+      "date": "2026-06",
+      "venue": "arXiv 预印本（ICML 2026 研讨会论文）",
+      "arxiv": "2606.18022",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2606.18022" },
+        { "label": "ICML 2026 HiLD 研讨会", "url": "https://icml.cc/virtual/2026/72319" },
+        { "label": "ICML 2026 SPIGM 研讨会", "url": "https://icml.cc/virtual/2026/74195" },
+        { "label": "ICML 2026 FDGM 研讨会（口头）", "url": "https://icml.cc/virtual/2026/70380" }
+      ],
+      "page": "papers/recursive-mdm.html",
+      "reading": "papers/recursive-mdm.html",
+      "tldr": "R-MDM 在掩码扩散模型的每个去噪步里把同一块 Transformer 反复用 L 遍，参数不变、只加计算；在数独、Countdown 等小型结构化任务上，它在同参数下明显变好，在同 FLOPs 下大体追平更深的普通模型。作者把并行解码误差拆成循环能降的“保真误差”和只有少提交才能降的“依赖误差”，并据此用熵同时决定每步循环几遍、提交哪些 token。"
+    },
+    {
+      "id": "alodlm",
+      "track": "looped",
+      "also": ["dllm"],
+      "kind": "paper",
+      "lane": "",
+      "title": "ALoDLM 自适应循环扩散语言模型",
+      "full_title": "ALoDLM: Adaptively Looped Diffusion Language Models",
+      "authors": ["Liancheng Fang", "Zhuowei Li", "Youngeun Kim", "Tianchen Zhao", "Rajat Koner", "Jiaye Wu", "Linghan Xu", "Xuanbai Chen", "Xiang Xu", "Zheng Zhang", "Jakub Zablocki", "Nishant Sankaran", "Yifan Xing"],
+      "org": "Amazon AGI / University of Illinois Chicago / Korea University",
+      "date": "2026-10",
+      "venue": "arXiv 预印本",
+      "arxiv": "2610.04198",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2610.04198" },
+        { "label": "项目页", "url": "https://alo-dlm.github.io" },
+        { "label": "Code", "url": "https://github.com/amazon-science/ALoDLM" },
+        { "label": "权重 ALoDLM-8B", "url": "https://huggingface.co/amazon/ALoDLM-8B" },
+        { "label": "权重 ALoDLM-1.7B", "url": "https://huggingface.co/amazon/ALoDLM-1.7B" }
+      ],
+      "page": "papers/alodlm.html",
+      "reading": "papers/alodlm.html",
+      "tldr": "ALoDLM 把 Qwen3 中间的几层做成可以反复执行的循环核心：扩散模型每一步去噪时，有把握的 token 先提交，没把握的 token 保留隐藏状态再多算几遍，并把“第几遍提交”当作隐变量来训练退出门。只用 5B token 微调，1.7B 和 8B 两个规模在 11 项基准上的平均分都高于所评测的扩散模型和对应的 Qwen3，GSM8K 单请求吞吐约为 vLLM 上 Qwen3-8B 的 2.7 倍。"
+    },
+    {
+      "id": "loop-distill",
+      "track": "looped",
+      "also": ["dllm"],
+      "kind": "paper",
+      "lane": "",
+      "title": "Loop-Distill 扩散 LLM 的信息流精炼",
+      "full_title": "Loop-Distill: Refining Information Flow in Diffusion Language Models",
+      "date": "2026-09",
+      "venue": "ICLR 2027 投稿（审稿中）",
+      "links": [
+        { "label": "OpenReview", "url": "https://openreview.net/forum?id=w9AtxUbfFB" }
+      ],
+      "page": "papers/loop-distill.html",
+      "reading": "papers/loop-distill.html",
+      "tldr": "作者发现，从 AR 模型改造来的块扩散模型里，[MASK] 位置的表示在第 1 层被大幅改写后就几乎不再变化；Loop-Distill 在训练时用同一套权重让 2–3 个浅层各多算几遍当教师，只在教师损失更低时把学生的单次前向往它靠。推理结构完全不变，在两个 30B-A3B MoE 模型、13 个评测上平均高约 2 分，batch size 1 时吞吐高约 11%；这是一篇尚未评审的匿名投稿。"
     }
   ],
   "edges": [

@@ -32,7 +32,7 @@
     const tracks = Object.fromEntries((R.tracks || []).map((t) => [t.id, t]));
     return (R.nodes || []).filter((n) => n.kind !== "concept").map((n) => {
       const m = (n.arxiv && M[n.arxiv]) || {};
-      return { n, track: tracks[n.track], cites: m.citations, infl: m.influential, st: load(n.id),
+      return { n, track: tracks[n.track], also: (n.also || []).map((k) => tracks[k]).filter(Boolean), cites: m.citations, infl: m.influential, st: load(n.id),
                link: href(n.reading || n.page), year: String(n.date || "").slice(0, 4) };
     });
   }
@@ -62,12 +62,14 @@
     const $ = (s) => host.querySelector(s);
     const persist = () => { try { localStorage.setItem("atlas-library-ui", JSON.stringify(Object.assign({}, ui, { q: "" }))); } catch (e) { /* ignore */ } };
 
+    // a paper belongs to its track and to any extra categories listed in node.also (cross-field papers)
+    const inCat = (p, k) => p.n.track === k || (p.n.also || []).includes(k);
     function filtered() {
       const q = ui.q.trim().toLowerCase();
       return all.filter((p) => {
         const s = statusOf(p.st);
         if (ui.shelf === "fav" ? !p.st.fav : ui.shelf !== "all" && s !== ui.shelf) return false;
-        if (ui.cat !== "all" && p.n.track !== ui.cat) return false;
+        if (ui.cat !== "all" && !inCat(p, ui.cat)) return false;
         if (ui.full && !p.n.reading) return false;
         if (!q) return true;
         const hay = [p.n.title, p.n.full_title, p.n.org, p.n.venue, p.n.tldr, (p.n.tags || []).join(" "), p.track && p.track.short, p.n.arxiv].join(" ").toLowerCase();
@@ -84,7 +86,7 @@
         ${p.n.full_title ? `<div class="pc-en">${esc(p.n.full_title)}</div>` : ""}
         <p class="pc-blurb">${esc(p.n.tldr && p.n.tldr !== "（占位）" ? p.n.tldr : "")}</p>
         <div class="pc-meta">${p.n.reading ? '<span class="pc-badge">精读</span>' : '<span class="pc-badge alt">旧版拆解</span>'}
-          ${p.track ? `<span class="pc-track">${esc(p.track.short)}</span>` : ""}${p.n.org ? `<span class="pc-org">${esc(String(p.n.org).split(/[;；/、]/)[0])}</span>` : ""}
+          ${p.track ? `<span class="pc-track">${esc(p.track.short)}${p.also.map((t) => " × " + esc(t.short)).join("")}</span>` : ""}${p.n.org ? `<span class="pc-org">${esc(String(p.n.org).split(/[;；/、]/)[0])}</span>` : ""}
           ${p.cites != null ? `<span class="pc-cites" title="Semantic Scholar 被引次数（高影响力引用 ${fmtN(p.infl)}）">被引 ${fmtN(p.cites)}</span>` : ""}${tags}</div>
         <div class="pc-foot">${s !== "unread" ? `<span class="pc-status ${s}">${STATUS[s]}${s === "reading" ? " " + prog + "%" : ""}</span>` : ""}</div>
         ${prog > 0 && s !== "done" ? `<div class="pc-progress"><i style="width:${prog}%"></i></div>` : ""}
@@ -98,7 +100,7 @@
       const shelfCount = (k) => base.filter((p) => (k === "all" ? true : k === "fav" ? p.st.fav : statusOf(p.st) === k)).length;
       $('[data-list="shelf"]').innerHTML = [["all", "全部"], ["unread", "未读"], ["reading", "在读"], ["done", "已读"], ["fav", "收藏"]]
         .map(([k, l]) => `<button type="button" class="lib-item${ui.shelf === k ? " on" : ""}" data-shelf="${k}">${l}<span>${shelfCount(k)}</span></button>`).join("");
-      $('[data-list="cat"]').innerHTML = [["all", "全部", base.length]].concat((R.tracks || []).map((t) => [t.id, t.short, base.filter((p) => p.n.track === t.id).length]))
+      $('[data-list="cat"]').innerHTML = [["all", "全部", base.length]].concat((R.tracks || []).map((t) => [t.id, t.short, base.filter((p) => inCat(p, t.id)).length]))
         .filter(([k, , c]) => !ui.full || k === "all" || c > 0 || ui.cat === k)
         .map(([k, l, c]) => `<button type="button" class="lib-item${ui.cat === k ? " on" : ""}" data-cat="${k}">${esc(l)}<span>${c}</span></button>`).join("");
       const years = {};

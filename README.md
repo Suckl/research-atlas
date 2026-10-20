@@ -106,6 +106,12 @@
     - [ELR](papers/elastic-latent-recurrence.html)
     - [循环能替代多少参数](papers/loops-vs-parameters.html)
     - [ARLoop](papers/arloop.html)
+  - 与扩散 LLM 的交叉（同时出现在“扩散 LLM”类别下）：
+    - [Loopholing](papers/loopholing.html)
+    - [LoopMDM](papers/loopmdm.html)
+    - [R-MDM](papers/recursive-mdm.html)
+    - [ALoDLM](papers/alodlm.html)
+    - [Loop-Distill](papers/loop-distill.html)（ICLR 2027 匿名投稿）
 
 ## 每个精读页的结构
 
