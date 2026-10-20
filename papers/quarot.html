@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuaRot 精读</title>
+<meta name="description" content="QuaRot（NeurIPS 2024）逐节精读：用正交旋转与 Hadamard 变换消除激活离群值，把 LLaMA-2 的权重、激活和 KV 缓存全部量化到 4 bit；每个旋转放在哪、哪些离线融合、哪些在线计算、INT4 内核，以及精度和速度数字的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="quarot">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · NeurIPS 2024</div>
+  <h1>QuaRot：把大模型“转一转”，让 4 bit 推理不再怕离群值</h1>
+  <p class="en-title">QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs</p>
+  <div class="paper-authors">Saleh Ashkboos<sup>1</sup>, Amirkeivan Mohtashami<sup>2</sup>, Maximilian L. Croci<sup>3</sup>, Bo Li<sup>1</sup>, Pashmina Cameron<sup>4</sup>, Martin Jaggi<sup>2</sup>, Dan Alistarh<sup>5,6</sup>, Torsten Hoefler<sup>1</sup>, James Hensman<sup>3</sup></div>
+  <div class="paper-affil"><sup>1</sup>ETH Zurich　<sup>2</sup>EPFL　<sup>3</sup>Microsoft Research　<sup>4</sup>Microsoft　<sup>5</sup>IST Austria　<sup>6</sup>NeuralMagic（论文把单位直接写在每位作者名下，Dan Alistarh 署“IST Austria &amp; NeuralMagic”；编号为本页所加）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2404.00456" target="_blank" rel="noopener">arXiv 2404.00456 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/b5b939436789f76f08b9d0da5e81af7c-Abstract.html" target="_blank" rel="noopener">NeurIPS 2024 ↗</a>
+    <a class="pill" href="https://github.com/spcl/QuaRot" target="_blank" rel="noopener">Code: spcl/QuaRot ↗</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>534</b><span>GitHub star（spcl/QuaRot，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页依据 arXiv v2（2024-10-29，即 NeurIPS 版）。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍；附录里的消融和性能细节并进第 5 节一起讲。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 arXiv 非独占许可发布，原图不能转载，所以本页的图都是本站自己画的示意图或根据论文表格数字重画的简图，并附上原图链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型推理很贵，一个直接的降本办法是<b>量化</b>：把模型里的数从 16 位浮点数换成更短的整数来存、来算。只把权重压成 4 bit（“weight-only”）已经很成熟，它能省显存、加快逐 token 生成，但矩阵乘法本身仍然在 16 位精度下进行。要让矩阵乘法也用上 GPU 上更快的 4 bit 整数单元，就必须把<b>每个矩阵乘的两个输入都变成 4 bit</b>：权重是一个，另一个是运行时才产生的<b>激活</b>。难点在于激活里有极少数数值特别大的“离群值”，它们会把整组数的量化刻度撑得很粗，使其余的数几乎全被舍成 0。此前的 4 bit 方案只能把离群的那几个通道单独挑出来，用高精度另算，代价是复杂的混合精度内核。</p>
+<p>QuaRot 换了一个角度：既然离群值集中在少数几个坐标方向上，那就<b>把整个隐藏状态换一组坐标来表示</b>。具体做法是乘一个正交矩阵（几何上就是“旋转”）。旋转不改变向量的长度，却会把一个方向上的巨大数值均匀地摊到所有坐标上，离群值就消失了。关键在于这个旋转要做到“模型的输出完全不变”：作者借用他们在 SliceGPT 里发现的<b>计算不变性</b>，把大部分旋转矩阵提前乘进权重里，推理时完全不花时间；只在少数无法提前合并的位置，插入可以快速计算的 <b>Hadamard 变换</b>。这样一来，所有线性层的输入、以及 KV 缓存，都能直接用最简单的逐 token 4 bit 量化，不需要保留任何高精度通道。</p>
+<p>最重要的结果：LLaMA-2-70B 在权重、激活、KV 缓存全部 4 bit 的设置下，WikiText-2 困惑度只比 FP16 高 0.47，六项零样本任务的平均准确率保留约 99%；在 RTX 3090 上，单个 Transformer 块的 prefill 最多快 3.33 倍，decode 时的峰值显存最多省 3.89 倍。小模型的损失明显更大（LLaMA-2-7B 平均准确率低 4.18 个百分点），这一点后面会反复强调。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>只量化权重和“权重、激活都量化”分别能省什么？为什么后者必须要有 INT4 Tensor Core？</li>
+  <li>激活离群值为什么偏偏对 4 bit 激活量化是致命的？</li>
+  <li>为什么乘一个正交矩阵能消掉离群值，又不改变模型输出？RMSNorm 在这里起什么作用？</li>
+  <li>QuaRot 一共在一层里放了哪几个旋转？哪些提前乘进了权重，哪些必须在推理时实时算？</li>
+  <li>“3.33 倍加速、0.47 困惑度损失”分别是在什么模型、什么 GPU、什么批大小下测的，各自还差什么没测？</li>
+  <li>后来的 SpinQuant、DuQuant、FlatQuant 改了什么？FlashAttention-3 和 NVFP4 训练里的 Hadamard 变换和 QuaRot 是什么关系？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2404.00456" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么 4 bit 推理要连激活一起量化</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>量化的目的是同时省显存和省计算。只量化权重能省显存，却省不了计算；要省计算，就得让矩阵乘的两边都是低比特。那么，激活为什么比权重难量化得多？之前的工作又是怎么勉强绕过去的？QuaRot 打算用什么完全不同的办法？</div>
+
+<div class="note-pre"><b>先补一点背景：4 bit 整数量化到底在做什么。</b>
+<p>INT4 只能表示 16 个整数：−8 到 7。要用它表示一组实数，先选一个<b>刻度</b>（scale）\(s\)，把每个数除以 \(s\)、四舍五入成整数存起来，用的时候再乘回 \(s\)。最常用的<b>对称量化</b>把这组数里绝对值最大的那个映射到 7：</p>
+<div class="formula">$$s=\frac{\max_i |x_i|}{7},\qquad q_i=\mathrm{clamp}\Big(\mathrm{round}\big(x_i/s\big),-8,7\Big),\qquad \hat x_i=s\,q_i .$$</div>
+<p>四舍五入带来的误差最多是半个刻度 \(s/2\)。所以误差的大小由这组数里<b>最大的那个</b>决定：只要有一个数特别大，\(s\) 就特别大，其余所有的数都被量得很粗。这就是“离群值”伤害量化的根本原因。<b>非对称量化</b>额外存一个零点，把 \([\min,\max]\) 映射到 0 到 15，适合不以 0 为中心的数据（QuaRot 用它量化 KV 缓存）。</p>
+<p>一组数共用一个刻度，“一组”怎么划叫<b>粒度</b>：整个张量一个刻度（per-tensor）；权重矩阵的每个输出通道一个刻度（per-channel）；激活的每个 token（矩阵的每一行）一个刻度（per-token）；或者每连续 128 个数一个刻度（group-wise，记作 128G）。粒度越细，误差越小，但要存的刻度越多，矩阵乘内核也越复杂。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：只量化权重，和权重、激活都量化，差在哪。</b>
+<p>LLM 推理分两个阶段（详见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。<b>prefill</b> 一次处理整段输入，几千个 token 同时过每一个线性层，是“矩阵乘矩阵”，计算量大、数据复用多，瓶颈在<b>算力</b>。<b>decode</b> 每步只为每个请求生成一个 token，是“矩阵乘向量”，每读一遍权重只做很少的计算，瓶颈在<b>显存带宽</b>。</p>
+<p><b>只量化权重</b>（例如 W4A16：权重 4 bit，激活 16 bit）的做法是：权重以 4 bit 存在显存里，算之前在芯片上解压回 FP16，再用 FP16 的 Tensor Core 去乘。它省下的是显存容量和读权重的带宽，所以对 decode 很有效；但乘法仍然是 FP16 乘法，对受算力限制的 prefill 几乎没有帮助。</p>
+<p><b>权重、激活都量化</b>（W4A4）则让矩阵乘的两个输入都是 INT4，可以直接交给 GPU 的 <b>INT4 Tensor Core</b>。以论文用的 RTX 3090 为例，NVIDIA 白皮书给出的稠密峰值是：INT4 568 TOPS，而 FP16（FP32 累加）只有 71 TFLOPS，相差 8 倍。只有走到这一步，prefill 才能真正变快。</p>
+<p>用 LLaMA-2-7B 的一层算一笔账（推算）。一层的线性层共有约 2.02 亿个参数（注意力 4 × 4096² + 前馈 3 × 4096 × 11008），FP16 下约 0.40 GB。prefill 2048 个 token 时，这一层要做约 \(2\times2.02\times10^8\times2048\approx8.3\times10^{11}\) 次运算，却只需要把 0.40 GB 权重读一遍，每读一个字节要做约 2000 次运算；RTX 3090 的“算力 ÷ 带宽”只有 71 TFLOPS ÷ 936 GB/s ≈ 76，所以 prefill 远远受限于算力。decode 时批大小为 1，每读一个字节只做约 1 次运算，受限于带宽，这时只要权重变小就能变快，激活是不是 4 bit 无所谓。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：三种精度方案，矩阵乘发生在哪种计算单元上</div>
+  <div class="dia-flow"><span class="lbl" style="min-width:86px;font-size:.8rem;color:var(--text-2)">W16A16</span><span class="dia-box">FP16 权重</span><span class="dia-arrow">+</span><span class="dia-box">FP16 激活</span><span class="dia-arrow">→</span><span class="dia-box tgt">FP16 Tensor Core<small>RTX 3090：71 TFLOPS</small></span><span class="dia-arrow">→</span><span class="dia-box">FP16 输出</span></div>
+  <div class="dia-flow"><span class="lbl" style="min-width:86px;font-size:.8rem;color:var(--text-2)">W4A16</span><span class="dia-box enc">INT4 权重<small>显存与带宽省 4 倍</small></span><span class="dia-arrow">→ 解压 →</span><span class="dia-box">FP16 权重</span><span class="dia-arrow">+</span><span class="dia-box">FP16 激活</span><span class="dia-arrow">→</span><span class="dia-box tgt">FP16 Tensor Core<small>算力没变</small></span></div>
+  <div class="dia-flow"><span class="lbl" style="min-width:86px;font-size:.8rem;color:var(--text-2)">W4A4</span><span class="dia-box enc">INT4 权重</span><span class="dia-arrow">+</span><span class="dia-box pred">INT4 激活<small>运行时逐 token 量化</small></span><span class="dia-arrow">→</span><span class="dia-box act">INT4 Tensor Core<small>RTX 3090：568 TOPS，INT32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box">× 行刻度 × 列刻度 → FP16</span></div>
+  <div class="dia-note">峰值数字来自 NVIDIA GA102 架构白皮书（RTX 3090，稠密、按标称加速频率）。W4A4 要多做两件事：每一层输入在运行时现场量化；乘完之后把 INT32 结果乘以两个刻度变回 FP16。QuaRot 的工作就是让第一件事不丢精度。</div>
+</div>
+<p>下面这个交互小工具可以帮你建立直觉：选一个模型和 GPU，把批大小和上下文长度拖大拖小，看 prefill 和 decode 分别落在“带宽受限”还是“算力受限”的区域。只有落在算力受限区域的部分，才能从 INT4 Tensor Core 的更高算力里获益。（工具里的 GPU 是数据中心卡、按 16 位精度计算，用来理解两个阶段的区别即可。）</p>
+<div data-widget="roofline" data-panel="roofline"></div>
+
+<p>论文开头的判断是：prefill 受算力限制，所以“联合量化”（权重、KV 缓存和激活都降精度、用低精度做前向计算）是降低推理成本的关键一步。但激活比权重难量化得多，因为激活里有<b>离群值</b>，4 bit 时尤其严重。原文图 1 展示了 LLaMA-2-7B 第 10 层前馈网络输入的数值分布：原始模型里有几个通道的数值远远高出其他通道；经过 QuaRot 处理后，所有通道的分布变得平整，没有离群值。</p>
+<p>此前的 4 bit 工作（QUIK、Atom）的做法是：先用一小批校准数据找出哪些通道是离群通道，推理时把这些通道单独用高精度计算。QuaRot 的做法则是用<b>随机化的 Hadamard 变换</b>旋转模型的输入，借助 SliceGPT 提出的计算不变性，把这些变换乘进权重矩阵，得到一个输出完全等价、但没有离群特征的网络。论文列出的贡献有三条：</p>
+<ul>
+  <li>证明随机 Hadamard 变换可以直接乘进权重矩阵，不需要改模型结构，就能彻底消除离群特征、让激活容易量化，而模型输出不变。作者把它看作 SliceGPT 计算不变性的推广。</li>
+  <li>把这个思路推广到注意力模块：在线地对 key 和 value 做 Hadamard 变换，消除其中的离群特征，使 KV 缓存也能量化。</li>
+  <li>在此基础上实现了权重、激活、KV 缓存全部用整数 4 bit 的推理，并给出高效内核：LLaMA-2-70B 上 prefill 最高加速 3.33 倍（批大小 64、序列长度 2048），decode 阶段显存节省 3.89 倍，WikiText-2 困惑度损失不超过 0.47；零样本任务保留 99% 的准确率；6 bit 和 8 bit 只用最简单的四舍五入（RTN）就无损。</li>
+</ul>
+<figure class="paper-fig"><div class="dia" style="margin:0">
+  <div class="dia-title">示意：原文图 1 想说明的事（不是原图数据）</div>
+  <div class="dia-row"><span class="lbl">原始模型</span><div class="dia-track"><span class="dia-seg oth" style="flex:6">大多数通道：幅度小</span><span class="dia-seg frag" style="flex:1">少数通道：极大</span><span class="dia-seg oth" style="flex:5">大多数通道：幅度小</span></div></div>
+  <div class="dia-row"><span class="lbl">QuaRot 之后</span><div class="dia-track"><span class="dia-seg kv" style="flex:12">所有通道幅度相近：没有离群值，逐 token 量化的刻度不再被个别通道撑大</span></div></div>
+</div>
+<figcaption><b>对应原文图 1。怎么看：</b>原图是 LLaMA-2-7B 第 10 层 FFN 输入的激活分布，横轴是通道（隐藏维度的下标），纵轴是 token，高度是数值大小。左图（Hugging Face 下载的原始模型）在少数几个固定通道上出现高高的尖峰，而且所有 token 都在同样的通道上出现；右图（QuaRot 处理后）是一片均匀的“草地”。结论：同一组数据换一组坐标，就从“难量化”变成了“好量化”。原图见 <a href="https://arxiv.org/html/2404.00456v2#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</figcaption></figure>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“端到端 4 bit”指的是<b>所有线性层的矩阵乘</b>都在 INT4 下进行、KV 缓存以 INT4 存储。并不是所有运算都是 4 bit：RMSNorm、残差相加、注意力里 softmax 和两次批量矩阵乘、SiLU 激活、在线 Hadamard 变换，以及词嵌入和输出头，仍然在 FP16 或 FP32 下进行（见第 4 节）。另外，摘要里的“3.33 倍”是单个 Transformer 块的 prefill 加速，不是整个模型生成文本的速度。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：离群值这道坎，前人是怎么绕的</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在 QuaRot 之前，量化 LLM 的工作大致分成三条线：只量化权重、权重和激活一起量化、量化 KV 缓存。每条线分别遇到了什么困难，用了什么办法？哪些工作已经用过“旋转”？QuaRot 和它们的关键区别是什么？</div>
+
+<div class="note-pre"><b>先补一点背景：为什么“通道离群值”偏偏对激活量化是致命的。</b>
+<p>一个线性层算的是 \(Y = XW\)，\(X\) 的形状是“token 数 × 输入通道数 \(k\)”，\(W\) 是“\(k\) × 输出通道数”。输出的每个元素是一次沿 \(k\) 维的求和：\(Y_{ij}=\sum_{t} X_{it}W_{tj}\)。</p>
+<p>如果 \(X\) 的第 \(i\) 行共用一个刻度 \(s^x_i\)、\(W\) 的第 \(j\) 列共用一个刻度 \(s^w_j\)，那么两个刻度可以从求和号里提出来：</p>
+<div class="formula">$$Y_{ij}\approx\sum_t \big(s^x_i\,q^x_{it}\big)\big(s^w_j\,q^w_{tj}\big)=s^x_i\,s^w_j\underbrace{\sum_t q^x_{it}\,q^w_{tj}}_{\text{INT4 Tensor Core 里的整数累加}} .$$</div>
+<p>这正是 W4A4 能跑在整数单元上的原因：整数乘加在 Tensor Core 里一口气做完，最后只乘一次两个刻度。但它要求<b>刻度沿求和维 \(k\) 不变</b>。所以激活只能“每个 token 一个刻度”，不能“每个输入通道一个刻度”。</p>
+<p>麻烦在于 LLM 的激活离群值恰好是<b>按通道</b>出现的：某几个固定的输入通道，在几乎所有 token 上数值都特别大（原文图 1 里那几道尖峰）。于是每个 token 的那一行里都含有离群值，每一行的刻度都被撑大，每一行里正常通道的数都被舍得很粗。权重没有这个问题，因为权重的分布要平整得多，而且可以离线慢慢优化。</p>
+</div>
+
+<p><b>只量化权重的方法</b>（GPTQ、AWQ、SpQR、AQLM、QuIP# 等）把每个权重压成低比特，计算前再还原成高精度，主要计算仍在高精度下进行。论文把它们作为背景，不作为直接对手。</p>
+<p><b>权重和激活一起量化的方法</b>都在和离群值较劲：</p>
+<ul>
+  <li><b>LLM.int8()</b>（Dettmers 等，NeurIPS 2022）在 8 bit 下发现了这种“涌现的”离群特征，做法是推理时实时找出离群特征维度，把这几维单独拿出来做 16 bit 矩阵乘，其余超过 99.9% 的数值用 8 bit。QuaRot 的评价是这样做性能不好，因为拆分本身就有开销。</li>
+  <li><b>SmoothQuant</b>（Xiao 等，ICML 2023）的办法是把每个输入通道的激活除以一个系数、同时把权重对应的行乘以同一个系数。数学上输出不变，但“量化难度”从激活挪到了权重上。系数要用校准数据确定，还多了一个需要调的超参数。它解决了 8 bit（W8A8），但到了 4 bit 就不够用了：表 1 里它在 LLaMA-2-7B 上的困惑度是 83.12。</li>
+  <li><b>QUIK</b>（Ashkboos 等，2023，与本文同一第一作者）和 <b>Atom</b>（Zhao 等，2023）把离群通道离线找出来，推理时保留在高精度：QUIK 每层留 256 个 FP16 离群通道，并把最难的 down-projection 层留在 8 bit；Atom 把 128 个离群通道重排到矩阵末尾、用 INT8 计算，并为此写了复杂的混合精度矩阵乘内核。</li>
+  <li><b>OmniQuant</b>（Shao 等，2023）用校准数据训练可学习的裁剪阈值和等价变换，属于“轻量重训练”。</li>
+</ul>
+
+<div class="note-pre"><b>先补一点背景：QuIP 和 QuIP# 用旋转做了什么。</b>
+<p><b>QuIP</b>（Chee 等，NeurIPS 2023）研究的是 2 bit 的<b>只量化权重</b>。它的出发点是：如果权重矩阵的元素大小都差不多（没有特别突出的元素），就容易量化。它把这种性质叫做“非相干”（incoherent），并提出<b>非相干处理</b>：在权重矩阵左右各乘一个随机正交矩阵 \(W\to UWV^\top\)，量化完再在推理时把 \(U\)、\(V\) 的作用撤销。<b>QuIP#</b>（Tseng 等，ICML 2024）把随机正交矩阵换成计算更快的<b>随机 Hadamard 变换</b>，再配上格点码本和微调。这两项工作的旋转只是为了量化权重，激活不量化；而且推理时每个权重矩阵前后都要各做一次变换来“撤销”旋转。</p>
+<p>另外，Xi 等（NeurIPS 2023）在用 4 bit 整数<b>训练</b> Transformer 时，也在每个线性层的前向计算里用了精确的 Hadamard 变换。</p>
+</div>
+
+<p><b>KV 缓存量化</b>是另一条线。生成长文本或开大批量时，KV 缓存会成为显存的主要占用（见 <a href="vllm.html#n-3">vLLM 精读 §3</a>）。FlexGen 用 4 bit 分组量化 KV 缓存；KVQuant 推到 3 bit；KIVI 做到了 2 bit（见本站 <a href="kivi.html">KIVI 精读</a>）。这些工作都发现 <b>key 里也有按通道出现的离群值</b>，于是各自用了一套复杂的手段：按通道量化 key、非均匀量化、把离群值留成高精度。以 KIVI 为例，它的结论是 key 应该“按通道”分组量化、value 应该“按 token”分组量化，正是因为 key 的离群值固定出现在某几个通道上。QuaRot 走的是另一条路：先把 key 旋转一下，让离群通道消失，key 也就可以像 value 一样简单地按 token 量化了（第 4.5 节）。</p>
+<p>QuaRot 的定位于是很清楚：它也用 Hadamard 变换做非相干处理，但<b>不在推理时撤销变换</b>，而是借助 SliceGPT 的计算不变性，尽可能把变换直接融合进权重。QuIP# 需要每个权重矩阵在前向时做两次 Hadamard 变换，QuaRot 每个 Transformer 层只需要“一个半”（第 4 节解释这个数是怎么来的）。更重要的是，计算不变性意味着<b>激活也一起被做了非相干处理</b>，所以激活也能被有效量化。同样的技巧用到注意力块上，就能把 KV 缓存量化到 4 bit。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>QuIP/QuIP# 的旋转是“量化前转过去、计算时转回来”，模型结构不变但推理多了开销；QuaRot 的旋转是“把转动直接写进权重，让整个网络从此就在新坐标系里运行”，大部分旋转在推理时不存在。两者用的数学工具一样，用法完全不同。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 背景：正交矩阵、Hadamard 变换、非相干处理与计算不变性</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>QuaRot 用到的数学工具只有四样：正交矩阵（尤其是 Hadamard 矩阵）、衡量“离群程度”的非相干性、Transformer 的 pre-norm 结构，以及 SliceGPT 证明的计算不变性。这一节把它们一一讲清楚：为什么“旋转”能把离群值摊平？为什么旋转可以写进权重而不改变输出？为什么偏偏是 Hadamard 矩阵？</div>
+
+<h4 id="n-3-1">3.1 正交矩阵与 Hadamard 矩阵</h4>
+<p>一个方阵 \(Q\) 满足 \(QQ^\top=I\)，就叫<b>正交矩阵</b>。几何上，它把向量旋转（或翻转）到另一个方向，但<b>不改变长度</b>：\(\|xQ\|=\|x\|\)。论文把所有实正交矩阵都称为“旋转矩阵”。</p>
+<p><b>Hadamard 矩阵</b>是一种特殊的正交矩阵：它的元素全是 \(+1\) 或 \(-1\)（再乘一个归一化系数）。最常用的是 <b>Walsh–Hadamard 矩阵</b>，大小是 2 的幂，可以由 2×2 的“种子”反复做 Kronecker 积得到：</p>
+<div class="formula">$$H_2=\frac{1}{\sqrt2}\begin{pmatrix}1&amp;1\\1&amp;-1\end{pmatrix},\qquad H_{2^n}=H_2\otimes H_{2^{n-1}} .$$</div>
+<p>Kronecker 积 \(A\otimes B\) 的意思是：把 \(A\) 的每个元素 \(a_{ij}\) 换成一整块 \(a_{ij}B\)。所以 \(H_4\) 就是 \(H_2\) 的四个位置各放一块 \(\pm H_2\)，依此类推。这种递归结构带来一个重要好处：计算 \(Hx\) 不需要 \(d^2\) 次乘加，只需要 \(d\log_2 d\) 次加减，这就是<b>快速 Walsh–Hadamard 变换</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：d = 8 的快速 Walsh–Hadamard 变换（蝶形图）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="8 点快速 Walsh–Hadamard 变换的三级蝶形运算" style="--dg-min:700px">
+    <text x="250" y="16" class="t-c t-sm">第 1 级：相距 1 的两两配对</text>
+    <text x="450" y="16" class="t-c t-sm">第 2 级：相距 2</text>
+    <text x="650" y="16" class="t-c t-sm">第 3 级：相距 4</text>
+    <g style="stroke:var(--text-2);stroke-width:1.2;fill:none">
+      <!-- stage 1: pairs (0,1)(2,3)(4,5)(6,7) -->
+      <path d="M150,40 L350,40 M150,74 L350,40 M150,40 L350,74"/><path d="M150,74 L350,74" style="stroke-dasharray:5 4"/>
+      <path d="M150,108 L350,108 M150,142 L350,108 M150,108 L350,142"/><path d="M150,142 L350,142" style="stroke-dasharray:5 4"/>
+      <path d="M150,176 L350,176 M150,210 L350,176 M150,176 L350,210"/><path d="M150,210 L350,210" style="stroke-dasharray:5 4"/>
+      <path d="M150,244 L350,244 M150,278 L350,244 M150,244 L350,278"/><path d="M150,278 L350,278" style="stroke-dasharray:5 4"/>
+      <!-- stage 2: pairs (0,2)(1,3)(4,6)(5,7) -->
+      <path d="M350,40 L550,40 M350,108 L550,40 M350,40 L550,108"/><path d="M350,108 L550,108" style="stroke-dasharray:5 4"/>
+      <path d="M350,74 L550,74 M350,142 L550,74 M350,74 L550,142"/><path d="M350,142 L550,142" style="stroke-dasharray:5 4"/>
+      <path d="M350,176 L550,176 M350,244 L550,176 M350,176 L550,244"/><path d="M350,244 L550,244" style="stroke-dasharray:5 4"/>
+      <path d="M350,210 L550,210 M350,278 L550,210 M350,210 L550,278"/><path d="M350,278 L550,278" style="stroke-dasharray:5 4"/>
+      <!-- stage 3: pairs (0,4)(1,5)(2,6)(3,7) -->
+      <path d="M550,40 L750,40 M550,176 L750,40 M550,40 L750,176"/><path d="M550,176 L750,176" style="stroke-dasharray:5 4"/>
+      <path d="M550,74 L750,74 M550,210 L750,74 M550,74 L750,210"/><path d="M550,210 L750,210" style="stroke-dasharray:5 4"/>
+      <path d="M550,108 L750,108 M550,244 L750,108 M550,108 L750,244"/><path d="M550,244 L750,244" style="stroke-dasharray:5 4"/>
+      <path d="M550,142 L750,142 M550,278 L750,142 M550,142 L750,278"/><path d="M550,278 L750,278" style="stroke-dasharray:5 4"/>
+    </g>
+    <g style="fill:var(--c-enc)">
+      <circle cx="150" cy="40" r="4"/><circle cx="150" cy="74" r="4"/><circle cx="150" cy="108" r="4"/><circle cx="150" cy="142" r="4"/><circle cx="150" cy="176" r="4"/><circle cx="150" cy="210" r="4"/><circle cx="150" cy="244" r="4"/><circle cx="150" cy="278" r="4"/>
+      <circle cx="350" cy="40" r="4"/><circle cx="350" cy="74" r="4"/><circle cx="350" cy="108" r="4"/><circle cx="350" cy="142" r="4"/><circle cx="350" cy="176" r="4"/><circle cx="350" cy="210" r="4"/><circle cx="350" cy="244" r="4"/><circle cx="350" cy="278" r="4"/>
+      <circle cx="550" cy="40" r="4"/><circle cx="550" cy="74" r="4"/><circle cx="550" cy="108" r="4"/><circle cx="550" cy="142" r="4"/><circle cx="550" cy="176" r="4"/><circle cx="550" cy="210" r="4"/><circle cx="550" cy="244" r="4"/><circle cx="550" cy="278" r="4"/>
+      <circle cx="750" cy="40" r="4"/><circle cx="750" cy="74" r="4"/><circle cx="750" cy="108" r="4"/><circle cx="750" cy="142" r="4"/><circle cx="750" cy="176" r="4"/><circle cx="750" cy="210" r="4"/><circle cx="750" cy="244" r="4"/><circle cx="750" cy="278" r="4"/>
+    </g>
+    <g class="t-r"><text x="135" y="40" class="t-r">x₀</text><text x="135" y="74" class="t-r">x₁</text><text x="135" y="108" class="t-r">x₂</text><text x="135" y="142" class="t-r">x₃</text><text x="135" y="176" class="t-r">x₄</text><text x="135" y="210" class="t-r">x₅</text><text x="135" y="244" class="t-r">x₆</text><text x="135" y="278" class="t-r">x₇</text></g>
+    <g><text x="765" y="40">(Hx)₀</text><text x="765" y="74">(Hx)₁</text><text x="765" y="108">(Hx)₂</text><text x="765" y="142">(Hx)₃</text><text x="765" y="176">(Hx)₄</text><text x="765" y="210">(Hx)₅</text><text x="765" y="244">(Hx)₆</text><text x="765" y="278">(Hx)₇</text></g>
+    <text x="850" y="150" class="t-c t-sm">最后整体</text>
+    <text x="850" y="168" class="t-c t-sm">乘 1/√8</text>
+    <text x="480" y="312" class="t-c t-sm">每对节点做一次“蝶形”：上面输出 a + b（实线），下面输出 a − b（虚线是带减号的那条）。3 级 × 8 次加减 = 24 次运算，直接做 8×8 矩阵乘要 64 次乘加。</text>
+  </svg>
+  <div class="dia-note">本站示意图。d = 4096 时，快速变换只需 4096 × 12 ≈ 4.9 万次加减，而稠密矩阵乘需要 4096² ≈ 1678 万次乘加（推算）。这就是 QuaRot 在推理时坚持用 Hadamard 矩阵、而不用任意正交矩阵的原因：前者在线计算几乎免费。QuaRot 的代码用 Dao AI Lab 的 <code>fast-hadamard-transform</code> CUDA 库来做这一步。</div>
+</div>
+<p>大小不是 2 的幂时，Hadamard 矩阵不一定存在。论文的做法是把维度分解成 \(d=2^n m\)，其中 \(m\) 是一个已知存在 Hadamard 矩阵的大小（Sloane 维护的 Hadamard 矩阵库里查得到），再用 Kronecker 积 \(H_d=H_{2^n}\otimes H_m\)，计算量是 \(O(d(m+n))\)。从官方代码看，LLaMA-2-7B 的 FFN 中间维 11008 = 64 × 172，13B 的 13824 = 128 × 108，70B 的 28672 = 1024 × 28，代码里分别内置了 172、108、28 阶的 Hadamard 矩阵（据 <code>hadamard_utils.py</code>）。</p>
+<p>最后，借用 QuIP# 的做法，QuaRot 在方便的地方用<b>随机化 Hadamard 矩阵</b> \(\tilde H=H\,\mathrm{diag}(s)\)，其中 \(s\) 是一串随机的 \(\pm1\)。也就是先随机翻转每个坐标的正负号，再做 Hadamard 变换。翻转符号本身也是正交变换，所以 \(\tilde H\) 仍然正交；加入随机性是为了避免某个特定输入恰好和 Hadamard 的基方向对齐、变换后反而集中。</p>
+
+<h4 id="n-3-2">3.2 非相干处理：为什么旋转能把离群值摊平</h4>
+<p>QuIP 给“离群程度”下了一个定义：一个 \(m\times n\) 的矩阵 \(W\) 称为 \(\mu\)-非相干，如果</p>
+<div class="formula">$$\max_{ij}|W_{ij}|\;\le\;\mu\,\frac{\|W\|_F}{\sqrt{mn}} .$$</div>
+<p>右边的 \(\|W\|_F/\sqrt{mn}\) 是所有元素的均方根，也就是“典型元素有多大”。所以 \(\mu\) 就是“最大元素是典型元素的几倍”。所有元素一样大时 \(\mu=1\)；一个元素独大时 \(\mu\) 接近 \(\sqrt{mn}\)。\(\mu\) 越大，越难量化，因为刻度由最大元素决定，典型元素只能分到很少的几个量化格。</p>
+<p>为什么乘一个随机正交矩阵能让 \(\mu\) 变小？看一个向量 \(x\) 经过 Hadamard 变换后的第 \(j\) 个坐标：\((Hx)_j=\frac{1}{\sqrt d}\sum_i \pm x_i\)。它是<b>所有</b>原坐标带随机符号的加权和。原来集中在一个坐标上的巨大数值，被平均分给了全部 \(d\) 个新坐标，每个新坐标只分到 \(1/\sqrt d\)；而大量小数值相加时正负抵消，结果的大小接近一个高斯分布。总长度不变，但“最大值 / 均方根”被压到了接近高斯分布的水平。QuIP 和 QuIP# 对这一点给出了概率上的保证。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一个 8 维向量，旋转前后做 INT4 对称量化（数字为本站计算）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="一个带离群值的 8 维向量在 Hadamard 变换前后的 INT4 量化格点与量化结果" style="--dg-min:720px">
+    <text x="245" y="18" class="t-c t-b">旋转前：x 的第 4 维是离群值（9.0）</text>
+    <text x="725" y="18" class="t-c t-b">旋转后：y = Hx（同一个向量换了一组坐标）</text>
+    <g style="stroke:var(--border);stroke-width:1;stroke-dasharray:3 3">
+      <line x1="45" y1="230.6" x2="450" y2="230.6"/><line x1="45" y1="189.4" x2="450" y2="189.4"/><line x1="45" y1="168.9" x2="450" y2="168.9"/><line x1="45" y1="148.3" x2="450" y2="148.3"/><line x1="45" y1="127.7" x2="450" y2="127.7"/><line x1="45" y1="107.1" x2="450" y2="107.1"/><line x1="45" y1="86.6" x2="450" y2="86.6"/><line x1="45" y1="66" x2="450" y2="66"/>
+      <line x1="515" y1="54.3" x2="920" y2="54.3"/><line x1="515" y1="66.6" x2="920" y2="66.6"/><line x1="515" y1="78.8" x2="920" y2="78.8"/><line x1="515" y1="91" x2="920" y2="91"/><line x1="515" y1="103.3" x2="920" y2="103.3"/><line x1="515" y1="115.5" x2="920" y2="115.5"/><line x1="515" y1="127.8" x2="920" y2="127.8"/><line x1="515" y1="152.2" x2="920" y2="152.2"/><line x1="515" y1="164.5" x2="920" y2="164.5"/><line x1="515" y1="176.7" x2="920" y2="176.7"/><line x1="515" y1="189" x2="920" y2="189"/><line x1="515" y1="201.2" x2="920" y2="201.2"/><line x1="515" y1="213.4" x2="920" y2="213.4"/><line x1="515" y1="225.7" x2="920" y2="225.7"/>
+    </g>
+    <line x1="45" y1="210" x2="450" y2="210" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="515" y1="140" x2="920" y2="140" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <g style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.2">
+      <rect x="56" y="203.6" width="28" height="6.4"/><rect x="106" y="210" width="28" height="9.6"/><rect x="156" y="205.2" width="28" height="4.8"/><rect x="206" y="66" width="28" height="144" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><rect x="256" y="210" width="28" height="3.2"/><rect x="306" y="202" width="28" height="8"/><rect x="356" y="210" width="28" height="6.4"/><rect x="406" y="208.4" width="28" height="1.6"/>
+    </g>
+    <g style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2">
+      <rect x="526" y="62.8" width="28" height="77.2"/><rect x="576" y="140" width="28" height="75.5"/><rect x="626" y="140" width="28" height="75.5"/><rect x="676" y="59.4" width="28" height="80.6"/><rect x="726" y="62.8" width="28" height="77.2"/><rect x="776" y="140" width="28" height="55.2"/><rect x="826" y="140" width="28" height="85.7"/><rect x="876" y="140" width="28" height="84"/>
+    </g>
+    <g style="fill:var(--c-loss)">
+      <circle cx="70" cy="210" r="4"/><circle cx="120" cy="210" r="4"/><circle cx="170" cy="210" r="4"/><circle cx="220" cy="66" r="4"/><circle cx="270" cy="210" r="4"/><circle cx="320" cy="210" r="4"/><circle cx="370" cy="210" r="4"/><circle cx="420" cy="210" r="4"/>
+      <circle cx="540" cy="66.5" r="4"/><circle cx="590" cy="213.5" r="4"/><circle cx="640" cy="213.5" r="4"/><circle cx="690" cy="54.3" r="4"/><circle cx="740" cy="66.5" r="4"/><circle cx="790" cy="201.2" r="4"/><circle cx="840" cy="225.7" r="4"/><circle cx="890" cy="54.3" r="4"/>
+    </g>
+    <text x="458" y="66" class="t-xs">7 格</text><text x="458" y="210" class="t-xs">0 格</text>
+    <text x="245" y="252" class="t-c t-sm">格点间距 = 9/7 ≈ 1.29：7 个小数值全部落进“0”这一格</text>
+    <text x="245" y="272" class="t-c t-sm">量化后只剩离群值；均方误差 0.134</text>
+    <text x="725" y="252" class="t-c t-sm">格点间距 ≈ 0.51：8 个数都用上了格点；量化后再乘 Hᵀ 转回</text>
+    <text x="725" y="272" class="t-c t-sm">均方误差 0.022，约为左边的 1/6</text>
+    <text x="480" y="294" class="t-c t-xs">柱子 = 真实数值；红点 = 量化再还原后的数值；虚线 = INT4 能表示的格点</text>
+  </svg>
+  <div class="dia-note">本站示意图，数字为推算：\(x=(0.4,-0.6,0.3,9.0,-0.2,0.5,-0.4,0.1)\)，\(H\) 是归一化的 8 阶 Walsh–Hadamard 矩阵，两边都做逐向量对称 INT4 量化。“最大值 / 均方根”从 2.81 降到 1.11。换成更接近真实模型的设置——4096 维、其中一维是 100、其余是标准正态、用随机 Hadamard 变换——本站模拟得到的“最大值 / 均方根”从 54 降到 2.9，正常通道的量化误差（均方根）从 1.00 降到 0.22（推算，随机种子 0）。</div>
+</div>
+<p>QuaRot 把这个思路同时用在权重和激活上。对权重，乘正交矩阵降低了非相干系数，这一点和 QuIP 一样；对激活，原文图 1 已经展示了效果：处理后的激活不再有离群值。</p>
+<p>一个自然的问题是：既然任何随机正交矩阵都能“摊平”离群值，为什么偏要 Hadamard？理由有两层。第一层是速度：在线的那几处变换必须用快速算法，只有 Hadamard 这类结构化矩阵才有 \(O(d\log d)\) 的算法。第二层是效果：Hadamard 矩阵的每个元素绝对值都一样（都是 \(1/\sqrt d\)），任何一个坐标上的能量都会被<b>严格均匀</b>地分到所有新坐标上；而一般的随机正交矩阵只是“平均意义上”均匀，个别元素可能偏大。QuIP# 从理论上说明了随机 Hadamard 给出的最大值上界更紧。QuaRot 的消融（第 5.4 节）也证实了这一点：即使在只需离线融合、速度无所谓的残差流旋转上，随机 Hadamard 也比随机正交矩阵好得多。</p>
+
+<h4 id="n-3-3">3.3 Transformer 的结构：pre-norm、RMSNorm 和门控 FFN</h4>
+<p>论文假设模型是“pre-norm”结构：每个注意力块、每个前馈块之前都有一个 LayerNorm 或 RMSNorm，块的输出直接加回残差流。LLaMA-2 就是这样。它的前馈网络（FFN）是门控结构（SwiGLU）：输入先经过 RMSNorm，再分两路乘 \(W_{\text{gate}}\) 和 \(W_{\text{up}}\)，门控那一路过激活函数 \(\sigma\)（SiLU）后与另一路逐元素相乘，最后乘 \(W_{\text{down}}\) 得到输出。</p>
+<div class="formula">$$\mathrm{RMSNorm}(x)=\frac{x}{\|x\|/\sqrt d}\odot\alpha,\qquad \mathrm{FFN}(x)=\Big(\sigma\big(\tilde xW_{\text{gate}}\big)\odot\big(\tilde xW_{\text{up}}\big)\Big)W_{\text{down}},\quad \tilde x=\mathrm{RMSNorm}(x)$$</div>
+<p>这里 \(\alpha\) 是 RMSNorm 的可学习缩放参数，逐维相乘。原文图 2 画的就是这个 FFN，图 5 画的是带 RoPE 的注意力块：RMSNorm 之后分三路乘 \(W_q\)、\(W_k\)、\(W_v\)，\(q\)、\(k\) 加上旋转位置编码，做多头注意力，key 和 value 存进 KV 缓存，最后乘 \(W_{\text{out}}\)。量化之前，这些运算以 FP32 或 FP16 进行。</p>
+
+<h4 id="n-3-4">3.4 计算不变性：旋转可以“写进”权重</h4>
+<div class="note-pre"><b>先补一点背景：SliceGPT 和它发现的计算不变性。</b>
+<p>SliceGPT（Ashkboos 等，ICLR 2024，与本文第一作者、Croci、Hoefler、Hensman 共同完成）是一篇剪枝论文：它把每层的隐藏状态先转到主成分方向，再整行整列地删掉不重要的方向，最多删掉 LLaMA-2-70B 等模型 25% 的参数。为了让“转到主成分方向”不改变模型输出，作者证明了一个定理：<b>Transformer 的权重和块与块之间传递的激活，可以用同一个正交矩阵做变换，而模型的输出保持不变。</b>这就是计算不变性。QuaRot 把这个定理从“为了删维度而旋转”改成了“为了消离群值而旋转”。</p>
+</div>
+<p>它为什么成立？关键是 RMSNorm。暂时假设 RMSNorm 没有缩放参数 \(\alpha\)，只做“除以长度”（论文写作 \(x_i\leftarrow x_i/\|x_i\|\)）。因为正交矩阵不改变长度，\(\|xQ\|=\|x\|\)，所以</p>
+<div class="formula">$$\mathrm{RMSNorm}(XQ)=\frac{XQ}{\|XQ\|}=\frac{X}{\|X\|}\,Q=\mathrm{RMSNorm}(X)\,Q .$$</div>
+<p>也就是说，RMSNorm 和旋转可以交换顺序。论文的式 (3) 写成等价的形式 \(\mathrm{RMSNorm}(X)=\mathrm{RMSNorm}(XQ^\top)Q\)。</p>
+<p>有了这个性质，就可以把整条残差流都换到旋转后的坐标里：</p>
+<ul>
+  <li><b>入口</b>：把词嵌入矩阵右乘 \(Q\)，残差流从第一层开始就是 \(XQ\)。</li>
+  <li><b>每个块的输入一侧</b>：块先做 RMSNorm，得到 \(\mathrm{RMSNorm}(X)Q\)；把块的输入权重（\(W_q,W_k,W_v\) 或 \(W_{\text{gate}},W_{\text{up}}\)）左乘 \(Q^\top\)，乘法结果是 \(\mathrm{RMSNorm}(X)QQ^\top W=\mathrm{RMSNorm}(X)W\)，与原模型完全一样。所以块内部的计算没有任何变化。</li>
+  <li><b>每个块的输出一侧</b>：把输出权重（\(W_{\text{out}}\) 或 \(W_{\text{down}}\)）右乘 \(Q\)，块的输出变成原输出乘 \(Q\)，加回残差流后，残差流仍然是“原残差流乘 \(Q\)”。</li>
+  <li><b>出口</b>：最后的 RMSNorm 之后，输出头左乘 \(Q^\top\)，得到的 logits 与原模型相同。</li>
+</ul>
+<p>剩下的是缩放参数 \(\alpha\)。逐维缩放 \(\mathrm{diag}(\alpha)\) 和旋转不能交换，所以要先把它“搬走”：把 \(\mathrm{diag}(\alpha)\) 乘进紧随其后的权重矩阵（\(W\leftarrow\mathrm{diag}(\alpha)W\)），RMSNorm 本身只保留“除以长度”的部分。对 OPT 这类用 LayerNorm 的模型，还要先把“减均值”这一步（也是一个线性投影）乘进前一层的权重，把 LayerNorm 变成 RMSNorm；官方代码的 <code>fuse_layer_norms</code> 就是做这件事的。</p>
+<div class="dia">
+  <div class="dia-title">示意图：计算不变性——整条残差流在旋转后的坐标里运行</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="计算不变性：嵌入乘 Q，块输入权重左乘 Q 转置，块输出权重右乘 Q，输出头左乘 Q 转置" style="--dg-min:720px">
+    <g class="enc"><rect class="box" x="20" y="150" width="130" height="40" rx="8"/><text x="85" y="164" class="t-c">嵌入 E → EQ</text><text x="85" y="181" class="t-c t-xs">离线改好</text></g>
+    <path class="edge no-head" d="M150,170 L840,170" style="stroke-width:3"/>
+    <text x="480" y="190" class="t-c t-sm">残差流：每一层传递的都是 XQ，而不是 X</text>
+    <path class="edge" d="M190,170 L190,75 L213,75"/>
+    <g><rect class="box" x="215" y="55" width="110" height="40" rx="8"/><text x="270" y="69" class="t-c">RMSNorm</text><text x="270" y="86" class="t-c t-xs">α 已移走，只除以长度</text></g>
+    <path class="edge" d="M325,75 L343,75"/>
+    <g class="enc"><rect class="box" x="345" y="55" width="160" height="40" rx="8"/><text x="425" y="69" class="t-c">Qᵀ diag(α) W_in</text><text x="425" y="86" class="t-c t-xs">W_q W_k W_v 或 W_gate W_up</text></g>
+    <path class="edge" d="M505,75 L523,75"/>
+    <g><rect class="box" x="525" y="55" width="100" height="40" rx="8"/><text x="575" y="69" class="t-c">块内计算</text><text x="575" y="86" class="t-c t-xs">与原模型完全相同</text></g>
+    <path class="edge" d="M625,75 L643,75"/>
+    <g class="enc"><rect class="box" x="645" y="55" width="120" height="40" rx="8"/><text x="705" y="69" class="t-c">W_out Q</text><text x="705" y="86" class="t-c t-xs">W_o 或 W_down</text></g>
+    <path class="edge" d="M765,75 L790,75 L790,156"/>
+    <circle cx="790" cy="170" r="12" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/><text x="790" y="170" class="t-c">+</text>
+    <text x="870" y="164" class="t-c t-sm">× L 层</text>
+    <path class="edge" d="M860,178 L860,232"/>
+    <g class="enc"><rect class="box" x="640" y="235" width="300" height="44" rx="8"/><text x="790" y="251" class="t-c">最后的 RMSNorm → Qᵀ diag(α_f) W_head</text><text x="790" y="268" class="t-c t-xs">logits 与原模型逐位相同（不计数值误差）</text></g>
+    <g><rect class="box" x="20" y="225" width="590" height="70" rx="8" style="fill:var(--surface-2)"/><text x="315" y="246" class="t-c">为什么能这样做：‖xQ‖ = ‖x‖，所以 RMSNorm(XQ) = RMSNorm(X)·Q</text><text x="315" y="268" class="t-c t-sm">块输入一侧：RMSNorm(X)·Q·Qᵀ·W = RMSNorm(X)·W，块内看到的东西与原模型一样</text><text x="315" y="285" class="t-c t-sm">块输出一侧：f(X)·Q 加回 XQ，残差流继续保持“乘了 Q”的状态</text></g>
+  </svg>
+  <div class="dia-note">本站示意图，蓝色框表示离线改写过的权重，推理时不需要任何额外计算。对应原文 §3.4 与图 3、图 6 中带 \(Q\) 的部分。</div>
+</div>
+<p>这一步做完之后，有两个副作用正好是量化想要的：第一，所有权重都被正交矩阵乘过一次，非相干系数降低，和 QuIP# 对权重做的处理类似，但<b>推理时不需要任何额外操作</b>；第二，块与块之间传递的激活变成了 \(XQ\)，也就是被做了非相干处理，离群值消失了。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>因为每一层都要把输出加回同一条残差流，所有层<b>必须共用同一个 \(Q\)</b>：第 3 层用的旋转和第 30 层用的旋转是同一个矩阵。这既是 QuaRot 简单的原因，也是它的约束——后来的 FlatQuant 就专门指出，残差连接把所有块的变换绑在了一起。另外，“输出不变”只在精确算术下成立；权重以 FP16 存储时，乘进 \(Q\) 会引入极小的舍入差异（官方代码用 FP64 做这些矩阵乘再转回原精度）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · 原图：<a href="https://arxiv.org/html/2404.00456v2#S3.F2" target="_blank" rel="noopener">图 2（FFN）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 方法：一层里的四处旋转，和三步量化</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>第 3 节的计算不变性只旋转了“块与块之间”的激活。可是一个线性层的输入并不都来自残差流：FFN 里的 down-projection 吃的是 SwiGLU 的输出，注意力的输出投影吃的是多头注意力的输出，KV 缓存里存的是投影加位置编码之后的 key 和 value。这些“块内部”的激活怎么旋转？哪些旋转能提前乘进权重，哪些必须在推理时实时算？旋转完之后，权重、激活、KV 缓存又分别用什么方法量化？</div>
+
+<h4 id="n-4-1">4.1 总览：先在全精度下旋转，再量化</h4>
+<p>QuaRot 分两个阶段。<b>第一阶段</b>在全精度下改写模型：把旋转矩阵乘进权重，并在前向计算里插入几个在线 Hadamard 变换。这一阶段做完，模型的输出（在精确算术下）不变。<b>第二阶段</b>才真正量化：用现成的方法（默认 GPTQ）量化权重，并在前向计算里插入在线的量化操作，现场把激活和 KV 缓存量化成 4 bit。激活的量化用最简单的四舍五入（RTN）。下图把两个阶段的结果画在一张图里。</p>
+<div class="dia">
+  <div class="dia-title">示意图：QuaRot 处理后的一个 LLaMA 层（注意力块 + 前馈块）</div>
+  <svg class="dg" viewBox="0 0 960 540" role="img" aria-label="QuaRot 处理后的注意力块和前馈块：哪些旋转融合进权重，哪些在线计算，哪里量化为 INT4" style="--dg-min:820px">
+    <rect x="20" y="8" width="22" height="14" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="48" y="15" class="t-sm">离线乘进权重的旋转（推理时零开销）</text>
+    <rect x="330" y="8" width="22" height="14" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="358" y="15" class="t-sm">在线 Hadamard 变换（推理时实时算）</text>
+    <rect x="640" y="8" width="22" height="14" rx="3" style="fill:var(--c-data-bg);stroke:var(--c-data)"/><text x="668" y="15" class="t-sm">在线量化成 INT4（逐 token）</text>
+    <text x="20" y="52" class="t-b">注意力块</text>
+    <text x="20" y="150" class="t-b">XQ</text><text x="20" y="166" class="t-xs">FP16</text>
+    <path class="edge" d="M50,150 L78,150"/>
+    <g><rect class="box" x="80" y="130" width="80" height="40" rx="8"/><text x="120" y="150" class="t-c">RMSNorm</text></g>
+    <path class="edge" d="M160,150 L178,150"/>
+    <g class="data"><rect class="box" x="180" y="130" width="60" height="40" rx="8"/><text x="210" y="144" class="t-c">量化</text><text x="210" y="160" class="t-c t-xs">INT4</text></g>
+    <path class="edge" d="M240,150 L258,150 L258,88 L273,88"/><path class="edge" d="M258,150 L273,150"/><path class="edge" d="M258,150 L258,212 L273,212"/>
+    <g class="enc"><rect class="box" x="275" y="70" width="175" height="36" rx="8"/><text x="362" y="88" class="t-c">Qᵀ diag(α) W_q</text></g>
+    <g class="enc"><rect class="box" x="275" y="132" width="175" height="36" rx="8"/><text x="362" y="150" class="t-c">Qᵀ diag(α) W_k</text></g>
+    <g class="enc"><rect class="box" x="275" y="194" width="175" height="36" rx="8"/><text x="362" y="212" class="t-c">Qᵀ diag(α) W_v (I⊗H_dh)</text></g>
+    <path class="edge" d="M450,88 L468,88"/><path class="edge" d="M450,150 L468,150"/>
+    <g><rect class="box" x="470" y="70" width="60" height="98" rx="8"/><text x="500" y="119" class="t-c">RoPE</text></g>
+    <path class="edge" d="M530,88 L548,88"/><path class="edge" d="M530,150 L548,150"/>
+    <g class="pred"><rect class="box" x="550" y="70" width="80" height="98" rx="8"/><text x="590" y="108" class="t-c">H_dh</text><text x="590" y="128" class="t-c t-xs">逐头，Q 与 K</text></g>
+    <path class="edge" d="M630,88 L758,88"/><text x="694" y="80" class="t-c t-xs">Q 保持 FP16</text>
+    <path class="edge" d="M630,150 L697,150 L697,173"/>
+    <path class="edge" d="M450,212 L648,212"/>
+    <g class="act"><rect class="box" x="650" y="175" width="95" height="55" rx="8"/><text x="697" y="195" class="t-c" style="font-size:12px">量化 → KV 缓存</text><text x="697" y="214" class="t-c t-xs">INT4，每组 128</text></g>
+    <path class="edge" d="M745,202 L758,202"/>
+    <g><rect class="box" x="760" y="70" width="80" height="160" rx="8"/><text x="800" y="132" class="t-c">注意力</text><text x="800" y="152" class="t-c t-xs">FP16 计算</text><text x="800" y="168" class="t-c t-xs">读 INT4 KV</text><text x="800" y="182" class="t-c t-xs">后现场反量化</text></g>
+    <path class="edge" d="M840,135 L853,135"/>
+    <g class="pred"><rect class="box" x="855" y="110" width="95" height="50" rx="8"/><text x="902" y="128" class="t-c" style="font-size:12px">跨头 Hadamard</text><text x="902" y="146" class="t-c t-xs">H_nh ⊗ I</text></g>
+    <path class="edge" d="M905,160 L905,248"/>
+    <g class="data"><rect class="box" x="870" y="250" width="80" height="40" rx="8"/><text x="910" y="264" class="t-c">量化</text><text x="910" y="280" class="t-c t-xs">INT4</text></g>
+    <path class="edge" d="M870,270 L852,270"/>
+    <g class="enc"><rect class="box" x="700" y="250" width="150" height="40" rx="8"/><text x="775" y="264" class="t-c">H W_o Q</text><text x="775" y="280" class="t-c t-xs">INT4 权重</text></g>
+    <path class="edge" d="M700,270 L612,270"/><text x="605" y="270" class="t-r t-sm">输出 YQ（FP16），加回残差流</text>
+    <text x="20" y="330" class="t-b">前馈块（SwiGLU）</text>
+    <text x="20" y="420" class="t-b">XQ</text><text x="20" y="436" class="t-xs">FP16</text>
+    <path class="edge" d="M50,420 L78,420"/>
+    <g><rect class="box" x="80" y="400" width="80" height="40" rx="8"/><text x="120" y="420" class="t-c">RMSNorm</text></g>
+    <path class="edge" d="M160,420 L178,420"/>
+    <g class="data"><rect class="box" x="180" y="400" width="60" height="40" rx="8"/><text x="210" y="414" class="t-c">量化</text><text x="210" y="430" class="t-c t-xs">INT4</text></g>
+    <path class="edge" d="M240,420 L258,420 L258,368 L273,368"/><path class="edge" d="M258,420 L258,472 L273,472"/>
+    <g class="enc"><rect class="box" x="275" y="350" width="175" height="36" rx="8"/><text x="362" y="368" class="t-c">Qᵀ diag(α) W_gate</text></g>
+    <g class="enc"><rect class="box" x="275" y="454" width="175" height="36" rx="8"/><text x="362" y="472" class="t-c">Qᵀ diag(α) W_up</text></g>
+    <path class="edge" d="M450,368 L468,368"/>
+    <g><rect class="box" x="470" y="350" width="60" height="36" rx="8"/><text x="500" y="368" class="t-c">SiLU</text></g>
+    <path class="edge" d="M530,368 L575,368 L575,404"/><path class="edge" d="M450,472 L575,472 L575,436"/>
+    <circle cx="575" cy="420" r="14" style="fill:var(--surface);stroke:var(--text-2);stroke-width:1.5"/><text x="575" y="420" class="t-c">×</text>
+    <path class="edge" d="M589,420 L608,420"/>
+    <g class="pred"><rect class="box" x="610" y="400" width="110" height="40" rx="8"/><text x="665" y="414" class="t-c" style="font-size:12px">在线 Hadamard</text><text x="665" y="430" class="t-c t-xs">d_ff 维（7B：11008）</text></g>
+    <path class="edge" d="M720,420 L738,420"/>
+    <g class="data"><rect class="box" x="740" y="400" width="60" height="40" rx="8"/><text x="770" y="414" class="t-c">量化</text><text x="770" y="430" class="t-c t-xs">INT4</text></g>
+    <path class="edge" d="M800,420 L818,420"/>
+    <g class="enc"><rect class="box" x="820" y="400" width="130" height="40" rx="8"/><text x="885" y="414" class="t-c">H W_down Q</text><text x="885" y="430" class="t-c t-xs">INT4 权重</text></g>
+    <path class="edge" d="M885,440 L885,476"/><text x="885" y="490" class="t-c t-sm">输出 YQ（FP16），加回残差流</text>
+    <text x="480" y="526" class="t-c t-xs">INT4 矩阵乘的结果是 INT32，立即乘“行刻度 × 列刻度”转回 FP16；RMSNorm 在 FP32 下计算；Q 是全模型共用的同一个随机 Hadamard 矩阵。</text>
+  </svg>
+  <div class="dia-note">本站示意图，综合原文 <a href="https://arxiv.org/html/2404.00456v2#S4.F3" target="_blank" rel="noopener">图 3（FFN）↗</a> 与 <a href="https://arxiv.org/html/2404.00456v2#A1.F6" target="_blank" rel="noopener">图 6（注意力）↗</a>，以及官方代码 <code>e2e/quantized_llama/modeling_llama.py</code>。橙色框一共四个：前馈块一个，注意力块里 Q、K 各一个（画成一个框），跨头一个。</div>
+</div>
+
+<h4 id="n-4-2">4.2 第 1a 步：旋转残差流</h4>
+<p>先把 RMSNorm（或 LayerNorm）的线性部分并进相邻的权重矩阵，然后选一个大小等于隐藏维度的<b>随机化 Hadamard 矩阵</b> \(Q\)，按第 3.4 节的方法把每个权重矩阵左乘或右乘它。以 key 投影为例：</p>
+<div class="formula">$$W_k\;\leftarrow\;Q^\top\,\mathrm{diag}(\alpha)\,W_k ,$$</div>
+<p>其他块输入一侧的矩阵同理；块输出一侧的矩阵右乘 \(Q\)。按计算不变性，这一步不改变模型输出（在数值精度足够的前提下）。改写后的权重和 QuIP# 处理过的权重形态相似，非相干系数降低了，但 QuaRot 在推理时不需要任何额外处理。与此同时，块与块之间传递的激活也变成了 \(X\leftarrow XQ\)，原文图 1 显示它们不再有离群值。</p>
+<p>这一步之后，<b>四类线性层输入中的两类</b>已经被旋转好了：注意力的 \(W_q,W_k,W_v\) 和前馈块的 \(W_{\text{gate}},W_{\text{up}}\)，它们的输入都是 RMSNorm 之后的残差流。剩下的两类是 down-projection 的输入和输出投影 \(W_o\) 的输入，再加上 KV 缓存，需要后面三步分别处理。</p>
+
+<h4 id="n-4-3">4.3 第 1b 步：前馈块内部，插一个在线 Hadamard</h4>
+<p>down-projection 的输入是 \(\sigma(\tilde xW_{\text{gate}})\odot(\tilde xW_{\text{up}})\)。SiLU 和逐元素相乘都是<b>逐坐标的非线性运算</b>，它们和旋转不能交换：先旋转再取 SiLU，不等于先取 SiLU 再旋转。所以没法像第 1a 步那样把一个旋转从 \(W_{\text{up}}\) 的输出“推”过非线性，一直推到 down-projection 的输入。这个位置的激活没有被旋转过，而它恰恰是离群值最严重的地方之一（QUIK 也正是因此才把 down-projection 留在 8 bit）。</p>
+<p>QuaRot 的办法是：在 down-projection 之前，<b>在线</b>做一次 Hadamard 变换 \(h\to hH\)，用全精度计算，并按 QuIP# 的方式用快速内核实现；然后把它的逆乘进 down-projection 的权重：\(W_{\text{down}}\leftarrow HW_{\text{down}}\)。因为这里的 \(H\) 是确定的 Walsh–Hadamard 矩阵（对称且 \(HH=I\)），\((hH)(HW_{\text{down}})=hW_{\text{down}}\)，输出不变。再叠加第 1a 步的 \(Q\)，down-projection 的权重最终是 \(HW_{\text{down}}Q\)。</p>
+<p>这个在线变换的维度是 FFN 的中间维，LLaMA-2-7B 是 11008，不是 2 的幂，所以要用第 3.1 节的 Kronecker 构造：11008 = 64 × 172，先做 64 点的快速变换，再乘一个 172 阶的小 Hadamard 矩阵。</p>
+
+<h4 id="n-4-4">4.4 第 1c 步：value 与输出投影，一半离线、一半在线</h4>
+<p>输出投影 \(W_o\)（论文记作 \(W_{\text{out}}\)）的输入是多头注意力的输出，同样没有被旋转过。作者注意到，在每个头内部，\(W_v\) 和 \(W_{\text{out}}\) 实际上是被乘在一起的：</p>
+<div class="formula">$$Y=\mathrm{concat}\big[P_1V_1,\dots,P_{n_h}V_{n_h}\big]W_{\text{out}}=\sum_{h=1}^{n_h}P_h\,X\,W_v^{(h)}\,W_{\text{out}}^{(h)} ,$$</div>
+<p>其中 \(P_h\) 是第 \(h\) 个头的注意力权重矩阵（序列长度 × 序列长度，由 query 和 key 经 softmax 算出），\(V_h=XW_v^{(h)}\) 是这个头的 value，\(W_{\text{out}}^{(h)}\) 是 \(W_{\text{out}}\) 中对应这个头的那几行。\(P_h\) 作用在“序列”这一维上，\(W_v^{(h)}W_{\text{out}}^{(h)}\) 作用在“特征”这一维上，两者互不干扰。所以可以在中间插一对互逆的、大小为头维度 \(d_h\) 的 Hadamard 矩阵：</p>
+<div class="formula">$$W_v^{(h)}\leftarrow W_v^{(h)}H_{d_h},\qquad W_{\text{out}}^{(h)}\leftarrow H_{d_h}W_{\text{out}}^{(h)} ,$$</div>
+<p>代回去，结果不变。所有头的权重在矩阵里是拼在一起的，所以这等价于一次 Kronecker 结构的乘法：\(W_v\leftarrow W_v(I\otimes H_{d_h})\)，\(W_{\text{out}}\leftarrow(I\otimes H_{d_h})W_{\text{out}}\)。这一步完全离线，有两个效果：<b>value 向量被逐头旋转了</b>，所以 V 缓存可以量化；注意力的输出也被逐头旋转了。</p>
+<p>但“逐头旋转”只在每个头的 \(d_h\) 维内部混合，不同头之间没有混合。如果离群值集中在某几个头上，它们仍然存在。为了对整个 \(n_hd_h\) 维的注意力输出做一次<b>完整的</b> Hadamard 变换，作者用了一个恒等式（\(n_h\) 和 \(d_h\) 都是 2 的幂时成立）：</p>
+<div class="formula">$$H_{n_h d_h}=(I\otimes H_{d_h})(H_{n_h}\otimes I) .$$</div>
+<p>前一半 \((I\otimes H_{d_h})\) 已经离线乘进了 \(W_v\)；只需要再在推理时对注意力输出 \(Z\) 在线乘上后一半 \(Z\leftarrow Z(H_{n_h}\otimes I)\)，同时把 \(W_{\text{out}}\) 完整地换成 \(HW_{\text{out}}\)。原文图 6 把这个在线步骤叫做 “Hadamard heads”。它的计算很便宜：把 \(Z\) 重排成 \(n_h\times d_h\) 的矩阵，对每一列做一次长度 \(n_h\) 的 Walsh–Hadamard 变换即可。</p>
+<div class="dia">
+  <div class="dia-title">示意图：为什么“逐头 Hadamard + 跨头 Hadamard = 一次完整的 Hadamard”</div>
+  <svg class="dg" viewBox="0 0 960 262" role="img" aria-label="把注意力输出排成头数乘头维度的网格：逐头变换混合每一行，跨头变换混合每一列，合起来是完整的 Hadamard 变换" style="--dg-min:760px">
+    <text x="150" y="22" class="t-c t-sm">注意力输出（一个 token）排成 n_h × d_h</text>
+    <text x="480" y="22" class="t-c t-sm">第一步：每个头内部混合（H_dh）</text>
+    <text x="810" y="22" class="t-c t-sm">第二步：同一位置跨头混合（H_nh）</text>
+    <g>
+      <rect class="tk enc" x="91" y="50" width="28" height="28"/><rect class="tk enc" x="121" y="50" width="28" height="28"/><rect class="tk enc" x="151" y="50" width="28" height="28"/><rect class="tk enc" x="181" y="50" width="28" height="28"/>
+      <rect class="tk act" x="91" y="80" width="28" height="28"/><rect class="tk act" x="121" y="80" width="28" height="28"/><rect class="tk act" x="151" y="80" width="28" height="28"/><rect class="tk act" x="181" y="80" width="28" height="28"/>
+      <rect class="tk pred" x="91" y="110" width="28" height="28"/><rect class="tk pred" x="121" y="110" width="28" height="28"/><rect class="tk pred" x="151" y="110" width="28" height="28"/><rect class="tk pred" x="181" y="110" width="28" height="28"/>
+      <rect class="tk tgt" x="91" y="140" width="28" height="28"/><rect class="tk tgt" x="121" y="140" width="28" height="28"/><rect class="tk tgt" x="151" y="140" width="28" height="28"/><rect class="tk tgt" x="181" y="140" width="28" height="28"/>
+      <text x="84" y="64" class="t-r t-xs">头 1</text><text x="84" y="94" class="t-r t-xs">头 2</text><text x="84" y="124" class="t-r t-xs">头 3</text><text x="84" y="154" class="t-r t-xs">头 4</text>
+    </g>
+    <text x="300" y="110" class="t-c t-lg">→</text>
+    <g>
+      <rect class="tk enc" x="421" y="50" width="28" height="28"/><rect class="tk enc" x="451" y="50" width="28" height="28"/><rect class="tk enc" x="481" y="50" width="28" height="28"/><rect class="tk enc" x="511" y="50" width="28" height="28"/>
+      <rect class="tk act" x="421" y="80" width="28" height="28"/><rect class="tk act" x="451" y="80" width="28" height="28"/><rect class="tk act" x="481" y="80" width="28" height="28"/><rect class="tk act" x="511" y="80" width="28" height="28"/>
+      <rect class="tk pred" x="421" y="110" width="28" height="28"/><rect class="tk pred" x="451" y="110" width="28" height="28"/><rect class="tk pred" x="481" y="110" width="28" height="28"/><rect class="tk pred" x="511" y="110" width="28" height="28"/>
+      <rect class="tk tgt" x="421" y="140" width="28" height="28"/><rect class="tk tgt" x="451" y="140" width="28" height="28"/><rect class="tk tgt" x="481" y="140" width="28" height="28"/><rect class="tk tgt" x="511" y="140" width="28" height="28"/>
+      <path class="edge no-head" d="M414,64 L546,64 M414,94 L546,94 M414,124 L546,124 M414,154 L546,154" style="marker-start:url(#ah);marker-end:url(#ah)"/>
+    </g>
+    <text x="480" y="192" class="t-c t-sm">每一行（一个头）内部互相混合</text>
+    <text x="480" y="210" class="t-c t-sm" style="fill:var(--c-enc)">离线乘进 W_v 与 W_o</text>
+    <text x="630" y="110" class="t-c t-lg">→</text>
+    <g>
+      <rect class="tk data" x="751" y="50" width="28" height="28"/><rect class="tk data" x="781" y="50" width="28" height="28"/><rect class="tk data" x="811" y="50" width="28" height="28"/><rect class="tk data" x="841" y="50" width="28" height="28"/>
+      <rect class="tk data" x="751" y="80" width="28" height="28"/><rect class="tk data" x="781" y="80" width="28" height="28"/><rect class="tk data" x="811" y="80" width="28" height="28"/><rect class="tk data" x="841" y="80" width="28" height="28"/>
+      <rect class="tk data" x="751" y="110" width="28" height="28"/><rect class="tk data" x="781" y="110" width="28" height="28"/><rect class="tk data" x="811" y="110" width="28" height="28"/><rect class="tk data" x="841" y="110" width="28" height="28"/>
+      <rect class="tk data" x="751" y="140" width="28" height="28"/><rect class="tk data" x="781" y="140" width="28" height="28"/><rect class="tk data" x="811" y="140" width="28" height="28"/><rect class="tk data" x="841" y="140" width="28" height="28"/>
+      <path class="edge no-head" d="M765,44 L765,174 M795,44 L795,174 M825,44 L825,174 M855,44 L855,174" style="stroke:var(--c-pred);marker-start:url(#ah-pred);marker-end:url(#ah-pred)"/>
+    </g>
+    <text x="810" y="192" class="t-c t-sm">每一列（各头的同一位置）互相混合</text>
+    <text x="810" y="210" class="t-c t-sm" style="fill:var(--c-pred)">推理时在线计算（“Hadamard heads”）</text>
+    <text x="480" y="238" class="t-c">两步连起来 = (I ⊗ H_dh)(H_nh ⊗ I) = H_nh ⊗ H_dh：整个 n_h·d_h 维向量做了一次完整的 Hadamard 变换</text>
+    <text x="480" y="256" class="t-c t-xs">示意用 4 个头、每头 4 维；LLaMA-2-7B 是 32 个头、每头 128 维，在线部分只是对 128 组长度为 32 的向量做快速变换</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应原文 §4 Stage 1c 的式 (7)–(9)。颜色在第一个网格里代表“属于哪个头”；最后一个网格变成同一种颜色，表示每个数都已经混合了所有头、所有维度的信息。13B 的头数 40 不是 2 的幂，官方代码对此用了 40 阶的已知 Hadamard 矩阵做 Kronecker 构造（据 <code>hadamard_utils.py</code>）。</div>
+</div>
+
+<h4 id="n-4-5">4.5 第 1d 步：key 的旋转——RoPE 挡住了离线融合</h4>
+<div class="note-pre"><b>先补一点背景：RoPE 为什么会挡路。</b>
+<p>旋转位置编码（RoPE，见本站 <a href="roformer.html">RoFormer 精读</a>）把 query 和 key 的每两个相邻维度看成一个二维平面，按 token 的位置转一个角度。它是在 \(XW_q\)、\(XW_k\) <b>算出来之后</b>才施加的，而且转多少取决于位置。如果把一个 Hadamard 矩阵乘进 \(W_k\)，它会在 RoPE <b>之前</b>生效，而 RoPE 的“两两一组按位置旋转”和 Hadamard 的“所有维度一起混合”不能交换顺序。所以 key 的旋转不能像 value 那样离线融合。</p>
+</div>
+<p>但 key 的量化同样重要：已有的 KV 缓存量化工作（KVQuant、KIVI）都发现 key 里有按通道的离群值。注意力分数是 \(P_h=\mathrm{Softmax}\big(\alpha\,\mathrm{Pos}(Q_h)\mathrm{Pos}(K_h)^\top\odot M\big)\)，其中 \(\mathrm{Pos}\) 是位置编码，\(M\) 是因果掩码，\(\alpha=1/\sqrt{d_h}\)。query 和 key 之间的关系和 value 与输出投影之间一样：只要两边乘上同一个正交矩阵，内积就不变。于是 QuaRot 在 RoPE <b>之后</b>，对每个头的 query 和 key 都在线乘一个 \(H_{d_h}\)：</p>
+<div class="formula">$$\mathrm{Pos}(Q_h)H_{d_h}\big(\mathrm{Pos}(K_h)H_{d_h}\big)^\top=\mathrm{Pos}(Q_h)\,H_{d_h}H_{d_h}^\top\,\mathrm{Pos}(K_h)^\top=\mathrm{Pos}(Q_h)\mathrm{Pos}(K_h)^\top .$$</div>
+<p>注意力分数完全不变，而存进缓存的 key 是旋转过的，没有离群值，可以量化到 4 bit。</p>
+<p>论文还讨论了另一种选择：<b>Pre-RoPE 缓存</b>（KVQuant 提出）。它把加位置编码之前的 key 存进缓存，这样旋转就能离线融进 \(W_k\)，query 也不用旋转；代价是每一步解码时，都得把缓存里<b>所有</b>的 key 在线反旋转、再加位置编码。解码时每步只有一个 query，却有成千上万个缓存的 key，这样做太贵。QuaRot 选择 Post-RoPE 缓存：每一步只需要对新来的那一个 token 的 query 和 key 做一次长度 \(d_h\) 的 Hadamard 变换。</p>
+<p>到这里，第一阶段全部完成。效果可以概括成一句话：块与块之间的激活被乘上了一个 Hadamard 矩阵；块内部的激活由在线 Hadamard 变换处理，而这些变换又被对应的权重修改抵消。前向计算的结果没有变，可以开始量化了。</p>
+
+<h4 id="n-4-6">4.6 小结：每一处旋转放在哪、离线还是在线、各花多少</h4>
+<div class="table-wrap"><table>
+  <tr><th>位置</th><th>旋转了什么</th><th>怎么实现</th><th>推理开销</th><th>为了量化谁</th></tr>
+  <tr><td>残差流（第 1a 步）</td><td>全模型共用的随机 Hadamard \(Q\)，维度 = 隐藏维</td><td>离线：嵌入 \(\times Q\)；块输入权重左乘 \(Q^\top\mathrm{diag}(\alpha)\)；块输出权重右乘 \(Q\)；输出头左乘 \(Q^\top\)</td><td>无</td><td>\(W_{q,k,v}\)、\(W_{\text{gate,up}}\) 的输入激活；所有权重</td></tr>
+  <tr><td>down-projection 输入（第 1b 步）</td><td>Walsh–Hadamard \(H\)，维度 = FFN 中间维</td><td>在线变换激活；离线 \(W_{\text{down}}\leftarrow HW_{\text{down}}Q\)</td><td>每层一次完整变换</td><td>\(W_{\text{down}}\) 的输入激活</td></tr>
+  <tr><td>value / 输出投影（第 1c 步）</td><td>逐头 \(H_{d_h}\) + 跨头 \(H_{n_h}\)</td><td>逐头部分离线乘进 \(W_v\)、\(W_o\)；跨头部分在线（Hadamard heads）</td><td>每层“半次”变换（只做跨头那一半）</td><td>V 缓存；\(W_o\) 的输入激活</td></tr>
+  <tr><td>query / key（第 1d 步）</td><td>逐头 \(H_{d_h}\)</td><td>在线，RoPE 之后对 Q 和 K 各做一次</td><td>每层两次小变换（长度 \(d_h\)）</td><td>K 缓存</td></tr>
+</table></div>
+<p>论文在相关工作里说 QuaRot “每个 Transformer 层只需要一个半 Hadamard 变换”，指的是前两行在线部分：down-projection 前一次完整的，加上输出投影前跨头的那半次；为 KV 缓存量化而加的 query/key 旋转没算在里面。后来的 SpinQuant 论文则把 QuaRot 数成“每个块四个在线 Hadamard”（down-projection、跨头、Q、K 各算一个）。两种说法数的东西不同，并不矛盾。</p>
+
+<h4 id="n-4-7">4.7 第 2a 步：量化权重（GPTQ 或 RTN）</h4>
+<div class="note-pre"><b>先补一点背景：GPTQ 比“四舍五入”强在哪。</b>
+<p>最简单的权重量化是 <b>RTN</b>（round-to-nearest）：每个权重独立地四舍五入到最近的格点。它不需要任何数据，但每个权重的误差都各自留在那里。<b>GPTQ</b>（Frantar、Ashkboos、Hoefler、Alistarh，2022）是逐层的“带补偿的量化”：它用一小批校准数据算出这一层输入的二阶统计量（近似 Hessian \(H=2XX^\top\)），然后一列一列地量化权重；每量化一列，就根据 Hessian 把这一列产生的误差<b>分摊</b>到还没量化的列上，让这一层的输出 \(XW\) 尽量接近原来。它能在几个 GPU 小时内量化上千亿参数的模型，是 4 bit 权重量化的标准做法之一。</p>
+</div>
+<p>经过第一阶段的改写，任何权重量化方法都能直接用。QuaRot 默认用 GPTQ，权重<b>逐输出通道对称量化</b>，每一列的裁剪比例用线性搜索、按平方误差最小来选。校准集是 WikiText-2 训练集的 128 条样本，每条 2048 个 token。论文给出的耗时：在一张 A100 上，用 QuaRot 改写 LLaMA-2-70B 需要 5 分钟，再用 GPTQ 量化需要 2 小时。第 5 节还会看到，换成完全不需要数据的 RTN 也能用，只是精度差一些。</p>
+
+<h4 id="n-4-8">4.8 第 2b 步：在线量化激活</h4>
+<p>权重量化好之后，在每个线性层前插入一个量化操作，现场把激活变成 INT4：</p>
+<ul>
+  <li><b>RMSNorm</b>（已经去掉了 \(\alpha\)）按 PyTorch 的实现留在 FP32 下计算。</li>
+  <li>线性层的输入<b>逐 token 对称量化</b>：每一行（一个 token）取绝对值最大值，除以 7（INT4 能表示的最大正数）得到这一行的刻度，再把这一行除以刻度、四舍五入。实验里对激活统一用 0.9 的裁剪比例，也就是把最大值先乘 0.9 再算刻度，让少数极端值被截断、换取其余数值更细的刻度。</li>
+  <li>INT4 矩阵乘的输出是 INT32。<b>反量化</b>时把它转成 FP16，再乘上对应的行刻度（来自输入）和列刻度（来自权重），也就是第 2 节那个公式里的 \(s^x_is^w_j\)。</li>
+</ul>
+<p>举一个小例子（推算）。某个 token 的一行激活是 \((0.9,-2.1,0.3,1.4)\)。绝对值最大是 2.1，乘裁剪比例 0.9 得 1.89，刻度 \(s=1.89/7=0.27\)。各数除以 0.27 再四舍五入得 \((3,-8,1,5)\)；其中 \(-2.1/0.27\approx-7.78\) 舍入成 \(-8\)，正好用上了 INT4 最小的那个值。还原回来是 \((0.81,-2.16,0.27,1.35)\)，每个数的误差都不超过 0.09。如果这一行里有一个离群值 20，刻度就会变成约 2.6，这四个数会被量成 \((0,-1,0,1)\)，几乎全部信息都丢了。旋转的作用，就是保证每一行都更像前一种情况。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个 W4A4 线性层在推理时的四个内核（据官方代码 <code>quarot/nn/linear.py</code>、<code>quarot/kernels/</code>）</div>
+  <div class="dia-flow"><span class="dia-box">FP16 激活<small>每行一个 token</small></span><span class="dia-arrow">→</span><span class="dia-box pred">（可选）在线 Hadamard<small>只在 W_down、W_o 之前</small></span><span class="dia-arrow">→</span><span class="dia-box">量化内核<small>求每行最大值 → 刻度 → 四舍五入，两个 INT4 打包进一个字节</small></span><span class="dia-arrow">→</span><span class="dia-box act">CUTLASS INT4 GEMM<small>Tensor Core，INT32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box">反量化内核<small>INT32 → FP16，× 行刻度 × 列刻度</small></span></div>
+  <div class="dia-note">四步是四个独立的内核，量化和反量化没有融合进矩阵乘。论文在性能部分明确说，把量化操作融合进矩阵乘还能进一步提速。这也是第 5 节里“单个线性层快 3.2–4.3 倍，整个块只快 2–3.3 倍”的原因之一。</div>
+</div>
+
+<h4 id="n-4-9">4.9 第 2c 步：量化注意力与 KV 缓存</h4>
+<p>序列变长、批变大之后，注意力会受显存带宽限制，因为每一步都要把整份 KV 缓存读一遍。key 和 value 都旋转过之后，就可以把缓存量化成低比特，减少要读的数据量。QuaRot 的做法是：</p>
+<ul>
+  <li>KV 缓存用<b>非对称</b>量化，每 128 个数一组（正好是 LLaMA-2 的头维度，所以就是“每个 token 的每个头一组”），裁剪比例 0.95；query 保持 FP16。</li>
+  <li>注意力内核基于 FlashInfer 改写（附录 A.10 分成三个例程）：<b>Init</b> 在 prefill 时用整段的 key/value 初始化量化缓存，而 prefill 本身的注意力直接用 FlashAttention 在未量化的 key/value 上计算；<b>Append</b> 在每步解码时先量化新 token 的 key/value 并追加进缓存；<b>Decode</b> 用当前 query 读取 INT4 缓存，<b>分段读进来、现场反量化成 FP16、再做点积</b>，并像 FlashAttention 一样用在线 softmax 累积结果。</li>
+</ul>
+<h4 id="n-4-10">4.10 走一遍：解码时一个 token 穿过 QuaRot 的一层</h4>
+<p>把上面所有步骤串起来，看一个新 token 在 decode 时经过一层要做哪些事（据论文 §4 与官方代码整理）：</p>
+<ol>
+  <li>残差流里的隐藏状态已经是旋转后的 \(xQ\)（FP16）。RMSNorm 在 FP32 下只做“除以长度”。</li>
+  <li><b>量化</b>成 INT4（逐 token），送进三个 INT4 矩阵乘 \(Q^\top\mathrm{diag}(\alpha)W_{q/k/v}\)，结果反量化回 FP16。value 因为 \(W_v\) 里乘过逐头 Hadamard，出来就是旋转过的。</li>
+  <li>query、key 加 RoPE，然后各做一次<b>在线</b>逐头 Hadamard（长度 128）。</li>
+  <li>新 token 的 key、value 被非对称量化成 INT4，追加进 KV 缓存（Append）。</li>
+  <li>Decode 内核用 FP16 的 query 读取 INT4 缓存，分段反量化、计算注意力。</li>
+  <li>注意力输出做一次<b>在线</b>跨头 Hadamard，再量化成 INT4，乘 \(HW_oQ\)，反量化，加回残差流。</li>
+  <li>前馈块：RMSNorm → 量化 → 两个 INT4 矩阵乘 \(Q^\top\mathrm{diag}(\alpha)W_{\text{gate/up}}\) → 反量化 → SiLU 与逐元素相乘（FP16）。</li>
+  <li>对 11008 维的中间激活做一次<b>在线</b> Hadamard，量化，乘 \(HW_{\text{down}}Q\)，反量化，加回残差流。</li>
+</ol>
+<p>数一下：每层 4 次激活量化（加上 KV 缓存的量化）、7 个 INT4 矩阵乘、4 处在线 Hadamard。与原模型相比，多出来的只有这些量化/反量化和 Hadamard，它们都是读写一遍数据的轻量操作；而原来最重的 7 个矩阵乘全部换成了 INT4。</p>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>KV 缓存是 4 bit 的，但注意力本身的计算（\(QK^\top\)、softmax、乘 \(V\)）仍是 FP16。4 bit KV 缓存省的是显存和读数据的带宽，不是算力；所以它只有在“读缓存”成为瓶颈时才会变快（第 5 节会看到批很小时它反而更慢）。另外，词嵌入和输出头（lm_head）在官方代码里没有量化。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2404.00456v2#A1.SS1" target="_blank" rel="noopener">附录 A.1（注意力模块）↗</a> · <a href="https://arxiv.org/html/2404.00456v2#A1.SS10" target="_blank" rel="noopener">附录 A.10（内核）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实验：精度掉了多少，速度快了多少，各在什么条件下</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>权重、激活、KV 缓存全部 4 bit 之后，模型的困惑度和零样本准确率掉了多少？和 SmoothQuant、OmniQuant、QUIK、Atom 比怎么样？速度和显存的收益在什么 GPU、什么批大小、什么序列长度下测得？各个设计（GPTQ、分组、Hadamard 而非任意旋转、裁剪比例）分别贡献多少？最后，这些数字能说明多少问题？</div>
+
+<h4 id="n-5-1">5.1 实验是怎么设计的</h4>
+<ul>
+  <li><b>实现</b>：在 Hugging Face Transformers + PyTorch 上实现。根据官方仓库的说明，精度实验用 <code>fake_quant</code> 目录下的脚本完成，也就是在 PyTorch 里“量化后立刻反量化”来模拟 4 bit 的数值误差；速度实验则用另外写的真实 INT4 内核（CUTLASS 做 4 bit 矩阵乘，FlashInfer 改写的内核做 KV 缓存量化）。</li>
+  <li><b>量化设置</b>：激活逐 token 对称量化，裁剪比例 0.9；KV 缓存非对称、每组 128、裁剪比例 0.95；权重逐通道对称，用 RTN 或 GPTQ，裁剪比例线性搜索。GPTQ 的校准集是 WikiText-2 训练集里 128 条长 2048 的序列。</li>
+  <li><b>模型与任务</b>：LLaMA-2 7B / 13B / 70B；语言建模看 WikiText-2 困惑度（序列长度 2048）；零样本看 PIQA、WinoGrande、HellaSwag、LAMBADA（OpenAI 版）、ARC-Easy、ARC-Challenge 六项，用 LM Evaluation Harness 默认参数。附录另有 LLaMA-3 8B / 70B 和 Phi-3-mini。</li>
+  <li><b>硬件</b>：作者说他们面向消费级 GPU，所以<b>所有性能实验都在 NVIDIA RTX 3090 上</b>完成（CUDA 12.1）。量化流程本身（旋转 + GPTQ）在 A100 上跑。</li>
+</ul>
+
+<h4 id="n-5-2">5.2 精度：困惑度与零样本准确率</h4>
+<p>表 1 是全文最核心的表。为了看清每个对手“量化了什么、保留了什么”，本站把相关设定补成了几列（设定来自各自论文，SmoothQuant 与 OmniQuant 的数字由 QuaRot 引自 OmniQuant 论文）：</p>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th>权重量化</th><th>高精度离群通道</th><th>其他设定</th><th class="num">7B</th><th class="num">13B</th><th class="num">70B</th></tr>
+  <tr><td>FP16 基线</td><td>—</td><td>—</td><td>—</td><td class="num">5.47</td><td class="num">4.88</td><td class="num">3.32</td></tr>
+  <tr><td>SmoothQuant</td><td>RTN，逐通道</td><td>0</td><td>逐通道平滑系数挪到权重；激活逐 token</td><td class="num">83.12</td><td class="num">35.88</td><td class="num">—</td></tr>
+  <tr><td>OmniQuant</td><td>RTN，逐通道</td><td>0</td><td>用校准数据训练裁剪阈值和等价变换</td><td class="num">14.26</td><td class="num">12.30</td><td class="num">—</td></tr>
+  <tr><td>QUIK-4B</td><td>GPTQ</td><td>256（FP16）</td><td>此处 down-projection 也用 4 bit；不量化 KV 缓存</td><td class="num">8.87</td><td class="num">7.78</td><td class="num">6.91</td></tr>
+  <tr class="hl"><td>QuaRot</td><td>GPTQ，逐通道</td><td>0</td><td>激活逐 token；KV 缓存 4 bit</td><td class="num">6.10</td><td class="num">5.40</td><td class="num">3.79</td></tr>
+  <tr><td>Atom-128G</td><td>GPTQ，每组 128</td><td>128（INT8，重排到末尾）</td><td>激活每组 128；KV 缓存 4 bit</td><td class="num">6.03</td><td class="num">5.26</td><td class="num">—</td></tr>
+  <tr class="hl"><td>QuaRot-128G</td><td>GPTQ，每组 128</td><td>0</td><td>激活每组 128；KV 缓存 4 bit</td><td class="num">5.93</td><td class="num">5.26</td><td class="num">3.61</td></tr>
+</table></div>
+<p>表中是 WikiText-2 困惑度（越低越好）。QuaRot 的损失最多 0.63（7B），70B 上只有 0.47；而且它既不需要 OmniQuant 那样的再训练，也不需要 QUIK 那样的高精度离群特征和非对称量化。在分组量化下和 Atom 比（双方组数相同），QuaRot 不需要保留任何高精度特征，也不需要重排通道之类的操作，7B 上比 Atom 低 0.1，13B 上持平。</p>
+<div class="dia">
+  <div class="dia-title">简图：LLaMA-2-7B 上，各方法的 4 bit 困惑度比 FP16 高出多少（数字取自原文表 1）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="LLaMA-2-7B 上各方法 W4A4 困惑度增量的对数轴条形图" style="--dg-min:760px">
+    <g style="stroke:var(--border);stroke-dasharray:3 3"><line x1="310" y1="26" x2="310" y2="272"/><line x1="510" y1="26" x2="510" y2="272"/><line x1="710" y1="26" x2="710" y2="272"/><line x1="910" y1="26" x2="910" y2="272"/></g>
+    <g style="fill:var(--surface-3);stroke:var(--border-strong)">
+      <rect x="310" y="33" width="578" height="24" rx="3"/><rect x="310" y="73" width="389" height="24" rx="3"/><rect x="310" y="113" width="306" height="24" rx="3"/><rect x="310" y="153" width="150" height="24" rx="3"/>
+    </g>
+    <g style="fill:var(--c-enc-bg);stroke:var(--c-enc)">
+      <rect x="310" y="193" width="160" height="24" rx="3"/><rect x="310" y="233" width="133" height="24" rx="3"/>
+    </g>
+    <g class="t-r">
+      <text x="300" y="45" class="t-r">SmoothQuant（RTN，无离群通道）</text>
+      <text x="300" y="85" class="t-r">OmniQuant（RTN，无离群通道）</text>
+      <text x="300" y="125" class="t-r">QUIK-4B（GPTQ，256 个 FP16 通道）</text>
+      <text x="300" y="165" class="t-r">Atom-128G（分组，128 个 INT8 通道）</text>
+      <text x="300" y="205" class="t-r t-b">QuaRot（GPTQ，无离群通道）</text>
+      <text x="300" y="245" class="t-r t-b">QuaRot-128G（分组，无离群通道）</text>
+    </g>
+    <text x="880" y="45" class="t-r">+77.65（83.12）</text>
+    <text x="707" y="85">+8.79（14.26）</text>
+    <text x="624" y="125">+3.40（8.87）</text>
+    <text x="468" y="165">+0.56（6.03）</text>
+    <text x="478" y="205">+0.63（6.10）</text>
+    <text x="451" y="245">+0.46（5.93）</text>
+    <line x1="310" y1="272" x2="910" y2="272" class="axis"/>
+    <text x="310" y="288" class="t-c t-sm">0.1</text><text x="510" y="288" class="t-c t-sm">1</text><text x="710" y="288" class="t-c t-sm">10</text><text x="910" y="288" class="t-c t-sm">100</text>
+    <text x="610" y="314" class="t-c t-sm">困惑度比 FP16（5.47）高出多少，对数轴；括号里是困惑度本身</text>
+  </svg>
+  <div class="dia-note">本站根据原文表 1 重画，横轴取对数是因为 SmoothQuant 的增量（77.65）和 QuaRot 的增量（0.63）差了两个数量级。注意分组的两行（Atom-128G、QuaRot-128G）和不分组的行不是同一个设定，只能两两比较。</div>
+</div>
+<p>零样本任务（表 2）给出的是另一种角度。困惑度衡量的是“预测下一个词的平均把握”，零样本准确率衡量的是“做选择题的能力”，两者不总是同步。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th class="num">FP16 平均</th><th class="num">QuaRot 平均</th><th class="num">差值</th><th class="num">保留比例（推算）</th><th>掉得最多的任务（推算）</th></tr>
+  <tr><td>LLaMA-2-7B</td><td class="num">69.82</td><td class="num">65.64</td><td class="num">−4.18</td><td class="num">94.0%</td><td>ARC-Challenge −5.38，WinoGrande −5.29</td></tr>
+  <tr><td>LLaMA-2-13B</td><td class="num">72.59</td><td class="num">69.79</td><td class="num">−2.80</td><td class="num">96.1%</td><td>ARC-Easy −4.50，LAMBADA −3.08</td></tr>
+  <tr><td>LLaMA-2-70B</td><td class="num">77.07</td><td class="num">75.98</td><td class="num">−1.09</td><td class="num">98.6%</td><td>HellaSwag −2.02，WinoGrande −1.74</td></tr>
+</table></div>
+<p>论文的说法是“QuaRot 保留了准确率，平均分最多掉 4.18%（70B 掉 1.09%）”。这里的“%”其实是准确率的<b>百分点</b>。摘要里“保留 99% 的零样本性能”指的是 70B：75.98 ÷ 77.07 ≈ 98.6%。规律很清楚：<b>模型越大，损失越小</b>。7B 掉 4 个多点，已经不能算“几乎无损”了。</p>
+
+<h4 id="n-5-3">5.3 性能：prefill 加速、线性层加速、decode 显存与注意力延迟</h4>
+<p>性能实验都在<b>单个 Transformer 块</b>上做，原因是整个模型在大批量下放不进作者的 GPU。从官方代码（<code>e2e/benchmark_layer.py</code>）看，基准脚本只取模型的第 0 层；INT4 版本不加载真实权重（权重的数值不影响耗时），输入是随机张量；FP16 对照组是同一套基于 Hugging Face 的 LLaMA 层，注意力用 FlashAttention-2，KV 缓存用同样的分页结构但不量化。</p>
+<p><b>prefill（首 token 时间）。</b>序列长度 2048、批大小从 1 到 64，QuaRot 相对 FP16 的加速如下图。7B 上是 1.97–2.16 倍，70B 上是 3.16–3.33 倍；批越大、模型越大，加速越多，因为矩阵乘在总时间里占的比例越高。作者也说，把量化操作融合进矩阵乘还能更快。</p>
+<div class="dia">
+  <div class="dia-title">简图：单个 Transformer 块的 prefill 加速（序列长度 2048，RTX 3090；数字取自原文表 16）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="LLaMA-2-7B 与 70B 单层 prefill 相对 FP16 的加速倍数随批大小变化" style="--dg-min:700px">
+    <line x1="60" y1="240" x2="930" y2="240" class="axis"/><line x1="60" y1="40" x2="60" y2="240" class="axis"/>
+    <g style="stroke:var(--border)"><line x1="60" y1="195" x2="930" y2="195"/><line x1="60" y1="150" x2="930" y2="150"/><line x1="60" y1="105" x2="930" y2="105"/></g>
+    <line x1="60" y1="60" x2="930" y2="60" style="stroke:var(--text-3);stroke-dasharray:6 4"/>
+    <text x="925" y="50" class="t-r t-xs">4×（原文图 4 中标为“理想提升”的参考线）</text>
+    <text x="52" y="240" class="t-r t-sm">0×</text><text x="52" y="195" class="t-r t-sm">1×</text><text x="52" y="150" class="t-r t-sm">2×</text><text x="52" y="105" class="t-r t-sm">3×</text><text x="52" y="60" class="t-r t-sm">4×</text>
+    <g style="fill:var(--c-enc-bg);stroke:var(--c-enc)">
+      <rect x="100" y="151.4" width="44" height="88.6"/><rect x="160" y="147.3" width="44" height="92.7"/><rect x="220" y="145.1" width="44" height="94.9"/><rect x="280" y="143.7" width="44" height="96.3"/><rect x="340" y="142.8" width="44" height="97.2"/>
+    </g>
+    <g style="fill:var(--c-pred-bg);stroke:var(--c-pred)">
+      <rect x="540" y="97.8" width="44" height="142.2"/><rect x="600" y="92.9" width="44" height="147.1"/><rect x="660" y="90.6" width="44" height="149.4"/><rect x="720" y="90.2" width="44" height="149.8"/>
+    </g>
+    <g class="t-c t-sm">
+      <text x="122" y="142" class="t-c t-sm">1.97</text><text x="182" y="138" class="t-c t-sm">2.06</text><text x="242" y="136" class="t-c t-sm">2.11</text><text x="302" y="134" class="t-c t-sm">2.14</text><text x="362" y="133" class="t-c t-sm">2.16</text>
+      <text x="562" y="88" class="t-c t-sm">3.16</text><text x="622" y="83" class="t-c t-sm">3.27</text><text x="682" y="81" class="t-c t-sm">3.32</text><text x="742" y="80" class="t-c t-sm">3.33</text>
+      <text x="122" y="256" class="t-c t-sm">B=1</text><text x="182" y="256" class="t-c t-sm">B=4</text><text x="242" y="256" class="t-c t-sm">B=16</text><text x="302" y="256" class="t-c t-sm">B=32</text><text x="362" y="256" class="t-c t-sm">B=64</text>
+      <text x="562" y="256" class="t-c t-sm">B=1</text><text x="622" y="256" class="t-c t-sm">B=4</text><text x="682" y="256" class="t-c t-sm">B=16</text><text x="742" y="256" class="t-c t-sm">B=32</text>
+    </g>
+    <text x="242" y="282" class="t-c t-b">LLaMA-2-7B 的一层</text>
+    <text x="652" y="282" class="t-c t-b">LLaMA-2-70B 的一层</text>
+  </svg>
+  <div class="dia-note">本站根据原文表 16 重画；对应 <a href="https://arxiv.org/html/2404.00456v2#S5.F4" target="_blank" rel="noopener">原文图 4 左 ↗</a>。表 16 里 70B 的 3.33× 标的是批大小 32，而引言和图 4 把它写成批大小 64，论文内部不一致；这里按表画。</div>
+</div>
+<p><b>单个线性层。</b>附录 A.10 把 4 bit 线性层（含量化、矩阵乘、反量化，可选在线 Hadamard）单独拿出来测（原文图 7、表 14，序列长度 2048）。以 FFN 的 down-projection 尺寸为例，批大小 1 时：7B（11008×4096）从 FP16 的 2.569 ms 降到 0.798 ms（含 Hadamard），约 3.2 倍；70B（28672×8192）从 12.450 ms 降到 2.911 ms，约 4.3 倍。批大小增大时比例基本不变。在线 Hadamard 的额外开销，按表 14 算，7B 约 6.5%、13B 约 7.4%、70B 约 1%（推算；论文正文说“最多 7%”）；在正方形的输出投影尺寸上开销更大，例如 5120×5120 从 0.464 ms 涨到 0.552 ms，约 19%（推算），这大概是因为 13B 的隐藏维 5120 不是 2 的幂，需要额外乘一个 40 阶的矩阵。</p>
+<div class="note-pre"><b>先补一点背景：从耗时反推“跑到了峰值的几成”。</b>
+<p>一个 \(m\times k\) 乘 \(k\times n\) 的矩阵乘要做 \(2mkn\) 次运算。70B 的 down-projection、2048 个 token：\(2\times2048\times28672\times8192\approx9.6\times10^{11}\)。FP16 用了 12.45 ms，相当于约 77 TFLOPS；INT4 用了 2.881 ms（不含 Hadamard），相当于约 334 TOPS（均为推算）。对照 RTX 3090 的白皮书峰值：FP16（FP32 累加）71 TFLOPS，INT4 568 TOPS。FP16 基线已经跑满了这一档峰值（实际频率高于标称加速频率，所以略超），而 INT4 只用到峰值的六成左右。这说明两件事：一是在这张卡上 INT4 的理论上限是 8 倍，实测 4.3 倍还有空间；二是 8 倍这个上限来自 GeForce 卡“FP16 配 FP32 累加只有半速”的规格，换一张卡，比例就不同了。</p>
+</div>
+<p><b>decode：显存。</b>decode 主要受显存限制，论文报告的是解码阶段的<b>峰值显存</b>。原文图 4 右（批大小 16、解码 50 个 token、prefill 长度 256–4096）和表 17 显示：7B 的一层节省 3.63–3.75 倍，序列越长越多；70B 的一层几乎都是 3.89 倍。70B 用了分组查询注意力（GQA），KV 缓存相对权重小得多，所以显存基本由权重决定，节省比例接近“16 bit → 4 bit + 刻度”的上限，而且几乎不随序列长度变化；7B 是普通多头注意力，KV 缓存占比随序列变长而上升，于是比例随之变化。</p>
+<div class="dia">
+  <div class="dia-title">简图：decode 一个 token 时的峰值显存（批大小 16，KV 长度 4096；数字取自原文表 17 与 v1 表 4）</div>
+  <div class="dia-row"><span class="lbl">7B 一层 · FP16</span><div class="dia-track"><span class="dia-seg w" style="flex:1.416">1.416 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">7B 一层 · QuaRot</span><div class="dia-track"><span class="dia-seg kv" style="flex:0.378">0.378</span><span class="dia-seg oth" style="flex:1.038;background:transparent"></span></div></div>
+  <div class="dia-out">节省 3.75 倍</div>
+  <div class="dia-row"><span class="lbl">70B 一层 · FP16</span><div class="dia-track"><span class="dia-seg w" style="flex:1.865">1.865 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">70B 一层 · QuaRot</span><div class="dia-track"><span class="dia-seg kv" style="flex:0.480">0.480</span><span class="dia-seg oth" style="flex:1.385;background:transparent"></span></div></div>
+  <div class="dia-out">节省 3.89 倍</div>
+  <div class="dia-row"><span class="lbl">7B 整个模型（v1）</span><div class="dia-track"><span class="dia-seg w" style="flex:45.2">FP16：45.20 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">7B 整个模型（v1）</span><div class="dia-track"><span class="dia-seg kv" style="flex:12.19">QuaRot：12.19 GB</span><span class="dia-seg oth" style="flex:33.01;background:transparent"></span></div></div>
+  <div class="dia-out">节省 3.71 倍（arXiv v1 的表 4 测的是整个 LLaMA-2-7B；v2 改成了单层）</div>
+  <div class="dia-note">每组两行用同一把尺子，三组之间的尺子不同。对应 <a href="https://arxiv.org/html/2404.00456v2#S5.F4" target="_blank" rel="noopener">原文图 4 右 ↗</a> 与 <a href="https://arxiv.org/html/2404.00456v2#A1.T17" target="_blank" rel="noopener">表 17 ↗</a>。</div>
+</div>
+<p><b>decode：注意力内核。</b>附录表 15 测了缓存里已有 2047 个 token、解码第 2048 个 token 时，注意力层一次 Append + Decode 的耗时。结果出人意料却很合理：<b>批小的时候，4 bit 缓存反而更慢</b>。以 7B 的尺寸为例，批大小 1 时 FP16 是 0.713 ms，INT4（含 FP16 Hadamard）是 1.117 ms；直到批大小 16 才反超，批大小 32 时快约 1.7 倍（2.098 ms 对 1.216 ms）。原因是 4 bit 缓存的好处只是少读数据，而量化、反量化、Hadamard 都有固定开销；只有批足够大或序列足够长、读缓存成了真正的瓶颈，省下的读取时间才盖得过这些开销。</p>
+<div class="dia">
+  <div class="dia-title">简图：解码一个 token 的注意力层耗时，FP16 缓存 vs INT4 缓存（LLaMA-2-7B 尺寸，32 头 × 128 维；数字取自原文表 15）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="不同批大小下，FP16 KV 缓存与 INT4 KV 缓存的单步注意力耗时折线图" style="--dg-min:700px">
+    <line x1="100" y1="250" x2="860" y2="250" class="axis"/><line x1="100" y1="50" x2="100" y2="250" class="axis"/>
+    <g style="stroke:var(--border)"><line x1="100" y1="205" x2="860" y2="205"/><line x1="100" y1="160" x2="860" y2="160"/><line x1="100" y1="115" x2="860" y2="115"/><line x1="100" y1="70" x2="860" y2="70"/></g>
+    <text x="92" y="250" class="t-r t-sm">0</text><text x="92" y="205" class="t-r t-sm">0.5</text><text x="92" y="160" class="t-r t-sm">1.0</text><text x="92" y="115" class="t-r t-sm">1.5</text><text x="92" y="70" class="t-r t-sm">2.0</text>
+    <text x="40" y="150" class="t-c t-sm" transform="rotate(-90 40 150)">毫秒</text>
+    <line x1="610" y1="60" x2="610" y2="250" style="stroke:var(--text-3);stroke-dasharray:4 4"/>
+    <text x="616" y="232" class="t-xs">批大小 8 到 16 之间交叉</text>
+    <polyline points="120,185.8 260,184.9 400,179.7 540,161.4 680,128.7 820,61.2" style="fill:none;stroke:var(--c-tgt);stroke-width:2.5"/>
+    <polyline points="120,149.5 260,149.0 400,149.4 540,148.7 680,150.8 820,140.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <g style="fill:var(--c-tgt)"><circle cx="120" cy="185.8" r="4"/><circle cx="260" cy="184.9" r="4"/><circle cx="400" cy="179.7" r="4"/><circle cx="540" cy="161.4" r="4"/><circle cx="680" cy="128.7" r="4"/><circle cx="820" cy="61.2" r="4"/></g>
+    <g style="fill:var(--c-enc)"><circle cx="120" cy="149.5" r="4"/><circle cx="260" cy="149" r="4"/><circle cx="400" cy="149.4" r="4"/><circle cx="540" cy="148.7" r="4"/><circle cx="680" cy="150.8" r="4"/><circle cx="820" cy="140.6" r="4"/></g>
+    <text x="808" y="52" class="t-r t-sm" style="fill:var(--c-tgt)">FP16 KV 缓存（批 32：2.098 ms）</text>
+    <text x="400" y="133" class="t-c t-sm" style="fill:var(--c-enc)">INT4 KV 缓存 + FP16 在线 Hadamard（批 32：1.216 ms）</text>
+    <text x="200" y="200" class="t-c t-sm" style="fill:var(--c-tgt)">批 1：0.713 ms</text>
+    <text x="120" y="266" class="t-c t-sm">1</text><text x="260" y="266" class="t-c t-sm">2</text><text x="400" y="266" class="t-c t-sm">4</text><text x="540" y="266" class="t-c t-sm">8</text><text x="680" y="266" class="t-c t-sm">16</text><text x="820" y="266" class="t-c t-sm">32</text>
+    <text x="480" y="290" class="t-c t-sm">批大小（对数轴）；缓存中已有 2047 个 token，测解码第 2048 个 token 的 Append + Decode</text>
+  </svg>
+  <div class="dia-note">本站根据原文 <a href="https://arxiv.org/html/2404.00456v2#A1.T15" target="_blank" rel="noopener">表 15 ↗</a> 重画。表里 70B 一栏用的是 64 个头 × 128 维，看起来没有按 GQA 的 8 个 KV 头来测，这一点论文没有说明。</div>
+</div>
+
+<h4 id="n-5-4">5.4 消融：每个设计各贡献多少</h4>
+<p><b>RTN 代替 GPTQ。</b>权重不用 GPTQ、直接四舍五入（表 3，附录表 9 有完整的 4/6/8 bit 结果），校准数据和超参数都不需要了。8 bit 时完全无损：7B 困惑度 5.50（FP16 5.47），70B 3.33（FP16 3.32）；6 bit 也几乎无损（7B 5.56、13B 4.95、70B 3.36）。这就是摘要里“6 bit 和 8 bit 用 RTN 就无损”的依据。4 bit 时 RTN 明显变差：7B 困惑度 8.37、平均准确率 58.26（比 FP16 低 11.56 点），70B 困惑度 4.14、平均准确率 73.63（低 3.44 点）。RTN 和 GPTQ 的困惑度差距随模型变大而缩小：7B 差 2.27，70B 差约 0.35（论文正文写 0.34）。结论是小模型更需要 GPTQ。</p>
+<p><b>分组量化</b>（表 4，GPTQ，KV 缓存组大小固定 128）。权重和激活每 256 / 128 / 64 个数一组时，7B 困惑度从 6.10 依次降到 5.98、5.93、5.88；70B 从 3.79 降到 3.63、3.61、3.58。组越小越准，但要多存刻度，矩阵乘内核也更复杂（刻度不再沿求和维保持不变，见第 2 节）。论文的速度内核只实现了不分组的版本。</p>
+<p><b>KV 缓存的位宽</b>（附录表 6，其余部分保持高精度、只量化 KV）。K、V 都是 4 bit 时，7B 困惑度 5.51（只高 0.04），70B 3.33；降到 3 bit，最多也只高 0.21（7B 5.68），70B 只高 0.07。key 比 value 更敏感：7B 上“K 4 bit、V 3 bit”是 5.54，“K 3 bit、V 4 bit”是 5.65；“K、V 都 3 bit”（5.68）比“K 4 bit、V 2 bit”（5.75）还好。到 2 bit 就明显崩了（K2V2：7B 9.23）。</p>
+<p><b>只量化权重时旋转有没有用</b>（附录表 7，非对称逐通道，激活和 KV 保持 FP16）。旋转对 GPTQ 帮助很大：7B 的 W4 从 8.25 降到 5.60（论文说的“最多改善 2.65”）；位数越低帮助越大，2 bit 的 70B 从 25.30 降到 5.60，让 GPTQ 在 2 bit 下第一次有了“能用”的结果。对 RTN 也有帮助：W4 时 7B 从 6.99 降到 6.76，13B 从 6.32 降到 5.48，70B 从 4.45 降到 3.66。</p>
+<p><b>Hadamard 还是任意随机正交矩阵</b>（附录表 8）。由于计算不变性，残差流上的 \(Q\) 其实可以是任何正交矩阵（在线的那几处仍然用快速 Hadamard）。作者试了“随机矩阵做 QR 分解得到的正交矩阵”：7B 困惑度 7.45，比随机 Hadamard 的 6.10 差 1.35；13B 差 0.44；70B 差 0.28。随机 Hadamard 明显更好，模型越大差距越小。</p>
+<p><b>在线 Hadamard 用 FP16 还是 FP32</b>（附录表 10）。正文实验都用 FP32；换成 FP16 后，7B 困惑度 6.08（FP32 是 6.10），平均准确率 66.21（FP32 是 65.64）；13B 困惑度都是 5.40，平均准确率差 0.07。作者认为差别在噪声范围内，精度不受影响。</p>
+<p><b>裁剪比例</b>（附录表 5，LLaMA-2-7B，只量化一种东西、其余保持全精度）。只量化输入激活时，裁剪比例 1.0 / 0.95 / 0.9 / 0.85 对应困惑度 5.938 / 5.910 / 5.828 / 5.850，0.9 最好；只量化 KV 缓存时对应 5.513 / 5.510 / 5.517 / 5.532，0.95 最好。这和 Atom 论文的结论一致。</p>
+<p><b>别的模型</b>（附录表 11–13）。LLaMA-3 更难量化：8B 困惑度从 6.14 升到 8.16（分组 128 时 7.36），平均准确率从 73.22 降到 65.18；70B 困惑度从 2.86 升到 6.66（分组时 5.51），平均准确率从 79.94 降到 69.21，掉了 10.7 个点。Phi-3-mini 用 GPTQ 4 bit 时困惑度从 6.35 升到 7.85，平均准确率从 73.11 降到 66.34；8 bit 仍然无损。</p>
+<div class="note-warn"><b>正文与表格对不上的几处（以表格为准）：</b>
+<ul>
+  <li>附录 A.4 说旋转让 RTN “最多改善 0.24”，但表 7 里 13B、70B 分别改善了 0.84 和 0.79；同一张表里 GPTQ 在 7B W4 上（8.25）反而比 RTN（6.99）差，论文没有解释。</li>
+  <li>结论一节写“70B 在 RTX 3090 上 prefill 加速 2.16 倍、decode 显存最多省 3.39 倍”，这是 arXiv v1 的旧数字（v1 测的是整个 7B 模型）；v2 正文的对应数字是 3.33 倍和 3.89 倍。v1 摘要写的“困惑度损失最多 0.29”也和正文的 0.47 不一致，GitHub README 至今仍是 0.29。</li>
+</ul></div>
+
+<h4 id="n-5-5">5.5 结果的份量</h4>
+<p>把上面的数字放在一起看，下面几点决定了它们能说明多少问题。</p>
+<p><b>精度和速度不是在同一个产物上测的。</b>精度来自 PyTorch 里的模拟量化，速度来自另写的 INT4 内核，只测一层、而且不加载真实权重。两套实现在量化规则上一致（逐 token 对称激活、逐通道权重、每组 128 的非对称 KV），所以模拟精度大体可信；但论文没有给出“用真实 INT4 内核跑完整模型、同时测精度和速度”的结果，分组量化（QuaRot-128G）的精度也没有对应的内核。</p>
+<p><b>“几乎无损”只对大模型成立。</b>同样是 W4A4KV4，70B 平均准确率掉 1.09 点，13B 掉 2.80 点，7B 掉 4.18 点；LLaMA-3-70B 掉 10.7 点。“保留 99%”说的是 LLaMA-2-70B 这一个点。评测本身也偏轻：困惑度是在 WikiText-2 测试集上测的，而 GPTQ 的校准数据正好来自 WikiText-2 训练集，同分布，对困惑度有利；零样本是六道常识选择题，没有 MMLU、代码、数学、生成质量或长上下文检索；KV 缓存量化只在 2048 长度下验证过。</p>
+<p><b>对手的条件并不统一。</b>SmoothQuant 和 OmniQuant 的数字是从 OmniQuant 论文里抄来的，没有 70B；QUIK 保留 256 个 FP16 通道，但不量化 KV 缓存；Atom 只在分组设定下比较，QuaRot 也换成了分组设定才和它打平。所有对手里，只有 QuaRot 和 Atom 同时把 KV 缓存量化到 4 bit。速度方面，论文<b>只和 FP16 比</b>，没有和 QUIK、Atom 的 INT4 内核比，也没有和 W8A8（SmoothQuant）或 W4A16 的权重量化内核比；而在小批量的 decode 场景，W4A16 才是最直接的对手。</p>
+<p><b>速度数字的条件很窄。</b>只有一张 RTX 3090，只测单个 Transformer 块，FP16 基线是作者自己的 Hugging Face 层 + FlashAttention-2，而不是 vLLM、TensorRT-LLM 这类生产推理引擎。prefill 只测了序列长度 2048。decode 只报告了峰值显存和注意力内核延迟，<b>没有报告每秒生成多少 token</b>；而注意力内核在批大小 8 以下反而变慢。前面推算过，RTX 3090 的 INT4 与 FP16（FP32 累加）峰值相差 8 倍，这个比例是 GeForce 卡特有的；数据中心卡的比例不同，而 H100 的官方规格表里根本没有列出 INT4 Tensor Core 的算力。换句话说，这些加速数字在 Ampere/Ada 一代的消费级卡上成立，不能直接搬到 H100 上。</p>
+<p><b>显存节省主要来自权重。</b>3.63–3.89 倍是单层的峰值显存，70B 几乎全是权重；整个模型时，没有量化的词嵌入和输出头会把比例往下拉，层数多又会把比例往上拉（论文认为整体会更高）。arXiv v1 测过整个 LLaMA-2-7B：批 16、长度 4096 时从 45.20 GB 降到 12.19 GB，约 3.71 倍。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2404.00456v2#A1" target="_blank" rel="noopener">附录 A ↗</a> · 代码：<a href="https://github.com/spcl/QuaRot/tree/main/fake_quant" target="_blank" rel="noopener">fake_quant ↗</a> · <a href="https://github.com/spcl/QuaRot/blob/main/e2e/benchmark_layer.py" target="_blank" rel="noopener">e2e/benchmark_layer.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 结论：作者自己说还差什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者怎么总结这项工作？他们认为下一步该做什么？他们对硬件有什么判断？</div>
+<p>作者的总结是：QuaRot 用 Hadamard 矩阵消除了预训练 LLM 激活和 KV 缓存里的离群值，据他们所知第一次实现了端到端的 4 bit 量化；LLaMA-2-70B 量化到 4 bit 后保留了 FP16 基线 99% 的下游任务性能；所有 LLaMA-2 模型量化到 6 bit 和 8 bit 都无损。（结论里的加速和显存数字是 v1 的旧值，见 5.4 节末的提醒。）</p>
+<p>作者列出的后续方向有两个：一是<b>量化残差流</b>，目前残差相加仍是 FP16；二是推广到<b>混合专家（MoE）</b>架构。在硬件方面，他们指出，用 QuaRot 做端到端 INT4 推理，可以获得和当时刚发布的 NVIDIA B200 的 FP4 格式相近的加速，而整数单元比浮点 FP4 单元便宜得多。这个判断后来只对了一半：旋转的思路确实被广泛采用，但硬件走向了 FP4 而不是 INT4（见下一节）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2404.00456v2#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>QuaRot 之后，“先旋转、再量化”几乎成了低比特推理的标准前处理，而且很快从 INT4 推理扩散到 FP8 注意力、FP4 推理和 FP4 训练。后续工作大致沿三个方向走：把旋转<b>学出来</b>，把旋转<b>换成更一般的变换</b>，以及把 Hadamard 变换<b>搬进底层内核和新的数据格式</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：从“旋转权重”到“旋转一切低精度运算”（括号里是 arXiv 首版年月）</div>
+  <div class="dia-flow"><span class="dia-box">QuIP（2023-07）<small>随机正交矩阵，只量化权重</small></span><span class="dia-arrow">→</span><span class="dia-box">QuIP#（2024-02）<small>随机 Hadamard，只量化权重</small></span></div>
+  <div class="dia-flow"><span class="dia-box">SliceGPT（2024-01）<small>计算不变性，用于剪枝</small></span><span class="dia-arrow">→</span><span class="dia-box enc">QuaRot（2024-03）<small>旋转融合进权重 + 在线 Hadamard，W4A4KV4</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">⇢ 学旋转 / 换变换：</span><span class="dia-box pred">SpinQuant（2024-05）<small>学出来的旋转</small></span><span class="dia-box pred">DuQuant（2024-06）<small>按离群维构造旋转 + 置换</small></span><span class="dia-box pred">FlatQuant（2024-10）<small>可学习仿射变换</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">⇢ 进内核 / 新格式：</span><span class="dia-box act">FlashAttention-3（2024-07）<small>FP8 注意力里旋转 Q、K</small></span><span class="dia-box act">NVFP4 预训练（2025-09）<small>16×16 随机 Hadamard</small></span><span class="dia-box act">MR-GPTQ（2025-09）<small>MXFP4 / NVFP4 推理</small></span></div>
+  <div class="dia-note">本站整理，只列本页讨论到的工作。</div>
+</div>
+
+<h4 id="n-impact-1">SpinQuant：随机旋转有好有坏，不如学一个</h4>
+<p>Meta 的 SpinQuant（Liu 等，2024-05，ICLR 2025）先做了一个 QuaRot 没做的实验：对 LLaMA-2-7B 的 W4A4 量化，换 100 个不同的随机旋转，零样本平均准确率最好和最差的相差 13 个点；即使只在随机 Hadamard 矩阵之间换，差距也有 6 个点。这说明 QuaRot 的结果有相当一部分取决于“抽到了哪个随机矩阵”。于是 SpinQuant 把旋转当成参数来<b>学</b>：残差流上的旋转 \(R_1\)（对应 QuaRot 的 \(Q\)）和每层注意力里 value/输出投影之间的逐头旋转 \(R_2\)，在正交矩阵构成的流形（Stiefel 流形）上用 Cayley 参数化的梯度下降优化，目标是让“激活被量化后的网络”的最终损失最小；只用 800 条 WikiText-2 样本迭代 100 步，7B 大约 25 分钟。学完以后照样乘进权重，再做 GPTQ。需要量化 KV 缓存或 4 bit 激活时，再加上和 QuaRot 一样的在线 Hadamard（\(R_3\) 用于 Q/K，\(R_4\) 用于 down-projection）。</p>
+<p>它报告的结果是：W4A4KV4 下 LLaMA-2-7B 与全精度的零样本差距缩小到 2.9 个点（QuaRot 是 4.18 个点，但两篇论文的任务集合不同，不能直接相减）。在它自己复现的 LLaMA-3-70B 上，QuaRot + GPTQ 的 W4A4KV4 困惑度是 20.2，而 SpinQuant 是 5.5（全精度 2.8）。值得注意的是，QuaRot 自己的附录给出的 LLaMA-3-70B 结果是 6.66，两边的复现相差悬殊，这本身就说明 LLaMA-3-70B 的 W4A4 量化很脆弱，对随机矩阵和实现细节都敏感。</p>
+
+<h4 id="n-impact-2">DuQuant 与 FlatQuant：不局限于“同一个旋转”</h4>
+<p><b>DuQuant</b>（Lin 等，2024-06，NeurIPS 2024 Oral）把离群值分成两种：一种是在所有 token 上都偏大的“普通离群值”，一种是只出现在极少数 token、数值特别巨大的“超大离群值”。它认为以往的方法主要对付前者，对后者效果不好，于是<b>利用离群值所在维度的先验</b>，分块构造旋转矩阵，把离群值先摊到相邻通道；再用一种“之字形”置换把离群值均匀分配到各个块里，最后再旋转一次。</p>
+<p><b>FlatQuant</b>（Sun 等，2024-10，ICML 2025）则观察到：经过逐通道缩放或 Hadamard 变换之后，权重和激活的分布仍然可能又陡又散。它为<b>每个线性层</b>学一个可逆的仿射变换（不必是正交矩阵），用两个小矩阵的 Kronecker 积来表示，让在线计算足够便宜，并把所有操作融合进一个内核。它特别指出，QuaRot 和 SpinQuant 因为要把旋转融进 RMSNorm 两侧，所有层被残差连接绑在同一个变换上（第 3.4 节的那个约束），而 FlatQuant 保留 LayerNorm、每层各用各的变换。它报告 LLaMA-3-70B 的 W4A4 准确率下降不到 1%，比 SpinQuant 高 7.5%，相对 FP16 prefill 最高快 2.3 倍、decode 快 1.7 倍。这些速度同样是在 RTX 3090 上测的，INT4 矩阵乘用的也是 QuaRot 那一套 CUTLASS 内核，KV 缓存量化也沿用 FlashInfer。</p>
+
+<h4 id="n-impact-3">FlashAttention-3：FP8 注意力里的“非相干处理”</h4>
+<p>FlashAttention-3（Shah 等，2024-07，见本站 <a href="flashattention-3.html">FlashAttention-3 精读</a>）在 H100 上用 FP8 做注意力时，为了降低量化误差用了两招：分块量化，以及<b>非相干处理</b>——在量化成 FP8 之前，把 Q 和 K 都乘上同一个“随机 ±1 对角矩阵 × Hadamard 矩阵”。因为 \((QM)(KM)^\top=QK^\top\)，注意力结果不变，离群值却被摊平了；这一步还可以和 RoPE 融合在一起，几乎不花额外时间。这和 QuaRot 第 1d 步对 query/key 做的事在数学上是同一件事；FlashAttention-3 在这里引用的是 QuIP 和 QuIP#。它用“每个元素有 0.1% 的概率加上一个标准差为 10 的噪声”来模拟离群值，测得 FP8 注意力的均方根误差从逐张量量化基线的 2.4e-2 降到 9.1e-3（约 2.6 倍）；去掉非相干处理、只保留分块量化时误差回到 2.4e-2，说明在这个测试里起作用的主要是旋转。</p>
+
+<h4 id="n-impact-4">FP4 时代：硬件没有走向 INT4，但旋转留了下来</h4>
+<p>QuaRot 的速度依赖 Ampere/Ada 一代 GPU 的 INT4 Tensor Core（代码里 CUTLASS 的目标架构是 Sm80）。下一代数据中心卡 H100 的官方规格表只列 FP8 和 INT8 等格式，没有 INT4；再下一代的 Blackwell 加入的是 <b>FP4</b>（NVFP4、MXFP4 这类带细粒度缩放的 4 bit 浮点格式，见旧版 <a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解</a>）。QuaRot 结论里“用整数做出接近 FP4 的效果”的设想没有成为主流，但“乘一个 Hadamard 矩阵来压离群值”被原样带进了 FP4：</p>
+<ul>
+  <li><b>NVFP4 预训练</b>（NVIDIA，2025-09；见旧版 <a href="../legacy/tracks/ai-infra/19-fp4-training.html">FP4 训练拆解</a>）在 12B 模型、10T token 的 FP4 训练里，对<b>权重梯度（Wgrad）矩阵乘的两个输入</b>做 16×16 的随机 Hadamard 变换：两个输入乘上同一个正交变换，点积里自然抵消。他们发现 16 阶比 4 阶收敛更好、与 128 阶差不多；全程共用一个随机符号向量；在较小规模的实验里，前向和激活梯度的矩阵乘上没有观察到收益，所以只用在 Wgrad 上。这篇报告把 QuaRot、FlashAttention-3、HALO、QuIP# 等列为随机 Hadamard 变换的出处。</li>
+  <li><b>MR-GPTQ</b>（Egiazarian 等，2025-09，QuaRot 的 Ashkboos、Hoefler、Alistarh 也是作者）系统研究了 MXFP4 和 NVFP4 的训练后量化，发现 NVFP4 每 16 个数一组的小分组会让传统的离群值抑制手段失效，而 MXFP4 的“2 的幂刻度”误差又很大；它改用<b>分块</b> Hadamard 变换配合针对格式改造的 GPTQ，报告在 B200 上单层最高 3.6 倍、端到端 2.2 倍的加速（相对 FP16），并得出“FP4 不是 INT4 的自动升级”的结论。</li>
+  <li>同一团队的 <b>HALO</b>（Ashkboos 等，2025-01）把 Hadamard 旋转放进前向和反向传播，用于 8 bit 的低精度微调。</li>
+</ul>
+
+<h4 id="n-impact-5">进入工具链</h4>
+<p>vLLM 项目的模型压缩工具 llm-compressor 提供了两种变换：“SpinQuant/QuaRot 风格”的 <code>SpinQuantModifier</code> 和 “QuIP 风格”的 <code>QuIPModifier</code>；文档说用 Hadamard 变换处理过的模型可以在 vLLM 里调用 hadacore 内核加速。HadaCore 是 IBM 与 Meta 在 PyTorch 博客上发布的 Hadamard 变换内核，它把快速 Walsh–Hadamard 变换拆成 16×16 的小块交给 FP16 Tensor Core 去算，报告在 A100 上比 QuaRot 所用的 Dao AI Lab 内核快 1.1–1.4 倍、H100 上快 1.0–1.3 倍；博客开头就把 QuaRot、SpinQuant 和 FlashAttention-3 列为动机。</p>
+<div class="note-warn"><b>回头看这篇论文：</b>QuaRot 真正留下来的是两个想法，而不是 INT4 内核本身：一是“利用计算不变性把旋转写进权重，只在少数位置在线做 Hadamard”这套布置方案（SpinQuant 的 \(R_1\)–\(R_4\) 和它一一对应）；二是“随机 Hadamard 是又快又好的去离群值工具”这个经验，它后来被用到了 FP8 注意力、FP4 推理和 FP4 训练里。至于“哪个旋转最好”“要不要每层不同”“正交是否必要”，后续工作给出了不同的答案。</div>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Saleh Ashkboos</b>（第一作者）<div class="aff">ETH Zurich，Scalable Parallel Computing Lab（SPCL）博士生</div>据 SPCL 主页，他于 2025 年博士毕业，论文题为 “Hybrid and Transform-Aware Compression for Efficient and Accurate Large Language Modeling”，之后去了 NVIDIA。SliceGPT、QUIK 的第一作者，GPTQ 的作者之一；后来又主导了 HALO，并参与 MR-GPTQ。</div>
+  <div class="author-card"><b>Amirkeivan Mohtashami</b><div class="aff">EPFL，Machine Learning and Optimization Laboratory（MLO）</div>与 Martin Jaggi 合作了 Landmark Attention（NeurIPS 2023），研究长上下文的块检索注意力。</div>
+  <div class="author-card"><b>Maximilian L. Croci</b><div class="aff">Microsoft Research</div>SliceGPT 的第二作者。</div>
+  <div class="author-card"><b>Bo Li</b><div class="aff">ETH Zurich</div></div>
+  <div class="author-card"><b>Pashmina Cameron</b><div class="aff">Microsoft</div></div>
+  <div class="author-card senior"><b>Martin Jaggi</b><div class="aff">EPFL 副教授，Machine Learning and Optimization Laboratory（MLO）负责人</div></div>
+  <div class="author-card senior"><b>Dan Alistarh</b><div class="aff">IST Austria 教授（2022 年起），领导 Deep Algorithms and Systems Lab（DASLab）；论文署名同时列 NeuralMagic</div>研究压缩表示（稀疏、量化）上的高效训练与推理算法；GPTQ 的作者之一。</div>
+  <div class="author-card senior"><b>Torsten Hoefler</b><div class="aff">ETH Zurich 正教授，SPCL 负责人</div>据其主页，同时担任瑞士国家超算中心（CSCS）机器学习首席架构师；ACM Fellow、IEEE Fellow、欧洲科学院院士，2019 年获 ACM Gordon Bell 奖。</div>
+  <div class="author-card senior"><b>James Hensman</b><div class="aff">Microsoft Research</div>高斯过程库 GPflow 的创建者之一（据 GPflow 论文）；SliceGPT 的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：NeurIPS 2024（poster）。arXiv v1 发布于 2024-03-30，v2（会议版）于 2024-10-29 更新。</li>
+  <li><b>开源</b>：<a href="https://github.com/spcl/QuaRot" target="_blank" rel="noopener">spcl/QuaRot</a>，Apache-2.0 许可，534 个 star、79 个 fork（截至 2026-10-20）；仓库创建于 2024-03-31，最后一次推送是 2024-11-26。仓库里分成两部分：<code>fake_quant</code>（复现论文精度的模拟量化脚本，README 写明目前只支持 LLaMA-2）和 <code>quarot</code>（CUTLASS INT4 矩阵乘、量化/反量化、FlashInfer 改写的 4 bit KV 缓存内核）。</li>
+  <li><b>采用</b>：llm-compressor 的 <code>SpinQuantModifier</code> 被文档描述为“SpinQuant/QuaRot 风格”；FlatQuant 直接沿用了 QuaRot 的 CUTLASS INT4 + FlashInfer 内核方案；NVIDIA 的 NVFP4 预训练报告和 PyTorch 博客的 HadaCore 都把 QuaRot 列为 Hadamard 变换的来源之一。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>本站精读：<a href="flashattention-3.html">FlashAttention-3</a>（FP8 注意力里的非相干处理）· <a href="kivi.html">KIVI</a>（2 bit KV 缓存量化，key 按通道、value 按 token）· <a href="deepseek-v3.html">DeepSeek-V3</a>（细粒度 FP8 训练）· <a href="vllm.html">vLLM</a>（KV 缓存、prefill 与 decode）· <a href="flashattention.html">FlashAttention</a>（在线 softmax）· <a href="roformer.html">RoFormer</a>（RoPE）</li>
+  <li>旧版拆解页：<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式</a> · <a href="../legacy/tracks/ai-infra/19-fp4-training.html">FP4 训练（NVFP4 / MXFP4）</a> · <a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a></li>
+  <li>原始资料：<a href="https://arxiv.org/abs/2401.15024" target="_blank" rel="noopener">SliceGPT ↗</a> · <a href="https://arxiv.org/abs/2402.04396" target="_blank" rel="noopener">QuIP# ↗</a> · <a href="https://arxiv.org/abs/2405.16406" target="_blank" rel="noopener">SpinQuant ↗</a> · <a href="https://arxiv.org/abs/2406.01721" target="_blank" rel="noopener">DuQuant ↗</a> · <a href="https://arxiv.org/abs/2410.09426" target="_blank" rel="noopener">FlatQuant ↗</a> · <a href="https://arxiv.org/abs/2509.25149" target="_blank" rel="noopener">NVFP4 预训练 ↗</a> · <a href="https://arxiv.org/abs/2509.23202" target="_blank" rel="noopener">MR-GPTQ ↗</a> · <a href="https://pytorch.org/blog/hadacore/" target="_blank" rel="noopener">HadaCore ↗</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2404.00456" target="_blank" rel="noopener">arXiv:2404.00456</a>（v2）。论文以 arXiv 非独占许可发布，本页没有转载原图，所有图都是本站自绘的示意图或根据论文表格数字重画的简图。GPU 峰值算力引自 NVIDIA GA102 架构白皮书与 H100 产品页。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

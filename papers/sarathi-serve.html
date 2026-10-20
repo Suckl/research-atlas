@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarathi-Serve 精读</title>
+<meta name="description" content="Sarathi-Serve（OSDI 2024）逐节精读：prefill 与 decode 的代价为什么差这么多、生成停顿和流水线气泡从哪来、分块预填充与无停顿批处理怎么做、token 预算怎么选、分块要付出什么代价，以及“服务容量提升 2.6–5.6 倍”是在什么条件下、和谁比出来的。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="sarathi-serve">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · OSDI 2024</div>
+  <h1>Sarathi-Serve：用分块预填充和无停顿批处理，化解大模型推理的吞吐—延迟两难</h1>
+  <p class="en-title">Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve</p>
+  <div class="paper-authors">Amey Agrawal<sup>1,†</sup>, Nitin Kedia<sup>2</sup>, Ashish Panwar<sup>2</sup>, Jayashree Mohan<sup>2</sup>, Nipun Kwatra<sup>2</sup>, Bhargav S. Gulavani<sup>2</sup>, Alexey Tumanov<sup>1</sup>, Ramachandran Ramjee<sup>2</sup></div>
+  <div class="paper-affil"><sup>1</sup>Georgia Institute of Technology（佐治亚理工学院）　<sup>2</sup>Microsoft Research India（微软印度研究院）　<sup>†</sup>部分工作在微软印度研究院实习期间完成（论文脚注）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2403.02310" target="_blank" rel="noopener">arXiv 2403.02310 ↗</a>
+    <a class="pill" href="https://www.usenix.org/conference/osdi24/presentation/agrawal" target="_blank" rel="noopener">OSDI 2024 ↗</a>
+    <a class="pill" href="https://github.com/microsoft/sarathi-serve" target="_blank" rel="noopener">Code: microsoft/sarathi-serve ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/15-orca-sarathi.html">结构拆解：Orca / Sarathi-Serve 时间轴与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>534</b><span>GitHub star（microsoft/sarathi-serve，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文在 arXiv 上以非独占许可发布，本站不能转载原图，所以页面里的图都是本站自己画的示意图，或者根据原图数据重画的简图，每张图都附有原图链接。标“推算”的数字是本站根据论文数据或公开配置算出来的；标“从原图读出”的数字是本站从原图的矢量数据或坐标中读出的近似值，二者都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型推理服务处理一个请求分两个阶段。第一个阶段叫 <b>prefill</b>（预填充）：把用户的整段输入一次性算完，得到第一个输出 token。这一步一次处理成百上千个 token，GPU 的算力能被吃满，但耗时较长。第二个阶段叫 <b>decode</b>（解码）：之后每一步只为这个请求生成一个 token。这一步算得很少，GPU 的算力大部分闲着，时间几乎都花在从显存里读模型权重上。正因为 decode 这么“不划算”，推理系统都想把很多请求的 decode 拼成一个大批一起算：读一遍权重，就能同时为几十上百个请求各生成一个 token，吞吐量随之成倍上升。</p>
+<p>麻烦在于请求是陆续到达的。新请求必须先做 prefill，才能加入 decode 的大批。如果系统一有空就先给新请求做 prefill（vLLM 和 Orca 的做法），批很快变大，吞吐量高；但 prefill 一步可能要几百毫秒甚至几秒，这段时间里正在生成的请求一个字也出不来，用户看到的是输出突然卡住。论文把这种现象叫<b>生成停顿</b>（generation stall）。反过来，如果系统先把手头的 decode 都做完、再接新请求（FasterTransformer 的做法），出字就很平稳，但批会随着请求一个个结束而越变越小，吞吐量很低。论文把这称作<b>吞吐与延迟的两难</b>：现有的调度器只能二选一。此外，当模型大到要跨机器用流水线并行部署时，各次迭代的计算量忽大忽小，流水线的各级之间会互相空等，形成<b>流水线气泡</b>，同样浪费 GPU。</p>
+<p>Sarathi-Serve 是一个调度器，它的办法有两部分。第一是<b>分块预填充</b>（chunked prefill）：把长输入切成大小相近的块，一次迭代只算一块。第二是<b>无停顿批处理</b>（stall-free batching）：每次迭代先把所有正在 decode 的请求放进批里，再用剩下的 <b>token 预算</b>装 prefill 块。因为 decode 批本来就用不满算力，捎带一块 prefill 只会让这一步慢一点，而不会让正在生成的请求停几秒；又因为每一步的 token 数都被预算限住，各次迭代的耗时变得差不多，流水线气泡也随之变小。</p>
+<p>论文的结果是：在“99% 的出字间隔不超过某个上限”的约束下，Mistral-7B 单张 A100 能稳定承受的请求速率（论文称为服务容量）是 vLLM 的 2.6 倍，Yi-34B 两张 A100 最高是 3.7 倍；Falcon-180B 跨两台机器做流水线并行时，最高是 Orca 的 5.6 倍。摘要里的 5.6 倍容易被读成“比 vLLM 高 5.6 倍”，从原图看它是相对 Orca 的数字，相对 vLLM 最高约 3.6 倍，第 5 节会把这些条件一一摊开。这套做法后来成了 vLLM 等主流推理引擎的默认调度方式。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>prefill 和 decode 的代价为什么差这么多？“decode 用不满算力”具体是什么意思？</li>
+  <li>TTFT、TBT、服务容量分别是什么？为什么论文盯着 P99 TBT？</li>
+  <li>生成停顿和流水线气泡是怎么产生的？为什么“把 prefill 和 decode 拼进同一批”（Orca 的做法）也解决不了？</li>
+  <li>分块预填充和无停顿批处理各做了什么？token 预算怎么选，选大选小各付出什么代价？</li>
+  <li>分块要额外付出多少开销，开销主要来自哪里？</li>
+  <li>2.6×、3.7×、5.6× 这些数字是和谁比、在什么硬件和负载下测出来的？什么情况下优势会变小？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：吞吐和延迟为什么难以兼得</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>推理服务既要便宜（吞吐量高），又要好用（响应快、出字平稳）。提高吞吐量最直接的手段是把很多请求拼成大批一起算，但拼批的方式会伤到延迟。现有系统是怎么拼批的，各自伤在哪里？Sarathi-Serve 准备怎么同时保住两边？</div>
+
+<div class="note-pre"><b>先补一点背景：用户感受到的两个延迟，TTFT 和 TBT。</b>
+<p>用聊天机器人时，用户先等第一个字出来，然后看着字一个接一个地蹦出来。这两段体验分别对应两个指标。<b>TTFT</b>（time to first token，首 token 延迟）是从请求到达到第一个 token 生成的时间，它包括排队等待和 prefill 的计算时间。<b>TBT</b>（time between tokens，token 间隔）是同一个请求相邻两个输出 token 之间的时间间隔，它决定了输出是否流畅。一个请求生成 500 个 token，就有 499 个 TBT 值。</p>
+<p>论文看的是 TBT 的 <b>P99</b>，也就是把所有请求、所有 token 的间隔放在一起排序，排在第 99 百分位的那个值。看尾部而不是平均，是因为停顿是偶发的：一个请求在 500 个 token 里卡住一次 2 秒，平均间隔可能只多了 4 毫秒，用户却实实在在地看到输出停了 2 秒。P99 能把这种偶发的长停顿暴露出来。</p>
+</div>
+
+<p>论文先用一组实测说明问题有多严重：在两张 A100 上用 vLLM 跑 Yi-34B，处理 128 个来自 arXiv 论文摘要数据集的请求。把“已经生成的 token 总数”随时间画出来，vLLM 的曲线是一级一级的台阶：每当有新请求的 prefill 插进来，所有正在生成的请求就一起停住，最长的一次停了好几秒。Sarathi-Serve 的曲线则平滑得多，而且更早跑完全部请求。</p>
+
+<div class="dia">
+  <div class="dia-title">简图：负载越高，vLLM 的出字尾延迟涨得越快（Yi-34B，2 张 A100，arXiv 摘要数据集）</div>
+  <svg class="dg" viewBox="0 0 640 262" role="img" aria-label="三个请求速率下 vLLM 与 Sarathi-Serve 的 P99 TBT 柱状图" style="max-width:640px">
+    <line x1="70" y1="210" x2="610" y2="210" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="70" y1="210" x2="70" y2="24" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="70" y1="150" x2="610" y2="150" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="70" y1="90" x2="610" y2="90" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="70" y1="30" x2="610" y2="30" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="62" y="210" class="t-r t-xs">0</text>
+    <text x="62" y="150" class="t-r t-xs">0.5 s</text>
+    <text x="62" y="90" class="t-r t-xs">1.0 s</text>
+    <text x="62" y="30" class="t-r t-xs">1.5 s</text>
+    <text x="22" y="118" class="t-c t-sm" transform="rotate(-90 22 118)">P99 TBT</text>
+    <rect x="118" y="147.6" width="48" height="62.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.5"/>
+    <rect x="172" y="172.8" width="48" height="37.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+    <rect x="288" y="132" width="48" height="78" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.5"/>
+    <rect x="342" y="171.6" width="48" height="38.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+    <rect x="458" y="43.2" width="48" height="166.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.5"/>
+    <rect x="512" y="170.4" width="48" height="39.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+    <text x="142" y="139" class="t-c t-xs">0.52</text>
+    <text x="196" y="164" class="t-c t-xs">0.31</text>
+    <text x="312" y="123" class="t-c t-xs">0.65</text>
+    <text x="366" y="163" class="t-c t-xs">0.32</text>
+    <text x="482" y="35" class="t-c t-xs">1.39</text>
+    <text x="536" y="162" class="t-c t-xs">0.33</text>
+    <text x="169" y="226" class="t-c t-sm">0.55 请求/秒</text>
+    <text x="339" y="226" class="t-c t-sm">0.7 请求/秒</text>
+    <text x="509" y="226" class="t-c t-sm">1.0 请求/秒</text>
+    <rect x="200" y="244" width="12" height="12" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+    <text x="218" y="250" class="t-sm">vLLM</text>
+    <rect x="300" y="244" width="12" height="12" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+    <text x="318" y="250" class="t-sm">Sarathi-Serve</text>
+  </svg>
+  <div class="dia-note">本站根据原图数据重画，柱高从原图矢量数据读出（约值），对应 <a href="https://arxiv.org/html/2403.02310v3#S1.F1" target="_blank" rel="noopener">原文图 1(b) ↗</a>。怎么看：横轴是每秒到达的请求数，纵轴是 99% 分位的出字间隔。负载从 0.55 升到 1.0 请求/秒时，vLLM 的 P99 TBT 从约 0.52 秒涨到约 1.39 秒，Sarathi-Serve 一直在 0.31–0.33 秒左右。原文图 1(a) 是同一组实验里“累计生成 token 数—时间”的曲线，vLLM 呈台阶状，放大框里能看到一次持续数秒的停顿。</div>
+</div>
+
+<p>为什么会这样？论文把当时的调度器按“prefill 和 decode 谁优先”分成两类。</p>
+<ul>
+  <li><b>decode 优先</b>：以 FasterTransformer 为代表的传统系统按“请求”组批。一批请求一起做完 prefill，再一起 decode，直到这一批全部结束，新请求才能进来。正在生成的请求从不被新请求打扰，所以 TBT 很稳定；代价是吞吐量低：批里的请求陆续结束后，剩下的请求只能以越来越小的批继续跑，GPU 越来越闲。</li>
+  <li><b>prefill 优先</b>：Orca 提出了按“迭代”组批，每生成一个 token 就重新组一次批，请求可以随时加入和离开。Orca 和 vLLM 都把它和“prefill 优先”结合：只要显存允许，就立刻给新请求做 prefill。这样后面的 decode 批更大，吞吐量更高；代价是每次插入 prefill，正在 decode 的请求都得等它算完，出现生成停顿。prompt 越长，这一等越久。</li>
+</ul>
+<p>两类做法各占一头，论文用原文图 2 把它们画在“吞吐量—TBT 延迟”的平面上：FasterTransformer 在“延迟低、吞吐低”的角落；Orca 靠迭代级调度往“吞吐高”挪了一步，vLLM 再靠 PagedAttention 放下更大的批，吞吐更高，但两者的 TBT 都更差；Sarathi-Serve 的目标是“吞吐高、延迟也低”的那个角。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：三类调度方式，各自先照顾谁、牺牲谁</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box pred">decode 优先（FasterTransformer）<small>按请求组批：这一批全部生成完，才接新请求</small></span></div>
+      <div class="dia-flow"><span class="dia-box">TBT：稳定，新请求从不插队</span></div>
+      <div class="dia-flow"><span class="dia-box">吞吐：低，批越跑越小；新请求排队久，TTFT 高</span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box loss">prefill 优先（Orca、vLLM）<small>按迭代组批：显存一有空就先做新请求的 prefill</small></span></div>
+      <div class="dia-flow"><span class="dia-box">吞吐：高，decode 批大</span></div>
+      <div class="dia-flow"><span class="dia-box">TBT：尾部很差，prefill 插进来时 decode 全部停住</span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box act">无停顿（Sarathi-Serve）<small>按迭代组批 + 每步只捎带一小块 prefill</small></span></div>
+      <div class="dia-flow"><span class="dia-box">吞吐：高，新请求照样能尽快进入 decode 批</span></div>
+      <div class="dia-flow"><span class="dia-box">TBT：有上限，每步的计算量被 token 预算限住</span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图，内容对应 <a href="https://arxiv.org/html/2403.02310v3#S1.F2" target="_blank" rel="noopener">原文图 2 ↗</a>（原图是一张定性的“吞吐量—TBT”平面图，论文注明它只是示意，实际数值取决于模型和负载）。</div>
+</div>
+
+<p>引言还指出第二个问题：<b>流水线气泡</b>。模型大到一台机器放不下时，要跨机器部署。张量并行每层都要做两次 all-reduce 通信，在机器之间只有普通以太网时太慢，所以跨机器时通常改用流水线并行，把模型按层切成几段，每台机器负责一段。流水线要靠“微批”让各段同时干活，而 LLM 推理里每个微批的计算量差别很大：一个含长 prompt 的微批可能比一个纯 decode 的微批慢好几倍，后一段的机器就只能干等，GPU 时间白白浪费（第 3.3 节详细讲）。</p>
+<p>针对这两个问题，Sarathi-Serve 提出两个想法。<b>分块预填充</b>把一个请求的 prefill 切成计算量相近的块，分到多次迭代里完成，每次只算 prompt 的一部分。<b>无停顿调度</b>让新请求加入正在运行的批时不打断任何 decode：每一批由所有正在 decode 的请求，加上一块或几块新请求的 prefill 组成，总 token 数凑到一个事先设定的预算。这样做以迭代级调度为基础，但多了一个关键的限制：<b>每次迭代里的 prefill token 数被封顶</b>。于是每次迭代的耗时有了上限，而且几乎与新请求的 prompt 有多长无关，正在 decode 的请求的 TBT 也就几乎不受新 prefill 影响。此外，这样组出来的“混合批”（同时含 prefill token 和 decode token）计算量都差不多，用在流水线并行上时各微批耗时均匀，气泡显著减少。</p>
+<p>论文在四种模型和硬件组合上做了评测：Mistral-7B 用 1 张 A100；Yi-34B 用 2 张 A100 做 2 路张量并行；LLaMA2-70B 用 8 张 A40；Falcon-180B 用跨两台机器的 8 张 A100，机器内 4 路张量并行、机器间 2 级流水线，机器之间是普通以太网。Yi-34B 的服务容量最高提升 3.7 倍，Mistral-7B 最高 2.6 倍，Falcon-180B 因为气泡减少，端到端服务容量最高提升 5.6 倍。论文列出的贡献是：指出现有系统在吞吐—延迟权衡上的问题；提出分块预填充和无停顿批处理两个简单而有效的技术；在多种模型、硬件和并行方式上证明它的通用性，服务容量最多能提升一个数量级。</p>
+
+<div class="note-pre"><b>先补一点背景：前作 SARATHI。</b>
+<p>同一组作者在 2023 年 8 月发表过一篇 SARATHI（<a href="https://arxiv.org/abs/2308.16369" target="_blank" rel="noopener">arXiv 2308.16369 ↗</a>），标题直译是“用分块 prefill 捎带 decode，提高 LLM 推理效率”。它最早提出了两件事：把 prefill 切成等大的块，以及让 decode“搭车”（piggyback）进带 prefill 块的批里。那篇论文的目标是<b>吞吐量</b>：摘要里报告 LLaMA-13B 在 A6000 上 decode 吞吐最高提升 10 倍、端到端吞吐最高 1.33 倍；GPT-3 在流水线并行下气泡减少 6.29 倍、端到端吞吐提升 1.91 倍。</p>
+<p>Sarathi-Serve 把这个机制改造成面向<b>在线服务</b>的调度器：评价标准从“吞吐量”换成“在尾延迟约束下能扛多大负载”，新增了“先放 decode、再放 prefill、按 token 预算封顶”的无停顿调度规则，并讨论了预算该怎么按延迟目标来选。所以读这篇时，可以把“分块”看作继承来的工具，把“无停顿 + 预算 + 尾延迟约束下的容量”看作这篇真正的新内容。</p>
+</div>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>Sarathi-Serve 改的是<b>调度</b>，不是模型，也不是注意力内核。它不改变模型算出的任何数字，输出与不分块时一致（同一批里的计算顺序变了，浮点误差层面可能有极小差异，论文没有讨论这一点）。</li>
+  <li>“TBT”和 DistServe 等论文里的 “TPOT” 不是一回事。TPOT 通常是一个请求所有输出 token 的<b>平均</b>间隔，一次长停顿会被平均掉；TBT 的 P99 是把所有间隔放在一起看尾部，对偶发停顿非常敏感。指标选择本身就决定了 Sarathi-Serve 的优势会被放大还是缩小（第 5 节再谈）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · 原图：<a href="https://arxiv.org/html/2403.02310v3#S1.F1" target="_blank" rel="noopener">图 1 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S1.F2" target="_blank" rel="noopener">图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：两个阶段、多卡部署、三个指标和两类调度器</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>后面所有的设计都建立在几个事实上：prefill 和 decode 算的东西不同，所以代价不同；大模型要分到多张卡上，张量并行和流水线并行各有利弊；评价一个推理系统要看 TTFT、TBT 和服务容量；现有调度器在“先做 prefill 还是先做 decode”上做了不同的取舍。这一节把这些背景依次讲清楚。熟悉 vLLM 精读页的读者可以快速浏览前两小节。</div>
+
+<h4 id="n-2-1">2.1 一层 Transformer 里算什么，推理的两个阶段</h4>
+<p>GPT-3、LLaMA、Yi 这些模型都是只有解码器的 Transformer，由很多结构相同的层堆起来，每层有两个模块。<b>自注意力</b>模块先用三个线性变换把每个 token 的向量变成 query、key、value，再让每个 token 的 query 和它前面所有 token 的 key 做点积、经过 softmax 得到权重，用这些权重对 value 加权平均；多个“头”并行做这件事，结果再经过一个线性变换合并。<b>前馈网络</b>（FFN）是两个线性层夹一个激活函数：先把维度 \(h\) 放大到更高的维度，再变回 \(h\)。</p>
+<p>这里有一个对后面很重要的区分：一层里除了注意力的“点积 + 加权平均”这一步，其余计算（QKV 投影、输出投影、FFN）都是<b>逐 token 独立</b>的线性层，每个 token 都乘同一组权重。注意力那一步则要用到这个 token 前面所有 token 的 key 和 value，每个请求各算各的。</p>
+
+<div class="note-pre"><b>先补一点背景：prefill、decode 与 KV 缓存。</b>
+<p>推理服务处理一个请求分两步。<b>prefill</b> 处理用户输入的整段 prompt：这些 token 全部已知，可以在一次前向计算里并行算完，算出每个 token 在每一层的 key 和 value，并预测出第一个输出 token。<b>decode</b> 从第一个输出 token 开始，每一步把上一步刚生成的那一个 token 送进模型，生成下一个 token，直到生成结束符为止。decode 的每一步都要用到之前所有 token 的 key 和 value，为了不每步重算，系统把它们存在显存里，这就是 <b>KV 缓存</b>。</p>
+<p>一个典型的 prompt 有几百到几千个 token。prefill 一次处理这么多 token，线性层是“矩阵乘矩阵”，GPU 的算力能用满；decode 每步对每个请求只处理一个 token，线性层退化成“矩阵乘向量”，计算量很小，却要把整份权重从显存读一遍，所以速度被显存带宽卡住，算力大部分闲着。这一点在 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a> 有更细的讲解。</p>
+</div>
+
+<p>所以 decode 特别适合拼批：把 \(B\) 个请求的 decode 放进一批，读一遍权重就能同时为 \(B\) 个请求各生成一个 token，读权重的成本被摊到 \(B\) 份上。批越大，越划算。为了让批更大，近年有几类互补的技术：vLLM 的 PagedAttention 消除了 KV 缓存的显存碎片，能同时放下更多请求；多查询注意力（MQA）和分组查询注意力（GQA）让多个查询头共用一组 key/value，直接缩小 KV 缓存，论文举例说 LLaMA2-70B 的 KV 缓存只有 LLaMA-65B 的八分之一。这些技术都让“开大批”变得可行，但开大批之后怎么安排 prefill 和 decode，才是本文要回答的问题。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同样一步，decode 和 prefill 的时间花在不同地方（Mistral-7B，单张 A100，理想化估算）</div>
+  <div class="dia-row"><span class="lbl">decode 32 个请求·读</span><div class="dia-track"><span class="dia-seg w" style="flex:7.3">读权重 ≈ 7.3 ms</span><span class="dia-seg" style="flex:40.2"></span></div></div>
+  <div class="dia-row"><span class="lbl">decode 32 个请求·算</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1.5">1.5</span><span class="dia-seg" style="flex:46"></span></div></div>
+  <div class="dia-out">一步 ≈ 7.3 ms，被读权重卡住；按峰值算，算力只用了约五分之一。</div>
+  <div class="dia-row"><span class="lbl">prefill 1024 个 token·读</span><div class="dia-track"><span class="dia-seg w" style="flex:7.3">读权重 ≈ 7.3 ms</span><span class="dia-seg" style="flex:40.2"></span></div></div>
+  <div class="dia-row"><span class="lbl">prefill 1024 个 token·算</span><div class="dia-track"><span class="dia-seg cmp" style="flex:47.5">计算 ≈ 47.5 ms</span></div></div>
+  <div class="dia-out">一步 ≈ 47.5 ms，被算力卡住；读权重的时间完全藏在计算后面。</div>
+  <div class="dia-note">推算：Mistral-7B 约 72.4 亿参数，BF16 下权重约 14.5 GB，A100 显存带宽按约 2.0 TB/s、BF16 稠密算力按 312 TFLOPS（厂商峰值）计；每个 token 的线性层计算量约为 2 × 参数量 ≈ 14.5 GFLOP，忽略注意力和 KV 读取。一步的耗时近似取“读数据时间”和“计算时间”中较大的一个。实测会比这慢（论文图 4 中 decode 一步约 18–23 ms），但两者的比例关系不变：decode 的算力大量空闲，这正是 Sarathi-Serve 要利用的“空隙”。</div>
+</div>
+
+<h4 id="n-2-2">2.2 多卡推理：张量并行与流水线并行</h4>
+<p>模型越来越大，一张卡放不下，或者放下了也留不出足够的显存给 KV 缓存，就要分到多张卡甚至多台机器上。论文还强调了另一个动机：decode 的吞吐量受限于一张卡上能放下的最大批，把权重分到多张卡上，每张卡腾出的显存可以放更多请求的 KV 缓存，从而开更大的批。常用的切法有两种。</p>
+<ul>
+  <li><b>张量并行</b>（TP）把每一层的权重和 KV 缓存平均切到所有卡上，每张卡算每一层的一部分。好处是每张卡的批可以随卡数线性变大，单步延迟也随之降低；坏处是每层要做两次 all-reduce（注意力一次、FFN 一次），而且这些通信在关键路径上，必须等它完成才能继续算。所以张量并行只适合机器内部有 NVLink 这类高带宽互连的场合。张量并行的切法见 <a href="megatron-lm.html#n-3-1">Megatron-LM 精读 §3</a>。</li>
+  <li><b>流水线并行</b>（PP）按层切，每张卡（或每组卡）负责连续的若干层。数据算完前一段，把激活传给下一段即可：每隔很多层才通信一次，而且是点对点发送，比 all-reduce 便宜得多。所以在机器之间只有普通网络时，流水线并行比张量并行高效。代价是要用“微批”让各段同时工作，否则同一时刻只有一段在干活。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：流水线、微批与气泡。</b>
+<p>假设模型切成两段，GPU0 负责前半，GPU1 负责后半。如果一次只送一批数据进去，GPU0 算完前半交给 GPU1 后就没事可做，GPU1 在 GPU0 算的时候也没事可做，两张卡各闲一半。解决办法是把工作切成多个<b>微批</b>，GPU0 算完微批 1 交给 GPU1 后马上开始算微批 2，两张卡就能同时忙起来，像工厂的流水线一样。流水线上某一段因为上游没送来活而空等的时间，叫<b>流水线气泡</b>。训练里的气泡来自“先做前向、再做反向”的依赖，<a href="megatron-lm.html#n-2-3">Megatron-LM 精读 §2.3</a> 有一张示意图。推理只有前向，看起来没有这种依赖，但第 3.3 节会看到，只要各个微批的耗时不一样长，气泡照样会出现。</p>
+</div>
+
+<h4 id="n-2-3">2.3 三个指标：TTFT、TBT 和服务容量</h4>
+<p>论文用两个延迟指标和一个吞吐指标。<b>TTFT</b> 是请求到达后生成第一个 token 的时间，反映系统的“反应快不快”；系统负载高时，请求要排队，TTFT 里的排队时间会变长。<b>TBT</b> 是同一请求相邻两个输出 token 之间的间隔，反映输出“流不流畅”。吞吐指标叫<b>服务容量</b>（capacity）：在满足某个延迟目标的前提下，系统能持续承受的最大请求速率，单位是每秒请求数（QPS）。容量越高，同样的硬件能服务越多用户，单个请求的成本越低。</p>
+<p>后面实验里的具体口径是：延迟目标只约束 <b>P99 TBT</b>；同时要求系统“扛得住”，即排队时间不能无限增长，论文用的标准是请求的调度延迟中位数不超过 2 秒。容量就是在这两个条件同时满足时的最高 QPS。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>容量的定义里没有直接约束 TTFT，只通过“调度延迟中位数 ≤ 2 秒”间接限制了排队。分块预填充恰恰会让 prefill 变慢一点、TTFT 变长一点（第 5.4 节的表 4 有实测），所以这个指标天然对 Sarathi-Serve 有利。这不是说结果不可信，而是说“容量更高”的含义是“在出字流畅的前提下能接更多请求”，不等于“每个请求都更快拿到第一个字”。</div>
+
+<h4 id="n-2-4">2.4 两类调度器：请求级批处理和迭代级批处理</h4>
+<p>调度器负责两件事：决定接不接新请求（准入控制），以及每一步把哪些请求放进一批（组批策略）。论文把现有调度器分成 prefill 优先和 decode 优先两类，并用两段伪代码说明它们的区别。</p>
+
+<div class="note-pre"><b>先补一点背景：从请求级批处理到 Orca 的迭代级调度。</b>
+<p>传统的推理引擎，如 FasterTransformer 和 Triton Inference Server，按<b>请求</b>组批：取一批请求，执行到这批里<b>所有</b>请求都结束为止，才取下一批。不同请求的输入、输出长度差别很大，短的请求要用填充补齐到最长的那个，还要陪着最长的请求跑完，新请求只能等整批结束。</p>
+<p>Orca（OSDI 2022）提出<b>迭代级调度</b>：每做完一次前向迭代（生成一个 token）就重新组一次批，生成完的请求立刻离开，新请求下一步就能加入。今天常说的“连续批处理”（continuous batching）就是它。为了让处在不同阶段、长度各异的请求能拼进同一次迭代，Orca 还提出了 <b>selective batching</b>：线性层是逐 token 的，所以把所有请求的 token 摊平成一个大矩阵一起乘权重；注意力要用各自的 KV，所以按请求拆开分别算，再拼回去。这意味着一次迭代里可以既有某个请求的几百个 prompt token，又有另外几十个请求各 1 个 decode token，它们在线性层里就是同一个矩阵的不同行。这正是后面“把 prefill 块和 decode 拼进同一批”的技术前提。迭代级调度的时间轴示意见 <a href="vllm.html#n-2-3">vLLM 精读 §2.3</a>，selective batching 的示意见 <a href="../legacy/tracks/ai-infra/15-orca-sarathi.html#c-selective">Orca / Sarathi-Serve 拆解页</a>。</p>
+</div>
+
+<p><b>请求级批处理（论文 Algorithm 1）</b>的逻辑是：当前批为空时，不断取新请求，直到显存放不下为止，对这一批做 prefill；之后每一步只对这批做 decode，并移除已结束的请求；只有这批全部结束、批变空了，才会再接新请求。论文把它归为 <b>decode 优先</b>：正在 decode 的请求不会被新请求打断，TBT 很好；但后半程批越来越小，很多迭代都是小批量的纯 decode，GPU 算力浪费严重。</p>
+<p><b>迭代级批处理（论文 Algorithm 2，以 vLLM 为例）</b>的逻辑是：每一步都先看能不能接新请求，只要显存能放下就一直接；如果这一步接到了新请求，就只对这些新请求做 prefill，算完把它们并入正在运行的批；如果没有新请求，才对整批做一次 decode。论文把它归为 <b>prefill 优先</b>：新请求被“急切地”接纳，后续 decode 批更大，吞吐量更高；但凡有新请求进来，这一步就是纯 prefill，所有正在 decode 的请求都要等它完成。这种在两次 decode 之间插入 prefill 导致的等待，就是<b>生成停顿</b>。</p>
+<p>这个分类同样适用于当时的 vLLM、TensorRT-LLM、LightLLM 等系统，它们都用迭代级批处理。另外，Splitwise、DistServe 这类把 prefill 和 decode 放到不同机器上的系统被论文归为第三类“拆分式”，留到相关工作里讨论。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#alg1" target="_blank" rel="noopener">Algorithm 1 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#alg2" target="_blank" rel="noopener">Algorithm 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 动机：decode 的空闲算力、生成停顿和流水线气泡</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>prefill 和 decode 的代价到底差多少，差在哪里？既然 decode 用不满算力，能不能顺手多塞点活进去？现有的 prefill 优先调度为什么一定会造成停顿，Orca 那种“prefill 和 decode 拼在一起算”为什么也救不了？流水线并行下，气泡又是怎么来的？论文把答案整理成四条结论（Takeaway 1–4），后面的设计就是逐条回应它们。</div>
+
+<h4 id="n-3-1">3.1 prefill 与 decode 的代价</h4>
+<p>论文先在单张 A100 上用 Mistral-7B 测了两个阶段的吞吐量随批大小的变化（原文图 3，prompt 长度都是 1024）。prefill 在批大小为 1 时就已经接近饱和：从原图读出，批大小 1 时约每秒 4.4K 个 token，加到 2、4、8 之后在 4.7K–5.4K 之间小幅波动，基本不再涨。decode 则几乎随批大小线性增长：批大小 1 时每秒只有十几个 token，64 时约 810 个。注意两个子图的纵轴量级完全不同，prefill 每秒处理的 token 数比 decode 高出一个数量级以上。</p>
+<p><b>Takeaway 1：</b>两个阶段的行为截然相反。拼批能让 decode 的吞吐量成倍上升，对 prefill 却几乎没有帮助，因为单个 prefill 已经把算力用满了。</p>
+<p>接着论文把两个阶段的耗时拆成线性层、注意力和其他三部分（原文图 4）。从原图读出：prefill 的总耗时从 128 个 token 时约 33 ms 涨到 2K 个 token 时约 144 ms，其中线性层从约 15 ms 涨到约 118 ms；decode 一步约 18–23 ms，批大小从 1 涨到 64 几乎不变，线性层一直在 11 ms 左右。两条结论很清楚。第一，线性层是耗时的大头，即使在 2K 这样较长的序列上，注意力的耗时随长度平方增长，线性层仍占总时间的 80% 以上，所以优化线性层最重要。第二，decode 时线性层的效率极低：1 个 decode token 的线性层开销和 128 个 prefill token 差不多。</p>
+
+<div class="note-pre"><b>先补一点背景：算术强度与 roofline。</b>
+<p>GPU 执行一个矩阵乘法时，读数据和做计算是重叠进行的，总时间大致是两者中较长的那个：\(T \approx \max(T_{\text{math}}, T_{\text{mem}})\)。如果读数据更慢，这个操作就是<b>访存受限</b>，算力闲着，用“模型算力利用率”（MFU）衡量会很低；如果计算更慢，就是<b>算力受限</b>，带宽闲着，用“模型带宽利用率”（MBU）衡量会很低。两者正好相等时，算力和带宽同时用满，这是最理想的状态。</p>
+<p>判断一个操作落在哪一边，看<b>算术强度</b>：每从显存读 1 字节数据，要做多少次浮点运算。设一个线性层的权重是 \(d_{\text{in}}\times d_{\text{out}}\) 的 BF16 矩阵，这一步有 \(n\) 个 token 要乘它：</p>
+<div class="formula">$$\text{算术强度}=\frac{2\,n\,d_{\text{in}}d_{\text{out}}}{2\,d_{\text{in}}d_{\text{out}}+2\,n\,(d_{\text{in}}+d_{\text{out}})}\;\approx\; n\qquad(n\ll d_{\text{in}},d_{\text{out}})$$</div>
+<p>分子是乘加的次数（每个乘加算 2 次运算），分母是读权重加读写激活的字节数。当 \(n\) 远小于矩阵维度时，权重的字节数占绝对多数，算术强度约等于 token 数 \(n\)。GPU 也有一个“平衡点”：峰值算力除以显存带宽。A100 的 BF16 稠密算力为 312 TFLOPS、带宽约 2 TB/s，平衡点约 156 次运算/字节（推算）。所以一批里的 token 数少于一百多个时，线性层是访存受限的；多于这个数，才变成算力受限。decode 批里每个请求只贡献 1 个 token，几十个请求的 decode 批远在平衡点左边；一段上千 token 的 prefill 远在右边。更多推导见 <a href="flashattention.html#n-2-2">FlashAttention 精读 §2.2</a>。</p>
+</div>
+<p>下面的小工具可以直观地看到这一点：把批大小 B 调大，decode 的点会沿着斜线（带宽受限区）往右上走；prefill 的点一开始就在平顶（算力受限区）上。</p>
+<div data-widget="roofline" data-panel="roofline"></div>
+
+<p>论文的原文图 5 用 LLaMA2-70B 在 4 张 A100 上的线性层画出了同样的趋势：decode 批（几十个 token）的算术强度很低，被读权重的时间卡住；prefill 批（上千个 token）的算术强度很高，带宽反而没用满。图上把两者中间、大约 600 个 token 处标为“平衡点”，Sarathi-Serve 想做的就是把 decode 和 prefill 块混在一起，让每一批都落在平衡点附近。论文在脚注里说，理论上 A100 上大约 200 个 token 就会变成算力受限，但实测中张量并行度较高时要到 500–600 个 token 才转折，原因是各种固定开销。</p>
+<p>原文图 6 直接测了 LLaMA2-70B 线性层的耗时随批里 token 数的变化。从原图读出，2 路张量并行时，128 到 256 个 token 之间耗时几乎不变（约 75 ms），因为这段时间主要花在读权重上，多算几个 token 不怎么费时；越过转折点以后，耗时基本随 token 数线性增长，到 4096 个 token 时约 1000 ms；4 路张量并行时每张卡的权重减半，曲线整体低一半左右。曲线上还有一级一级的小台阶，那是矩阵按“瓦片”切分计算造成的（第 4.3 节讲）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：线性层耗时随一批 token 数的变化，以及 decode 批和 token 预算各落在哪里</div>
+  <svg class="dg" viewBox="0 0 640 270" role="img" aria-label="线性层耗时随 token 数先平后升的示意曲线" style="max-width:640px">
+    <line x1="70" y1="220" x2="610" y2="220" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="70" y1="220" x2="70" y2="24" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="340" y="250" class="t-c t-sm">一批里的 token 数 →</text>
+    <text x="24" y="122" class="t-c t-sm" transform="rotate(-90 24 122)">线性层耗时 →</text>
+    <rect x="72" y="40" width="148" height="178" style="fill:var(--c-act-bg);stroke:none;opacity:.6"/>
+    <path d="M72,178 L200,176 C215,175 224,170 236,164 L600,40" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <line x1="92" y1="220" x2="92" y2="186" style="stroke:var(--c-pred);stroke-width:2"/>
+    <text x="96" y="200" class="t-xs" style="fill:var(--c-pred)">decode 批</text>
+    <text x="96" y="212" class="t-xs" style="fill:var(--c-pred)">（几十个 token）</text>
+    <line x1="210" y1="220" x2="210" y2="60" style="stroke:var(--c-act);stroke-dasharray:5 4;stroke-width:1.5"/>
+    <text x="214" y="70" class="t-xs" style="fill:var(--c-act)">token 预算选在拐点附近</text>
+    <text x="146" y="120" class="t-c t-xs">平台区：读权重主导</text>
+    <text x="146" y="134" class="t-c t-xs">多塞 token 几乎不加时间</text>
+    <text x="470" y="150" class="t-c t-xs">斜坡区：计算主导</text>
+    <text x="470" y="164" class="t-c t-xs">耗时随 token 数线性增长</text>
+    <line x1="560" y1="220" x2="560" y2="56" style="stroke:var(--c-loss);stroke-dasharray:3 4"/>
+    <text x="556" y="210" class="t-r t-xs" style="fill:var(--c-loss)">整段长 prompt 的 prefill</text>
+  </svg>
+  <div class="dia-note">本站示意图，不是论文数据，对应 <a href="https://arxiv.org/html/2403.02310v3#S3.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 与 <a href="https://arxiv.org/html/2403.02310v3#S3.F6" target="_blank" rel="noopener">原文图 6 ↗</a>。绿色阴影是“平台区”。decode 批落在平台区的最左边：在它上面再加几百个 prefill token，这一步的耗时几乎不变，这就是 decode 批里“白送”的算力。token 预算如果选在拐点附近，混合批既把算力用起来，又不会让这一步变慢太多；一整段几千 token 的 prefill 则远在斜坡上，插进来就会让这一步变得很长。</div>
+</div>
+<p><b>Takeaway 2：</b>decode 批工作在访存受限区，算力没有用满。这意味着可以在 decode 批里再处理更多 token，而这一步的耗时不会明显增加。</p>
+<div class="note-warn"><b>读图时要注意：</b>原文图 3 和图 4 都是 Mistral-7B、单张 A100，但绝对数值对不上：图 4 里 1K 个 token 的 prefill 约 76 ms，折合每秒约 1.3 万个 token，图 3 里同样长度的 prefill 只有每秒约 4.4K–5.4K 个；图 4 里批大小 64 的 decode 一步约 23 ms，折合每秒约 2,800 个 token，图 3 里只有约 810 个（本站推算，约差 3 倍）。论文没有交代两张图的测量口径有何不同，所以这两张图只适合看趋势和比例，不适合拿绝对值去和别的系统比。</div>
+
+<h4 id="n-3-2">3.2 吞吐—延迟的两难：生成停顿是怎么来的</h4>
+<p>迭代级调度提高了吞吐量，代价是 TBT 的尾部，原因就是<b>生成停顿</b>。原文图 7 用 A、B、C、D 四个请求的例子对比了四种调度方式：开始时 A、B 在 decode，过了一次迭代后 C、D 到达。下面用本站自己的画法把这个例子走一遍，每一行是一个请求，每一格是一次纯 decode 迭代那么长的时间。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同一组请求在四种调度方式下的时间线（C、D 在第 1 格结束时到达）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th></tr>
+    <tr><td colspan="13" class="gsub">① vLLM（prefill 优先，批里要么全是 prefill，要么全是 decode）</td></tr>
+    <tr><td class="lbl">A（还差 3 个 token）</td><td class="r"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">B（还要生成很多）</td><td class="r"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">C（新到）</td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">D（新到）</td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td colspan="13" class="gsub">② Orca（prefill 优先，整段 prefill 和 decode 拼进同一次迭代）</td></tr>
+    <tr><td class="lbl">A</td><td class="r"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">B</td><td class="r"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">C</td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">D</td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td colspan="13" class="gsub">③ FasterTransformer（decode 优先，请求级批处理）</td></tr>
+    <tr><td class="lbl">A</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">B</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">C</td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td></tr>
+    <tr><td class="lbl">D</td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td><td class="p"></td></tr>
+    <tr><td colspan="13" class="gsub">④ Sarathi-Serve（无停顿：每步 = 所有 decode + 一块 prefill）</td></tr>
+    <tr><td class="lbl">A</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">B</td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">C</td><td></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td class="lbl">D</td><td></td><td class="q"></td><td class="q"></td><td class="p"></td><td class="p"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td><td class="r"></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2403.02310v3#S3.F7" target="_blank" rel="noopener">原文图 7 ↗</a>（原图按“每次迭代一个方框”画，这里改成每个请求一行）。深蓝 = 这一格给该请求产出一个 token；浅红 = 在算该请求的 prefill（整段或一块）；斜纹 = 请求已经在系统里，但这一格没有产出（被卡住或在排队）；空白 = 还没到达或已经结束。为了画图简单，④ 里每次迭代都画成 1 格；实际上带了 prefill 块的迭代会比纯 decode 慢一些（第 4.2 节的表格给出实测倍数）。</div>
+</div>
+
+<p>逐行看这四种方式：</p>
+<ul>
+  <li><b>vLLM</b> 一看到 C、D 到达，就单独做一个只含 prefill 的批，把两段 prompt 一次算完（第 2–6 格）。这段时间 A、B 一个 token 也没生成，它们的 TBT 从 1 格被拉长到 6 格。这就是一次生成停顿，prompt 越长停得越久。</li>
+  <li><b>Orca</b> 支持混合批，把 C、D 的整段 prefill 和 A、B 的 decode 放进同一次迭代。看起来 A、B 没有被“踢出”批，但这次迭代要把两段完整 prompt 算完，耗时和 vLLM 的那次 prefill 差不多，A、B 得等这次迭代结束才拿到下一个 token，停顿依然存在。所以光是“拼在一起算”不够，关键在于这一步的总计算量有多大。</li>
+  <li><b>FasterTransformer</b> 让 A、B 不受打扰地生成完，再给 C、D 做 prefill。A、B 的出字很平稳，但 C、D 白白排队了 6 格才开始 prefill，TTFT 很长；而且 A 结束以后只剩 B 一个请求在跑，批越来越小，吞吐量低。</li>
+  <li><b>Sarathi-Serve</b> 把 C 的 prompt 切成两块，第 2、3 格各算一块，同时照常给 A、B 做 decode；D 等 C 的块算完后，在第 4、5 格分两块算完。A、B 从头到尾每格都有输出，C、D 也没有等太久就进入了 decode。</li>
+</ul>
+<p>论文还讨论了一种缓解办法：Orca 建议用较小的批来压低延迟尖峰。但第 2 节讲过，批变小会直接降低 decode 的吞吐量。所以现有系统只能根据延迟目标，在吞吐和延迟之间二选一。</p>
+<p><b>Takeaway 3：</b>prefill 和 decode 交替执行，使现有调度器必须在吞吐和延迟之间取舍。当时最先进的系统都用 prefill 优先，用 TBT 延迟换吞吐量。</p>
+
+<h4 id="n-3-3">3.3 流水线气泡浪费 GPU 时间</h4>
+<p>训练里的流水线气泡是因为反向必须等前向做完。推理只有前向，于是人们容易以为：只要用微批把流水线灌满，就不会有气泡。FasterTransformer、FastServe 等系统都用了微批，却没有讨论气泡；Orca 的论文甚至认为迭代级调度消除了流水线中的气泡。Sarathi-Serve 的实验（第 5.3 节）表明，即使用了迭代级调度，气泡仍然会浪费大量 GPU 时间。</p>
+<p>原因是 LLM 推理里每个微批的计算量差别很大，取决于里面有多少 prefill token、多少 decode token。论文把气泡分成三种：</p>
+<ul>
+  <li><b>PB1</b>：相邻两个微批里的 prefill token 数不同，耗时不同。后一段处理较长的那个微批时，前一段处理完较短的微批就没有活干了。</li>
+  <li><b>PB2</b>：一个 prefill 微批后面跟着一个 decode 微批（或反过来），两者耗时差距更大。</li>
+  <li><b>PB3</b>：即使都是纯 decode 微批，注意力的耗时也取决于各请求已经积累的上下文长度（KV 缓存有多大），不同微批的耗时仍有差异。</li>
+</ul>
+<p>论文给了一个量级：Falcon-180B 上，单个 4K token 的 prompt 执行一次约 1150 ms，而批大小为 32 的纯 decode 迭代约 200 ms，两者交替执行时可能产生约 950 ms 的气泡。prompt 越长、批越大，prefill 迭代越长、出现得越频繁，问题越严重。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：两级流水线上，微批耗时不均就会出现气泡（格子里的数字是微批编号）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><th></th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th></tr>
+    <tr><td colspan="15" class="gsub">① 迭代级调度、整段 prefill（Orca 式）：微批 1 = A、B 的整段 prefill，微批 2 = C、D 的整段 prefill，之后是 decode</td></tr>
+    <tr><td class="lbl">GPU0（前半层）</td><td class="p">1</td><td class="p">1</td><td class="p">1</td><td class="p">1</td><td class="p">2</td><td class="p">2</td><td></td><td></td><td style="background:var(--c-enc-bg);color:var(--c-enc)">3</td><td></td><td style="background:var(--c-enc-bg);color:var(--c-enc)">4</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">5</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">6</td><td></td></tr>
+    <tr><td class="lbl">GPU1（后半层）</td><td></td><td></td><td></td><td></td><td class="p">1</td><td class="p">1</td><td class="p">1</td><td class="p">1</td><td class="p">2</td><td class="p">2</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">3</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">4</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">5</td><td style="background:var(--c-enc-bg);color:var(--c-enc)">6</td></tr>
+    <tr><td colspan="15" class="gsub">② 无停顿批处理（Sarathi-Serve 式）：每个微批都是“decode + 一块 prefill”，token 数相同</td></tr>
+    <tr><td class="lbl">GPU0（前半层）</td><td class="p">1</td><td class="p">2</td><td style="background:var(--c-act-bg);color:var(--c-act)">3</td><td style="background:var(--c-act-bg);color:var(--c-act)">4</td><td style="background:var(--c-act-bg);color:var(--c-act)">5</td><td style="background:var(--c-act-bg);color:var(--c-act)">6</td><td style="background:var(--c-act-bg);color:var(--c-act)">7</td><td style="background:var(--c-act-bg);color:var(--c-act)">8</td><td style="background:var(--c-act-bg);color:var(--c-act)">9</td><td style="background:var(--c-act-bg);color:var(--c-act)">10</td><td style="background:var(--c-act-bg);color:var(--c-act)">11</td><td style="background:var(--c-act-bg);color:var(--c-act)">12</td><td style="background:var(--c-act-bg);color:var(--c-act)">13</td><td style="background:var(--c-act-bg);color:var(--c-act)">14</td></tr>
+    <tr><td class="lbl">GPU1（后半层）</td><td></td><td class="p">1</td><td class="p">2</td><td style="background:var(--c-act-bg);color:var(--c-act)">3</td><td style="background:var(--c-act-bg);color:var(--c-act)">4</td><td style="background:var(--c-act-bg);color:var(--c-act)">5</td><td style="background:var(--c-act-bg);color:var(--c-act)">6</td><td style="background:var(--c-act-bg);color:var(--c-act)">7</td><td style="background:var(--c-act-bg);color:var(--c-act)">8</td><td style="background:var(--c-act-bg);color:var(--c-act)">9</td><td style="background:var(--c-act-bg);color:var(--c-act)">10</td><td style="background:var(--c-act-bg);color:var(--c-act)">11</td><td style="background:var(--c-act-bg);color:var(--c-act)">12</td><td style="background:var(--c-act-bg);color:var(--c-act)">13</td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2403.02310v3#S3.F8" target="_blank" rel="noopener">原文图 8 ↗</a>。浅红 = 以 prefill 为主的微批；浅蓝 = 纯 decode 微批；浅绿 = decode 加一块 prefill 的混合微批；灰色空格 = 气泡。规则是：一个微批要先在 GPU0 上算完，才能进 GPU1；同一组请求的下一次迭代，要等它上一次迭代在 GPU1 上算完、拿到新 token 才能开始。在 ① 里，微批 2 比微批 1 短，GPU0 算完微批 2 后要空等两格，直到微批 1 从 GPU1 出来（PB1）；微批 3 是很短的 decode，GPU0 算完它又要等 GPU1 把微批 2 算完（PB2）。在 ② 里，每个微批的耗时相同，除了开头 GPU1 等第一个微批的那一格，两张卡一直满载。实际上 ② 也不会完全没有气泡，因为注意力的耗时还随上下文长度变化（PB3），原图里 Sarathi-Serve 的时间线上也留有一个很小的空隙。</div>
+</div>
+<p><b>Takeaway 4：</b>LLM 迭代的耗时会因批里 prefill token 和 decode token 的组成不同而有很大差异，用流水线并行时这会造成大量气泡。如果能让每个微批的计算量大致相同，气泡就能减少。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · 原图：<a href="https://arxiv.org/html/2403.02310v3#S3.F3" target="_blank" rel="noopener">图 3 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S3.F4" target="_blank" rel="noopener">图 4 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S3.F7" target="_blank" rel="noopener">图 7 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S3.F8" target="_blank" rel="noopener">图 8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 设计与实现：分块预填充、无停顿批处理、token 预算</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>第 3 节说 decode 批里有“白送”的算力，可以顺手做 prefill，但直接把整段 prefill 塞进去会让这一步变得很长。那么 prefill 该切成多大的块？每次迭代按什么顺序装哪些请求？一次装多少 token（token 预算）才合适，选大选小各有什么代价？分块本身又要额外付出什么？这一节是全文的核心。</div>
+
+<h4 id="n-4-1">4.1 分块预填充：把一段 prefill 拆到多次迭代里</h4>
+<p>第 3.1 节已经说明，decode 批严重访存受限，算术强度有很大的余量，正好可以“捎带”额外的计算。最直接的做法是像 Orca 那样组混合批，把访存受限的 decode 和算力受限的 prefill 放在一起算。问题是实际负载里的 prompt 往往很长：论文用的两个数据集中，openchat_sharegpt4 的 prompt 长度中位数是 1730 个 token，arxiv_summarization 是 7059 个（原文表 2）。把几千个 token 的整段 prefill 和 decode 拼在一起，这一步要算很久，TBT 照样很高。</p>
+<p>分块预填充基于两个观察。第一，一段长度适中的 prefill 已经能把 GPU 算力用满：原文图 4 显示，prefill 的吞吐量在序列长度约 512 时就开始饱和。第二，实际的 prompt 平均有几千个 token。两者合起来就有了机会：把长 prefill 切成较小的块，每块仍然大到足以把算力用满，于是“切块”本身不会明显降低效率，却能把每次迭代的计算量控制住。Sarathi-Serve 用这个机制组出 token 数合适的批，既用上 decode 批里闲置的算力，又不违反 TBT 的目标。</p>
+<p>分块之后，第 \(k\) 块的 token 在注意力里要看到哪些东西？因为是因果注意力，第 \(k\) 块里的每个 token 要看到它前面的<b>所有</b> token：前 \(k-1\) 块的 token 加上本块里排在它前面的 token。前 \(k-1\) 块在之前的迭代里已经算过，它们每层的 key 和 value 已经写进了 KV 缓存。所以第 \(k\) 块的注意力只需要：用本块的 query，去读 KV 缓存里前面各块的 K、V，再加上本块内部的因果注意力。除了最后一块，中间各块不需要采样输出 token；最后一块算完时，产出第一个输出 token，请求随之进入 decode。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：12 个 token 的 prompt 切成 3 块，每次迭代算一块时注意力看到什么</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="分块预填充的注意力范围示意：每块读取前面各块的 KV 缓存再加块内因果注意力">
+    <text x="270" y="40" class="t-c t-sm">key / value：第 1–12 个 token →</text>
+    <text x="140" y="100" class="t-r">块 1 · 第 1 次迭代</text>
+    <text x="140" y="180" class="t-r">块 2 · 第 2 次迭代</text>
+    <text x="140" y="260" class="t-r">块 3 · 第 3 次迭代</text>
+    <text x="140" y="316" class="t-r t-xs">每行是一个 query</text>
+    <rect x="150" y="60" width="20" height="20" style="fill:var(--c-enc)"/>
+    <rect x="170" y="60" width="220" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="80" width="40" height="20" style="fill:var(--c-enc)"/>
+    <rect x="190" y="80" width="200" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="100" width="60" height="20" style="fill:var(--c-enc)"/>
+    <rect x="210" y="100" width="180" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="120" width="80" height="20" style="fill:var(--c-enc)"/>
+    <rect x="230" y="120" width="160" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="140" width="80" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="230" y="140" width="20" height="20" style="fill:var(--c-enc)"/>
+    <rect x="250" y="140" width="140" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="160" width="80" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="230" y="160" width="40" height="20" style="fill:var(--c-enc)"/>
+    <rect x="270" y="160" width="120" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="180" width="80" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="230" y="180" width="60" height="20" style="fill:var(--c-enc)"/>
+    <rect x="290" y="180" width="100" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="200" width="80" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="230" y="200" width="80" height="20" style="fill:var(--c-enc)"/>
+    <rect x="310" y="200" width="80" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="220" width="160" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="310" y="220" width="20" height="20" style="fill:var(--c-enc)"/>
+    <rect x="330" y="220" width="60" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="240" width="160" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="310" y="240" width="40" height="20" style="fill:var(--c-enc)"/>
+    <rect x="350" y="240" width="40" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="260" width="160" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="310" y="260" width="60" height="20" style="fill:var(--c-enc)"/>
+    <rect x="370" y="260" width="20" height="20" style="fill:var(--surface-3)"/>
+    <rect x="150" y="280" width="160" height="20" style="fill:var(--c-tgt)"/>
+    <rect x="310" y="280" width="80" height="20" style="fill:var(--c-enc)"/>
+    <line x1="150" y1="60" x2="150" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="60" x2="390" y2="60" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="170" y1="60" x2="170" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="80" x2="390" y2="80" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="190" y1="60" x2="190" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="100" x2="390" y2="100" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="210" y1="60" x2="210" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="120" x2="390" y2="120" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="230" y1="60" x2="230" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="140" x2="390" y2="140" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="250" y1="60" x2="250" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="160" x2="390" y2="160" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="270" y1="60" x2="270" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="180" x2="390" y2="180" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="290" y1="60" x2="290" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="200" x2="390" y2="200" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="310" y1="60" x2="310" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="220" x2="390" y2="220" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="330" y1="60" x2="330" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="240" x2="390" y2="240" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="350" y1="60" x2="350" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="260" x2="390" y2="260" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="370" y1="60" x2="370" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="280" x2="390" y2="280" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="390" y1="60" x2="390" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="150" y1="300" x2="390" y2="300" style="stroke:var(--surface);stroke-width:1.5"/>
+    <line x1="146" y1="140" x2="394" y2="140" style="stroke:var(--text-2);stroke-width:2"/>
+    <line x1="146" y1="220" x2="394" y2="220" style="stroke:var(--text-2);stroke-width:2"/>
+    <rect x="430" y="66" width="14" height="14" style="fill:var(--c-enc)"/>
+    <text x="452" style="font-size:13px" y="73" class="t-sm">本块内部：普通的因果注意力，和整段 prefill 时一样</text>
+    <rect x="430" y="94" width="14" height="14" style="fill:var(--c-tgt)"/>
+    <text x="452" style="font-size:13px" y="101" class="t-sm">前面的块：从 KV 缓存里读出之前迭代存好的 K、V</text>
+    <rect x="430" y="122" width="14" height="14" style="fill:var(--surface-3)"/>
+    <text x="452" style="font-size:13px" y="129" class="t-sm">后面的 token：因果掩码，看不到</text>
+    <text style="font-size:13px" x="430" y="172" class="t-sm">第 1 次迭代：块 1 只看自己，是一个 4×4 的小三角。</text>
+    <text style="font-size:13px" x="430" y="198" class="t-sm">第 2 次迭代：块 2 的 4 个 query 先读块 1 的 4 组 K、V，再看块内。</text>
+    <text style="font-size:13px" x="430" y="224" class="t-sm">第 3 次迭代：块 3 读块 1、2 共 8 组 K、V，再看块内。</text>
+    <text style="font-size:13px" x="430" y="258" class="t-sm">三次拼起来正好是整段 prefill 的那个大三角：</text>
+    <text style="font-size:13px" x="430" y="278" class="t-sm">算出来的结果不变，只是分三次算；代价是紫色部分</text>
+    <text style="font-size:13px" x="430" y="298" class="t-sm">要在后面的迭代里从 KV 缓存重新读出来。</text>
+  </svg>
+  <div class="dia-note">本站示意图（原文没有对应的图）。行是 query（本次迭代要算的 token），列是 key/value。蓝色和紫色合起来就是标准的因果注意力下三角。实现上需要一个注意力内核，能让“一块 query”去读分页存放的 KV 缓存；Sarathi-Serve 用的是 FlashAttention v2 和 FlashInfer 的分页 prefill 内核（第 4.4 节）。</div>
+</div>
+
+<h4 id="n-4-2">4.2 无停顿批处理：先放 decode，再放 prefill 块，总量不超预算</h4>
+<p>Sarathi-Serve 的调度器仍然是迭代级的，它用分块预填充和“prefill 与 decode 合批”来提高吞吐、压低延迟。与 Orca、vLLM 为了做 prefill 而让正在进行的 decode 停下来不同，Sarathi-Serve 利用 decode 迭代里算术强度的余量来做 prefill，不推迟任何 decode。论文把这叫<b>无停顿批处理</b>（原文 Algorithm 3）。它的步骤是：</p>
+<ol>
+  <li><b>先定预算。</b>根据用户给定的 TBT 目标，算出一个批最多能装多少 token，记作 token 预算 \(\tau\)（怎么算见第 4.3 节）。</li>
+  <li><b>每次迭代，先装所有正在 decode 的请求。</b>每个请求占 1 个 token。</li>
+  <li><b>再装已经开始、还没做完的 prefill。</b>每个这样的请求，取“剩余 prompt 长度”和“预算剩余量”中较小的那个作为本次的块大小。</li>
+  <li><b>最后才接纳新请求。</b>只有在所有正在运行的请求都安排好之后，才从队列里取新请求，前提是显存放得下它、预算还有剩余；同样按剩余预算决定它这一步算多长的块。</li>
+  <li>把这一批（混合批）交给模型执行一次前向，移除已结束的请求，进入下一次迭代。</li>
+</ol>
+<p>因为每次迭代的计算量都被预算封顶，decode 永远不会因为同一批里有 prefill 块而经历长时间的生成停顿。用代码写出来大致是这样（本站按论文 Algorithm 3 和官方仓库的 <code>sarathi_scheduler.py</code> 整理的简化版）：</p>
+<pre><code class="lang-py">def schedule_one_iteration(running, waiting, token_budget):
+    batch, used = [], 0
+    # 1) 所有已经在 decode 的请求先上车，每个 1 个 token
+    for r in running:
+        if r.prefill_done:
+            batch.append((r, 1)); used += 1
+    # 2) 还没做完 prefill 的请求，按剩余预算切下一块
+    for r in running:
+        if not r.prefill_done:
+            chunk = min(r.remaining_prompt, token_budget - used)
+            if chunk > 0:
+                batch.append((r, chunk)); used += chunk
+    # 3) 最后才接新请求：要显存放得下、预算还有剩
+    while waiting and used &lt; token_budget and can_allocate_kv(waiting[0]):
+        r = waiting.pop(0)
+        chunk = min(r.prompt_len, token_budget - used)
+        running.append(r); batch.append((r, chunk)); used += chunk
+    return batch   # 交给引擎：线性层一起算，注意力按请求分别算</code></pre>
+
+<p>举一个具体的例子。假设预算是 512，当前有 30 个请求在 decode，新来了两个请求：C 的 prompt 有 1200 个 token，D 有 727 个。</p>
+<div class="dia">
+  <div class="dia-title">示意图：token 预算为 512 时，连续四次迭代的批是怎么装的</div>
+  <div class="dia-row"><span class="lbl">迭代 1</span><div class="dia-track"><span class="dia-seg kv" style="flex:30">30</span><span class="dia-seg w" style="flex:482">C 的第 1 块：482 个 token</span></div></div>
+  <div class="dia-row"><span class="lbl">迭代 2</span><div class="dia-track"><span class="dia-seg kv" style="flex:30">30</span><span class="dia-seg w" style="flex:482">C 的第 2 块：482</span></div></div>
+  <div class="dia-row"><span class="lbl">迭代 3</span><div class="dia-track"><span class="dia-seg kv" style="flex:30">30</span><span class="dia-seg w" style="flex:236">C 的第 3 块：236</span><span class="dia-seg cmp" style="flex:246">D 的第 1 块：246</span></div></div>
+  <div class="dia-row"><span class="lbl">迭代 4</span><div class="dia-track"><span class="dia-seg kv" style="flex:31">31</span><span class="dia-seg cmp" style="flex:481">D 的第 2 块：481</span></div></div>
+  <div class="dia-out">每一步都是 512 个 token。C 在迭代 3 算完最后一块、产出第一个 token，迭代 4 起加入 decode（30 → 31）；D 在迭代 4 算完。</div>
+  <div class="dia-note">本站示意图，数字是虚构的例子。蓝色 = decode token（每个请求 1 个）；紫色 = C 的 prefill 块；绿色 = D 的 prefill 块。C 的三块是 482 + 482 + 236 = 1200，D 的两块是 246 + 481 = 727。注意第 2 步“先装没做完的 prefill”保证了 C 在 D 之前做完，先到的请求不会被后到的请求插队。</div>
+</div>
+
+<p>回到第 3.2 节那张四种调度方式的时间线：Sarathi-Serve 的第一次迭代只有 decode，因为还没有要做的 prefill；C 到达后，它的 prefill 被切成两块，在接下来两次迭代里和 A、B 的 decode 合批完成。这样既没有让 decode 停下来，也没有让 prefill 无限期地等，TBT 基本没有尖峰，吞吐也没有受损。而且分块预填充加无停顿批处理，在大多数情况下都让每个混合批的计算量相近，这正是第 3.3 节说的减少流水线气泡所需要的。</p>
+<p>论文用原文图 9 量化了“往 decode 批里加 prefill”的代价。对比的三种批是：纯 decode；decode 加一块固定预算的 prefill（Sarathi-Serve 的做法）；decode 加一整段 prefill（Orca 式的朴素混合批）。图上标出了每种批相对纯 decode 批的耗时倍数：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>上下文长度</th><th>批大小 1：分块 / 整段</th><th>批大小 32：分块 / 整段</th><th>批大小 64：分块 / 整段</th></tr>
+  <tr><td>Mistral-7B</td><td>1024</td><td>1.8× / 5.7×</td><td>1.4× / 3.8×</td><td>1.2× / 2.8×</td></tr>
+  <tr><td>Mistral-7B</td><td>2048</td><td>1.9× / 10.2×</td><td>1.4× / 5.5×</td><td>1.3× / 3.7×</td></tr>
+  <tr><td>Mistral-7B</td><td>4096</td><td>2.0× / 20.3×</td><td>1.3× / 7.8×</td><td>1.2× / 5.1×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>1024</td><td>3.6× / 7.1×</td><td>3.1× / 6.0×</td><td>2.5× / 4.7×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>2048</td><td>3.6× / 13.3×</td><td>2.8× / 9.7×</td><td>2.2× / 7.1×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>4096</td><td>3.7× / 28.3×</td><td>2.5× / 16.6×</td><td>1.9× / 10.6×</td></tr>
+</table></div>
+<p>表中数字取自原文图 9 柱子上的标注，都是“这一批的耗时 ÷ 同条件下纯 decode 批的耗时”。朴素的混合批最多让这一步慢到 28.3 倍，也就是 TBT 被拉长 28 倍；分块后，Mistral-7B 只慢 1.2–2.0 倍。批越大、上下文越长，decode 本身越慢，捎带一块 prefill 的相对影响就越小。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>“无停顿”不等于“零影响”。</b>带了 prefill 块的那一步确实比纯 decode 慢：Mistral-7B 慢 1.2–2.0 倍，LLaMA2-70B 慢 1.9–3.7 倍（上表）。Sarathi-Serve 做到的是把这个“慢多少”封顶，让它不随 prompt 长度增长，而不是让它消失。所以 token 预算必须和 TBT 目标一起选。原文图 9 没有说明它用的预算是多少，LLaMA2-70B 的倍数偏高可能和这一点有关，本站无法核实。</li>
+  <li><b>论文的 Algorithm 3 是示意，有几处笔误。</b>例如第 18 行写成“批 ← 新请求”，应当是把新请求<b>加入</b>批；循环里也没有取下一个新请求。图注说“可选地加入一块进行中的 prefill”，而官方代码会把所有进行中的 prefill 都排进来（只要预算够）。复现时以官方仓库的 <code>sarathi/core/scheduler/sarathi_scheduler.py</code> 为准。</li>
+  <li><b>新请求被接纳时，要一次性分配下整段 prompt 的 KV 显存。</b>官方代码在接纳时调用块管理器为请求分配显存，之后各块直接写入。所以显存不够时，即使预算有剩，也接不进新请求；批大小上限（实验里是 128 个请求）同样会挡住新请求。</li>
+</ul></div>
+
+<h4 id="n-4-3">4.3 token 预算怎么选</h4>
+<p>token 预算由两个相互拉扯的因素决定：TBT 目标和分块的开销。从 TBT 看，预算越小越好，因为每次迭代的 prefill token 越少，这一步越快。但预算太小，prefill 会被切得太碎，带来两种开销：一是每块太小，GPU 利用率下降；二是注意力里要反复读前面各块的 KV 缓存。</p>
+
+<p><b>反复读 KV 缓存。</b>第 \(k\) 块的注意力要读前面所有块的 KV。如果一段 prefill 切成 \(N\) 块，第 1 块的 KV 会被后面的块读 \(N-1\) 次，第 2 块的 KV 被读 \(N-2\) 次，依此类推。这增加了从显存读取的数据量，但计算量不变。</p>
+<div class="dia">
+  <div class="dia-title">示意图：4096 个 token 的 prompt 按 512 切成 8 块，每块额外要读多少“旧块”的 KV</div>
+  <div class="dia-row"><span class="lbl">块 2 额外读</span><div class="cells"><span class="cell c">1</span></div></div>
+  <div class="dia-row"><span class="lbl">块 3 额外读</span><div class="cells"><span class="cell c">1</span><span class="cell c">2</span></div></div>
+  <div class="dia-row"><span class="lbl">块 4 额外读</span><div class="cells"><span class="cell c">1</span><span class="cell c">2</span><span class="cell c">3</span></div></div>
+  <div class="dia-row"><span class="lbl">……</span><div class="cells"><span class="cell">…</span></div></div>
+  <div class="dia-row"><span class="lbl">块 8 额外读</span><div class="cells"><span class="cell c">1</span><span class="cell c">2</span><span class="cell c">3</span><span class="cell c">4</span><span class="cell c">5</span><span class="cell c">6</span><span class="cell c">7</span></div></div>
+  <div class="dia-out">合计 1 + 2 + … + 7 = 28 块次，即 28 × 512 = 14,336 个 token 的 KV 被额外读了一遍（推算）。</div>
+  <div class="dia-note">本站示意图。格子里的数字是被读的旧块编号。以 Yi-34B 为例：60 层、8 个 KV 头、头维度 128（公开配置），BF16 下每个 token 的 KV 约 240 KB；两路张量并行时每张卡存一半，约 120 KB。额外读取量约 14,336 × 120 KB ≈ 1.8 GB，按约 2 TB/s 的带宽算不到 1 毫秒；而这段 4096 token 的 prefill 在每张卡上的计算量约 2 × 340 亿 × 4096 ÷ 2 ≈ 1.4 × 10¹⁴ 次运算，即使按 312 TFLOPS 的峰值算也要约 0.45 秒（以上均为推算）。两者差了两个数量级以上。</div>
+</div>
+<p>正如上面的推算所示，额外读 KV 的量和 prefill 本身的计算量比起来很小。论文也说，即使块很小，prefill 阶段的注意力仍然是算力受限的；实际中分块的开销主要来自内核启动之类的固定开销（第 5.4 节会看到实测开销）。本站补充一个角度：Sarathi-Serve 用的 FlashAttention-2 内核，本来就把 query 沿序列切成小块分给不同的线程块，每个线程块都要把它前面所有的 K、V 从显存扫一遍（FA2 的并行方式见 <a href="flashattention.html#n-9">FlashAttention 精读 §9</a>，分块与扫描顺序见 <a href="flashattention.html#n-3-4">§3.4</a>）。也就是说，不分块时这种“同一份 K、V 被不同的 query 小块反复读”同样存在，分块只是把这些读取分到了不同的迭代里，在内核层面并没有多出多少流量（本站分析，论文没有这样论证）。真正多出来的，更可能是块变小后线性层效率下降（第 3.1 节图 6 的平台区）和每次迭代都要重复付的固定开销。按原文图 6 读出的数字粗算，LLaMA2-70B 两路张量并行时，512 个 token 的批每个 token 的线性层耗时约 0.32 ms，4096 个 token 时约 0.24 ms，前者约是后者的 1.3 倍（推算），和第 5.4 节实测的分块开销量级相当。</p>
+
+<div class="note-pre"><b>先补一点背景：瓦片量化（tile quantization）。</b>
+<p>GPU 做矩阵乘法时，把输出矩阵切成固定大小的“瓦片”（tile），每个瓦片交给一个线程块计算，每个线程块做的运算量相同。如果矩阵的某一维不能被瓦片大小整除，最后一排瓦片里只有一部分是有用的，但线程块照样要把整个瓦片算完。举个例子（本站示意）：瓦片高 128 行时，256 个 token 正好是 2 排瓦片；257 个 token 就要 3 排，第 3 排只有 1 行有用，却要付出一整排的计算。论文实测，块大小取 257 时，prefill 的时间比取 256 时多 32%。所以预算最好取瓦片大小的整数倍，第 3.1 节图 6 曲线上的小台阶也是这个原因。</p>
+</div>
+<p><b>流水线并行下还要考虑气泡。</b>块越大，各个微批之间的耗时差异越大，气泡越多，系统总吞吐越低；块太小，算术强度低、固定开销占比高，同样不好。</p>
+<p>所以选预算是一个综合决策，取决于 TBT 目标、并行配置和具体硬件。论文给出的基本做法是做一次性的性能剖析（profiling）：测量含不同 token 数的批各要多长时间，把预算设为“不违反 TBT 目标的前提下，一批能装的最多 token 数”。更精细的选择借助同组开发的推理模拟器 Vidur（<a href="https://arxiv.org/abs/2405.05465" target="_blank" rel="noopener">arXiv 2405.05465 ↗</a>），在给定部署下搜索让服务容量最大的预算。实验里的设置是：严格的延迟目标用 512，宽松的用 2048；LLaMA2-70B 在宽松目标下用 1536，以减少流水线气泡。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：token 预算选小、选大，各自得到什么、付出什么</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">预算小（如 512）</span></div>
+      <div class="dia-flow"><span class="dia-box act">得到：每次迭代短，TBT 尾部低且平稳；流水线各微批更均匀</span></div>
+      <div class="dia-flow"><span class="dia-box loss">付出：prefill 切得碎，线性层落在平台区、效率低；固定开销被重复付；TTFT 变长；能达到的最高吞吐略低</span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box pred">预算大（如 2048）</span></div>
+      <div class="dia-flow"><span class="dia-box act">得到：prefill 几乎不打折扣，吞吐高，TTFT 短</span></div>
+      <div class="dia-flow"><span class="dia-box loss">付出：每次迭代长，TBT 尾部高；在严格的 TBT 目标下可能直接违约；流水线下气泡变多</span></div>
+    </div>
+  </div>
+  <div class="dia-flow" style="margin-top:10px"><span class="dia-box reg">TBT 目标</span><span class="dia-arrow">→</span><span class="dia-box">剖析：不同 token 数的批各要多久</span><span class="dia-arrow">→</span><span class="dia-box">取不违约的最大 token 数</span><span class="dia-arrow">→</span><span class="dia-box">按瓦片大小取整，考虑流水线气泡</span><span class="dia-arrow">→</span><span class="dia-box reg">用 Vidur 模拟，选容量最大的预算</span></div>
+  <div class="dia-note">本站示意图，内容综合自原文 §4.3。第 5.2 节的实验会直接展示“预算和延迟目标不匹配”时的后果：在最严格的目标下，预算 2048 的 Sarathi-Serve 反而不如 vLLM。</div>
+</div>
+<p>论文在第 5.1 节提到，按负载特征动态调整预算还能进一步提升性能，并把这留作未来工作。官方仓库里已经有一个相关的可选功能（<code>enable_dynamic_chunking_schedule</code>）：一段 prompt 的前几块用较大的块，越往后块越小。直觉上，越靠后的块要读的旧 KV 越多、注意力越贵，用小一些的块能让每次迭代的耗时更均匀。这个功能论文没有评测，这里只作为代码层面的补充。</p>
+
+<h4 id="n-4-4">4.4 实现</h4>
+<p>Sarathi-Serve 在开源的 vLLM 代码基础上实现。作者用 FlashAttention v2 和 FlashInfer 的内核实现了分页 KV 缓存上的分块 prefill；因为 FlashAttention 后端支持的模型更多，论文的所有实验都用它。作者还扩展了原来的 vLLM 代码，支持多种调度策略（包括后面作为对照的 vLLM、Orca 策略）、分块预填充、流水线并行和一套详细的性能遥测系统。流水线并行和张量并行的通信都用 NCCL。官方仓库的说明里写明，这个仓库最初是 vLLM 的一个分支，是一个研究原型，只保留了最关键的功能，并不具备开源 vLLM 的全部特性。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#alg3" target="_blank" rel="noopener">Algorithm 3 ↗</a> · 原图：<a href="https://arxiv.org/html/2403.02310v3#S4.F9" target="_blank" rel="noopener">图 9 ↗</a> · 代码：<a href="https://github.com/microsoft/sarathi-serve/blob/main/sarathi/core/scheduler/sarathi_scheduler.py" target="_blank" rel="noopener">sarathi_scheduler.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实验：在尾延迟约束下，每个模型副本能多扛多少请求</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在给定的延迟目标下，一个模型副本用不同的调度器各能承受多大负载？延迟目标收紧或放宽时，这个负载怎么变？在张量并行和流水线并行下表现如何？分块要付出多少额外开销？分块和混合批两个技术单独用、合起来用，效果各是什么样？读结果之前，先把实验是怎么设计的、“容量”是怎么测出来的讲清楚，因为这些细节直接决定了倍数的含义。</div>
+
+<h4 id="n-5-1">5.1 实验是怎么设计的</h4>
+<p><b>模型和硬件。</b>论文选了四个模型，作者认为它们是各自规模里最好的开源模型之一。除 LLaMA2-70B 外，都跑在 Azure 的 NC96ads v4 虚拟机上：每台 4 张 80 GB 的 A100，GPU 两两之间用 NVLink 相连，机器之间是 100 Gbps 以太网。LLaMA2-70B 跑在一台有 8 张 48 GB A40 的服务器上，GPU 同样两两相连。官方仓库的复现说明进一步写明 A100 是 PCIe 版本。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>注意力</th><th>GPU 与并行方式</th><th>显存总量（每卡）</th></tr>
+  <tr><td>Mistral-7B</td><td>GQA，滑动窗口</td><td>1 张 A100</td><td>80 GB（80 GB）</td></tr>
+  <tr><td>Yi-34B</td><td>GQA</td><td>2 张 A100，2 路张量并行</td><td>160 GB（80 GB）</td></tr>
+  <tr><td>LLaMA2-70B</td><td>GQA</td><td>8 张 A40，4 路张量并行 × 2 级流水线</td><td>384 GB（48 GB）</td></tr>
+  <tr><td>Falcon-180B</td><td>GQA</td><td>2 台 × 4 张 A100，4 路张量并行 × 2 级流水线</td><td>640 GB（80 GB）</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 1。Falcon-180B 的两级流水线跨两台机器，之间只有 100 Gbps 以太网。</p>
+
+<p><b>负载。</b>两个数据集都只提供请求的长度分布，到达时间用泊松过程生成（相邻请求的间隔随机、平均速率可调，模拟大量用户各自独立地发请求）。openchat_sharegpt4 是用户分享的与 ChatGPT-4 的对话，一段对话有多轮，每一轮作为一个单独的请求发给系统，所以 prompt 长度的相对差异很大。arxiv_summarization 是 arXiv 论文和它们的摘要，prompt 更长、输出长度的差异更小，作者认为它代表了 Microsoft 365 Copilot、Google Duet AI 这类工作负载。两个数据集分别去掉了总长度超过 8192 和 16384 个 token 的离群请求。</p>
+<div class="table-wrap"><table>
+  <tr><th>数据集</th><th>prompt：中位数 / P90 / 标准差</th><th>输出：中位数 / P90 / 标准差</th></tr>
+  <tr><td>openchat_sharegpt4</td><td>1730 / 5696 / 2088</td><td>415 / 834 / 101</td></tr>
+  <tr><td>arxiv_summarization</td><td>7059 / 12985 / 3638</td><td>208 / 371 / 265</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 2，单位是 token。官方复现脚本里的长度统计是用 LLaMA2 的分词器算的。</p>
+
+<p><b>指标和延迟目标。</b>TTFT 每个请求只有一个值，所以看中位数；TBT 每个 decode token 都产生一个值，所以看 P99。延迟目标只设在 P99 TBT 上，分<b>严格</b>和<b>宽松</b>两档。为了照顾每个“模型 + 硬件”组合本身的速度差异，论文仿照 Splitwise 的做法，把目标定为一个基准时间的倍数：基准是“上下文 4K、批大小 32、没有任何 prefill 干扰时，一次 decode 迭代的耗时”，严格目标是它的 5 倍，宽松目标是 25 倍。严格目标代表聊天机器人这类交互式应用；宽松目标代表“整段输出要在可预期的时间内生成完，但对单个 token 的间隔要求不高”的场景。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>宽松目标：P99 TBT</th><th>严格目标：P99 TBT</th><th>推算的基准 decode 迭代耗时</th></tr>
+  <tr><td>Mistral-7B</td><td>0.5 s</td><td>0.1 s</td><td>约 20 ms</td></tr>
+  <tr><td>Yi-34B</td><td>1 s</td><td>0.2 s</td><td>约 40 ms</td></tr>
+  <tr><td>LLaMA2-70B</td><td>5 s</td><td>1 s</td><td>约 200 ms</td></tr>
+  <tr><td>Falcon-180B</td><td>5 s</td><td>1 s</td><td>约 200 ms</td></tr>
+</table></div>
+<p class="w-note">前两列来自原文表 3；最后一列是本站用“严格目标 ÷ 5”反推的（推算）。Falcon-180B 的 200 ms 与 §3.3 中“批大小 32 的纯 decode 迭代约 200 ms”一致。</p>
+
+<p><b>容量怎么测。</b>所有负载实验都要求系统“扛得住”：排队延迟不能无限增长，论文的标准是请求调度延迟的中位数不超过 2 秒。容量就是在“P99 TBT 不超过目标”且“调度延迟中位数不超过 2 秒”这两条同时成立时的最高请求速率。官方仓库的复现说明补充了具体做法：对请求速率做二分搜索，每个配置需要 7–8 次试验，每次试验发 2048 个请求、最长跑 30 分钟。结果是单个模型副本的容量，单位是每秒请求数。</p>
+
+<div class="note-pre"><b>先补一点背景：这里的 “vLLM” 和 “Orca” 指的是什么。</b>
+<p>论文把 vLLM 和 Orca 作为对照，因为它们代表了当时 LLM 推理的最高水平。但 Orca 没有开源，论文也没有交代对照用的 vLLM 版本。从官方仓库看，三者都是同一套代码（Sarathi-Serve 自己的 vLLM 分支）里的不同<b>调度策略</b>：<code>vllm_scheduler.py</code> 实现 prefill 优先、批里要么全是 prefill 要么全是 decode 的策略；<code>orca_scheduler.py</code> 实现“所有 decode + 新请求的整段 prefill”合成一批的策略，而且为每个请求按模型最大长度一次性预留 KV 显存；<code>sarathi_scheduler.py</code> 是本文的策略。模型执行、注意力内核、通信都是共用的。</p>
+<p>这样做的好处是只比较调度策略本身，排除了内核和工程实现的差别。需要记住的是：这里的“vLLM”是“vLLM 当时默认的调度策略”，不是某个发布版本的 vLLM 整体；这里的“Orca”是“按 Orca 论文思路的复现”，还背着按最大长度预留显存的包袱。复现配置里，vLLM 和 Sarathi-Serve 的批上限都是 128 个请求，Orca 的批上限在 Mistral-7B 上是 16、在 LLaMA2-70B 上是 8，注释说批再大，激活和 KV 缓存的显存就会爆掉。</p>
+</div>
+
+<h4 id="n-5-2">5.2 服务容量</h4>
+<p>原文图 10（张量并行的两个模型）和图 11（用了流水线并行的两个模型）给出了全部 16 种组合（4 个模型 × 2 个数据集 × 2 档延迟目标）下三种调度器的容量。原图柱子上只标了 Sarathi-Serve 相对 Orca 的倍数，下表把每根柱子的高度都列出来，并补上相对 vLLM 的倍数。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>数据集</th><th>目标</th><th>Orca</th><th>vLLM</th><th>Sarathi-Serve</th><th>÷ vLLM</th><th>÷ Orca</th></tr>
+  <tr><td>Mistral-7B</td><td>openchat</td><td>严格</td><td>0.73</td><td>0.77</td><td>2.03</td><td>2.64×</td><td>2.78×</td></tr>
+  <tr><td>Mistral-7B</td><td>openchat</td><td>宽松</td><td>1.06</td><td>1.56</td><td>2.28</td><td>1.46×</td><td>2.15×</td></tr>
+  <tr><td>Yi-34B</td><td>openchat</td><td>严格</td><td>0.27</td><td>0.29</td><td>1.08</td><td>3.72×</td><td>4.00×</td></tr>
+  <tr><td>Yi-34B</td><td>openchat</td><td>宽松</td><td>0.50</td><td>0.71</td><td>1.22</td><td>1.72×</td><td>2.44×</td></tr>
+  <tr><td>Mistral-7B</td><td>arxiv</td><td>严格</td><td>0.34</td><td>0.44</td><td>0.62</td><td>1.41×</td><td>1.82×</td></tr>
+  <tr><td>Mistral-7B</td><td>arxiv</td><td>宽松</td><td>0.39</td><td>0.47</td><td>0.77</td><td>1.64×</td><td>1.97×</td></tr>
+  <tr><td>Yi-34B</td><td>arxiv</td><td>严格</td><td>0.16</td><td>0.20</td><td>0.27</td><td>1.35×</td><td>1.69×</td></tr>
+  <tr><td>Yi-34B</td><td>arxiv</td><td>宽松</td><td>0.18</td><td>0.24</td><td>0.35</td><td>1.46×</td><td>1.94×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>openchat</td><td>严格</td><td>0.13</td><td>0.19</td><td>0.72</td><td>3.79×</td><td>5.54×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>openchat</td><td>宽松</td><td>0.13</td><td>0.54</td><td>0.82</td><td>1.52×</td><td>6.31×</td></tr>
+  <tr><td>Falcon-180B</td><td>openchat</td><td>严格</td><td>0.13</td><td>0.17</td><td>0.61</td><td>3.59×</td><td>4.69×</td></tr>
+  <tr><td>Falcon-180B</td><td>openchat</td><td>宽松</td><td>0.13</td><td>0.49</td><td>0.73</td><td>1.49×</td><td>5.62×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>arxiv</td><td>严格</td><td>0.05</td><td>0.06</td><td>0.23</td><td>3.83×</td><td>4.60×</td></tr>
+  <tr><td>LLaMA2-70B</td><td>arxiv</td><td>宽松</td><td>0.09</td><td>0.12</td><td>0.27</td><td>2.25×</td><td>3.00×</td></tr>
+  <tr><td>Falcon-180B</td><td>arxiv</td><td>严格</td><td>0.05</td><td>0.07</td><td>0.21</td><td>3.00×</td><td>4.20×</td></tr>
+  <tr><td>Falcon-180B</td><td>arxiv</td><td>宽松</td><td>0.08</td><td>0.12</td><td>0.22</td><td>1.83×</td><td>2.75×</td></tr>
+</table></div>
+<p class="w-note">容量单位是每秒请求数（单个模型副本）。三列容量是本站从原文图 10、图 11 的矢量数据里读出的柱高，都是 0.01 的整数倍（复现代码把搜索到的请求速率四舍五入到两位小数）；“÷ Orca”一列与原图柱子上的标注完全吻合，“÷ vLLM”一列是本站算的（推算）。数值很小的几格（如 0.05、0.06）只有两位有效数字，对应的倍数误差较大。</p>
+
+<div class="dia">
+  <div class="dia-title">简图：16 种组合下，Sarathi-Serve 的容量是 vLLM 的几倍</div>
+  <svg class="dg" viewBox="0 0 960 500" role="img" aria-label="16 种配置下 Sarathi-Serve 服务容量相对 vLLM 的倍数">
+    <rect x="300" y="8" width="14" height="14" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="320" y="15" class="t-sm">严格延迟目标（SLO-S）</text>
+    <rect x="500" y="8" width="14" height="14" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="520" y="15" class="t-sm">宽松延迟目标（SLO-R）</text>
+    <text x="10" y="44" class="t-b" style="font-size:12px">openchat_sharegpt4（prompt 长度中位数 1730）</text>
+    <text x="272" y="64" class="t-r">Mistral-7B · 1×A100 · 严格</text>
+    <rect x="280" y="56" width="355.9" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="641.9" y="64" class="t-sm">2.64×（2.03 vs 0.77）</text>
+    <text x="272" y="88" class="t-r">Mistral-7B · 1×A100 · 宽松</text>
+    <rect x="280" y="80" width="197.3" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="483.3" y="88" class="t-sm">1.46×（2.28 vs 1.56）</text>
+    <text x="272" y="112" class="t-r">Yi-34B · 2×A100 · 严格</text>
+    <rect x="280" y="104" width="502.8" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="788.8" y="112" class="t-sm">3.72×（1.08 vs 0.29）</text>
+    <text x="272" y="136" class="t-r">Yi-34B · 2×A100 · 宽松</text>
+    <rect x="280" y="128" width="232.0" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="518.0" y="136" class="t-sm">1.72×（1.22 vs 0.71）</text>
+    <text x="272" y="160" class="t-r">LLaMA2-70B · 8×A40 · 严格</text>
+    <rect x="280" y="152" width="511.6" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="797.6" y="160" class="t-sm">3.79×（0.72 vs 0.19）</text>
+    <text x="272" y="184" class="t-r">LLaMA2-70B · 8×A40 · 宽松</text>
+    <rect x="280" y="176" width="205.0" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="491.0" y="184" class="t-sm">1.52×（0.82 vs 0.54）</text>
+    <text x="272" y="208" class="t-r">Falcon-180B · 8×A100 · 严格</text>
+    <rect x="280" y="200" width="484.4" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="770.4" y="208" class="t-sm">3.59×（0.61 vs 0.17）</text>
+    <text x="272" y="232" class="t-r">Falcon-180B · 8×A100 · 宽松</text>
+    <rect x="280" y="224" width="201.1" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="487.1" y="232" class="t-sm">1.49×（0.73 vs 0.49）</text>
+    <text x="10" y="264" class="t-b" style="font-size:12px">arxiv_summarization（prompt 长度中位数 7059）</text>
+    <text x="272" y="284" class="t-r">Mistral-7B · 1×A100 · 严格</text>
+    <rect x="280" y="276" width="190.2" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="476.2" y="284" class="t-sm">1.41×（0.62 vs 0.44）</text>
+    <text x="272" y="308" class="t-r">Mistral-7B · 1×A100 · 宽松</text>
+    <rect x="280" y="300" width="221.2" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="507.2" y="308" class="t-sm">1.64×（0.77 vs 0.47）</text>
+    <text x="272" y="332" class="t-r">Yi-34B · 2×A100 · 严格</text>
+    <rect x="280" y="324" width="182.2" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="468.2" y="332" class="t-sm">1.35×（0.27 vs 0.20）</text>
+    <text x="272" y="356" class="t-r">Yi-34B · 2×A100 · 宽松</text>
+    <rect x="280" y="348" width="196.9" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="482.9" y="356" class="t-sm">1.46×（0.35 vs 0.24）</text>
+    <text x="272" y="380" class="t-r">LLaMA2-70B · 8×A40 · 严格</text>
+    <rect x="280" y="372" width="517.5" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="803.5" y="380" class="t-sm">3.83×（0.23 vs 0.06）</text>
+    <text x="272" y="404" class="t-r">LLaMA2-70B · 8×A40 · 宽松</text>
+    <rect x="280" y="396" width="303.8" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="589.8" y="404" class="t-sm">2.25×（0.27 vs 0.12）</text>
+    <text x="272" y="428" class="t-r">Falcon-180B · 8×A100 · 严格</text>
+    <rect x="280" y="420" width="405.0" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+    <text x="691.0" y="428" class="t-sm">3.00×（0.21 vs 0.07）</text>
+    <text x="272" y="452" class="t-r">Falcon-180B · 8×A100 · 宽松</text>
+    <rect x="280" y="444" width="247.5" height="16" style="fill:var(--c-act-bg);stroke:var(--c-act);stroke-width:1.2"/>
+    <text x="533.5" y="452" class="t-sm">1.83×（0.22 vs 0.12）</text>
+    <line x1="280" y1="472" x2="820" y2="472" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="280" y1="472" x2="280" y2="476" style="stroke:var(--text-3)"/><text x="280" y="488" class="t-c t-sm">0×</text>
+    <line x1="415" y1="472" x2="415" y2="476" style="stroke:var(--text-3)"/><text x="415" y="488" class="t-c t-sm">1×</text>
+    <line x1="550" y1="472" x2="550" y2="476" style="stroke:var(--text-3)"/><text x="550" y="488" class="t-c t-sm">2×</text>
+    <line x1="685" y1="472" x2="685" y2="476" style="stroke:var(--text-3)"/><text x="685" y="488" class="t-c t-sm">3×</text>
+    <line x1="820" y1="472" x2="820" y2="476" style="stroke:var(--text-3)"/><text x="820" y="488" class="t-c t-sm">4×</text>
+    <line x1="415" y1="36" x2="415" y2="472" style="stroke:var(--c-pred);stroke-dasharray:4 4;stroke-width:1.5"/>
+    <text x="419" y="30" class="t-xs" style="fill:var(--c-pred)">vLLM = 1×</text>
+  </svg>
+  <div class="dia-note">本站根据原文 <a href="https://arxiv.org/html/2403.02310v3#S5.F10" target="_blank" rel="noopener">图 10 ↗</a> 和 <a href="https://arxiv.org/html/2403.02310v3#S5.F11" target="_blank" rel="noopener">图 11 ↗</a> 的柱高重画（原图画的是三种调度器的绝对容量，这里换成相对 vLLM 的倍数，括号里是 Sarathi-Serve 与 vLLM 的容量）。怎么看：橙色虚线是 vLLM 的水平；蓝色柱（严格目标）普遍比绿色柱（宽松目标）长，说明延迟要求越严，Sarathi-Serve 的优势越大；上半部分（prompt 较短的对话数据）里，张量并行的两个模型在严格目标下优势最明显，下半部分（长 prompt 的论文摘要）里，Mistral-7B 和 Yi-34B 的优势缩小到 1.35–1.64 倍。</div>
+</div>
+
+<p>论文对这些结果的解读有以下几点。</p>
+<ul>
+  <li><b>Sarathi-Serve 在所有组合上都领先。</b>严格目标下，它最多能承受 Orca 的 4.0 倍、vLLM 的 3.7 倍负载（Yi-34B，openchat_sharegpt4）。对用流水线并行的大模型，论文说最多是 Orca 的 6.3 倍、vLLM 的 4.3 倍（LLaMA2-70B，openchat_sharegpt4），原因是气泡少。6.3 倍与原图吻合；但按原图柱高，LLaMA2-70B 在这个数据集上相对 vLLM 最多约 3.8 倍，4.3 倍这个数字出现在第 5.4 节 Falcon-180B 和“vLLM 纯张量并行”的对比里，正文这里可能写混了。</li>
+  <li><b>Orca 和 vLLM 往往先撞上延迟目标，再撞上吞吐上限。</b>也就是说，限制它们容量的不是 GPU 算不过来，而是 P99 TBT 先超标了。所以把目标放宽，它们的容量会明显上升，例如 vLLM 在 Mistral-7B、openchat 上从 0.77 涨到 1.56。Sarathi-Serve 则可以按目标调整预算：严格目标下用 512，把 prompt 切得更碎，效率略降但尾延迟更低；宽松目标下用 2048，让 prefill 更高效；LLaMA2-70B 宽松目标下用 1536，以减少流水线气泡。</li>
+  <li><b>宽松目标下 vLLM 明显强于 Orca，原因有两个。</b>第一，Orca 一次迭代里可以塞进多个请求的整段 prompt，最多“最大序列长度 × 批大小”个 token，而 vLLM 一次 prefill 迭代最多只有“最大序列长度”个 token，所以 Orca 的尾延迟有时更高。第二，vLLM 能支持大得多的批：Orca 没有 PagedAttention，处理 token 极多的批时激活也很占显存，批只能开小。</li>
+  <li><b>所有系统在 arxiv_summarization 上的容量都低于 openchat_sharegpt4。</b>因为前者的 prompt 长得多（中位数 7059 对 1730），prefill 更耗时，Orca 和 vLLM 也更容易因为长 prefill 而违反延迟目标。</li>
+</ul>
+
+<h4 id="n-5-3">5.3 吞吐—延迟权衡：延迟目标从严到松，容量怎么变</h4>
+<p>为了把权衡看完整，论文在 openchat_sharegpt4 上把 P99 TBT 目标取 5 个值，测 vLLM 和 Sarathi-Serve 的容量（原文图 12）。vLLM 按 Orca 论文的建议，用三种批上限（32、64、128）来调节吞吐和延迟；Sarathi-Serve 用两种预算（512 和 2048），批上限都是 128。</p>
+<div class="dia">
+  <div class="dia-title">简图：P99 TBT 目标从严到松时的服务容量（openchat_sharegpt4）</div>
+  <svg class="dg" viewBox="0 0 960 310" role="img" aria-label="不同 P99 TBT 目标下 vLLM 与 Sarathi-Serve 的服务容量">
+    <text x="260.0" y="22" class="t-c t-b" style="font-size:13px">Mistral-7B（1 张 A100）</text>
+    <line x1="70" y1="240" x2="450" y2="240" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="70" y1="240" x2="70" y2="40" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="70" y1="240.0" x2="450" y2="240.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="240.0" class="t-r t-sm">0</text>
+    <line x1="70" y1="200.0" x2="450" y2="200.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="200.0" class="t-r t-sm">0.5</text>
+    <line x1="70" y1="160.0" x2="450" y2="160.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="160.0" class="t-r t-sm">1</text>
+    <line x1="70" y1="120.0" x2="450" y2="120.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="120.0" class="t-r t-sm">1.5</text>
+    <line x1="70" y1="80.0" x2="450" y2="80.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="80.0" class="t-r t-sm">2</text>
+    <line x1="70" y1="40.0" x2="450" y2="40.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="64" y="40.0" class="t-r t-sm">2.5</text>
+    <text x="70.0" y="254" class="t-c t-sm">0.1 s</text>
+    <text x="165.0" y="254" class="t-c t-sm">0.2 s</text>
+    <text x="260.0" y="254" class="t-c t-sm">0.3 s</text>
+    <text x="355.0" y="254" class="t-c t-sm">0.4 s</text>
+    <text x="450.0" y="254" class="t-c t-sm">0.5 s</text>
+    <polyline points="70.0,178.4 165.0,158.4 260.0,141.6 355.0,132.0 450.0,132.0" style="fill:none;stroke:var(--c-pred);stroke-width:1.6"/>
+    <polyline points="70.0,178.4 165.0,156.8 260.0,141.6 355.0,128.8 450.0,113.6" style="fill:none;stroke:var(--c-pred);stroke-width:1.6;stroke-dasharray:6 3"/>
+    <polyline points="70.0,178.4 165.0,155.2 260.0,140.0 355.0,128.8 450.0,115.2" style="fill:none;stroke:var(--c-pred);stroke-width:1.6;stroke-dasharray:2 3"/>
+    <circle cx="70.0" cy="178.4" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="165.0" cy="155.2" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="260.0" cy="140.0" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="355.0" cy="128.8" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="450.0" cy="115.2" r="3.5" style="fill:var(--c-pred)"/>
+    <polyline points="70.0,77.6 165.0,80.0 260.0,80.0 355.0,80.0 450.0,80.0" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+    <circle cx="70.0" cy="77.6" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="165.0" cy="80.0" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="260.0" cy="80.0" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="355.0" cy="80.0" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="450.0" cy="80.0" r="3.5" style="fill:var(--c-enc)"/>
+    <polyline points="70.0,200.0 165.0,108.8 260.0,56.0 355.0,56.0 450.0,56.0" style="fill:none;stroke:var(--c-act);stroke-width:2.2"/>
+    <circle cx="70.0" cy="200.0" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="165.0" cy="108.8" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="260.0" cy="56.0" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="355.0" cy="56.0" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="450.0" cy="56.0" r="3.5" style="fill:var(--c-act)"/>
+    <text x="750.0" y="22" class="t-c t-b" style="font-size:13px">Yi-34B（2 张 A100）</text>
+    <line x1="560" y1="240" x2="940" y2="240" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="560" y1="240" x2="560" y2="40" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="560" y1="240.0" x2="940" y2="240.0" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="554" y="240.0" class="t-r t-sm">0</text>
+    <line x1="560" y1="182.9" x2="940" y2="182.9" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="554" y="182.9" class="t-r t-sm">0.4</text>
+    <line x1="560" y1="125.7" x2="940" y2="125.7" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="554" y="125.7" class="t-r t-sm">0.8</text>
+    <line x1="560" y1="68.6" x2="940" y2="68.6" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <text x="554" y="68.6" class="t-r t-sm">1.2</text>
+    <text x="560.0" y="254" class="t-c t-sm">0.2 s</text>
+    <text x="655.0" y="254" class="t-c t-sm">0.4 s</text>
+    <text x="750.0" y="254" class="t-c t-sm">0.6 s</text>
+    <text x="845.0" y="254" class="t-c t-sm">0.8 s</text>
+    <text x="940.0" y="254" class="t-c t-sm">1.0 s</text>
+    <polyline points="560.0,194.3 655.0,172.9 750.0,154.3 845.0,142.9 940.0,128.6" style="fill:none;stroke:var(--c-pred);stroke-width:1.6"/>
+    <polyline points="560.0,194.3 655.0,172.9 750.0,151.4 845.0,140.0 940.0,128.6" style="fill:none;stroke:var(--c-pred);stroke-width:1.6;stroke-dasharray:6 3"/>
+    <polyline points="560.0,192.9 655.0,175.7 750.0,154.3 845.0,141.4 940.0,127.1" style="fill:none;stroke:var(--c-pred);stroke-width:1.6;stroke-dasharray:2 3"/>
+    <circle cx="560.0" cy="192.9" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="655.0" cy="175.7" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="750.0" cy="154.3" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="845.0" cy="141.4" r="3.5" style="fill:var(--c-pred)"/>
+    <circle cx="940.0" cy="127.1" r="3.5" style="fill:var(--c-pred)"/>
+    <polyline points="560.0,77.1 655.0,77.1 750.0,77.1 845.0,77.1 940.0,77.1" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+    <circle cx="560.0" cy="77.1" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="655.0" cy="77.1" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="750.0" cy="77.1" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="845.0" cy="77.1" r="3.5" style="fill:var(--c-enc)"/>
+    <circle cx="940.0" cy="77.1" r="3.5" style="fill:var(--c-enc)"/>
+    <polyline points="560.0,211.4 655.0,171.4 750.0,57.1 845.0,57.1 940.0,57.1" style="fill:none;stroke:var(--c-act);stroke-width:2.2"/>
+    <circle cx="560.0" cy="211.4" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="655.0" cy="171.4" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="750.0" cy="57.1" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="845.0" cy="57.1" r="3.5" style="fill:var(--c-act)"/>
+    <circle cx="940.0" cy="57.1" r="3.5" style="fill:var(--c-act)"/>
+    <text x="260" y="270" class="t-c t-sm">横轴：P99 TBT 目标　纵轴：服务容量（请求/秒）</text>
+    <text x="750" y="270" class="t-c t-sm">横轴：P99 TBT 目标　纵轴：服务容量（请求/秒）</text>
+    <line x1="150" y1="294" x2="180" y2="294" style="stroke:var(--c-pred);stroke-width:1.6"/><text x="186" y="294" class="t-sm">vLLM（批上限 32 / 64 / 128，三条几乎重合）</text>
+    <line x1="520" y1="294" x2="550" y2="294" style="stroke:var(--c-enc);stroke-width:2.2"/><text x="556" y="294" class="t-sm">Sarathi-Serve 预算 512</text>
+    <line x1="730" y1="294" x2="760" y2="294" style="stroke:var(--c-act);stroke-width:2.2"/><text x="766" y="294" class="t-sm">Sarathi-Serve 预算 2048</text>
+  </svg>
+  <div class="dia-note">本站根据 <a href="https://arxiv.org/html/2403.02310v3#S5.F12" target="_blank" rel="noopener">原文图 12 ↗</a> 的折线坐标重画（数值从原图矢量数据读出，约值）。怎么看：横轴是延迟目标，越往右越宽松；纵轴是在该目标下能承受的最高请求速率。三条橙线几乎重合，说明 vLLM 调小批上限换不来更多容量；蓝线（预算 512）在所有目标下几乎是一条水平线；绿线（预算 2048）在最严格的目标下比 vLLM 还低，目标放宽以后反超蓝线。</div>
+</div>
+<p>从这张图可以读出三点。</p>
+<ul>
+  <li><b>vLLM 的容量被生成停顿封顶，开大批也用不上。</b>三种批上限下，vLLM 的容量几乎一样。这说明 PagedAttention 虽然让大批成为可能，但在有延迟约束的实际场景里，prefill 优先的调度让吞吐—延迟的权衡非常陡峭，vLLM 用不上它的大批。</li>
+  <li><b>Sarathi-Serve 用预算精确地调节权衡。</b>严格目标下用小预算 512，容量是 vLLM 的 3.5 倍；宽松目标下换成大预算 2048，效率更高，在 Yi-34B、1 秒目标下容量是 vLLM 的 1.65 倍。按原图读数，Yi-34B 在 0.2 秒目标下，预算 512 约 1.14、vLLM 约 0.33，正好约 3.5 倍；Mistral-7B 在 0.1 秒目标下是约 2.03 对 0.77，约 2.6 倍。论文正文把 3.5 倍写成“Mistral-7B、100 ms”，图注写的是 Yi-34B，数据支持图注。</li>
+  <li><b>预算选错了会吃亏。</b>预算 2048 在最严格的目标下，Mistral-7B 只有约 0.5、Yi-34B 只有约 0.2，都比 vLLM 低。原因是每次迭代装 2048 个 token 太慢，直接让 P99 TBT 超标。这说明 Sarathi-Serve 的优势依赖于“预算和延迟目标匹配”，第 4.3 节的预算选择不是可有可无的细节。</li>
+</ul>
+
+<h4 id="n-5-4">5.4 让流水线并行变得可用</h4>
+<p>这组实验想说明：有了 Sarathi-Serve，跨普通网络用流水线并行部署大模型也能高效。Falcon-180B 跑在两台机器上，每台 4 张 A100，机器之间是 100 Gbps 以太网。比较三种配置：vLLM 用 8 路张量并行（跨两台机器）；vLLM 用作者实现的流水线并行（机器内 4 路张量并行、机器间 2 级流水线）；Sarathi-Serve 用同样的流水线配置。</p>
+<div class="table-wrap"><table>
+  <tr><th>纯 decode 批的 TBT 中位数</th><th>批 8</th><th>批 16</th><th>批 32</th><th>批 64</th><th>批 128</th></tr>
+  <tr><td>8 路张量并行（跨机器）</td><td>0.19 s</td><td>0.21 s</td><td>0.21 s</td><td>0.25 s</td><td>0.36 s</td></tr>
+  <tr><td>4 路张量并行 × 2 级流水线</td><td>0.08 s</td><td>0.09 s</td><td>0.10 s</td><td>0.13 s</td><td>0.15 s</td></tr>
+</table></div>
+<div class="table-wrap"><table>
+  <tr><th>容量（请求/秒）</th><th>严格目标</th><th>宽松目标</th></tr>
+  <tr><td>vLLM，8 路张量并行</td><td>0.14</td><td>0.16</td></tr>
+  <tr><td>vLLM，4 路张量并行 × 2 级流水线</td><td>0.17</td><td>0.49</td></tr>
+  <tr><td>Sarathi-Serve，4 路张量并行 × 2 级流水线</td><td>0.61</td><td>0.73</td></tr>
+</table></div>
+<p class="w-note">数值是本站从原文图 13(a)(b) 的矢量数据读出的（约值）；容量一表与第 5.2 节表中 Falcon-180B、openchat_sharegpt4 的两行一致，说明是同一组实验。</p>
+<p>结果分两步看。第一，跨机器的张量并行很慢：纯 decode 批的 TBT 中位数大约是“机器内张量并行 + 机器间流水线”的 2 倍，因为每层两次 all-reduce 都要走以太网。所以 vLLM 的纯张量并行配置即使在宽松目标下容量也很低。第二，vLLM 改用混合并行后，宽松目标下容量明显上升（0.49），但严格目标下急剧下降（0.17），原因是流水线气泡。Sarathi-Serve 用分块预填充减小各微批之间的耗时差异、避开气泡，容量在宽松目标下是 vLLM 混合并行的 1.48 倍，在严格目标下是 3.6 倍；相对 vLLM 纯张量并行，严格目标下是 4.3 倍。</p>
+
+<h4 id="n-5-5">5.5 消融实验：分块的开销，两个技术各自的作用</h4>
+<p><b>分块的开销。</b>原文图 14 在 Yi-34B（2 路张量并行）上测了分块对 prefill 总耗时的影响：prompt 长度取 2K、4K、8K，块大小取 512、1024、2048，结果以不分块的耗时为 1 做归一化。正文说，块越小开销越大，即使是最小的 512，开销也“至多约 25%”；预算 2048 时开销几乎可以忽略。按原图柱高读出的数字是：</p>
+<div class="table-wrap"><table>
+  <tr><th>prompt 长度</th><th>块 512</th><th>块 1024</th><th>块 2048</th></tr>
+  <tr><td>2K</td><td>1.30</td><td>1.20</td><td>0.99</td></tr>
+  <tr><td>4K</td><td>1.33</td><td>1.22</td><td>1.01</td></tr>
+  <tr><td>8K</td><td>1.27</td><td>1.18</td><td>0.96</td></tr>
+</table></div>
+<p class="w-note">本站从原文图 14 的矢量数据读出（约值）。块 512 的开销在 27%–33% 之间，比正文的“至多约 25%”略高。官方仓库 osdi-sarathi-serve 分支里附带的一份结果文件（<code>chunking-overhead.csv</code>）给出的块 512 开销是 12%–19%（2K–8K），与论文图也不完全一致，可能是不同批次的测量。三处来源的共同结论是：块 512 的开销在一到三成之间，块 2048 基本没有开销。</p>
+<p>这个开销和第 4.3 节的推算对得上：开销的主要来源不是反复读 KV，而是块变小后矩阵乘法的效率下降、每次迭代的固定开销。它也解释了为什么 Sarathi-Serve 在宽松目标下要换用大预算：延迟允许的时候，没有理由多付这三成的 prefill 开销。</p>
+
+<p><b>两个技术单独用和一起用。</b>原文表 4 在 Yi-34B、两张 A100、预算 1024 下跑了 128 个请求，比较三种调度：只用混合批（prefill 和 decode 拼在一起，但 prefill 不分块）；只用分块（prefill 分块，但不和 decode 拼在同一批）；两者一起用（Sarathi-Serve）。</p>
+<div class="table-wrap"><table>
+  <tr><th>调度方式</th><th>openchat：P50 TTFT</th><th>openchat：P99 TBT</th><th>arxiv：P50 TTFT</th><th>arxiv：P99 TBT</th></tr>
+  <tr><td>只用混合批</td><td>0.53 s</td><td>0.68 s</td><td>3.78 s</td><td>1.38 s</td></tr>
+  <tr><td>只用分块</td><td>1.04 s</td><td>0.17 s</td><td>5.38 s</td><td>0.20 s</td></tr>
+  <tr><td>两者一起（Sarathi-Serve）</td><td>0.76 s</td><td>0.14 s</td><td>3.90 s</td><td>0.17 s</td></tr>
+</table></div>
+<p>只用分块时 TTFT 变长，因为分块后的 prefill 效率略低，而且 prefill 块和 decode 分开在不同的迭代里轮流跑，prefill 的推进速度被摊薄了；只用混合批时 TBT 很高，因为长 prefill 照样造成生成停顿。两者一起用时，P99 TBT 是三者中最低的，比“只用分块”还低：只用分块时，一个 decode 请求在两次出字之间可能要等一整次 prefill 块的迭代，而合批之后 decode 和 prefill 块在同一次迭代里完成，不用再等。TTFT 则介于两者之间。</p>
+<div class="note-warn"><b>读表时要注意：</b>两者一起用的 TTFT 并不是最低的。openchat 上是 0.76 秒，比只用混合批的 0.53 秒高约 43%；arxiv 上是 3.90 秒对 3.78 秒，高约 3%（推算）。Sarathi-Serve 用一点 TTFT 换来了 TBT 尾部的大幅下降（0.68 → 0.14 秒、1.38 → 0.17 秒）。这个交换在“看 P99 TBT 的容量”指标下非常划算，但如果应用更在乎首字延迟，就要重新权衡。</div>
+
+<h4 id="n-5-6">5.6 结果的份量：这些倍数是在什么条件下、和谁比出来的</h4>
+<p>把第 5.1–5.5 节的细节合在一起，可以这样理解论文的数字：</p>
+<ul>
+  <li><b>对照系统是同一代码库里的调度策略。</b>“vLLM”是 vLLM 当时默认的调度策略（prefill 优先、prefill 与 decode 不合批），运行在 Sarathi-Serve 自己的 vLLM 分支上，用的是同样的 FlashAttention 内核；论文没有写分支基于哪个 vLLM 版本，本站也无法确认。这能干净地隔离出调度的作用，但不等于和某个发布版本的 vLLM 正面比。“Orca”是复现，还按模型最大长度预留 KV 显存、批上限只有 8–16，所以“相对 Orca 的倍数”（如 5.6 倍、6.3 倍）混合了调度和显存管理两方面的差距。同期已经有类似思路的系统没有被比较：DeepSpeed-FastGen（2024 年 1 月）的 Dynamic SplitFuse 同样把长 prompt 切开、和 decode 拼成固定大小的批；TensorRT-LLM 也不在对照里。</li>
+  <li><b>摘要里三个数字的口径不同。</b>Mistral-7B 的 2.6 倍和 Yi-34B 的 3.7 倍是相对 vLLM、严格目标、openchat_sharegpt4；Falcon-180B 的 5.6 倍是相对 Orca、宽松目标、openchat_sharegpt4，同一格相对 vLLM 只有约 1.5 倍，Falcon-180B 相对 vLLM 的最好成绩是严格目标下的约 3.6 倍（混合并行）和约 4.3 倍（纯张量并行）。</li>
+  <li><b>优势集中在“严格的 TBT 目标 + 长短不一的 prompt”。</b>相对 vLLM，严格目标下 openchat_sharegpt4 上是 2.6–3.8 倍，宽松目标下降到 1.5–1.7 倍；在 prompt 很长的 arxiv_summarization 上，张量并行的两个模型只有 1.35–1.64 倍。应用对出字间隔不敏感、或 prompt 普遍很短（停顿本来就短）时，收益会更小。</li>
+  <li><b>指标只约束 TBT，不约束 TTFT。</b>容量的定义是“P99 TBT 达标且调度延迟中位数不超过 2 秒”时的最高请求速率。分块会让 TTFT 变长（第 5.5 节表 4），这一点不会反映在容量里。延迟目标是按每个模型自己的 decode 速度定的（5 倍和 25 倍），不是统一的绝对值。</li>
+  <li><b>负载是合成的。</b>只有长度分布来自真实数据集，到达过程是泊松分布，每次试验 2048 个请求、单个模型副本，没有生产流量里的突发、多轮会话的前缀复用等因素。</li>
+  <li><b>硬件是 A100 和 A40，跨机器只有 100 Gbps 以太网。</b>流水线并行的大幅收益和“跨机器张量并行很慢”的结论都建立在这种普通网络上；在有 InfiniBand 或 NVLink 交换网络的集群上，纯张量并行的对照会强得多。论文没有 H100 上的结果。</li>
+  <li><b>预算是按延迟目标挑过的。</b>每档目标都用了对应的最佳预算（512、2048 或 1536）。第 5.3 节显示，预算选错时 Sarathi-Serve 可能比 vLLM 还差。</li>
+  <li><b>正文和图有几处对不上。</b>“相对 vLLM 4.3 倍（LLaMA2-70B）”与图 11 不符（约 3.8 倍）；第 5.2 节“3.5 倍”正文写 Mistral-7B，图注和数据都指向 Yi-34B；分块开销正文说“至多约 25%”，图上块 512 约 27%–33%。这些出入不改变结论的方向，但引用具体倍数时应以图为准。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · 原图：<a href="https://arxiv.org/html/2403.02310v3#S5.F10" target="_blank" rel="noopener">图 10 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S5.F11" target="_blank" rel="noopener">图 11 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S5.F12" target="_blank" rel="noopener">图 12 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S5.F13" target="_blank" rel="noopener">图 13 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S5.F14" target="_blank" rel="noopener">图 14 ↗</a> · <a href="https://arxiv.org/html/2403.02310v3#S5.T4" target="_blank" rel="noopener">表 4 ↗</a> · 复现脚本：<a href="https://github.com/microsoft/sarathi-serve/tree/osdi-sarathi-serve/osdi-experiments" target="_blank" rel="noopener">osdi-experiments ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 相关工作：和其他推理系统、拆分式方案的关系</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Sarathi-Serve 和同时期的其他推理系统是什么关系？特别是同一年出现的“把 prefill 和 decode 拆到不同机器上”的方案，同样是为了消除两个阶段的干扰，作者怎么看待两条路线的优劣？</div>
+<p><b>模型服务系统。</b>Clipper、TensorFlow-Serving、Clockwork、BatchMaker 研究的是一般模型服务里的放置、缓存和批处理策略，没有针对自回归 Transformer 推理的特殊问题。Orca、vLLM、FlexGen、FasterTransformer、LightSeq、TurboTransformers 则做了面向 Transformer 推理的专门优化。其中 FlexGen 面向资源受限的离线场景，追求吞吐量，不适合在线服务；FastServe 提出了抢占式调度，目标是缩短作业完成时间。论文选 Orca 和 vLLM 做详细对比，因为它们代表当时的最高水平。</p>
+<p><b>拆分式方案。</b>Splitwise、DistServe、TetriInfer 把 prefill 和 decode 放到不同的副本上执行，可以<b>完全</b>消除两者之间的干扰。作者指出它们的两个代价：第一，每个请求做完 prefill 后都要把 KV 缓存迁移到 decode 副本，副本之间没有高带宽互连时这很困难；第二，prefill 副本的显存利用不足，因为只有 decode 副本负责存放 KV 缓存。作者也承认拆分方案的长处：prefill 能以最高效率执行，因此 TTFT 更好，而分块预填充比整段 prefill 慢一些。两者的定量比较被留作未来工作。DistServe 一方对分块预填充的批评（块大小两难、重复读 KV）见 <a href="distserve.html#n-2-3">DistServe 精读 §2.3</a>，两篇论文同在 OSDI 2024 发表，可以对照着读。</p>
+<p><b>互补的调度工作。</b>Sheng 等人改进迭代级批处理，以保证多租户环境下各客户之间的公平性；FastServe 用抢占机制缓解队头阻塞。作者认为这些算法层面的优化和 Sarathi-Serve 互补，而且能从 prefill 与 decode 干扰的降低中受益。另一个系统 APIServe 已经采用了 SARATHI 的分块预填充，用 decode 批里浪费的算力，为多轮 API 调用提前重算 prefill。</p>
+<p><b>提高 GPU 利用率和模型层面的优化。</b>FasterTransformer 为特定模型写了专用 GPU 内核；CoCoNet 等工作让计算和通信重叠，在张量并行度高、通信可能占主导时特别有用；FlashAttention 等工作通过精心分块和划分工作，缓解长上下文下自注意力的显存瓶颈。模型层面，多查询注意力让所有头共用同一组 key 和 value，缩小 KV 缓存；量化压缩模型；混合专家模型减少每次迭代激活的参数；RetNet 等试图替代 Transformer。作者认为这些都和 Sarathi-Serve 正交：Sarathi-Serve 关注的是从 GPU 的角度解决流行 Transformer 模型的性能问题。</p>
+<div class="note-warn"><b>值得补充的一点：</b>论文的相关工作没有提到 DeepSpeed-FastGen（<a href="https://arxiv.org/abs/2401.08671" target="_blank" rel="noopener">arXiv 2401.08671 ↗</a>，2024 年 1 月）。它的 Dynamic SplitFuse 同样把长 prompt 切成小块、分到多次前向里，并把各请求的 token 凑成固定的批大小，和分块预填充非常接近。从时间上看，SARATHI（2023 年 8 月）更早提出了分块与捎带 decode，而“按尾延迟目标选预算、无停顿调度”的系统化论证是 Sarathi-Serve 的贡献。vLLM 官方文档在介绍分块预填充时，同时引用了 SARATHI 和 DeepSpeed-FastGen 两篇。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 结论</h3>
+<p>同时追求高吞吐和低延迟是理想的，但很难做到。论文把现有的 LLM 推理调度器归为 prefill 优先和 decode 优先两类：前者更擅长优化吞吐量，后者更擅长优化 TBT 延迟，但当两者都重要时，没有一类是理想的。为了解决这个权衡，作者提出了 Sarathi-Serve，它由分块预填充和无停顿批处理组成：把输入 prompt 切成较小的工作单元，构造不停顿的调度，让新请求加入正在运行的批时不必暂停正在进行的 decode。评测显示，Sarathi-Serve 让 Mistral-7B 在单张 A100 上的服务容量最多提升 2.6 倍，让 Falcon-180B 在 8 张 A100 上最多提升 5.6 倍（后者是相对 Orca，见第 5.6 节）。</p>
+<p>用一句话概括这篇论文的思路：decode 批里有大量闲置的算力，prefill 有大量需要算力的工作；把 prefill 切成小块、按固定的 token 预算塞进每一个 decode 批，就能把闲置的算力用起来，同时让每一步的耗时有上限，从而在不牺牲出字流畅度的前提下提高吞吐量，在流水线并行下还顺带消除了大部分气泡。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2403.02310v3#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">8 后来怎么样了</h3>
+
+<h4 id="n-8-1">8.1 “先放 decode、再按预算放 prefill 块”成了主流引擎的默认做法</h4>
+<p>这篇论文最直接的影响，是分块预填充加 decode 优先的合批方式被主流推理引擎吸收。以下是本站在 2026-10-20 核对的情况：</p>
+<ul>
+  <li><b>vLLM。</b>v0.4.2（2024 年）的文档里，分块预填充已经作为实验性功能出现：打开后调度器改为 decode 优先，把大的 prefill 切块、和 decode 请求拼在同一批里。2025 年 1 月发布的 V1 引擎干脆取消了 prefill 和 decode 的区分，调度结果只是“每个请求这一步处理多少个 token”，在固定的 token 预算下动态分配，分块预填充因此自然实现；V1 从 v0.8.0 起成为默认引擎。当前文档写明，V1 中分块预填充在可能的情况下默认开启，调度器先把所有待处理的 decode 放进批里，再安排 prefill，放不下的 prefill 自动切块。这几乎就是论文的无停顿批处理。文档对预算参数 <code>max_num_batched_tokens</code> 的调优建议也和论文一致：取小一些（如 2048）出字间隔更好，取大一些首字延迟更好，追求吞吐时建议大于 8192。文档在这里引用的是 SARATHI 和 DeepSpeed-FastGen。</li>
+  <li><b>SGLang。</b>分块预填充默认开启。以 v0.5.2 的代码为例，未指定时块大小按显存自动选择：显存小于 35 GB 的卡用 2048，A100、H100、H200 这一档用 8192，B200、MI300 这类更大显存的卡用 16384。但把 prefill 块和 decode 放进同一批需要另外打开 <code>--enable-mixed-chunk</code>，默认是关闭的。所以 SGLang 的默认行为更接近第 5.5 节表 4 里“只用分块”的那一行：靠分块限制每次 prefill 的长度，但不做 Sarathi-Serve 式的合批。</li>
+  <li><b>TensorRT-LLM。</b>支持“分块上下文”（chunked context，需要配合分页 KV 缓存，除最后一块外块大小须是 KV 块大小的整数倍），它的 in-flight batching 本来就允许 context 阶段和 generation 阶段的序列在同一批里处理。在它的 LLM API 中，<code>enable_chunked_prefill</code> 的默认值是 False（主分支代码），需要显式打开。</li>
+</ul>
+
+<h4 id="n-8-2">8.2 与 PD 分离：两条路线并存</h4>
+<p>同一届 OSDI 上的 DistServe 走了另一条路：干脆把 prefill 和 decode 放到不同的 GPU 上，用 KV 传输换取彻底的隔离，并以“goodput”（同时满足 TTFT 和 TPOT 目标时的每卡请求速率）为目标（见 <a href="distserve.html">DistServe 精读</a>）。两条路线对应不同的取舍：Sarathi-Serve 在一组 GPU 内把干扰控制在预算以内，不需要跨机器传 KV，部署简单，但 prefill 要付一点分块开销，TTFT 略差；PD 分离让两个阶段各自用最合适的并行方式和卡数，TTFT 和 TBT 都能单独优化，代价是 KV 迁移和更复杂的资源配比。</p>
+<p>后来的大规模部署里两者常常结合使用，而不是二选一。例如 DeepSeek-V3 的推理部署把 prefill 和 decode 放在不同的节点上（见 <a href="deepseek-v3.html#n-6">DeepSeek-V3 精读 §3.4</a>）；Kimi 的 Mooncake 采用 PD 分离，并在独立的 prefill 节点池里用“分块流水线并行”（chunked pipeline parallelism）把一个超长上下文请求分到多个节点上处理（见 <a href="mooncake.html">Mooncake 精读</a> 与 <a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离拆解页</a>）。分块这个工具本身，在拆分式系统里依然有用武之地。</p>
+
+<h4 id="n-8-3">8.3 同组的后续工作</h4>
+<ul>
+  <li><b>POD-Attention</b>（<a href="https://arxiv.org/abs/2410.18038" target="_blank" rel="noopener">arXiv 2410.18038 ↗</a>，ASPLOS 2025，Kamath、Prabhu、Mohan、Peter、Ramjee、Panwar）。Sarathi-Serve 的混合批让线性层受益，但注意力仍然用分别为 prefill 和 decode 优化的两个内核来算，效率不高。POD-Attention 是第一个专门为混合批计算注意力的 GPU 内核：它让 prefill 和 decode 的注意力在同一个流式多处理器上并发执行，同时用满算力和显存带宽。摘要报告注意力计算最多快 59%，平均快 28%。</li>
+  <li><b>Vidur</b>（<a href="https://arxiv.org/abs/2405.05465" target="_blank" rel="noopener">arXiv 2405.05465 ↗</a>）。第 4.3 节选预算时用到的推理模拟器：结合硬件剖析和预测模型估计延迟与吞吐，并能在不跑昂贵 GPU 实验的情况下搜索性价比最高的部署配置。</li>
+  <li><b>Etalon</b>（<a href="https://arxiv.org/abs/2407.07000" target="_blank" rel="noopener">arXiv 2407.07000 ↗</a>）。作者团队后来认为 TTFT、TBT、TPOT 这些常用指标不能完整反映用户体验，提出了“流畅度指数”（fluidity-index）。这也提醒读者：本文以 P99 TBT 为核心的评价方式本身也有局限。</li>
+  <li><b>Medha</b>（<a href="https://arxiv.org/abs/2409.17264" target="_blank" rel="noopener">arXiv 2409.17264 ↗</a>）。面向长上下文、请求长度差异极大的场景，引入细粒度的抢占式调度，用自适应分块和流式流水线并行让抢占变得可行，并提出 KV 缓存并行以降低超长上下文的 decode 延迟。它可以看作把“分块”从降低干扰的手段，进一步发展成支持抢占和长短请求混跑的基础。</li>
+</ul>
+<p>想看 Orca 与 Sarathi-Serve 的可交互时间轴、selective batching 示意和配套简答题，见<a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面；标“主页现职”的是本站 2026-10-20 查到的现任职位，不一定是论文发表时的职位。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Amey Agrawal</b>（第一作者）<div class="aff">Georgia Institute of Technology；论文脚注说明部分工作在微软印度研究院实习期间完成</div>佐治亚理工学院计算机学院博士生，属于 Alexey Tumanov 的 Systems for AI Lab（SAIL，见实验室页面）。前作 SARATHI 的第一作者，也是同组 Vidur、Etalon、Medha 的第一作者。</div>
+  <div class="author-card"><b>Nitin Kedia</b><div class="aff">Microsoft Research India</div>同组 Vidur、Etalon 的共同作者。</div>
+  <div class="author-card"><b>Ashish Panwar</b><div class="aff">Microsoft Research India；主页现职：Principal Researcher</div>博士毕业于印度科学理工学院（IISc），博士论文研究 NUMA 系统上的大页与内存管理；目前的工作是提升大语言模型等 ML 负载的性能；也是 POD-Attention 的作者之一。</div>
+  <div class="author-card"><b>Jayashree Mohan</b><div class="aff">Microsoft Research India；主页现职：Principal Researcher</div>博士毕业于德州大学奥斯汀分校，研究方向为系统与网络。</div>
+  <div class="author-card"><b>Nipun Kwatra</b><div class="aff">Microsoft Research India；主页现职：Principal Researcher</div>2011 年在斯坦福大学获计算机科学博士学位。</div>
+  <div class="author-card"><b>Bhargav S. Gulavani</b><div class="aff">Microsoft Research India</div>同组 SARATHI、Vidur 的共同作者。</div>
+  <div class="author-card senior"><b>Alexey Tumanov</b><div class="aff">Georgia Institute of Technology；主页现职：计算机学院副教授</div>领导 Systems for Artificial Intelligence Lab（SAIL）；2016 年在卡内基梅隆大学获博士学位，之后在 UC Berkeley RISELab 做博士后。</div>
+  <div class="author-card senior"><b>Ramachandran Ramjee</b><div class="aff">Microsoft Research India；主页现职：Partner Research Manager</div>在班加罗尔领导一个致力于提高 AI 基础设施效率的团队。马萨诸塞大学阿默斯特分校博士，IIT Madras 本科；加入微软前在美国贝尔实验室工作十年；ACM 杰出科学家，IEEE 与 INAE 会士。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/microsoft/sarathi-serve" target="_blank" rel="noopener">microsoft/sarathi-serve</a> 有 534 个 star、68 个 fork（截至 2026-10-20），Apache-2.0 许可，仓库创建于 2023-11-02。仓库说明它最初是 vLLM 的分支、是研究原型；<code>osdi-sarathi-serve</code> 分支提供了论文各图表的复现脚本和说明。</li>
+  <li><b>采用</b>：分块预填充加 decode 优先的合批方式是 vLLM V1 引擎的默认行为；SGLang 默认开启分块预填充（合批需另外打开）；TensorRT-LLM 支持分块上下文（第 8.1 节）。</li>
+  <li><b>发表</b>：OSDI 2024（第 18 届 USENIX 操作系统设计与实现研讨会，系统领域顶级会议）。arXiv 首版 2024-03-04，最新版 v3 为 2024-06-17。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca / Sarathi-Serve 结构拆解</a>：请求级批处理、迭代级调度与分块预填充的时间轴对比，selective batching 示意，伪代码与简答题。</li>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：KV 缓存、迭代级调度、服务指标；本文对照的就是它的调度策略。<a href="../legacy/tracks/ai-infra/03-vllm.html">vLLM 结构拆解</a>。</li>
+  <li><a href="distserve.html">DistServe 精读</a>：PD 分离路线，以及对分块预填充的批评；<a href="mooncake.html">Mooncake 精读</a>：生产环境中的 PD 分离与以 KV 缓存为中心的调度。<a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离结构拆解</a>。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理计算特征</a>：prefill 与 decode 的算术强度、KV 缓存大小的估算。</li>
+  <li><a href="flashattention.html">FlashAttention 精读</a>：算术强度、分块注意力内核；<a href="megatron-lm.html">Megatron-LM 精读</a>：张量并行与流水线气泡。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。论文以 arXiv 非独占许可发布，本页没有转载原图，图表均为本站示意图或根据原图数据重画的简图，并附原图链接。数字与结论以原文为准：<a href="https://arxiv.org/abs/2403.02310" target="_blank" rel="noopener">arXiv:2403.02310</a>（v3）；代码细节以 <a href="https://github.com/microsoft/sarathi-serve" target="_blank" rel="noopener">microsoft/sarathi-serve</a> 为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

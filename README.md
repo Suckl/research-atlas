@@ -28,6 +28,12 @@
   - [DistServe](papers/distserve.html)
   - [HybridFlow / verl](papers/hybridflow.html)
   - [DeepSeek-V3](papers/deepseek-v3.html)
+  - 2024 年以后的高引用工作。每页都有“结果的份量”一节，写明每个对比用的是什么基线系统、硬件、指标和精度代价。
+    - 调度与架构：[Sarathi-Serve](papers/sarathi-serve.html)、[Mooncake](papers/mooncake.html)
+    - 算子与注意力：[FlashAttention-3](papers/flashattention-3.html)、[NSA 原生稀疏注意力](papers/native-sparse-attention.html)
+    - KV cache 与量化：[SnapKV](papers/snapkv.html)、[KIVI](papers/kivi.html)、[QuaRot](papers/quarot.html)
+    - 投机解码：[Medusa](papers/medusa.html)、[EAGLE 1 / 2 / 3](papers/eagle.html)
+    - 训练系统：[MegaScale](papers/megascale.html)
 - 统一多模态：[视觉生成能扩展 UMM 的知识吗](papers/visual-generation-knowledge.html)
 - 扩散 LLM。每页的“结果的份量”写明和自回归模型比时对齐了什么（参数、训练 token、步数、批大小、对照系统）。
   - 噪声与目标：
@@ -87,7 +93,7 @@
 改版前的五条研究路线仍然保留：
 
 - JEPA（12 页）
-- AI Infra（24 个节点）
+- AI Infra（24 页）
 - 少步生成（17 页）
 - 视频记忆（18 页）
 - 扩散 LLM（19 页）

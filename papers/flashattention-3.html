@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashAttention-3 精读</title>
+<meta name="description" content="FlashAttention-3（NeurIPS 2024）的逐节精读：Hopper 的 TMA、WGMMA、warp 专业化与寄存器重分配，乒乓调度与 warpgroup 内两级流水，FP8 的布局转置、块量化与非相干处理，前向、反向与数值误差实验，以及结果的份量和后续发展。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="flash-attention-3">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · NeurIPS 2024</div>
+  <h1>FlashAttention-3：靠异步执行与低精度，让注意力在 Hopper 上又快又准</h1>
+  <p class="en-title">FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision</p>
+  <div class="paper-authors">Jay Shah<sup>1,*</sup>, Ganesh Bikshandi<sup>1,*</sup>, Ying Zhang<sup>2</sup>, Vijay Thakkar<sup>3,4</sup>, Pradeep Ramani<sup>3</sup>, Tri Dao<sup>5,6</sup></div>
+  <div class="paper-affil"><sup>1</sup>Colfax Research　<sup>2</sup>Meta　<sup>3</sup>NVIDIA　<sup>4</sup>Georgia Tech　<sup>5</sup>Princeton University　<sup>6</sup>Together AI　<sup>*</sup>共同一作</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2407.08608" target="_blank" rel="noopener">arXiv 2407.08608 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/7ede97c3e082c6df10a8d6103a2eebd2-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2024 ↗</a>
+    <a class="pill" href="https://github.com/Dao-AILab/flash-attention/tree/main/hopper" target="_blank" rel="noopener">Code: Dao-AILab/flash-attention（hopper/）↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/01-flash-attention.html">结构拆解：FA1–FA3 架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>25.2k</b><span>GitHub star（Dao-AILab/flash-attention，FA1–FA4 共用一个仓库，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文（arXiv v2）的章节顺序，用本站自己的话把整篇论文从头讲一遍；附录里的反向传播算法、SASS 分析、三级流水和完整的 FP8 测速结果，放进了正文对应的小节。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。这篇论文在 arXiv 上以 CC BY 4.0 发布，所以页面里直接使用了论文的原图，并在每张图下说明怎么看；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>FlashAttention 系列解决的是同一个问题：注意力要让每个 token 和所有 token 打分，标准实现会把 \(N\times N\) 的分数矩阵写进显存再读出来，时间大多花在搬运上。<a href="flashattention.html">第一代 FlashAttention</a>（2022）把 \(Q,K,V\) 切成小块，在芯片上的小存储里用“在线 softmax”一块一块地算完，从不把 \(N\times N\) 的矩阵写回显存；FlashAttention-2（2023）重新安排了并行方式和线程分工，在 A100 上用到了理论峰值的 50–73%。这两代都没有改变注意力的计算结果，只改变了“怎么组织计算”。</p>
+<p>问题出在下一代硬件上。2022 年发布的 H100（Hopper 架构）矩阵乘算力比 A100 高出很多，可 FlashAttention-2 在 H100 上只能用到约 35% 的算力，而同一张卡上优化得好的矩阵乘内核能用到 80–90%。原因不在于数据搬得多，而在于 Hopper 加了一批新能力，FlashAttention-2 一个都没用上：搬运数据的专用单元 TMA 和做矩阵乘的 Tensor Core 指令 WGMMA 都是<b>异步</b>的，发出指令的线程不必等它完成；Tensor Core 还支持 <b>FP8</b> 低精度，吞吐是 FP16 的两倍。FlashAttention-2 是按照 A100 那种“发一条指令、等它做完、再发下一条”的同步模型写的。</p>
+<p>FlashAttention-3 的工作，就是在不改变数学的前提下，把注意力重新编排成适合 Hopper 的样子。它有三个想法：第一，让一部分线程专门负责搬数据、另一部分专门负责计算（warp 专业化的生产者–消费者流水），搬运和计算同时进行；第二，softmax 里的指数运算比矩阵乘慢得多，于是让两组线程轮流使用 Tensor Core（乒乓调度），并在一组线程内部把相邻两次迭代错开（两级流水），让 softmax 尽量藏在矩阵乘的背后；第三，为 FP8 解决 Tensor Core 对数据排布的限制，并用块量化和“非相干处理”（乘一个随机正交矩阵把离群值摊开）降低 FP8 的误差。</p>
+<p>arXiv 版报告的结果是：在 H100 SXM5 上，FP16 前向比 FlashAttention-2 快 1.5–2.0 倍，最高 740 TFLOPs/s（理论峰值的 75%），反向快 1.5–1.75 倍；FP8 前向接近 1.2 PFLOPs/s；在带离群值的测试数据上，FP8 版本的误差比“逐张量量化”的基线 FP8 注意力低 2.6 倍。NeurIPS 正式版换了更新的软件环境，数字更高：BF16 最高 840 TFLOPs/s（85%），FP8 达到 1.3 PFLOPs/s（见第 6 节）。</p>
+<p>和第一代相比，这篇论文关心的问题换了层次。第一代问的是“需要搬多少数据”，答案是一个 IO 复杂度；这篇问的是“在一张具体的 GPU 上，哪个单元在什么时刻做什么”，答案是一套指令编排。在线 softmax 的数学几乎没变，所以本页只用几段话回顾它，把大部分背景知识留给 Hopper 硬件本身。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>同样是 IO 最优的算法，FlashAttention-2 为什么在 H100 上只能用到约 35% 的算力？</li>
+  <li>TMA、WGMMA、warpgroup、warp 专业化、<code>setmaxnreg</code> 各是什么，它们怎样让“搬数据”和“算”同时进行？</li>
+  <li>为什么 softmax 里的指数运算会成为瓶颈？乒乓调度和两级流水分别怎么把它藏起来？</li>
+  <li>FP8 的 Tensor Core 对数据排布有什么限制，FlashAttention-3 怎样在内核里绕开它？</li>
+  <li>块量化和非相干处理为什么能降低 FP8 的误差？那个“2.6 倍”是在什么数据上测的？</li>
+  <li>740 TFLOPs/s、1.2 PFLOPs/s 这些数字是在什么头维、序列长度、有无因果掩码下测的，和谁比、该怎么读？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么 IO 最优的 FlashAttention-2 在 H100 上跑不满</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FlashAttention-2 已经把显存读写压到了很低，为什么换到 H100 上只能用到约 35% 的算力，而矩阵乘内核能用到 80–90%？论文认为一部分原因是没有使用 Hopper 专用的指令，更根本的原因是算法本身按“同步”的方式设计，没有利用硬件的异步能力和低精度能力。那么利用这两种能力难在哪里？这一节交代全文的动机和三个贡献。</div>
+
+<div class="note-pre"><b>先回顾：FlashAttention 与 FlashAttention-2 做了什么。</b>
+<p>对一个注意力头，输入是 \(Q,K,V\in\mathbb{R}^{N\times d}\)（\(N\) 是序列长度，\(d\) 是头维）。FlashAttention 把 \(Q\) 按行切成若干块 \(Q_{i}\)（每块 \(B_{r}\) 行），把 \(K,V\) 切成若干块 \(K_{j},V_{j}\)（每块 \(B_{c}\) 行）。处理 \(Q_{i}\) 时，依次读入每一块 \(K_{j},V_{j}\)，在芯片上算出这一小块分数 \(S=Q_{i}K_{j}^{\top}\)，然后用“在线 softmax”把它并入已有的结果。在线 softmax 只需要为每一行记住两个数：到目前为止见过的最大分数 \(m\) 和指数和 \(\ell\)。每来一块新分数，就按下面的规则更新：</p>
+<div class="formula">$$m^{\mathrm{new}}=\max\big(m,\ \mathrm{rowmax}(S)\big),\qquad \tilde{P}=\exp\big(S-m^{\mathrm{new}}\big),\qquad \ell\leftarrow e^{m-m^{\mathrm{new}}}\ell+\mathrm{rowsum}(\tilde{P}),\qquad O\leftarrow e^{m-m^{\mathrm{new}}}\,O+\tilde{P}V_{j}$$</div>
+<p>乘 \(e^{m-m^{\mathrm{new}}}\) 的意思是：旧的累加结果是以旧的最大值为基准算的，现在最大值变大了，就把旧结果整体缩小，换到新的基准上，这样新旧两部分才能直接相加。所有块处理完后，\(O/\ell\) 就是精确的注意力输出；同时存下 \(L=m+\log\ell\)，反向传播时用它重新算出 softmax 概率，而不必保存 \(N\times N\) 的概率矩阵。具体推导和一个手算例子见 <a href="flashattention.html#n-3">FlashAttention 精读页第 3 节</a>。</p>
+<p>FlashAttention-2 保留了这套数学，改的是工作怎么分：除了按批和注意力头并行，还沿序列长度把不同的 \(Q_{i}\) 分给不同的线程块，内循环改成遍历 \(K,V\) 的块，并减少了矩阵乘以外的运算。这些改动让它在 A100 上快了约一倍（见 <a href="flashattention.html#n-9">FlashAttention 精读页“后来怎么样了”</a>）。FlashAttention-3 直接在 FlashAttention-2 的循环结构上改造。</p>
+</div>
+
+<p>论文首先给出一个对比：在 H100 上，优化好的矩阵乘（GEMM）内核能用到理论峰值的 80–90%，FlashAttention-2 只有 35%。作者认为原因有两层。表层原因是实现层面的：FlashAttention-2 在 Tensor Core 上用的还是 Ampere（A100）那一代的指令，没有换成 Hopper 专用的指令。作者引用了 ThunderKittens 和 cuDNN 9 两项工作作为旁证：它们改用 Hopper 专用的指令和以“块”为单位的编程抽象之后，注意力确实变快了，代码也更简单。</p>
+<p>更根本的原因在算法层面。FlashAttention-2 遵循的是一个简化的<b>同步</b>模型，设计里没有显式地考虑两样东西：</p>
+<ul>
+  <li><b>异步。</b>为了加速机器学习里最重要的那几种操作，硬件越来越“专业化”：做矩阵乘有专门的 Tensor Core，搬运数据有专门的张量内存加速器 TMA（Tensor Memory Accelerator），它们独立于负责逻辑、整数和普通浮点运算的 CUDA 核。专门单元在后台干活时，发出指令的线程可以去干别的，这就是异步。想吃到这份好处，就得让不同单元的工作在时间上重叠起来。</li>
+  <li><b>低精度。</b>论文列了一条趋势线：FP16（Pascal 架构）、BF16（Ampere 架构）、FP8（Hopper 架构）、FP4（Blackwell 架构）。每降低一次精度，在同样的功耗和芯片面积下，吞吐大约翻一倍甚至翻两倍。</li>
+</ul>
+<p>把这两样用起来并不简单。异步要求矩阵乘和 softmax 在时间上重叠，可它们之间有依赖：softmax 要用第一个矩阵乘 \(QK^{\top}\) 的结果，第二个矩阵乘 \(PV\) 又要用 softmax 的结果。低精度则要求认真控制量化误差，尤其是大语言模型里常见的<b>离群值</b>（少数几个数值比其他数大几十上百倍）会让低精度格式很难同时照顾到大数和小数。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同步写法与 FlashAttention-3 的异步写法，Tensor Core 忙闲对比（示意，不按比例）</div>
+  <div class="dia-row"><span class="lbl">同步写法：Tensor Core</span><div class="dia-track"><span class="dia-seg kv" style="flex:2">GEMM0</span><span class="dia-seg oth" style="flex:2">闲：等 softmax</span><span class="dia-seg kv" style="flex:2">GEMM1</span><span class="dia-seg res" style="flex:1">等数据</span><span class="dia-seg kv" style="flex:2">GEMM0</span><span class="dia-seg oth" style="flex:2">闲：等 softmax</span><span class="dia-seg kv" style="flex:2">GEMM1</span></div></div>
+  <div class="dia-row"><span class="lbl">同步写法：指数单元</span><div class="dia-track"><span class="dia-seg oth" style="flex:2">闲</span><span class="dia-seg cmp" style="flex:2">softmax</span><span class="dia-seg oth" style="flex:5">闲</span><span class="dia-seg cmp" style="flex:2">softmax</span><span class="dia-seg oth" style="flex:2">闲</span></div></div>
+  <div class="dia-row"><span class="lbl">FA3：TMA（生产者）</span><div class="dia-track"><span class="dia-seg w" style="flex:2">搬 K、V</span><span class="dia-seg oth" style="flex:2">空</span><span class="dia-seg w" style="flex:2">搬 K、V</span><span class="dia-seg oth" style="flex:2">空</span><span class="dia-seg w" style="flex:2">搬 K、V</span><span class="dia-seg oth" style="flex:3">空</span></div></div>
+  <div class="dia-row"><span class="lbl">FA3：Tensor Core</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">第 1 组的 GEMM</span><span class="dia-seg kv" style="flex:4">第 2 组的 GEMM</span><span class="dia-seg kv" style="flex:4">第 1 组的 GEMM</span><span class="dia-seg kv" style="flex:1">…</span></div></div>
+  <div class="dia-row"><span class="lbl">FA3：指数单元</span><div class="dia-track"><span class="dia-seg cmp" style="flex:4">第 2 组的 softmax</span><span class="dia-seg cmp" style="flex:4">第 1 组的 softmax</span><span class="dia-seg cmp" style="flex:4">第 2 组的 softmax</span><span class="dia-seg cmp" style="flex:1">…</span></div></div>
+  <div class="dia-note"><b>怎么看：</b>横向是时间。蓝色是 Tensor Core 在做矩阵乘（GEMM0 是 \(QK^{\top}\)，GEMM1 是 \(PV\)），绿色是 softmax（主要是指数运算），紫色是搬数据，灰色是闲着。同步写法里，同一组线程按“等数据 → 矩阵乘 → softmax → 矩阵乘”的顺序依次做，Tensor Core 在 softmax 和等数据的时候都闲着。FlashAttention-3 把搬数据交给专门的生产者线程，让两组计算线程轮流使用 Tensor Core 和指数单元，Tensor Core 几乎不停。本站示意图；实际的 FlashAttention-2 也会提前发起下一块的异步拷贝，GPU 的调度器也会在不同 warp 之间交错执行，所以真实的空闲没有图上这么整齐。</div>
+</div>
+
+<p>针对这些困难，论文提出三个贡献，后面第 3 节逐一展开：</p>
+<ol>
+  <li><b>生产者–消费者异步。</b>把一个线程块里的 warp 分成“生产者”和“消费者”两种角色：生产者只负责搬数据，消费者只负责计算。这样数据搬运和 Tensor Core 计算可以重叠，内存延迟和指令发射延迟都更容易被藏起来。</li>
+  <li><b>把 softmax 藏在异步的分块矩阵乘下面。</b>softmax 里的乘加和指数运算吞吐远低于矩阵乘。论文改造了 FlashAttention-2 的循环，打破 softmax 和矩阵乘之间的一部分先后依赖，让 softmax 在 Tensor Core 计算下一块的同时进行。</li>
+  <li><b>用上 FP8 Tensor Core。</b>前向传播改用 FP8 做矩阵乘，论文说实测的 TFLOPs/s 接近翻倍（第 4.4 节会看到，按图上的读数是 1.2–1.6 倍）。这要解决 FP32 累加结果和 FP8 操作数在寄存器里排布不一致的问题，并用块量化和非相干处理减小精度损失。</li>
+</ol>
+<p>实验在 H100 SXM5 上做，结论有四条：FP16 前向比 FlashAttention-2 快 1.5–2.0 倍（最高 740 TFLOPs/s），反向快 1.5–1.75 倍；FP8 接近 1.2 PFLOPs/s；序列较长时，FP16 版本超过 NVIDIA cuDNN 库里的注意力实现，FP8 版本与之互有胜负（论文脚注：头维 64 时 FP8 领先；头维 128 和 256 时，无因果掩码打平、有因果掩码落后）；FP16 版本的数值误差和 FlashAttention-2 相同，比标准实现小，FP8 版本在有离群值的数据上比逐张量量化的标准 FP8 注意力准 2.6 倍。代码以宽松的开源许可发布在 FlashAttention 官方仓库的 <code>hopper/</code> 目录。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“35%”“75%”指的是占 H100 SXM5 稠密 FP16 理论峰值 989 TFLOPs/s 的比例，分子是按公式算出来的注意力 FLOPs 除以实测时间（第 4 节详细讲），不是用硬件计数器测出的实际运算量。</li>
+  <li>FlashAttention-3 没有进一步减少显存读写量。它的分块方式和 FlashAttention-2 基本相同，提速来自“让不同硬件单元同时干活”和“用更快的 FP8 Tensor Core”，所以它的收益和具体硬件绑得很紧（论文正文只在 H100 上做了实验）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：注意力的计算量，以及 Hopper 的线程、存储与异步能力</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FlashAttention-3 的所有设计都建立在 Hopper 的几个硬件特性上，所以先要把这些特性讲清楚：注意力的前向和反向各有几次矩阵乘？H100 上有哪几层存储、哪几层线程，各有多大、多快？TMA 和 WGMMA 是什么，“异步”到底异步在哪里？warp 专业化和寄存器重分配解决什么问题？FP8 Tensor Core 又对数据的排布有什么限制？这一节对应论文 §2，是读懂第 3 节的前提。</div>
+
+<h4 id="n-2-1">2.1 注意力的前向与反向：一共几次矩阵乘</h4>
+<p>对一个注意力头，前向计算是三步：</p>
+<div class="formula">$$S=\alpha QK^{\top}\in\mathbb{R}^{N\times N},\qquad P=\mathrm{softmax}(S)\in\mathbb{R}^{N\times N},\qquad O=PV\in\mathbb{R}^{N\times d}$$</div>
+<p>其中 softmax 按行做，缩放系数通常取 \(\alpha=1/\sqrt{d}\)。实际计算时会先从每行减去这一行的最大值，防止指数溢出。多头注意力里每个头各算各的，不同头、不同样本之间完全并行。</p>
+<p>反向传播时，已知损失对输出的梯度 \(dO\)，按链式法则依次算出：</p>
+<div class="formula">$$dV=P^{\top}dO,\qquad dP=dO\,V^{\top},\qquad dS=\mathrm{dsoftmax}(dP),\qquad dQ=\alpha\,dS\,K,\qquad dK=\alpha\,dS^{\top}Q$$</div>
+<p>这里 \(\mathrm{dsoftmax}\) 是 softmax 的反向：对一行概率 \(p\)，有 \(ds=(\mathrm{diag}(p)-pp^{\top})\,dp\)。把它逐元素写开就是 \(dS_{ij}=P_{ij}\,(dP_{ij}-D_{i})\)，其中 \(D_{i}=\sum_{j}P_{ij}\,dP_{ij}\)。这个 \(D_{i}\) 有一个省事的算法：因为 \(dP_{ij}\) 是 \(dO_{i}\) 和 \(V_{j}\) 的内积，所以 \(D_{i}=dO_{i}\cdot\sum_{j}P_{ij}V_{j}=dO_{i}\cdot O_{i}\)，只需把 \(dO\) 和 \(O\) 逐元素相乘再按行求和，完全不用碰 \(N\times N\) 的矩阵。后面讲反向算法时会用到它。</p>
+<p>数一下矩阵乘的个数。前向有两个：\(QK^{\top}\) 和 \(PV\)。反向按 FlashAttention 的做法不保存 \(P\)，要先用 \(QK^{\top}\) 把分数重新算一遍，再算 \(dP\)、\(dV\)、\(dK\)、\(dQ\)，一共五个。每个矩阵乘的规模都差不多（\(N\times N\times d\) 量级），所以反向的计算量约是前向的 \(5/2=2.5\) 倍。第 4 节计算反向 TFLOPs/s 时用的就是这个倍数。</p>
+
+<h4 id="n-2-2">2.2 Hopper 的存储层次与线程层次</h4>
+<div class="note-pre"><b>先补一点背景：GPU 怎么组织线程和存储。</b>
+<p>一张 GPU 由很多个<b>流式多处理器</b>（SM）组成，H100 SXM5 有 132 个。可以把 SM 想成一个车间：车间里有计算单元，有一间小而快的公共仓库（共享内存，SMEM），每个工人还有自己的工具箱（寄存器）。所有车间共用一个很大但很远的中心仓库，也就是显存（HBM，论文里叫全局内存 GMEM），中间还隔着一层全芯片共享的 L2 缓存。离计算单元越近的存储越小、越快。</p>
+<p>程序员写的线程也分层。最小的单位是<b>线程</b>；32 个线程组成一个 <b>warp</b>，它们在同一时刻执行同一条指令；若干个 warp 组成一个<b>线程块</b>（CTA），一个线程块整个被放在同一个 SM 上运行，块里的线程可以通过这个 SM 的共享内存交换数据；一次内核启动的所有线程块合起来叫<b>网格</b>（grid）。Hopper 又在 warp 与线程块之间、线程块与网格之间各加了一层：4 个相邻的 warp（128 个线程）组成一个 <b>warpgroup</b>，它是 Hopper 新矩阵乘指令的执行单位；若干个线程块可以组成一个<b>线程块簇</b>（cluster），同一簇的线程块会被放在同一个 GPC（若干个 SM 组成的硬件分区）上。</p>
+</div>
+<p>论文表 1 把这两种层次对应起来，并给出了 H100 SXM5 上每层存储的容量和带宽：</p>
+<div class="table-wrap"><table>
+  <tr><th>硬件层级</th><th>对应的线程层级</th><th>存储</th><th>容量与带宽</th></tr>
+  <tr><td>整张芯片</td><td>网格</td><td>GMEM（显存 HBM）</td><td>80 GiB，3.35 TB/s</td></tr>
+  <tr><td>GPC</td><td>线程块簇</td><td>L2 缓存</td><td>50 MiB，12 TB/s</td></tr>
+  <tr><td>SM</td><td>线程块（CTA）</td><td>SMEM（共享内存）</td><td>每个 SM 228 KiB，全卡合计约 31 TB/s</td></tr>
+  <tr><td>线程</td><td>线程</td><td>RMEM（寄存器）</td><td>每个 SM 256 KiB</td></tr>
+</table></div>
+<p>共享内存的 31 TB/s 是论文自己算的：引用的测量结果是每个 SM 每个时钟周期能读 128 字节，乘以 132 个 SM 和 1830 MHz 的加速频率，得到约 30.9 TB/s（推算）。寄存器每个 SM 有 256 KiB，也就是 65,536 个 32 位寄存器（推算），由这个 SM 上的所有线程分；论文写的是每个线程最多能用 256 个。</p>
+<p>再看计算单元。每个 SM 里有 4 个 Tensor Core（NVIDIA H100 白皮书），专门做矩阵乘；有普通的 FP32 运算单元，做加减乘和比较；还有<b>多功能单元</b>（MUFU，也叫特殊函数单元），专门算指数、对数、倒数平方根这类函数。它们的速度相差悬殊：论文给出 H100 SXM5 的 FP16 矩阵乘理论峰值是 989 TFLOPs/s，而特殊函数只有 3.9 TFLOPs/s。换算到每个 SM 每个时钟周期，Tensor Core 能做约 4096 次浮点运算（推算：989 T ÷ 132 ÷ 1.83 GHz），MUFU 只能做 16 次（CUDA 编程指南的规格，论文脚注 5 引用）。这个 256 倍的差距是第 3.2 节的出发点。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：H100 SXM5 上的线程层次、存储层次与计算单元（数字来自论文表 1 和 §3.1）</div>
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="左列是线程层次，右列是存储和计算单元，虚线连接各层能直接使用的存储" style="--dg-min:760px">
+    <rect class="box enc" x="20" y="20" width="340" height="46" rx="8"/>
+    <text x="32" y="36" class="t-b">网格（grid）</text><text x="32" y="55" class="t-sm">一次内核启动的全部线程块，铺满整张芯片</text>
+    <rect class="box enc" x="20" y="84" width="340" height="46" rx="8"/>
+    <text x="32" y="100" class="t-b">线程块簇（cluster，Hopper 新增）</text><text x="32" y="119" class="t-sm">同一簇的线程块放在同一个 GPC 上</text>
+    <rect class="box enc" x="20" y="148" width="340" height="46" rx="8"/>
+    <text x="32" y="164" class="t-b">线程块（CTA）</text><text x="32" y="183" class="t-sm">整块放在一个 SM 上，共用这个 SM 的 SMEM</text>
+    <rect class="box enc" x="20" y="212" width="340" height="46" rx="8"/>
+    <text x="32" y="228" class="t-b">warpgroup（Hopper 新增）</text><text x="32" y="247" class="t-sm">4 个相邻 warp = 128 线程，WGMMA 的执行单位</text>
+    <rect class="box enc" x="20" y="276" width="340" height="46" rx="8"/>
+    <text x="32" y="292" class="t-b">warp</text><text x="32" y="311" class="t-sm">32 个线程，同一时刻执行同一条指令</text>
+    <rect class="box enc" x="20" y="340" width="340" height="46" rx="8"/>
+    <text x="32" y="356" class="t-b">线程</text><text x="32" y="375" class="t-sm">寄存器归自己私有</text>
+
+    <rect class="box data" x="600" y="20" width="290" height="46" rx="8"/>
+    <text x="612" y="36" class="t-b">GMEM（显存 HBM）</text><text x="612" y="55" class="t-sm">80 GiB · 3.35 TB/s · 在芯片外</text>
+    <rect class="box data" x="600" y="84" width="290" height="46" rx="8"/>
+    <text x="612" y="100" class="t-b">L2 缓存</text><text x="612" y="119" class="t-sm">50 MiB · 12 TB/s · 全芯片共享</text>
+    <rect class="box data" x="600" y="148" width="290" height="46" rx="8"/>
+    <text x="612" y="164" class="t-b">SMEM（共享内存）</text><text x="612" y="183" class="t-sm">每 SM 228 KiB · 全卡约 31 TB/s</text>
+    <rect class="box pred" x="600" y="212" width="290" height="46" rx="8"/>
+    <text x="612" y="228" class="t-b">Tensor Core（每 SM 4 个）</text><text x="612" y="247" class="t-sm">FP16 共 989 TFLOPs/s；FP8 翻倍</text>
+    <rect class="box act" x="600" y="276" width="290" height="46" rx="8"/>
+    <text x="612" y="292" class="t-b">MUFU 多功能单元</text><text x="612" y="311" class="t-sm">exp2 等：每 SM 每周期 16 次，全卡 3.9 TFLOPs/s</text>
+    <rect class="box data" x="600" y="340" width="290" height="46" rx="8"/>
+    <text x="612" y="356" class="t-b">RMEM（寄存器）</text><text x="612" y="375" class="t-sm">每 SM 256 KiB = 65,536 个 32 位寄存器</text>
+
+    <path class="edge idx no-head" d="M360,43 L600,43"/><text x="480" y="35" class="t-xs t-c">所有线程都能访问</text>
+    <path class="edge idx no-head" d="M360,107 L600,107"/><text x="480" y="99" class="t-xs t-c">硬件自动缓存</text>
+    <path class="edge idx no-head" d="M360,171 L600,171"/><text x="480" y="163" class="t-xs t-c">块内线程共同读写</text>
+    <path class="edge idx no-head" d="M360,235 L600,235"/><text x="480" y="227" class="t-xs t-c">整组 128 线程一起发 WGMMA</text>
+    <path class="edge idx no-head" d="M360,299 L600,299"/><text x="480" y="291" class="t-xs t-c">softmax 的指数在这里算</text>
+    <path class="edge idx no-head" d="M360,363 L600,363"/><text x="480" y="355" class="t-xs t-c">线程私有</text>
+
+    <path d="M890,43 C938,43 938,171 890,171" style="fill:none;stroke:var(--c-tgt);stroke-width:2;marker-end:url(#ah-tgt)"/>
+    <text x="946" y="107" class="t-sm t-c" style="fill:var(--c-tgt)" transform="rotate(90 946 107)">TMA 搬运</text>
+    <path d="M745,194 L745,210" style="fill:none;stroke:var(--c-pred);stroke-width:2;marker-end:url(#ah-pred)"/>
+    <path d="M890,235 C938,235 938,363 890,363" style="fill:none;stroke:var(--c-pred);stroke-width:2;marker-end:url(#ah-pred)"/>
+    <text x="946" y="299" class="t-sm t-c" style="fill:var(--c-pred)" transform="rotate(90 946 299)">累加结果</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左列蓝框是线程层次，从上到下越来越小；右列是存储（灰）和两类计算单元（橙色 Tensor Core、绿色 MUFU）。中间的虚线表示左边这一层的线程能直接使用右边哪一层。右侧三条彩色箭头是 FlashAttention-3 依赖的数据通路：紫色是 TMA 把数据从显存搬进共享内存，橙色短箭头是 WGMMA 直接从共享内存读矩阵，橙色长箭头是 Tensor Core 把累加结果写进寄存器。本站示意图。</div>
+</div>
+
+<h4 id="n-2-3">2.3 异步与 warp 专业化：TMA、WGMMA 和寄存器重分配</h4>
+<div class="note-pre"><b>先补一点背景：“同步”和“异步”在 GPU 上是什么意思。</b>
+<p>打个比方。同步的厨师自己去仓库搬菜，搬回来才能切，切完才能炒；每一步都要等上一步做完。异步的厨师先叫一个搬运工去仓库搬下一批菜，再把手上切好的菜放进烤箱，然后转身去调酱汁，过一会儿回来查看菜到了没有、烤箱好了没有。活还是那些活，但厨师、搬运工和烤箱同时在干。</p>
+<p>在 A100 上，FlashAttention-2 主要用两种指令。搬数据用 <code>cp.async</code>：每个线程各自算好地址，一次把至多 16 字节从显存拷进共享内存；它虽然名字里有“异步”，但地址计算和发起拷贝都要占用计算线程。做矩阵乘用 <code>mma.sync</code>：一个 warp 发出指令后，要等结果出来才能继续执行后面依赖它的指令。Hopper 把这两件事都交给了能在后台独立运行的硬件。</p>
+</div>
+<p><b>TMA（张量内存加速器）</b>是 Hopper 新增的专用搬运单元，负责在显存和共享内存之间异步拷贝数据。程序事先建立一个描述张量形状和步长的“张量映射”，之后只要<b>一个线程</b>发一条指令，TMA 就会把一整块多维数据搬过来，地址计算和越界检查都由硬件完成。搬完之后，硬件在共享内存里的一个屏障（barrier）上记一笔，等数据的线程查看这个屏障就知道数据到了没有。这样搬运既不占计算线程的指令，也不占它们的寄存器。</p>
+<p><b>WGMMA</b>（warpgroup 级矩阵乘累加）是 Hopper 新的 Tensor Core 指令。和 A100 上以一个 warp 为单位不同，它由整个 warpgroup 的 128 个线程一起发出，一条指令算一块 \(64\times n\times k\) 的矩阵乘：16 位类型时 \(k=16\)，FP8 时 \(k=32\)，\(n\) 最大到 256。它有两个关键性质。第一，它是异步的：发出之后，线程可以继续执行别的指令，等真正要读结果时再显式等待（先“提交”一组 WGMMA，之后再“等待”这一组完成）。第二，它的操作数可以<b>直接从共享内存读取</b>，不必先搬进寄存器。乘法 \(C=AB\) 里，\(B\) 必须放在共享内存，\(A\) 可以在共享内存，也可以在寄存器，结果 \(C\) 累加在 128 个线程的寄存器里。论文用 SS-GEMM 表示两个操作数都来自共享内存，用 RS-GEMM 表示第一个操作数来自寄存器。论文附录的 SASS（GPU 实际执行的机器指令）里可以看到 <code>HGMMA.64x192x16</code> 这样的指令：每条算 64 行、192 列、沿求和维 16 个元素；那段代码里第一个矩阵乘 \(QK^{\top}\) 被拆成 8 条，说明求和维（头维）是 128（推算：8×16）。</p>
+<p>有了能在后台运行的 TMA 和 WGMMA，就可以写 <b>warp 专业化</b>（warp specialization）的内核：把线程块里的 warp 分成两种角色，<b>生产者</b>只发搬运指令，<b>消费者</b>只做计算。这个思路早在 2011 年的 CudaDMA 工作里就有（论文引用）。它的好处是每个 warp 的指令流都变得单纯，编译器更容易排出好的指令顺序，一方的等待也不会卡住另一方。</p>
+<p>warp 专业化带来一个新问题：寄存器分配不均。正常情况下，一个内核里每个线程能用的寄存器数在启动时就定死了，所有 warp 一样多。可生产者只需要一个线程发 TMA，几乎不用寄存器；消费者要在寄存器里放分数块、输出累加器和 softmax 的中间量，寄存器越多越好。Hopper 为此提供了 <code>setmaxnreg</code> 指令，允许 warpgroup 在运行时把自己的寄存器配额调低（释放）或调高（申请）。于是生产者一开场就释放寄存器，消费者把释放出来的寄存器拿走。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个 SM 上 65,536 个寄存器怎么分（1 个生产者 warpgroup + 2 个消费者 warpgroup，共 384 个线程）</div>
+  <div class="dia-row"><span class="lbl">平均分</span><div class="dia-track"><span class="dia-seg w" style="flex:21504">生产者 128 线程 × 约 170</span><span class="dia-seg kv" style="flex:21504">消费者 1：128 × 约 170</span><span class="dia-seg kv" style="flex:21504">消费者 2：128 × 约 170</span></div></div>
+  <div class="dia-row"><span class="lbl">用 setmaxnreg 重分配</span><div class="dia-track"><span class="dia-seg w" style="flex:3072">×24</span><span class="dia-seg kv" style="flex:30720">消费者 1：128 × 240</span><span class="dia-seg kv" style="flex:30720">消费者 2：128 × 240</span><span class="dia-seg oth" style="flex:1024"></span></div></div>
+  <div class="dia-out">重分配后：128×24 + 2×128×240 = 64,512 个，没有超过 65,536（推算）；每个消费者线程从约 170 个寄存器涨到 240 个。</div>
+  <div class="dia-note">24 和 240 取自官方代码 <code>hopper/flash_fwd_kernel_sm90.h</code>（main 分支，2026-10-20 查看）在两个消费者 warpgroup、用 TMA 加载 K/V 时的设置；论文正文只说“预先设定的数量”。“约 170”是 65,536 ÷ 384 的推算值，实际分配还要按硬件的粒度取整。</div>
+</div>
+<div class="note-warn"><b>容易误解的地方：</b>WGMMA 的“异步”不等于“多个线程并发”。它的意思是：Tensor Core 替这个 warpgroup 干活时，这个 warpgroup 自己还能继续发别的指令（比如 softmax 的指数运算），但在读取累加结果之前必须等它完成。所以要想真正重叠，程序必须找到“和这次矩阵乘没有依赖关系的活”给线程去干。第 3 节的两种调度，本质上都是在给线程找这样的活。</div>
+
+<h4 id="n-2-4">2.4 低精度：FP8 格式，以及 FP8 WGMMA 对排布的限制</h4>
+<div class="note-pre"><b>先补一点背景：FP8 有多“粗”。</b>
+<p>浮点数由符号位、指数位和尾数位组成。指数位决定能表示多大和多小的数（范围），尾数位决定相邻两个可表示的数之间隔多远（精度）。FP16 有 5 位指数、10 位尾数；BF16 有 8 位指数、7 位尾数。Hopper 支持的两种 FP8 中，<b>E4M3</b> 有 4 位指数、3 位尾数，最大能表示 448；<b>E5M2</b> 有 5 位指数、2 位尾数，最大 57,344。FlashAttention-3 用的是 E4M3。3 位尾数意味着在 1 到 2 之间只有 8 个可表示的数，相邻两个数相差 1/8，四舍五入的相对误差最大约 6%（推算：半个间隔 1/16）。</p>
+<p>FP8 的范围很窄，所以使用时要先乘一个<b>缩放因子</b>，把张量里的数挪到格式能表示的区间里，算完再除回去。最常见的做法是逐张量缩放：整个张量共用一个缩放因子，通常让张量里绝对值最大的数正好对上格式的上限。更细的格式背景见本站的 <a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解页</a>，DeepSeek-V3 在训练中用的分块缩放见 <a href="deepseek-v3.html#n-5-2">DeepSeek-V3 精读页 3.3.2</a>。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：几种格式的位分配（格子宽度按位数画）</div>
+  <div class="dia-row"><span class="lbl">FP16（16 位）</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg w" style="flex:5">指数 5</span><span class="dia-seg kv" style="flex:10">尾数 10</span></div></div>
+  <div class="dia-row"><span class="lbl">BF16（16 位）</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg w" style="flex:8">指数 8</span><span class="dia-seg kv" style="flex:7">尾数 7</span></div></div>
+  <div class="dia-row"><span class="lbl">FP8 E4M3</span><div class="dia-track" style="max-width:50%"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg w" style="flex:4">指数 4</span><span class="dia-seg kv" style="flex:3">尾 3</span></div></div>
+  <div class="dia-row"><span class="lbl">FP8 E5M2</span><div class="dia-track" style="max-width:50%"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg w" style="flex:5">指数 5</span><span class="dia-seg kv" style="flex:2">尾 2</span></div></div>
+  <div class="dia-note"><b>怎么看：</b>紫色越长，范围越大；蓝色越长，精度越高。E4M3 用最少的位数换来了 Tensor Core 两倍的吞吐（论文 §2.2：FP8 WGMMA 每个 SM 的吞吐是 FP16/BF16 的 2 倍），代价是尾数只剩 3 位。本站示意图。</div>
+</div>
+<p>FP8 的麻烦不只在精度。论文 §2.2 指出，正确调用 FP8 WGMMA 要遵守它对操作数<b>排布</b>的限制。设要算 \(C=AB^{\top}\)，\(A\) 是 \(M\times k\)，\(B\) 是 \(N\times k\)，\(k\) 是求和的那一维。如果一个操作数在内存里沿外侧的 \(M\) 或 \(N\) 维连续存放，就叫 <b>mn-major</b>；如果沿求和维 \(k\) 连续存放，就叫 <b>k-major</b>。16 位的 WGMMA 对放在共享内存里的操作数两种排布都接受，FP8 的 WGMMA 只接受 k-major。</p>
+<p>放到注意力里看，第一个矩阵乘 \(S=QK^{\top}\) 的求和维是头维 \(d\)，而 \(Q\)、\(K\) 在内存里本来就是沿头维连续存的，所以天然是 k-major，没有问题。第二个矩阵乘 \(O=PV\) 的求和维是序列维（\(P\) 的列、\(V\) 的行），可 \(V\) 通常也是沿头维连续存的，对这个乘法来说它是 mn-major，FP8 WGMMA 不接受。另外还有一层冲突：第一个矩阵乘的 FP32 累加结果在各线程寄存器里的分布方式，和第二个矩阵乘要求的 FP8 操作数分布方式不一样，两个矩阵乘没法直接首尾相接。这两个问题在第 3.4 节解决。</p>
+
+<h4 id="n-2-5">2.5 标准注意力与 FlashAttention</h4>
+<p>论文沿用第一代的叫法：<b>标准注意力</b>指把中间矩阵 \(S\) 和 \(P\) 写进显存的实现。FlashAttention 的核心是用局部的 softmax 规约（在线 softmax）避免这些昂贵的读写，把整个注意力融合进一个内核。在 FlashAttention-3 的算法 1 里，这对应消费者主循环的第 18–19 行，再加上对 \(O\) 的重缩放。推导过程论文直接引用了 FlashAttention-2 的 §2.3.1；本站的详细讲解见 <a href="flashattention.html#n-3">FlashAttention 精读页第 3 节</a>。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 算法：生产者–消费者流水、把 softmax 藏起来、再换成 FP8</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了异步的 TMA 和 WGMMA，具体该怎样改写 FlashAttention-2 的循环，才能让搬数据、矩阵乘和 softmax 同时进行？softmax 和两个矩阵乘之间存在先后依赖，怎样在不改变结果的前提下把它们错开？换成 FP8 之后，排布限制怎么绕过，精度损失怎么补回来？这一节对应论文 §3，为了简单，正文只讲前向，反向放在最后一小节（论文附录 B.1）。</div>
+
+<h4 id="n-3-1">3.1 生产者–消费者：warp 专业化加环形缓冲（算法 1）</h4>
+<p>和 FlashAttention-2 一样，前向传播在批、注意力头和查询序列三个方向上都是完全并行的：每个线程块（CTA）负责 \(Q\) 的一块 \(Q_{i}\)（\(B_{r}\) 行），算出对应的输出块 \(O_{i}\)。所以只需要看一个线程块内部发生了什么。论文先给出一个只有 warp 专业化、还没有 softmax 与矩阵乘重叠的版本，即算法 1。</p>
+<p>线程块里的 warpgroup 分成两种角色，它们之间通过共享内存里一个 \(s\) 级的<b>环形缓冲</b>交接数据。第 \(j\) 块 \(K_{j},V_{j}\) 放在第 \(j\bmod s\) 级。每一级都配有屏障：生产者把数据装满后“提交”，消费者看到提交才去读；消费者用完后“释放”，生产者看到释放才往这一级装新数据。</p>
+<div class="dia">
+  <div class="dia-title">示意图：生产者与消费者通过 s 级环形缓冲交接 K、V 块（这里画 s = 4，消费者正在用第 3 块）</div>
+  <svg class="dg" viewBox="0 0 960 258" role="img" aria-label="生产者 warpgroup 用 TMA 把 K、V 块写进四级环形缓冲，消费者 warpgroup 读取后释放" style="--dg-min:720px">
+    <rect class="box tgt" x="20" y="70" width="220" height="84" rx="10"/>
+    <text x="130" y="94" class="t-c t-b">生产者 warpgroup</text>
+    <text x="130" y="116" class="t-c t-sm">只发 TMA 搬运指令</text>
+    <text x="130" y="136" class="t-c t-sm">每线程约 24 个寄存器</text>
+    <text x="474" y="30" class="t-c t-sm">共享内存里的 s 级环形缓冲：第 j 块 K、V 放在第 j mod s 级</text>
+    <rect class="box act" x="300" y="66" width="80" height="92" rx="8"/>
+    <text x="340" y="84" class="t-c t-xs">第 0 级</text><text x="340" y="108" class="t-c t-b">K₄ V₄</text><text x="340" y="132" class="t-c t-xs">已到达</text><text x="340" y="146" class="t-c t-xs">等待使用</text>
+    <rect class="box pred" x="390" y="66" width="80" height="92" rx="8" style="stroke-dasharray:5 3"/>
+    <text x="430" y="84" class="t-c t-xs">第 1 级</text><text x="430" y="108" class="t-c t-b">K₅ V₅</text><text x="430" y="132" class="t-c t-xs">TMA 正在写</text>
+    <rect class="box" x="480" y="66" width="80" height="92" rx="8"/>
+    <text x="520" y="84" class="t-c t-xs">第 2 级</text><text x="520" y="108" class="t-c t-b">空</text><text x="520" y="132" class="t-c t-xs">刚被释放</text><text x="520" y="146" class="t-c t-xs">下一个装 K₆ V₆</text>
+    <rect class="box enc" x="570" y="66" width="80" height="92" rx="8"/>
+    <text x="610" y="84" class="t-c t-xs">第 3 级</text><text x="610" y="108" class="t-c t-b">K₃ V₃</text><text x="610" y="132" class="t-c t-xs">消费者</text><text x="610" y="146" class="t-c t-xs">正在用</text>
+    <rect class="box enc" x="720" y="70" width="220" height="84" rx="10"/>
+    <text x="830" y="94" class="t-c t-b">消费者 warpgroup（2 个）</text>
+    <text x="830" y="116" class="t-c t-sm">WGMMA + softmax</text>
+    <text x="830" y="136" class="t-c t-sm">每线程约 240 个寄存器</text>
+    <path class="edge" d="M240,112 L296,112" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text x="268" y="102" class="t-c t-xs">写入</text>
+    <path class="edge enc" d="M650,112 L716,112"/>
+    <text x="683" y="102" class="t-c t-xs">读取</text>
+    <path class="edge" d="M830,154 C830,232 130,232 130,158"/>
+    <text x="480" y="246" class="t-c t-sm">消费者用完一级就“释放”它，生产者看到释放才往里装下一块；装满后“提交”，消费者看到提交才读</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>中间四个格子是共享内存里的四级缓冲，颜色表示状态：绿色已经到达、橙色虚框正在搬运、白色空着、蓝色正被消费者使用。紫色箭头是生产者用 TMA 写入，蓝色箭头是消费者读取，底部的灰色箭头是“释放”信号。因为缓冲有好几级，生产者可以比消费者提前好几块开始搬运，消费者需要某一块时它通常已经到了。本站示意图；级数 \(s\) 在论文里是一个参数，这里取 4 只为画图方便。</div>
+</div>
+<p>算法 1 的流程用本站的话写成伪代码如下（行号对应论文算法 1 的主要步骤）：</p>
+<pre><code class="lang-py"># 一个线程块负责 Q 的第 i 块（B_r 行）；K、V 每 B_c 行一块，共 T_c 块
+if 我是生产者 warpgroup:
+    用 setmaxnreg 把寄存器配额降下来           # 第 3 行：只需一个线程发 TMA
+    TMA: Q_i -> 共享内存；到达后通知消费者      # 第 4–5 行
+    for j in range(T_c):
+        等第 j % s 级被消费者释放               # 第 7 行（前 s 次不用等）
+        TMA: K_j, V_j -> 第 j % s 级；到达后通知 # 第 8–9 行
+else:  # 消费者 warpgroup
+    用 setmaxnreg 把寄存器配额升上去           # 第 12 行
+    O = 0；m = -inf；l = 0                      # 都在寄存器里
+    等 Q_i 到达
+    for j in range(T_c):
+        等 K_j 到达
+        S = WGMMA(Q_i, K_j^T)     # SS-GEMM，两个操作数都在共享内存；提交并等待
+        m_old = m；m = max(m, rowmax(S))
+        P = exp(S - m)；l = exp(m_old - m) * l + rowsum(P)
+        等 V_j 到达
+        O = exp(m_old - m) * O + WGMMA(P, V_j)    # RS-GEMM，P 在寄存器；提交并等待
+        释放第 j % s 级
+    O = O / l；L = m + log(l)；把 O_i 和 L_i 写回显存</code></pre>
+<p>在 Hopper 上，“降低 / 升高寄存器配额”用 <code>setmaxnreg</code>，搬 \(Q_{i}\) 和 \(K_{j},V_{j}\) 用 TMA，消费者里的两个矩阵乘用 WGMMA。两点值得注意。第一，发起 TMA 不会因为别的 TMA 还没完成而停住，所以生产者可以连续发出好几块的搬运。第二，生产者在前 \(s\) 次迭代里不需要等待，因为缓冲一开始是空的。</p>
+<div class="note-warn"><b>论文算法里的一处笔误：</b>论文算法 1 第 21 行把输出更新写成 \(O_{i}=\mathrm{diag}(\exp(m_{i}^{\mathrm{old}}-m_{i}))^{-1}O_{i}+\tilde{P}_{i}^{(j)}V_{j}\)，多了一个求逆。由于 \(m_{i}\ge m_{i}^{\mathrm{old}}\)，正确的做法是把旧的 \(O_{i}\) <b>乘以</b> \(\exp(m_{i}^{\mathrm{old}}-m_{i})\le 1\)，换到新的最大值基准上（和同一算法第 19 行更新 \(\ell_{i}\) 的方式一致），上面的伪代码按正确的写法给出。FlashAttention-2 论文的算法 1 第 10 行也是同样的写法，这属于沿用下来的记号笔误；官方代码（<code>hopper/softmax.h</code>）里乘的正是按“旧最大值减新最大值”算出的缩放系数，不受影响。</div>
+
+<h4 id="n-3-2">3.2 指数运算为什么是瓶颈，以及 warpgroup 之间的乒乓调度</h4>
+<div class="note-pre"><b>先补一点背景：softmax 里的指数到底有多慢。</b>
+<p>第 2.2 节讲过，H100 上每个 SM 每个时钟周期，Tensor Core 能做约 4096 次 FP16 浮点运算，MUFU 只能算 16 次指数，相差 256 倍。论文用头维 128 的 FP16 前向算了一笔账：对分数矩阵里的每一个元素，两次矩阵乘一共要做 \(4d=512\) 次浮点运算，而 softmax 只要算 1 次指数，所以矩阵乘的运算量是指数的 512 倍；可指数的吞吐又低了 256 倍，两相抵消，算指数的时间约等于矩阵乘时间的一半。换到 FP8，矩阵乘吞吐翻倍而指数吞吐不变，指数的相对代价也跟着翻倍。</p>
+<p>把这笔账推广一下（推算）：设一个分数块是 \(128\times128\)，在一个 SM 上，两次矩阵乘需要 \(4\times128\times128\times d\div4096=16d\) 个时钟周期，指数需要 \(128\times128\div16=1024\) 个时钟周期，两者之比是 \(64/d\)。头维越小，指数越显得贵。</p>
+<p>顺带一提，实际代码里的指数是用以 2 为底的 \(2^{x}\) 算的：先用一条乘加指令把分数乘上 \(\log_{2}e\)（和 softmax 的缩放系数合在一起）并减去最大值，再交给 MUFU 的 EX2 指令（官方代码 <code>hopper/softmax.h</code>；论文附录 B.2 的 SASS 里能看到 <code>FFMA</code> 和 <code>MUFU.EX2</code> 交替出现）。所以每算一个指数，FP32 单元也要陪着做一次乘加。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：一个 128×128 分数块在一个 SM 上的理论耗时（时钟周期，推算）</div>
+  <div class="dia-row"><span class="lbl">FP16，头维 64</span><div class="dia-track"><span class="dia-seg kv" style="flex:1024">矩阵乘 1024</span><span class="dia-seg cmp" style="flex:1024">指数 1024</span><span class="dia-seg oth" style="flex:2048"></span></div></div>
+  <div class="dia-row"><span class="lbl">FP16，头维 128</span><div class="dia-track"><span class="dia-seg kv" style="flex:2048">矩阵乘 2048</span><span class="dia-seg cmp" style="flex:1024">指数 1024</span><span class="dia-seg oth" style="flex:1024"></span></div></div>
+  <div class="dia-row"><span class="lbl">FP16，头维 256</span><div class="dia-track"><span class="dia-seg kv" style="flex:4096">矩阵乘 4096</span><span class="dia-seg cmp" style="flex:1024">指数 1024</span></div></div>
+  <div class="dia-row"><span class="lbl">FP8，头维 128</span><div class="dia-track"><span class="dia-seg kv" style="flex:1024">矩阵乘 1024</span><span class="dia-seg cmp" style="flex:1024">指数 1024</span><span class="dia-seg oth" style="flex:2048"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个设置，蓝段长度是两次矩阵乘在 Tensor Core 上的理论时间，绿段是 MUFU 算指数的理论时间。如果两者不能重叠，总时间就是两段之和，Tensor Core 的利用率最多是“蓝段 ÷（蓝段 + 绿段）”：头维 64 时只有 50%，头维 128 时约 67%，头维 256 时 80%。所以把指数藏到矩阵乘背后，对小头维和 FP8 尤其重要。这里只算了指数，没算求最大值、求和、重缩放、类型转换这些在 FP32 单元上执行的运算，它们会让情况更差一些。按 Hopper 的规格推算：矩阵乘每 SM 每周期 4096 次（FP8 为 8192 次），指数 16 次。本站示意图。</div>
+</div>
+<p>既然指数在独立的硬件单元 MUFU 上执行，理想情况就是让 MUFU 算指数的同时，Tensor Core 在做矩阵乘。一个 warpgroup 自己做不到这一点，因为它的 softmax 必须等它自己的 \(QK^{\top}\) 算完。但线程块里有两个消费者 warpgroup，它们处理的是 \(Q_{i}\) 的不同行，彼此没有依赖。于是论文用同步屏障（<code>bar.sync</code> 指令）强制规定先后：warpgroup 1 的两个矩阵乘（上一次迭代的 GEMM1，即 \(PV\)，加上下一次迭代的 GEMM0，即 \(QK^{\top}\)）排在 warpgroup 2 的矩阵乘之前。这样，warpgroup 2 用 Tensor Core 的时候，warpgroup 1 正好在算自己的 softmax；接着角色互换。两组像打乒乓球一样轮流使用 Tensor Core，所以叫<b>乒乓调度</b>（pingpong scheduling）。这个做法改编自 CUTLASS 里的 warp 专业化乒乓 GEMM（论文致谢）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="flashattention-3/fig/pingpong_pipelining.png" alt="原文图 1：两个 warpgroup 的乒乓调度" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>横轴是时间，上下两行是两个消费者 warpgroup。GEMM0 是 \(QK^{\top}\)，GEMM1 是 \(PV\)，同一种颜色属于同一次迭代（粉色是第一次，橙色第二次，绿色第三次）。竖虚线把时间切成几段：在每一段里，总是一个 warpgroup 在做 GEMM、另一个在做 softmax。比如在第二条和第三条竖虚线之间，warpgroup 2 在做粉色的 GEMM1 和橙色的 GEMM0，warpgroup 1 则在做橙色的 softmax。这样 Tensor Core 在任何时刻都有活干，softmax 的时间被藏在了另一组的矩阵乘下面。</figcaption></figure>
+<p>论文承认，实际运行时的乒乓不会像图上这么整齐，但它通常能提升性能。例如头维 128、序列长度 8192 的 FP16 前向，加了乒乓调度后从 570 TFLOPs/s 提到 620–640 TFLOPs/s（推算：约提升 9–12%）。对于多查询注意力（MQA）和分组查询注意力（GQA），论文沿用 FlashAttention-2 的做法，只调整张量的索引，让多个查询头直接读同一份 \(K,V\)，不在显存里复制。</p>
+
+<h4 id="n-3-3">3.3 warpgroup 内部的两级流水（算法 2）</h4>
+<p>乒乓调度利用的是两个 warpgroup 之间的独立性。论文进一步发现，即使在一个 warpgroup 内部，也能让一部分 softmax 指令和矩阵乘指令重叠。</p>
+<p>难点是循环内部的先后依赖。在算法 1 里，softmax（第 18–19 行）要用第一个矩阵乘的输出 \(S^{(j)}\)，第二个矩阵乘又要用 softmax 的结果 \(P^{(j)}\)；第 17 行和第 21 行的“等待”把三者串成了一条线。打破它的办法是<b>跨迭代流水</b>：第 \(j\) 次迭代的第二个矩阵乘 \(P^{(j-1)}V_{j-1}\) 只依赖上一次的 softmax 结果，和第 \(j\) 次迭代的 softmax 没有关系，所以两者可以同时进行。代价是要在寄存器里多存一份分数块。论文称之为两级（2-stage）GEMM–softmax 流水，算法 2 用它替换算法 1 里消费者的那一段。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="flashattention-3/fig/2_stage_pipelining.png" alt="原文图 2：两级 WGMMA–softmax 流水" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>三行分别是第一个矩阵乘 WGMMA0（\(QK^{\top}\)）、softmax 和第二个矩阵乘 WGMMA1（\(PV\)），格子里的数字是迭代编号，同色表示同一次迭代。看竖虚线之间的每一段：第 1 次迭代的 softmax 和第 0 次迭代的 WGMMA1 在同一段里并排进行，第 2 次迭代的 softmax 和第 1 次迭代的 WGMMA1 并排进行。也就是说，每次迭代的 softmax 都与上一次迭代的第二个矩阵乘重叠。</figcaption></figure>
+<p>算法 2 的主循环用本站的话写出来是这样：</p>
+<pre><code class="lang-py">S_cur = WGMMA(Q_i, K_0^T)；等待          # 先单独算第 0 块
+用 S_cur 算出 m、P_cur、l，并重缩放 O
+for j in 1 .. T_c-1:
+    S_next = WGMMA(Q_i, K_j^T)          # 第 9 行：提交，但不等
+    O = O + WGMMA(P_cur, V_{j-1})       # 第 11 行：提交，但不等
+    等 S_next 算完                       # 第 12 行
+    用 S_next 算出新的 m、P_next、l      # 第 13 行：这段 softmax 与第 11 行的矩阵乘同时进行
+    等 P_cur·V_{j-1} 算完，再按新的 m 重缩放 O   # 第 14 行
+    S_cur = S_next；P_cur = P_next
+O = O + WGMMA(P_last, V_{T_c-1})；等待；收尾写回</code></pre>
+<p>这里有一个细节值得想清楚：第 14 行为什么要在 \(P_{\mathrm{cur}}V_{j-1}\) 算完之后才重缩放 \(O\)？因为 \(P_{\mathrm{cur}}\) 是以上一次的最大值为基准算的，这一项加进 \(O\) 之后，\(O\) 整体还处在旧基准上；第 13 行刚用 \(S_{\mathrm{next}}\) 更新了最大值，于是要把整个 \(O\) 乘一次 \(e^{m^{\mathrm{old}}-m^{\mathrm{new}}}\) 换到新基准，下一次迭代加进来的 \(P_{\mathrm{next}}V_{j}\) 才和它对得上。</p>
+<p>理论上的好处之外，论文列了三个实际要考虑的问题：</p>
+<ul>
+  <li><b>编译器会重排指令。</b>伪代码只是理想的执行顺序，NVCC 编译器经常为了优化把指令换位置，可能把精心安排的重叠打乱。作者检查了生成的 SASS，确认编译器生成了预期的重叠代码（附录 B.2）：softmax 的一部分被挪到了第一个 WGMMA 之前；第一个 WGMMA 被拆成 8 条 <code>HGMMA</code>，中间穿插着 softmax 的指数（<code>MUFU.EX2</code>）、求和与 FP32 到 FP16 的转换；第二个 WGMMA 的 12 条 <code>HGMMA</code> 连在一起，没有和别的指令交错，这也符合预期。</li>
+  <li><b>寄存器压力。</b>两级流水要多存一份 \(S_{\mathrm{next}}\)，每个线程块多用 \(B_{r}\times B_{c}\times 4\) 字节的寄存器。举个例子（推算）：\(B_{r}=B_{c}=128\) 时是 64 KiB，分给两个消费者 warpgroup 的 256 个线程，每个线程多用 64 个寄存器，而每个消费者线程总共只有约 240 个。寄存器不够就会“溢出”到慢得多的内存里，所以流水级数和分块大小（也很吃寄存器）之间要权衡，论文的建议是按实测结果取舍。</li>
+  <li><b>三级流水。</b>论文还试了三级版本（附录 B.3，算法 4），想让第 \(j+2\) 次的第一个 WGMMA、第 \(j+1\) 次的 softmax 和第 \(j\) 次的第二个 WGMMA 三者同时进行。结果比两级版本差，原因有二：SASS 显示编译器只让第一个 WGMMA 和 softmax 重叠，第二个 WGMMA 没有重叠，作者也不清楚编译器为什么这样排；同时它要多存一份 \(\tilde{P}\) 和缩放因子，只能改用更小的分块。</li>
+</ul>
+<figure class="paper-fig"><div class="imgs one"><img src="flashattention-3/fig/3_stage_pipelining.png" alt="原文图 8：三级流水" loading="lazy"></div>
+<figcaption><b>原文图 8（附录 B.3）。怎么看：</b>和图 2 的画法相同，只是 WGMMA0 比 softmax 提前一次迭代、softmax 又比 WGMMA1 提前一次迭代，所以同一段时间里有三次不同的迭代在推进（例如第 3 次的 WGMMA0、第 2 次的 softmax 和第 1 次的 WGMMA1）。图上的安排是设想；实际的 SASS 没有做到第二个 WGMMA 的重叠，所以这个版本反而更慢。</figcaption></figure>
+<div class="note-warn"><b>两种重叠别混在一起：</b>乒乓调度是两个 warpgroup <b>之间</b>的重叠，靠的是它们处理不同的行、彼此独立；两级流水是一个 warpgroup <b>内部</b>相邻两次迭代之间的重叠，靠的是跨迭代的依赖更松。两者可以同时使用。第 4 节的消融实验分别去掉“warp 专业化”和“两级流水”中的一项，用来说明各自的贡献。</div>
+
+<h4 id="n-3-4">3.4 FP8 的效率问题：在内核里转置 V，并重排寄存器</h4>
+<p>第 2.4 节说过，换成 FP8 有两处排布冲突。论文分别处理。</p>
+<p><b>第一处：\(V\) 的排布。</b>\(Q,K,V\) 通常都是沿头维连续存放的。为了满足 FP8 WGMMA 对第二个矩阵乘的 k-major 要求，需要让 \(V\)（准确地说是搬进共享内存的 \(V\) 块）沿序列维连续。TMA 搬运时不能改变连续的方向，所以只剩两条路：(1) 在显存里事先把 \(V\) 转置好，或者 (2) 搬进共享内存之后在内核里转置。第 (1) 条又分两种：(1a) 把转置融合进前一个操作（比如旋转位置编码 RoPE）的收尾，这很难做进一个通用的库；(1b) 单独调用一个转置内核，交换序列维和头维的步长，这在推理这种受显存带宽限制的场景下太浪费，因为要把整个 \(V\) 多读写一遍。</p>
+<p>FP8 版本的 FlashAttention-3 选了第 (2) 条：在内核里逐块转置。它用的是 <code>LDSM</code>（ldmatrix）和 <code>STSM</code>（stmatrix）两条指令：一个 warp 的线程一起把共享内存里的数据读进寄存器、再写回共享内存，粒度是 128 字节，并且在拷贝的同时可以转置排布。这两条指令很省寄存器，所以可以交给寄存器配额很少的生产者 warpgroup 去做。从第二次迭代开始，下一块 \(V\) 的转置可以安排在“前一块 \(V\) 和当前 \(K\) 的两个 WGMMA”执行期间完成，几乎不占额外时间。论文致谢里说，在内核中转置的点子来自 cuDNN 团队。</p>
+<div class="dia">
+  <div class="dia-title">示意图：为什么要转置 V，转置发生在哪里</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="左边是沿头维连续存放的 V 块，经生产者在共享内存中转置后，变成沿 token 连续的 V 转置块" style="--dg-min:720px">
+    <text x="172" y="30" class="t-c t-b">共享内存里的一块 V（TMA 原样搬来）</text>
+    <g>
+      <rect x="60" y="50" width="224" height="168" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+      <path d="M60,78 H284 M60,106 H284 M60,134 H284 M60,162 H284 M60,190 H284" style="stroke:var(--border-strong);stroke-width:1"/>
+      <path d="M88,50 V218 M116,50 V218 M144,50 V218 M172,50 V218 M200,50 V218 M228,50 V218 M256,50 V218" style="stroke:var(--border-strong);stroke-width:1;stroke-dasharray:2 3"/>
+      <path class="edge enc" d="M66,64 L278,64"/><path class="edge enc" d="M66,92 L278,92"/><path class="edge enc" d="M66,120 L278,120"/>
+      <path class="edge enc" d="M66,148 L278,148"/><path class="edge enc" d="M66,176 L278,176"/><path class="edge enc" d="M66,204 L278,204"/>
+    </g>
+    <text x="172" y="238" class="t-c t-sm">头维 d →（内存里沿这个方向连续）</text>
+    <text x="40" y="134" class="t-c t-sm" transform="rotate(-90 40 134)">token（序列）</text>
+    <path class="edge pred" d="M310,134 L612,134" style="stroke-width:2.2"/>
+    <text x="461" y="108" class="t-c t-b" style="fill:var(--c-pred)">生产者 warpgroup 在共享内存里转置</text>
+    <text x="461" y="160" class="t-c t-sm">LDSM 读进寄存器 → 字节重排 → STSM 写回</text>
+    <text x="461" y="180" class="t-c t-xs">从第 2 块起，与前两个 WGMMA 同时进行</text>
+    <text x="724" y="30" class="t-c t-b">转置后的 Vᵀ 块</text>
+    <g>
+      <rect x="640" y="46" width="168" height="224" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+      <path d="M640,74 H808 M640,102 H808 M640,130 H808 M640,158 H808 M640,186 H808 M640,214 H808 M640,242 H808" style="stroke:var(--border-strong);stroke-width:1"/>
+      <path d="M668,46 V270 M696,46 V270 M724,46 V270 M752,46 V270 M780,46 V270" style="stroke:var(--border-strong);stroke-width:1;stroke-dasharray:2 3"/>
+      <path class="edge act" d="M646,60 L802,60"/><path class="edge act" d="M646,116 L802,116"/><path class="edge act" d="M646,172 L802,172"/><path class="edge act" d="M646,228 L802,228"/>
+    </g>
+    <text x="724" y="288" class="t-c t-sm">token →（现在沿这个方向连续）</text>
+    <text x="836" y="158" class="t-c t-sm" transform="rotate(90 836 158)">头维 d</text>
+    <text x="900" y="110" class="t-c t-xs">求和维 = token</text>
+    <text x="900" y="126" class="t-c t-xs">沿求和维连续</text>
+    <text x="900" y="142" class="t-c t-xs">= k-major</text>
+    <text x="900" y="158" class="t-c t-xs">FP8 WGMMA</text>
+    <text x="900" y="174" class="t-c t-xs">可以直接用</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左边蓝色是 TMA 原样搬进来的 \(V_{j}\) 块，每一行是一个 token、沿头维连续（箭头方向）。第二个矩阵乘 \(O=PV\) 是沿 token 求和的，对它来说这种排布是 mn-major，16 位 WGMMA 可以接受，FP8 WGMMA 不行。中间由生产者在共享内存里把它转置成右边绿色的块，让 token 方向变成连续方向，满足 k-major。为了图面清楚，右边只画了一部分箭头。本站示意图。</div>
+</div>
+<p><b>第二处：累加结果与操作数在寄存器里的分布不同。</b>第一个矩阵乘的结果 \(S\)（进而 \(P\)）以 FP32 存在消费者线程的寄存器里，第二个矩阵乘要把 \(P\) 当作寄存器里的操作数 A。在 FP16 下，FP32 累加结果的分布方式和 16 位操作数 A 要求的分布方式恰好兼容，转换精度之后可以直接用。FP8 不行：每个 32 位寄存器要装 4 个 8 位数，操作数 A 要求每个线程手里的是同一行里相邻的 4 列，可累加结果给每个线程的是 \(\{0,1\}\) 和 \(\{8,9\}\) 这样隔开的列。论文图 3 和图 4 画出了第 0 行和第 8 行、线程 0–3、前 8 个元素的分布，下面用本站的示意图把同一件事画成颜色：</p>
+<div class="dia">
+  <div class="dia-title">示意图：P 的一行前 16 列分别在哪个线程手里（对应原文图 3、图 4 的第 0 行）</div>
+  <div class="dia-row"><span class="lbl">FP32 累加结果（图 3）</span><div class="cells"><span class="cell a">0</span><span class="cell a">1</span><span class="cell b">2</span><span class="cell b">3</span><span class="cell c">4</span><span class="cell c">5</span><span class="cell">6</span><span class="cell">7</span><span class="cell a">8</span><span class="cell a">9</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell c">12</span><span class="cell c">13</span><span class="cell">14</span><span class="cell">15</span></div></div>
+  <div class="dia-row"><span class="lbl">FP8 操作数 A 的要求（图 4）</span><div class="cells"><span class="cell a">0</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell b">4</span><span class="cell b">5</span><span class="cell b">6</span><span class="cell b">7</span><span class="cell c">8</span><span class="cell c">9</span><span class="cell c">10</span><span class="cell c">11</span><span class="cell">12</span><span class="cell">13</span><span class="cell">14</span><span class="cell">15</span></div></div>
+  <div class="dia-row"><span class="lbl">FA3 的做法：线程内重排后“当作”操作数</span><div class="cells"><span class="cell a">0</span><span class="cell a">1</span><span class="cell a">8</span><span class="cell a">9</span><span class="cell b">2</span><span class="cell b">3</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell c">4</span><span class="cell c">5</span><span class="cell c">12</span><span class="cell c">13</span><span class="cell">6</span><span class="cell">7</span><span class="cell">14</span><span class="cell">15</span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每个格子是 \(P\) 某一行的一列，颜色表示这一列的数存在哪个线程的寄存器里：蓝色线程 0，绿色线程 1，橙色线程 2，灰色线程 3。第一行是第一个矩阵乘算完时的实际分布，第二行是 FP8 WGMMA 要求的分布。第三行是论文的办法：不在线程之间搬数据，只在每个线程内部用字节重排指令把顺序换成 \(\{d_{0}d_{1}d_{4}d_{5}d_{2}d_{3}d_{6}d_{7}\}\)，然后直接把它当作操作数用。格子里的数字是这一位置实际装的原始列号：逻辑上的第 0–3 列装的是原来的第 0、1、8、9 列。本站示意图，根据原文图 3、图 4 的排布画出。</div>
+</div>
+<p>这样一来，\(P\) 的列顺序被打乱了，直接乘 \(V\) 会得到错误的结果。补救的办法利用了一个简单的事实：对两个矩阵相乘，如果把 \(P\) 的列和 \(V\) 的行按同一个顺序重排，乘积不变（\(PV=\sum_{k}P_{:,k}V_{k,:}\)，求和的先后顺序不影响结果）。而 \(V\) 反正要在内核里转置一遍，转置时顺手按同样的顺序重排它的行，就一分钱不多花。论文脚注 9 说，正是因为在内核里转置 \(V\) 多了这份自由度，才不再需要用线程间的 shuffle 指令交换寄存器（作者早先在 Colfax 的博客里用的是 shuffle）。</p>
+<div class="note-warn"><b>arXiv 版与 NeurIPS 版的写法不同：</b>arXiv v2 正文描述的是上面这种“只做线程内字节重排、配合 \(V\) 的行重排”的方案。NeurIPS 正式版的 §3.3 先介绍了用字节重排加 <code>shfl_sync</code> 在线程之间交换数据的通用做法（附录 B.7 给了代码），再在附录 B.8 说明配合转置后的 \(V\) 可以省掉 shuffle，只保留字节重排。两版的结论一致，只是讲法和详略不同。</div>
+
+<h4 id="n-3-5">3.5 FP8 的精度问题：块量化与非相干处理</h4>
+<p>E4M3 只有 3 位尾数，误差本来就比 FP16、BF16 大。更麻烦的是，大模型的激活里常有<b>离群值</b>：少数几个数的绝对值远大于其余的数（论文引用了 LLM.int8() 和“Massive Activations”两项工作）。常见的 FP8 做法是<b>逐张量缩放</b>：\(Q\)、\(K\)、\(V\) 各用一个缩放因子。论文用了两种技术来降低误差。</p>
+<p><b>块量化。</b>不再整个张量共用一个缩放因子，而是每一块一个：把 \(Q\) 切成 \(B_{r}\times d\) 的块，把 \(K\)、\(V\) 切成 \(B_{c}\times d\) 的块，各自量化。这样，一个块里出现的大数只影响这一块的缩放，不会让别处的数也跟着变粗。量化这一步可以融合进注意力之前的某个操作（例如 RoPE）里，因为 RoPE 本身受显存带宽限制，多做几次乘法不会变慢。FlashAttention-3 本来就是按块计算的，每算出一块 \(S\)，乘上对应的 \(Q\) 块和 \(K\) 块的缩放因子即可，几乎没有额外开销。</p>
+<div class="note-pre"><b>先补一点背景：Hadamard 矩阵和“非相干”。</b>
+<p><b>正交矩阵</b> \(M\) 满足 \(MM^{\top}=I\)。用它同时右乘 \(Q\) 和 \(K\)，注意力分数不变：</p>
+<div class="formula">$$(QM)(KM)^{\top}=QMM^{\top}K^{\top}=QK^{\top}$$</div>
+<p>所以可以先把 \(Q\)、\(K\) 各乘一个正交矩阵再量化，数学上什么都没改，改变的只是“数在各个坐标上怎么分布”。<b>Hadamard 矩阵</b>是一种特别方便的正交矩阵：元素全是 \(\pm1/\sqrt{d}\)，可以递归地构造（\(H_{2n}=\frac{1}{\sqrt{2}}\begin{bmatrix}H_{n}&amp;H_{n}\\H_{n}&amp;-H_{n}\end{bmatrix}\)），并且像快速傅里叶变换一样只要 \(O(d\log d)\) 次运算就能乘完，而一般的矩阵乘向量要 \(O(d^{2})\)。</p>
+<p>它为什么能“摊开”离群值？乘以 Hadamard 矩阵后，新向量的每个坐标都是原向量所有坐标的 \(\pm\) 加权和，一个大数会被平均分到所有坐标上。用 4 维的例子算一下（推算）：\(x=(8,1,-1,1)\)，长度是 \(\sqrt{67}\approx8.19\)；乘以 \(H_{4}\) 后得到 \((4.5,\,2.5,\,4.5,\,4.5)\)，长度不变，但最大坐标从 8 降到了 4.5，各坐标的大小变得接近。在量化研究里，这种“没有哪个坐标特别突出”的性质叫<b>非相干</b>（incoherence）。前面再乘一个随机的 \(\pm1\) 对角矩阵，是为了保证对任何输入向量都大概率有这个效果：否则，恰好和某一行 Hadamard 向量同向的输入，乘完反而会变成一个尖峰。</p>
+</div>
+<p><b>非相干处理。</b>量化成 FP8 之前，把 \(Q\) 和 \(K\) 都乘以同一个随机正交矩阵 \(M\)。按上面的等式，注意力输出不变；而 \(QM\)、\(KM\) 的每个元素都是 \(Q\)、\(K\) 一行里各元素的随机加权和，离群值被摊开，量化误差随之下降。实际选取的 \(M\) 沿用 QuIP（Chee 等）和 QuIP#（Tseng 等）的做法：随机 \(\pm1\) 对角矩阵与 Hadamard 矩阵的乘积，乘法只要 \(O(d\log d)\)，而且论文说它也能融合进 RoPE，不增加计算开销。同样的旋转思路后来被大量用于模型量化，本站的 <a href="quarot.html">QuaRot 精读页</a> 讲的就是把 Hadamard 旋转用在权重、激活和 KV 缓存上。论文第 4.3 节验证，这两项技术合起来把误差最多降低 2.6 倍。</p>
+<div class="dia">
+  <div class="dia-title">本站补充的小模拟：旋转到底减小了哪一部分误差（推算，不是论文数据）</div>
+  <div class="table-wrap"><table>
+    <tr><th>逐张量 FP8（E4M3）量化</th><th>不旋转</th><th>先乘随机 ±1 对角阵与 Hadamard 矩阵</th></tr>
+    <tr><td>\(Q\) 的最大绝对值（均方根约 1.05）</td><td>27–35</td><td>4.9–6.0</td></tr>
+    <tr><td>\(S\) 全部元素的均方根误差</td><td>0.040–0.042</td><td>0.040–0.042（几乎不变）</td></tr>
+    <tr><td>\(S\) 在 softmax 权重 &gt; 0.05 的位置上的均方根误差</td><td>0.17–0.20</td><td>0.083–0.090（约减半）</td></tr>
+    <tr><td>输出 \(O\) 的均方根误差</td><td>0.012–0.016</td><td>0.007–0.009</td></tr>
+  </table></div>
+  <div class="dia-note"><b>怎么看：</b>本站用 numpy 按论文 §4.3 的分布生成 \(Q,K,V\)（序列 1024、头维 128、单头，4 个随机种子，表中给出范围），模拟 E4M3 的舍入，和 FP64 的精确结果比较。设置比论文粗糙（例如把 \(P\) 也量化成 FP8），绝对数值不能和论文表 3 对比，只看趋势：旋转把离群值摊平后，\(S\) 的<b>平均</b>误差并没有变小，但落在 softmax 权重大的那些<b>关键位置</b>上的误差减半了。原因是：不旋转时，同一个位置上 \(q\) 和 \(k\) 都很大的那几项既让分数变大（于是它在 softmax 里占主导），又带来最大的舍入误差，误差正好落在最要紧的地方；旋转后误差均匀地摊到所有位置，最要紧的位置分到的误差就少了。这是本站对论文“摊开离群值”这句话的一种具体解读，论文本身没有做这样的分析。</div>
+</div>
+<div class="note-warn"><b>论文与官方代码的差别：</b>论文描述的是每个 \(B_{r}\times d\) 或 \(B_{c}\times d\) 块一个缩放因子。本站查看官方代码（<code>hopper/flash_api.cpp</code>，main 分支，2026-10-20）时看到，FP8 接口接收的缩放因子 <code>q_descale</code>、<code>k_descale</code>、<code>v_descale</code> 的形状是（批大小，KV 头数），也就是每条序列、每个 KV 头一个；非相干处理所需的 Hadamard 旋转也不在注意力内核里，需要调用方在量化之前自己完成。用开源代码复现论文的误差数字，要先自己补上这两步。</div>
+
+<h4 id="n-3-6">3.6 反向传播：多一个专门累加 dQ 的 warp（附录 B.1）</h4>
+<p>反向传播也用 warp 专业化，只是角色多了一种。FlashAttention 系列的反向是按 \(K,V\) 的块并行的：每个线程块固定一块 \(K_{j},V_{j}\)，遍历所有的 \(Q_{i}\) 块，在片上累加出 \(dK_{j}\) 和 \(dV_{j}\)。麻烦在 \(dQ\)：同一块 \(dQ_{i}\) 要收集所有 \(K_{j}\) 块的贡献，而这些贡献来自不同的线程块，只能在显存里做原子加。很多线程块往同一个位置写，就会互相争抢。</p>
+<p>FlashAttention-3 的做法（算法 3）是在生产者和消费者之外，再设一个 <b>dQ 写回 warp</b>：</p>
+<ul>
+  <li>先用一个预处理内核算出 \(D=\mathrm{rowsum}(dO\circ O)\)（第 2.1 节推导过的那个量），写回显存。</li>
+  <li><b>生产者</b>先用 TMA 载入本线程块的 \(K_{j},V_{j}\)，然后依次把每一块 \(Q_{i}\)、\(dO_{i}\) 搬进环形缓冲。</li>
+  <li><b>消费者</b>对每一块 \(Q_{i}\)：用 SS-GEMM 重算 \(S=Q_{i}K_{j}^{\top}\)，用 SS-GEMM 算 \(dP=dO_{i}V_{j}^{\top}\)；用存下的 \(L_{i}\) 得到 \(P=\exp(S-L_{i})\)，再算 \(dS=P\circ(dP-D_{i})\)；用 RS-GEMM 累加 \(dV_{j}\mathrel{+}=P^{\top}dO_{i}\) 和 \(dK_{j}\mathrel{+}=dS^{\top}Q_{i}\)；最后用 SS-GEMM 算出这一块对 \(dQ_{i}\) 的贡献 \(dS\,K_{j}\)，写进共享内存，通知 dQ 写回 warp。</li>
+  <li><b>dQ 写回 warp</b>等到这份局部的 \(dQ\) 准备好，就借助信号量把它原子地加到显存里的 \(dQ_{i}\) 上。</li>
+</ul>
+<p>把原子加交给单独的 warp，好处是写回时的争抢和等待不会挡住其他 warp 去做下一个矩阵乘。一次迭代里正好是第 2.1 节数过的五个矩阵乘。</p>
+<div class="note-warn"><b>注意范围：</b>论文的反向只有 FP16/BF16 版本，没有 FP8 反向；附录 B.1 也没有为反向单独做消融。官方 README 写的发布范围同样是“FP16 / BF16 的前向和反向，FP8 的前向”。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2407.08608v2#A2" target="_blank" rel="noopener">附录 B ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 实验：快了多少，准了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FlashAttention-3 比 FlashAttention-2、Triton 版和 NVIDIA 闭源的 cuDNN 实现快多少？在哪些头维、序列长度、有无因果掩码的设置下快，在哪些设置下不快？warp 专业化和两级流水各贡献了多少？FP8 版本的误差到底降了多少，是在什么数据上测的？最后用“结果的份量”一小节，把这些数字放回它们的测量条件里。这一节对应论文 §4 和附录 C。</div>
+
+<h4 id="n-4-1">4.1 实验设置：和谁比，TFLOPs/s 怎么算</h4>
+<p>FlashAttention-3 用 CUTLASS 库提供的 WGMMA、TMA 等底层抽象实现。所有测速都在一张 H100 80GB SXM5（700 W 版）上进行，GPU 时钟固定在 1830 MHz，也就是计算 989 TFLOPs/s 理论峰值时用的频率；每个测试重复 100 次取平均。软件版本是论文写作时（2024 年 5 月）的最新版：CUDA 12.3、cuDNN 9.1.1.17、CUTLASS 3.5、FlashAttention 2.5.8、Triton nightly 3.0.0、PyTorch 2.3.0。</p>
+<p>对比的对象有四个：</p>
+<ul>
+  <li><b>标准注意力</b>：PyTorch 里把 \(S\)、\(P\) 写进显存的普通实现。</li>
+  <li><b>FlashAttention-2</b>：官方 CUDA 实现（2.5.8 版），用的是 Ampere 指令。</li>
+  <li><b>Triton</b>：用 Triton 语言写的 FlashAttention-2，论文说明它用到了 H100 专用的指令。</li>
+  <li><b>cuDNN</b>：NVIDIA 闭源库里为 H100 优化过的 FlashAttention-2 式实现，是最强的对手。</li>
+</ul>
+<p>测试设置：序列长度取 512、1k、2k、4k、8k、16k，批大小随之调整，使总 token 数固定为 16k；模型隐藏维度固定为 2048，头维取 64、128 或 256，对应 32、16 或 8 个注意力头；分别测有无因果掩码。速度用 TFLOPs/s 表示，其中运算量按公式计算：</p>
+<div class="formula">$$\text{前向 FLOPs}=4\cdot\text{seqlen}^{2}\cdot\text{头维}\cdot\text{头数}\qquad(\text{每个样本；有因果掩码时除以 2，反向乘以 2.5})$$</div>
+<p>系数 4 来自两个矩阵乘，每个矩阵乘做 \(2\cdot\text{seqlen}^{2}\cdot\text{头维}\) 次浮点运算（乘和加各算一次）。因果掩码下大约只算一半的分数，所以除以 2。反向乘 2.5 的理由在第 2.1 节讲过：前向 2 个矩阵乘，反向 5 个。拿消融实验的设置验算一遍（推算）：批 4、序列 8448、16 个头、头维 128，前向运算量是 \(4\times8448^{2}\times128\times16\times4\approx2.34\times10^{12}\) 次，论文表 2 测得 3.538 ms，相除正好是 661 TFLOPs/s。</p>
+<div class="note-warn"><b>这个指标要这样理解：</b>TFLOPs/s 是“按公式算出的运算量 ÷ 实测时间”，不是硬件实际执行的运算次数。所有实现用同一个公式，所以在同一设置下横向比较是公平的；但它不计入 softmax 的指数运算，也不计入因果掩码下对角线块里多算又被掩掉的那部分。不同论文如果用的公式不同（例如因果时不除以 2），数字不能直接放在一起比。</div>
+
+<h4 id="n-4-2">4.2 FP16 前向：比 FlashAttention-2 快 1.5–2 倍，长序列超过 cuDNN</h4>
+<figure class="paper-fig"><div class="imgs"><img src="flashattention-3/fig/flash3_h100_causal_False_hdim_64_fwd_speed.svg" alt="原文图 5(a)：前向，无因果掩码，头维 64" loading="lazy"><img src="flashattention-3/fig/flash3_h100_causal_False_hdim_128_fwd_speed.svg" alt="原文图 5(c)：前向，无因果掩码，头维 128" loading="lazy"><img src="flashattention-3/fig/flash3_h100_causal_False_hdim_256_fwd_speed.svg" alt="原文图 5(e)：前向，无因果掩码，头维 256" loading="lazy"></div>
+<figcaption><b>原文图 5(a)(c)(e)：无因果掩码的 FP16/BF16 前向。怎么看：</b>三张图分别是头维 64、128、256。横轴是序列长度，纵轴是 TFLOPs/s，柱子上标着具体数值。蓝色是标准注意力（16k 时显存不够，标 OOM），橙色 FlashAttention-2，绿色 Triton，红色 cuDNN，紫色 FlashAttention-3（头维 256 只比了 FlashAttention-2、cuDNN 和 FlashAttention-3）。先看紫色和橙色的差距：序列越长差距越大，16k 时分别是 497 对 324、648 对 370、756 对 326。再看紫色和红色：头维 64 和 256 时紫色几乎处处领先；头维 128 时，序列 512 和 1k 处红色略高（497 对 467，574 对 565），2k 起紫色反超。注意头维 256 那张图里 1k 处的紫色柱子被图例挡住了顶端，PDF 版标注的数值是 627。</figcaption></figure>
+<figure class="paper-fig"><div class="imgs"><img src="flashattention-3/fig/flash3_h100_causal_True_hdim_64_fwd_speed.svg" alt="原文图 5(b)：前向，有因果掩码，头维 64" loading="lazy"><img src="flashattention-3/fig/flash3_h100_causal_True_hdim_128_fwd_speed.svg" alt="原文图 5(d)：前向，有因果掩码，头维 128" loading="lazy"><img src="flashattention-3/fig/flash3_h100_causal_True_hdim_256_fwd_speed.svg" alt="原文图 5(f)：前向，有因果掩码，头维 256" loading="lazy"></div>
+<figcaption><b>原文图 5(b)(d)(f)：有因果掩码的 FP16/BF16 前向。怎么看：</b>画法同上。有因果掩码时各实现都比无掩码时慢，短序列时尤其明显。序列 512 处 cuDNN 在三个头维上都领先（225 对 197、315 对 292、308 对 286），1k 起 FlashAttention-3 反超，16k 时三个头维分别是 473、616、642，对应 FlashAttention-2 的 299、335、298。</figcaption></figure>
+<p>论文的总结是：前向比 FlashAttention-2 快约 1.5–2.0 倍，比标准注意力快 3–16 倍；对 1k 及以上的中长序列，FlashAttention-3 甚至超过了为 H100 专门优化、闭源的 cuDNN。从图上读出的数字看，这个总结大体成立，但有两处需要补充。第一，提速倍数和头维关系很大：16k、无掩码时，头维 64 是 1.53 倍，头维 128 是 1.75 倍，头维 256 是 2.32 倍（推算），最后一个超出了论文说的 2.0 倍上限。第二，“1k 起超过 cuDNN”在头维 128、无掩码的 1k 处并不成立（565 对 574），差距很小，但说明在短序列上两者大致打平。</p>
+<p>头维 64 的绝对速度最低（最高 497 TFLOPs/s，约为峰值的 50%，推算），这和第 3.2 节的估算吻合：头维 64 时，指数运算的理论耗时和矩阵乘一样长，即使藏得再好，指数单元本身也接近满负荷，Tensor Core 很难跑满。头维 256 时指数只占矩阵乘的四分之一，于是能跑到 756 TFLOPs/s，约 76% 的峰值（推算）。论文正文写的“最高 740 TFLOPs/s、75%”比图 5(e) 的最高柱子（756）略低，论文没有解释原因，可能是正文和图来自不同时间的测量；差别很小，不影响结论。</p>
+
+<h4 id="n-4-3">4.3 反向：快 1.5–1.75 倍</h4>
+<figure class="paper-fig"><div class="imgs"><img src="flashattention-3/fig/flash3_h100_causal_False_hdim_64_bwd_speed.svg" alt="原文图 6(a)：反向，无因果掩码，头维 64" loading="lazy"><img src="flashattention-3/fig/flash3_h100_causal_False_hdim_128_bwd_speed.svg" alt="原文图 6(b)：反向，无因果掩码，头维 128" loading="lazy"></div>
+<figcaption><b>原文图 6：FP16/BF16 反向。怎么看：</b>只有无因果掩码、头维 64 和 128 两种设置，颜色同图 5（没有 Triton）。紫色 FlashAttention-3 在所有长度上都最高：头维 128 时从 512 的 316 涨到 16k 的 561 TFLOPs/s，对应 FlashAttention-2 的 214 和 322、cuDNN 的 305 和 516。头维 64 时 16k 处是 474，对比 FlashAttention-2 的 291 和 cuDNN 的 433。</figcaption></figure>
+<p>反向比 FlashAttention-2 快 1.5–1.75 倍（论文）。从图上算，头维 128 时从 512 的 1.48 倍到 8k 的 1.76 倍，头维 64 时从 1.37 倍到 1.64 倍（推算），短序列时略低于论文给的区间。反向的最高速度 561 TFLOPs/s 约为峰值的 57%（推算），明显低于前向，因为反向每次迭代有五个矩阵乘、更多的中间量要放在寄存器和共享内存里，还要做 \(dQ\) 的原子累加。论文没有给出有因果掩码或头维 256 的反向结果。</p>
+
+<h4 id="n-4-4">4.4 FP8 前向：接近 1.2 PFLOPs/s，和 cuDNN 互有胜负</h4>
+<div class="note-pre"><b>先补一点背景：波次量化和持久化内核。</b>
+<p>GPU 一次能同时运行的线程块数量有限。如果一个内核有 133 个线程块，而 132 个 SM 每个只能放一个，就会先跑完 132 个，再单独跑剩下那 1 个，第二轮里 131 个 SM 空着。这种因为任务数不是 SM 数的整数倍而浪费的现象叫<b>波次量化</b>（wave quantization）。所以 FP8 的测试特意把 4k 以上的序列长度取成 132 的倍数：4224、8448、16896。</p>
+<p><b>持久化内核</b>（persistent kernel）是另一种对策：只启动和 SM 数量一样多的线程块，每个线程块用一个循环不断领取新的分块任务。这样不仅能平衡负载（因果掩码下不同查询块的工作量差别很大），还能让一个任务的收尾（写回输出）和下一个任务的开头（载入 \(Q\)）重叠，让 Tensor Core 少停顿。论文脚注 10 说，测速时 FP16 版本已经用上了持久化内核和负载均衡，FP8 版本还没有。</p>
+</div>
+<figure class="paper-fig"><div class="imgs"><img src="flashattention-3/fig/flash3_h100_fp8_causal_False_hdim_256_fwd_speed.svg" alt="原文图 7(a)：FP8 前向，无因果掩码，头维 256" loading="lazy"><img src="flashattention-3/fig/flash3_h100_fp8_causal_True_hdim_256_fwd_speed.svg" alt="原文图 7(b)：FP8 前向，有因果掩码，头维 256" loading="lazy"></div>
+<figcaption><b>原文图 7：FP8 前向，头维 256。怎么看：</b>纵轴刻度到 1200 TFLOPs/s；绿色 Triton，红色 cuDNN，紫色 FlashAttention-3（FP8 下没有 FlashAttention-2 的对照）。左图无掩码：短序列时 cuDNN 明显更快（512 处 686 对 510），8k 起 FlashAttention-3 反超，16k 时 1171 对 1139，这就是摘要里“接近 1.2 PFLOPs/s”的来源。右图有因果掩码：只有 512 和 1k 处 FlashAttention-3 领先，2k 起 cuDNN 一直领先，16k 时 1099 对 1024。</figcaption></figure>
+<figure class="paper-fig"><div class="imgs"><img src="flashattention-3/fig/flash3_h100_fp8_causal_False_hdim_64_fwd_speed.svg" alt="原文图 9(a)：FP8 前向，无因果掩码，头维 64" loading="lazy"><img src="flashattention-3/fig/flash3_h100_fp8_causal_True_hdim_64_fwd_speed.svg" alt="原文图 9(b)：FP8 前向，有因果掩码，头维 64" loading="lazy"><img src="flashattention-3/fig/flash3_h100_fp8_causal_False_hdim_128_fwd_speed.svg" alt="原文图 9(c)：FP8 前向，无因果掩码，头维 128" loading="lazy"><img src="flashattention-3/fig/flash3_h100_fp8_causal_True_hdim_128_fwd_speed.svg" alt="原文图 9(d)：FP8 前向，有因果掩码，头维 128" loading="lazy"></div>
+<figcaption><b>原文图 9（附录 C.2）：FP8 前向，头维 64 和 128。怎么看：</b>前两张是头维 64（无掩码、有掩码），后两张是头维 128（无掩码、有掩码）。头维 64 时 FlashAttention-3 从 4k 起大幅领先 cuDNN（16k 无掩码 613 对 438）；头维 128 无掩码时两者在长序列上基本打平（16k 处 1008 对 1003），短序列 cuDNN 领先很多（512 处 617 对 348）；头维 128 有掩码时 cuDNN 在长序列上领先（16k 处 922 对 881）。</figcaption></figure>
+<p>这些结果和论文脚注 2 的说法一致：头维 64 时 FP8 版本领先 cuDNN；头维 128 和 256 时，无因果掩码基本打平，有因果掩码则落后。论文把短序列和因果掩码下的落后部分归因于 FP8 版本还没有持久化内核和负载均衡（脚注 10）。</p>
+<p>FP8 相对于 FP16 快了多少？取最长序列、无掩码的 FlashAttention-3 对比（推算，序列长度 16896 对 16k，略有出入）：头维 256 是 1171 对 756，约 1.55 倍；头维 128 是 1008 对 648，约 1.56 倍；头维 64 是 613 对 497，只有约 1.23 倍。Tensor Core 的 FP8 吞吐是 FP16 的 2 倍，实测没有翻倍，主要原因还是第 3.2 节的那笔账：矩阵乘变快了一倍，指数运算却没有变快，头维 128 时指数的理论耗时已经和矩阵乘相当；再加上 \(V\) 的转置、寄存器重排这些 FP16 没有的额外工作。按 FP8 理论峰值（FP16 的 2 倍，约 1979 TFLOPs/s，推算）算，1171 TFLOPs/s 约为 59%。</p>
+
+<h4 id="n-4-5">4.5 消融：warp 专业化和两级流水各贡献多少</h4>
+<p>论文固定一个设置做消融：无因果掩码的 FP16 前向，批 4、序列 8448、16 个头、头维 128。分别去掉两级 GEMM–softmax 流水或 warp 专业化中的一项（论文表 2）：</p>
+<div class="dia">
+  <div class="dia-title">论文表 2 的数字，画成和理论峰值 989 TFLOPs/s 的对比（占峰值比例为推算）</div>
+  <div class="dia-row"><span class="lbl">有两级流水，无 warp 专业化</span><div class="dia-track"><span class="dia-seg kv" style="flex:570">570 TFLOPs/s · 4.105 ms · 58%</span><span class="dia-seg oth" style="flex:419"></span></div></div>
+  <div class="dia-row"><span class="lbl">有 warp 专业化，无两级流水</span><div class="dia-track"><span class="dia-seg kv" style="flex:582">582 TFLOPs/s · 4.021 ms · 59%</span><span class="dia-seg oth" style="flex:407"></span></div></div>
+  <div class="dia-row"><span class="lbl">两者都有（FlashAttention-3）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:661">661 TFLOPs/s · 3.538 ms · 67%</span><span class="dia-seg oth" style="flex:328"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每一行的整条长度代表 989 TFLOPs/s 的理论峰值，彩色部分是实测速度。只保留任何一项时都在 570–582 TFLOPs/s，两项同时使用时到 661 TFLOPs/s，相对两个单项版本分别快约 16% 和 14%（推算）。本站根据论文表 2 重画。</div>
+</div>
+<p>论文据此说明，异步（warp 专业化）和 GEMM–softmax 重叠两项改进都带来了显著的提速，合起来从 570 提升到 661 TFLOPs/s。这里的 570 恰好也是第 3.2 节里加乒乓调度之前的数字。</p>
+<div class="note-warn"><b>消融的范围很窄：</b>表 2 只有一个设置（头维 128、序列 8448、无掩码、FP16 前向），而且只有三行，没有“两者都去掉”的那一行，也没有单独去掉乒乓调度的对照（乒乓调度的效果只在第 3.1 节正文里顺带提了一句 570 → 620–640）。所以它能说明“两项改进叠加有用”，但不能精确拆分每一项在其他头维、因果掩码、FP8 或反向下贡献多少。</div>
+
+<h4 id="n-4-6">4.6 数值误差：FP16 和 FlashAttention-2 一样准，FP8 比基线准 2.6 倍</h4>
+<p>已经有研究专门讨论过 FlashAttention 的数值误差（论文引用了 “Is flash attention stable?”）。作者比较了 FlashAttention-2、FlashAttention-3 和标准注意力，以 FP64 精度的实现作为参考答案。为了模拟大模型中的离群特征，\(Q,K,V\) 的每个元素按下面的分布生成：</p>
+<div class="formula">$$\mathcal{N}(0,1)+\mathcal{N}(0,100)\cdot\mathrm{Bernoulli}(0.001)$$</div>
+<p>意思是每个元素先取一个标准正态数，再以 0.1% 的概率额外加上一个标准差为 10 的正态数。这样大多数元素在 ±3 以内，少数元素可以到几十。误差用均方根误差（RMSE）衡量，结果见论文表 3：</p>
+<div class="table-wrap"><table>
+  <tr><th>精度</th><th>方法</th><th class="num">RMSE</th></tr>
+  <tr><td rowspan="3">FP16</td><td>标准注意力</td><td class="num">3.2e-4</td></tr>
+  <tr><td>FlashAttention-2</td><td class="num">1.9e-4</td></tr>
+  <tr><td>FlashAttention-3</td><td class="num">1.9e-4</td></tr>
+  <tr><td rowspan="4">FP8（E4M3）</td><td>基线 FP8 注意力（逐张量缩放）</td><td class="num">2.4e-2</td></tr>
+  <tr class="hl"><td>FlashAttention-3（块量化 + 非相干处理）</td><td class="num">9.1e-3</td></tr>
+  <tr><td>FlashAttention-3，去掉块量化</td><td class="num">9.3e-3</td></tr>
+  <tr><td>FlashAttention-3，去掉非相干处理</td><td class="num">2.4e-2</td></tr>
+</table></div>
+<p>先看 FP16。FlashAttention-2 和 FlashAttention-3 的误差都是 1.9e-4，比标准实现的 3.2e-4 低约 1.7 倍。原因是 FlashAttention 把 softmax 的中间结果（包括重缩放）都放在 FP32 寄存器里，而标准实现会把 \(S\)、\(P\) 以 FP16 写进显存再读回来，多了几次舍入。这说明 FlashAttention-3 的种种异步改造没有损失精度，结果和 FlashAttention-2 一样。</p>
+<p>再看 FP8。基线 FP8 注意力用逐张量缩放，矩阵乘在 FP32 里累加，softmax 的中间结果保存为 FP16。FlashAttention-3 的 FP8 版本误差是 9.1e-3，比基线的 2.4e-2 低约 2.6 倍。两行消融把功劳分得很清楚：去掉块量化，误差只从 9.1e-3 变成 9.3e-3；去掉非相干处理，误差回到和基线一样的 2.4e-2。在这组测试数据上，误差的下降几乎全部来自非相干处理。</p>
+<div class="note-warn"><b>这个“2.6 倍”要这样读：</b>
+<ul>
+  <li>测试数据是人为生成的高斯分布加随机离群值，离群值出现在随机位置；真实大模型里的离群值往往集中在固定的几个通道上，分布不同，两种技术各自的贡献也可能不同。</li>
+  <li>它衡量的是单个注意力算子输出的 RMSE，论文没有用 FP8 注意力训练或推理一个真实模型，也没有报告下游任务的精度变化。论文在第 5 节把“低精度注意力对大规模训练的影响”列为未来工作。</li>
+  <li>即使准了 2.6 倍，FP8 的误差（9.1e-3）仍比 FP16（1.9e-4）大约 48 倍（推算）。</li>
+  <li>本站补充：DeepSeek-V3 的技术报告发现 Hopper 的 FP8 矩阵乘在 Tensor Core 内部累加时只保留约 14 位精度（见 <a href="deepseek-v3.html#n-5-2">DeepSeek-V3 精读页</a>）。注意力里每次累加的长度是头维或 \(B_{c}\)（几十到两百多），比训练中上千维的矩阵乘短得多，影响应该较小，但 FlashAttention-3 论文没有单独分析这一点。</li>
+</ul></div>
+
+<h4 id="n-4-7">4.7 结果的份量</h4>
+<p>把上面的数字放回测量条件里，可以这样看待它们：</p>
+<ul>
+  <li><b>对手选得怎么样。</b>FlashAttention-2（2.5.8 版）是当时最新的官方实现，但它用的是 Ampere 指令，没有为 Hopper 调过；拿它做主要对照，1.5–2.0 倍的提速里有相当一部分是“换用 Hopper 指令”本身带来的。更有说服力的对照是 cuDNN 9.1.1.17：它是 NVIDIA 为 H100 专门优化的闭源实现，在 2024 年 5 月可以算最强的对手。对它，FlashAttention-3 的 FP16 前向和反向在中长序列上领先，短序列上互有胜负；FP8 前向则整体上不比它强。Triton 版用了 Hopper 指令，FP16 前向比 FlashAttention-2 快一些（16k、无掩码时头维 64 为 403 对 324，头维 128 为 395 对 370），但离 FlashAttention-3 还很远，说明光换指令不够，还要重新编排执行顺序。</li>
+  <li><b>硬件条件。</b>只测了一张 H100 SXM5，而且把时钟锁在 1830 MHz。锁频让测量稳定，也让“占峰值的比例”可以直接算；实际部署时 GPU 会随功耗和温度调频，长时间满负荷运行的速度可能低于图上的数字（本站提醒）。H100 PCIe、H800、H20 等型号的 SM 数、频率或带宽不同，结果会变；Hopper 之前的 GPU 没有 TMA 和 WGMMA，根本跑不了这套内核；Blackwell 需要重新设计（见“后来怎么样了”）。</li>
+  <li><b>指标和设置。</b>所有数字都是单个注意力算子的速度，不是端到端训练或推理的速度；总 token 数固定为 16k，隐藏维度 2048，属于训练和长上下文预填充的典型形状。解码阶段每次只有一个或几个查询 token，瓶颈在读 KV 缓存的显存带宽，论文 arXiv 版没有测这种情况，并把“为推理优化”列为未来工作（NeurIPS 版补了附录，见第 6 节）。</li>
+  <li><b>占峰值多少。</b>摘要里的“75%”只在头维 256 时达到；最常用的头维 128 是约 65%，头维 64 约 50%；反向最高约 57%；FP8 最高约 59%（均为推算，见下表）。</li>
+  <li><b>误差。</b>FP16 版本没有精度代价；FP8 版本的“误差低 2.6 倍”是相对逐张量量化的基线，测试数据是合成的，没有真实模型上的精度评估。</li>
+</ul>
+<div class="table-wrap"><table>
+  <tr><th>设置（最长序列）</th><th class="num">FlashAttention-2</th><th class="num">cuDNN</th><th class="num">FlashAttention-3</th><th class="num">FA3 ÷ FA2</th><th class="num">FA3 占峰值</th></tr>
+  <tr><td>FP16 前向，无掩码，头维 64</td><td class="num">324</td><td class="num">413</td><td class="num">497</td><td class="num">1.53</td><td class="num">50%</td></tr>
+  <tr><td>FP16 前向，无掩码，头维 128</td><td class="num">370</td><td class="num">595</td><td class="num">648</td><td class="num">1.75</td><td class="num">66%</td></tr>
+  <tr><td>FP16 前向，无掩码，头维 256</td><td class="num">326</td><td class="num">581</td><td class="num">756</td><td class="num">2.32</td><td class="num">76%</td></tr>
+  <tr><td>FP16 前向，因果，头维 128</td><td class="num">335</td><td class="num">539</td><td class="num">616</td><td class="num">1.84</td><td class="num">62%</td></tr>
+  <tr><td>FP16 反向，无掩码，头维 128</td><td class="num">322</td><td class="num">516</td><td class="num">561</td><td class="num">1.74</td><td class="num">57%</td></tr>
+  <tr><td>FP8 前向，无掩码，头维 256</td><td class="num">—</td><td class="num">1139</td><td class="num">1171</td><td class="num">—</td><td class="num">59%</td></tr>
+  <tr><td>FP8 前向，因果，头维 128</td><td class="num">—</td><td class="num">922</td><td class="num">881</td><td class="num">—</td><td class="num">45%</td></tr>
+</table></div>
+<p class="w-note">单位 TFLOPs/s，读自论文图 5、6、7、9（arXiv v2）；FP16 行的序列长度是 16k，FP8 行是 16896。最后两列是本站推算：FP16 峰值按 989 TFLOPs/s，FP8 峰值按其 2 倍约 1979 TFLOPs/s。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2407.08608v2#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 讨论、局限、结论与相关工作</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者自己怎么总结这项工作，承认了哪些没做完的地方？这项工作在注意力相关的研究版图里处在什么位置，和近似注意力、MQA/GQA/MLA、分布式注意力、替代架构、低精度量化这些方向是什么关系？这一节对应论文 §5 和附录 A。</div>
+<p>作者的结论是：异步执行和低精度这类新的编程技术与硬件特性，能对注意力的效率和精度产生很大的影响。FlashAttention-3 比 FlashAttention-2 快 1.5–2.0 倍，FP8 版本的误差比标准的逐张量量化低 2.6 倍。论文列出三项局限，作为未来工作：</p>
+<ul>
+  <li><b>为大模型推理优化。</b>本文的测速都是训练和预填充式的形状，没有针对解码阶段（每次只有很少几个查询 token）做优化。</li>
+  <li><b>给 FP8 内核加上持久化内核设计。</b>这正是第 4.4 节 FP8 在短序列和因果掩码下落后于 cuDNN 的部分原因。</li>
+  <li><b>弄清低精度注意力在大规模训练中的影响。</b>论文只测了单个算子的数值误差。</li>
+</ul>
+<p>作者还认为，虽然论文只针对 Hopper，这些技术应该也适用于其他具备足够异步执行和低精度能力的加速器（论文脚注 1 有同样的说法）。</p>
+<p><b>相关工作（附录 A）</b>分成四块，读起来能看出 FlashAttention-3 的定位：</p>
+<ul>
+  <li><b>近似注意力和注意力变体。</b>稀疏注意力只算一部分分数（固定模式、滑动窗口、哈希、路由），低秩方法假设注意力矩阵低秩（核函数、随机投影），两者也可以结合。它们通常达不到标准注意力的模型质量，所以大多数大规模模型没有采用。多查询注意力（MQA）、分组查询注意力（GQA）和 DeepSeek-V2 的多头潜在注意力（MLA）是为了缩小 KV 缓存，但它们改变的只是 \(Q,K,V\) 怎么得到，核心计算 \(\mathrm{softmax}(QK^{\top})V\) 没变，所以对标准注意力的任何加速都能直接惠及它们。Ring Attention 等分布式方法能把上下文扩展到上百万 token，它们以 FlashAttention 为基本算子，同样受益。</li>
+  <li><b>替代架构。</b>RWKV、H3、MEGA、RetNet、Mamba、xLSTM 等从线性注意力和 RNN 的联系出发，用更复杂的递推代替注意力。但 Jamba、Zamba、Megalodon、Mamba2-hybrid 这类中大型模型为了质量仍保留了很多注意力层，所以加速注意力对它们也有用。</li>
+  <li><b>低精度注意力。</b>之前的量化工作主要是为推理压缩 KV 缓存，例如 KVQuant 和 KIVI 表明 KV 缓存可以压到 4、3 甚至 2 位。本文借用的是 QuIP 和 QuIP# 里的非相干处理。论文也指出，训练中的量化仍然困难，因为训练稳定通常需要更高精度。</li>
+  <li><b>硬件感知的算法。</b>本文属于针对具体微架构的调优：用新指令、采用原生异步的编程模型。另一个方向的例子是 LeanAttention，它针对解码阶段 GPU 占用率低、显存带宽压力大的问题，借鉴 Stream-K 的负载均衡思路。针对特定硬件优化矩阵乘的大量文献，也用到了很多相同的技术。</li>
+</ul>
+<div class="note-warn"><b>容易忽略的一点：</b>FlashAttention-3 对“近似注意力”和“替代架构”的态度是互补而不是竞争：它不改变计算结果，所以任何仍在使用 softmax 注意力的模型，不管是 GQA、MLA 还是混合架构里的注意力层，换上它都不需要重新训练。这也是它能被推理引擎和训练框架直接采用的前提。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.08608v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2407.08608v2#A1" target="_blank" rel="noopener">附录 A ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 NeurIPS 正式版：数字更新与新增的附录</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这篇论文的 arXiv 版（v2，2024-07）和 NeurIPS 2024 正式版的数字不一样，引用时该用哪个？正式版多了哪些内容，尤其是 arXiv 版列为局限的推理优化，后来补上了什么？本页前面各节以 arXiv v2 为准，因为只有它以 CC BY 4.0 发布、可以使用原图；这一节对照 NeurIPS 会议论文集里的 PDF 补充差别。</div>
+<p><b>数字和环境的变化。</b>正式版摘要改为：BF16 最高 840 TFLOPs/s（峰值的 85%），FP8 达到 1.3 PFLOPs/s；引言里矩阵乘内核的利用率写作 80–85%（arXiv 版是 80–90%）；对 cuDNN 的 FP8 比较改为“长序列上持平”。测速改用 BF16 输入，软件环境更新到 2024 年 10 月的版本：CUDA 12.3、cuDNN 9.5.0.50、CUTLASS 3.6、FlashAttention 2.6.3、Triton 3.1、PyTorch 2.5.0；每个测试重复 10 次取平均；FP8 的序列长度改成 512 到 16384 的 2 的幂。消融（表 2）和数值误差（表 3）的数字没有变。由于对手的版本也一起更新了，两版各自内部的比较都是公平的，但两版之间的绝对数字不能混用。引用峰值时，应注明是 arXiv 版的 740 TFLOPs/s（FP16）还是正式版的 840 TFLOPs/s（BF16）。</p>
+<p><b>新增的附录。</b>正式版把附录从 B.3 扩展到 B.9，补充了很多工程细节：</p>
+<ul>
+  <li><b>B.4 变长序列。</b>TMA 处理变长序列需要改写张量映射，开销大，所以载入 \(Q\) 时总是按整块读，越界的行由 TMA 填零、再由掩码去掉；固定长度时用大小为 2 的线程块簇做 TMA 多播（两个线程块合读同一份 \(K,V\)），变长时不能用，性能约下降 2%。</li>
+  <li><b>B.5 掩码。</b>掩码运算很贵，只在必要的块上做：因果和变长只处理最后一个 \(K\) 块，局部（滑动窗口）注意力只处理开头和结尾的几个块。</li>
+  <li><b>B.6 持久化内核。</b>启动和 SM 数一样多的线程块（H100 SXM5 上是 132 个），由调度器分配分块任务，让一个任务的收尾和下一个任务的开头重叠。</li>
+  <li><b>B.7、B.8 FP8 的寄存器交换和 \(V\) 的转置。</b>给出了用 <code>__byte_perm</code> 和 <code>__shfl_sync</code> 交换寄存器的代码，以及 LDSM/STSM 加字节重排的转置代码，并写出了第 3.4 节用到的等式：\(PV=\mathrm{colperm}_{\sigma}(P)\cdot\mathrm{rowperm}_{\sigma}(V)\)。</li>
+  <li><b>B.9 推理。</b>解码时查询只有一个或几个 token，注意力变成受显存带宽限制，要比的是读 KV 缓存的速度而不是 Tensor Core 利用率；而且只按查询长度并行会缺少并行度。正式版为此加了两项改动：<b>Split-KV</b>（即 Flash-Decoding），沿 KV 序列切成几段，由不同线程块分别算出部分输出和 log-sum-exp，再用一个规约内核合并；<b>GQA 打包</b>，把共享同一个 KV 头的多个查询头打包进同一个 \(Q\) 块，利用 WGMMA 每个 warpgroup 64 行的宽度，最多能快到 GQA 比例那么多倍。此外还有 Kai Londenberg 贡献的 PagedAttention 支持：新写了一种让 TMA 按块表做地址转换的加载操作。块表和分页的概念见 <a href="vllm.html#n-4">vLLM 精读页第 4 节</a>。</li>
+</ul>
+<p>正式版的局限一节也相应删去了“给 FP8 内核加持久化设计”这一条，只保留“为推理优化”和“低精度注意力对大规模训练的影响”。</p>
+<div class="note-warn"><b>引用时注意：</b>网上很多介绍文章引用的是 arXiv 版的 740 TFLOPs/s 和“接近 1.2 PFLOPs/s”，也有的引用正式版的 840 TFLOPs/s 和 1.3 PFLOPs/s，两者都对，只是对应不同的软件环境和不同时间的代码。本站的 <a href="flashattention.html#n-9">FlashAttention 精读页</a>同时列出了两组数字。</div>
+<p class="note-links"><a href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/7ede97c3e082c6df10a8d6103a2eebd2-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2024 正式版 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">7 后来怎么样了</h3>
+<p><b>代码。</b>FlashAttention-3 以 beta 版的形式放在官方仓库的 <a href="https://github.com/Dao-AILab/flash-attention/tree/main/hopper" target="_blank" rel="noopener"><code>hopper/</code> 目录</a>里。截至 2026-10-20，官方 README 写的发布范围是 FP16/BF16 的前向与反向、FP8 的前向，要求 H100/H800 GPU 和 CUDA 12.3 以上（推荐 CUDA 12.8）。这个目录后来持续扩展，现在能看到分页 KV 缓存（<code>paged_kv.h</code>）、Split-KV 的合并内核（<code>flash_fwd_combine*</code>）、GQA 打包（<code>pack_gqa.h</code>）以及针对 MLA 解码的测速脚本（<code>benchmark_mla_decode.py</code>）等文件，也就是第 6 节说的推理方向的工作。</p>
+<p><b>被推理引擎和框架采用。</b>以下均为各项目官方文档在 2026-10-20 的说法：</p>
+<ul>
+  <li><b>vLLM</b>：注意力后端文档（v0.20.2）写明，FlashAttention 后端默认在 SM100 及以上（Blackwell）用 FA4，在 SM90（Hopper）用 FA3，其余用 FA2，可用 <code>--attention-config.flash_attn_version</code> 指定；表中 FA3 这一行支持 FP8 格式的 KV 缓存。vLLM 本身的 KV 缓存管理见 <a href="vllm.html">vLLM 精读页</a>。</li>
+  <li><b>SGLang</b>：注意力后端文档写明，在 H100、H200、H20 等 Hopper 机器上，CUDA 12.3 以上时 MHA 和 MLA 模型默认都用 <code>fa3</code> 后端。SGLang 的设计见 <a href="sglang.html">SGLang 精读页</a>。</li>
+  <li><b>PyTorch</b>：发布时 PyTorch 官方博客转发了 FlashAttention-3 的介绍。之后 PyTorch 在 <code>torch.nn.attention</code> 里加了可插拔的 flash attention 实现：2.11 及以后的文档中，<code>activate_flash_attention_impl</code> 接受 <code>"FA3"</code> 和 <code>"FA4"</code> 两个标识；默认仍是 FA2，需要用户主动开启。</li>
+  <li><b>Hugging Face Transformers</b>：<code>attn_implementation="flash_attention_3"</code> 是可选的注意力后端之一，另有分页版本 <code>"paged|flash_attention_3"</code>。</li>
+</ul>
+<p><b>FlashAttention-4：Blackwell 上，指数运算成了主角。</b>第 3.2 节的那笔账在下一代硬件上变得更尖锐。据本站的 <a href="../legacy/tracks/ai-infra/22-flash-attention-4.html">FlashAttention-4 拆解页</a>，Blackwell（B200）把每个 SM 每周期的 Tensor Core 吞吐从 4096 提到 8192 次浮点运算，而 MUFU 仍是每周期 16 次指数，共享内存读带宽也没变。按本页的推算方法，头维 128 时指数的理论耗时已经和矩阵乘一样长，相当于 Hopper 上的 FP8；FlashAttention-3 论文里“FP8 的情况更糟”这句话，在 Blackwell 上成了 BF16 的常态。FlashAttention-4（Zadouri、Hoehnerbach、Shah、Liu、Thakkar、Dao，arXiv 2026-03）沿用 FlashAttention-3 的 warp 专业化和异步流水，又加了新的手段：用 FMA 单元上的多项式近似分担一部分指数运算，有条件地跳过 softmax 的重缩放，在反向里利用 Blackwell 的张量内存（TMEM）和 2-CTA 矩阵乘减少共享内存流量。它在 B200 上的 BF16 前向最高 1613 TFLOPs/s（约 71% 峰值），比 cuDNN 9.13 最多快 1.3 倍；整个内核用嵌在 Python 里的 CuTe-DSL 编写。官方 README 现在把 FA4 描述为同时面向 Hopper 和 Blackwell。</p>
+<p><b>更好写的内核：ThunderKittens 和 FlexAttention。</b>FlashAttention-3 的代码建立在 CUTLASS 的 C++ 模板上，每支持一种新的注意力变体都要手写大量代码。论文引言里引用过的 <a href="https://arxiv.org/abs/2410.20399" target="_blank" rel="noopener">ThunderKittens</a>（斯坦福 Hazy Research，arXiv 2410.20399）提供以“块”为基本单位的 CUDA 编程抽象，目标是用更少、更清楚的代码写出高性能的 Hopper 内核。<a href="https://arxiv.org/abs/2412.05496" target="_blank" rel="noopener">FlexAttention</a>（PyTorch 团队，arXiv 2412.05496）让用户用几行 Python 写出对分数的修改和掩码规则，再由编译器生成融合的注意力内核；它的论文报告，在因果掩码下前向是 FlashAttention-2 的 1.00–1.22 倍。后来 PyTorch 博客《FlexAttention + FlashAttention-4: Fast and Flexible》介绍了一个基于 CuTe-DSL 的 FA4 后端，让 FlexAttention 在 Hopper 和 Blackwell 上也能用上 FlashAttention 式的手调内核。</p>
+<div class="dia">
+  <div class="dia-title">示意图：FlashAttention 四代的主线，以及每一代面对的瓶颈</div>
+  <div class="dia-flow"><span class="dia-box enc">FA1 · 2022-05<small>A100；瓶颈是显存读写；分块 + 在线 softmax + 反向重算</small></span><span class="dia-arrow">→</span><span class="dia-box enc">FA2 · 2023-07<small>A100；瓶颈是线程分工；沿序列并行、减少非矩阵乘运算</small></span><span class="dia-arrow">→</span><span class="dia-box pred">FA3 · 2024-07<small>H100；瓶颈是同步执行；warp 专业化、乒乓调度、两级流水、FP8</small></span><span class="dia-arrow">→</span><span class="dia-box enc">FA4 · 2026-03<small>B200；瓶颈是指数与共享内存；软件指数、条件重缩放、CuTe-DSL</small></span></div>
+  <div class="dia-flow"><span class="dia-box">ThunderKittens · 2024-10<small>块级 CUDA 抽象</small></span><span class="dia-box">FlexAttention · 2024-12<small>Python 写变体，编译成融合内核；后加 FA4 后端</small></span></div>
+  <div class="dia-note"><b>怎么看：</b>第一行按时间排列 FlashAttention 的四代（日期为 arXiv 首版），橙色是本页的论文；每个方框写了主要面向的 GPU、那一代面对的瓶颈和主要手段。可以看到算法的数学（在线 softmax）从第一代起就没变，后三代处理的都是“同一套计算在新硬件上卡在哪里”。第二行是两条降低内核编写成本的支线。本站示意图。</div>
+</div>
+<p>想看 FlashAttention 1–3 的可交互架构图和配套简答题，见<a href="../legacy/tracks/ai-infra/01-flash-attention.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及论文本身。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Jay Shah</b>（共同一作）<div class="aff">Colfax Research</div>与 Ganesh Bikshandi 合写了论文引用的 Colfax 技术博客《Delivering 1 PFLOP/s of Performance with FP8 FlashAttention-2》（2024），FP8 寄存器重排的早期做法就出自这篇博客。</div>
+  <div class="author-card"><b>Ganesh Bikshandi</b>（共同一作）<div class="aff">Colfax Research</div>同上；Colfax Research 发布过一系列 CUTLASS 与 Hopper 编程教程，论文引用了其中的矩阵转置教程。</div>
+  <div class="author-card"><b>Ying Zhang</b><div class="aff">Meta</div>论文致谢中，Meta 也为这项工作提供了算力。</div>
+  <div class="author-card senior"><b>Vijay Thakkar</b><div class="aff">NVIDIA；佐治亚理工学院</div>NVIDIA 开发者博客的作者介绍称他是高级计算架构师、CUTLASS 3 的主要作者；佐治亚理工学院 2025 年的研讨会介绍称他在该校兼读博士。也是 FlashAttention-4 的作者之一。</div>
+  <div class="author-card senior"><b>Pradeep Ramani</b><div class="aff">NVIDIA</div></div>
+  <div class="author-card senior"><b>Tri Dao</b><div class="aff">普林斯顿大学计算机系助理教授；Together AI 联合创始人兼首席科学家</div>FlashAttention 系列的主要作者（FlashAttention-2 为单独署名），也是 Mamba 的作者之一。详见 <a href="flashattention.html#authors">FlashAttention 精读页</a>。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：NeurIPS 2024，Spotlight 海报（<a href="https://neurips.cc/virtual/2024/poster/93328" target="_blank" rel="noopener">会议页面</a>）。</li>
+  <li><b>开源</b>：代码在 <a href="https://github.com/Dao-AILab/flash-attention" target="_blank" rel="noopener">Dao-AILab/flash-attention</a> 的 <code>hopper/</code> 目录，与 FA1、FA2、FA4 共用一个仓库；该仓库截至 2026-10-20 有 25,162 个 star、3,174 个 fork，BSD-3-Clause 许可。作者博客：<a href="https://tridao.me/blog/2024/flash3/" target="_blank" rel="noopener">tridao.me</a>；PyTorch 官方博客也发布了 <a href="https://pytorch.org/blog/flashattention-3/" target="_blank" rel="noopener">介绍文章</a>。</li>
+  <li><b>采用</b>：vLLM 和 SGLang 在 Hopper 上默认使用 FA3；PyTorch（2.11 起的文档）和 Hugging Face Transformers 提供 FA3 作为可选后端（见上一节，均为 2026-10-20 查看的官方文档）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="flashattention.html">FlashAttention</a>、<a href="quarot.html">QuaRot</a>、<a href="native-sparse-attention.html">NSA 原生稀疏注意力</a></li>
+  <li><a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 1 / 2 / 3 结构拆解</a>：可交互的前向流程图、三代对比、简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/22-flash-attention-4.html">FlashAttention-4 拆解</a>：Blackwell 上的瓶颈转移、软件指数与条件重缩放。</li>
+  <li><a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解</a>：E4M3 与 E5M2 的位布局、缩放因子。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>：roofline、预填充与解码的访存特性。</li>
+  <li><a href="../legacy/tracks/ai-infra/index.html">AI Infra 路线（旧版）</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2407.08608" target="_blank" rel="noopener">arXiv:2407.08608</a>（v2）；第 6 节对照的是 <a href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/7ede97c3e082c6df10a8d6103a2eebd2-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2024 正式版</a>。原文图 1、2、5、6、7、8、9 取自 arXiv v2（作者 Jay Shah、Ganesh Bikshandi、Ying Zhang、Vijay Thakkar、Pradeep Ramani、Tri Dao），以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布，未做修改；其余示意图为本站绘制。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

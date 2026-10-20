@@ -1540,21 +1540,20 @@ window.ATLAS_REGISTRY = {
       "org": "首尔大学 / FriendliAI；Sarathi-Serve：Microsoft Research India 等",
       "date": "2022-07",
       "venue": "OSDI 2022；Sarathi-Serve OSDI 2024",
-      "arxiv": "2403.02310",
       "links": [
         { "label": "Orca (OSDI ’22)", "url": "https://www.usenix.org/conference/osdi22/presentation/yu" },
         { "label": "Sarathi arXiv", "url": "https://arxiv.org/abs/2403.02310" },
         { "label": "Code", "url": "https://github.com/microsoft/sarathi-serve" }
       ],
       "page": "legacy/tracks/ai-infra/15-orca-sarathi.html",
-      "tldr": "Orca 把调度粒度从“请求”降到“一次前向迭代”（迭代级调度，即连续批处理），并用 selective batching 只对与序列长度无关的算子拼批：GPT-3 175B 上同延迟吞吐 36.9×。Sarathi-Serve 再把长 prompt 切成等大的块与 decode 拼进同一批（chunked prefill + 无停顿调度），消除 prefill 对 decode 的阻塞：服务容量比 vLLM 高 2.6–5.6×。",
+      "tldr": "Orca 把调度粒度从“请求”降到“一次前向迭代”（迭代级调度，即连续批处理），并用 selective batching 只对与序列长度无关的算子拼批：GPT-3 175B 上同延迟吞吐 36.9×。Sarathi-Serve 再把长 prompt 切成等大的块与 decode 拼进同一批（chunked prefill + 无停顿调度），消除 prefill 对 decode 的阻塞：服务容量比 vLLM 高 2.6–3.7×（Falcon-180B 流水并行下的 5.6× 是相对 Orca）。",
       "tags": ["调度", "连续批处理", "chunked prefill"],
       "facts": {
         "problem": "请求级批处理：短请求等长请求、新请求等整批；prefill 插入会卡住正在 decode 的请求",
         "level": "推理引擎调度器",
         "mechanism": "每次迭代重新组批（连续批处理）+ selective batching；chunked prefill + 按 token 预算的无停顿调度",
         "tradeoff": "每步都要调度（CPU 开销）；分块让前面块的 KV 被反复读取；块大小在 TBT 与吞吐间取舍",
-        "key_number": "Orca：同延迟吞吐 36.9×（GPT-3 175B）；Sarathi-Serve：Mistral-7B 2.6×、Yi-34B 3.7×、Falcon-180B（PP）5.6×",
+        "key_number": "Orca：同延迟吞吐 36.9×（GPT-3 175B）；Sarathi-Serve：Mistral-7B 2.6×、Yi-34B 3.7×、Falcon-180B（PP，严格 SLO）相对 vLLM 3.6×（摘要的 5.6× 是相对 Orca）",
         "systems": "vLLM / SGLang / TensorRT-LLM 的默认调度（连续批处理 + chunked prefill）"
       }
     },
@@ -1588,6 +1587,184 @@ window.ATLAS_REGISTRY = {
       }
     },
     {
+      "id": "sarathi-serve",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "Sarathi-Serve",
+      "full_title": "Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve",
+      "authors": ["Amey Agrawal", "Nitin Kedia", "Ashish Panwar", "Jayashree Mohan", "Nipun Kwatra", "Bhargav S. Gulavani", "Alexey Tumanov", "Ramachandran Ramjee"],
+      "date": "2024-03",
+      "org": "Georgia Tech / Microsoft Research India",
+      "venue": "OSDI 2024",
+      "arxiv": "2403.02310",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2403.02310" },
+        { "label": "Code", "url": "https://github.com/microsoft/sarathi-serve" }
+      ],
+      "page": "papers/sarathi-serve.html",
+      "reading": "papers/sarathi-serve.html",
+      "tldr": "当时的推理调度器要么优先 prefill（吞吐高，但新请求插进来会让正在生成的请求停顿），要么优先 decode（出字平稳但吞吐低）。Sarathi-Serve 把长 prompt 切成小块，每次迭代先放进所有 decode、再按固定的 token 预算捎带一块 prefill，在 P99 出字间隔的约束下，Mistral-7B 单卡的服务容量是 vLLM 调度的 2.6 倍、Yi-34B 两卡最高 3.7 倍，流水线并行的气泡也随之减少。"
+    },
+    {
+      "id": "flash-attention-3",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "kernels",
+      "title": "FlashAttention-3",
+      "full_title": "FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision",
+      "authors": ["Jay Shah", "Ganesh Bikshandi", "Ying Zhang", "Vijay Thakkar", "Pradeep Ramani", "Tri Dao"],
+      "date": "2024-07",
+      "org": "Colfax Research / Meta / NVIDIA / Georgia Tech / Princeton University / Together AI",
+      "venue": "NeurIPS 2024",
+      "arxiv": "2407.08608",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2407.08608" },
+        { "label": "Code", "url": "https://github.com/Dao-AILab/flash-attention" }
+      ],
+      "page": "papers/flashattention-3.html",
+      "reading": "papers/flashattention-3.html",
+      "tldr": "FlashAttention-3 为 H100 重写注意力内核：一部分线程用 TMA 专门搬数据，另一部分用异步的 Tensor Core 计算，并让 softmax 的指数运算藏在矩阵乘背后，FP16 前向因此比 FlashAttention-2 快 1.5–2 倍（最高约 75% 峰值）。它还支持 FP8，用块量化和 Hadamard 旋转把 FP8 注意力的误差降到逐张量量化基线的约 1/2.6。"
+    },
+    {
+      "id": "medusa",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "Medusa",
+      "full_title": "Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads",
+      "authors": ["Tianle Cai", "Yuhong Li", "Zhengyang Geng", "Hongwu Peng", "Jason D. Lee", "Deming Chen", "Tri Dao"],
+      "date": "2024-01",
+      "org": "Princeton University / Together AI / UIUC / CMU / University of Connecticut",
+      "venue": "ICML 2024",
+      "arxiv": "2401.10774",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2401.10774" },
+        { "label": "Code", "url": "https://github.com/FasterDecoding/Medusa" }
+      ],
+      "page": "papers/medusa.html",
+      "reading": "papers/medusa.html",
+      "tldr": "Medusa 在大模型最后一层隐状态上加几个小的解码头，一次前向同时猜出后面几个 token，再用树状注意力把多条候选一起验证，收下最长的合格前缀。批大小为 1、以 Hugging Face 实现为基线时，只训解码头比原模型快约 2.2 倍，连主干一起训快约 2.8 倍，但后者和“典型接受”都不再保证输出与原模型完全一致。"
+    },
+    {
+      "id": "snapkv",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "SnapKV",
+      "full_title": "SnapKV: LLM Knows What You are Looking for Before Generation",
+      "authors": ["Yuhong Li", "Yingbing Huang", "Bowen Yang", "Bharat Venkitesh", "Acyr Locatelli", "Hanchen Ye", "Tianle Cai", "Patrick Lewis", "Deming Chen"],
+      "date": "2024-04",
+      "org": "UIUC / Cohere / Princeton",
+      "venue": "NeurIPS 2024",
+      "arxiv": "2404.14469",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2404.14469" },
+        { "label": "Code", "url": "https://github.com/FasterDecoding/SnapKV" }
+      ],
+      "page": "papers/snapkv.html",
+      "reading": "papers/snapkv.html",
+      "tldr": "SnapKV 在预填充结束时让提示末尾的一小段 token（通常就是用户的问题）对前文投票，每个注意力头只保留得票最高、并用池化连成片的那部分 KV，不用训练就把长提示的 KV 缓存压到固定大小。论文报告 16K 输入时解码快约 3.6 倍、LongBench 上平均只掉 0.1–2 分，但这是按当前问题做的有损压缩，也不减少预填充的计算。"
+    },
+    {
+      "id": "kivi",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "KIVI",
+      "full_title": "KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache",
+      "authors": ["Zirui Liu", "Jiayi Yuan", "Hongye Jin", "Shaochen Zhong", "Zhaozhuo Xu", "Vladimir Braverman", "Beidi Chen", "Xia Hu"],
+      "date": "2024-02",
+      "org": "Rice University / Texas A&M University / Stevens Institute of Technology / Carnegie Mellon University",
+      "venue": "ICML 2024",
+      "arxiv": "2402.02750",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2402.02750" },
+        { "label": "Code", "url": "https://github.com/jy-yuan/KIVI" }
+      ],
+      "page": "papers/kivi.html",
+      "reading": "papers/kivi.html",
+      "tldr": "KIVI 发现 KV 缓存里 key 有少数固定的大数值通道、value 没有，于是把 key 按通道、value 按 token 量化到 2 bit，并让最近一段 token 保持全精度，不需要校准或微调。在一张 A100 上跑 Llama-2-7B 时，同样显存能装下 4 倍的批，吞吐是 Hugging Face 16 bit 基线的 2.35–3.47 倍，Llama 和 Mistral 的准确率只掉 1–2 分以内。"
+    },
+    {
+      "id": "quarot",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "QuaRot",
+      "full_title": "QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs",
+      "authors": ["Saleh Ashkboos", "Amirkeivan Mohtashami", "Maximilian L. Croci", "Bo Li", "Pashmina Cameron", "Martin Jaggi", "Dan Alistarh", "Torsten Hoefler", "James Hensman"],
+      "date": "2024-03",
+      "org": "ETH Zurich / EPFL / Microsoft Research / IST Austria / NeuralMagic",
+      "venue": "NeurIPS 2024",
+      "arxiv": "2404.00456",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2404.00456" },
+        { "label": "Code", "url": "https://github.com/spcl/QuaRot" }
+      ],
+      "page": "papers/quarot.html",
+      "reading": "papers/quarot.html",
+      "tldr": "QuaRot 利用计算不变性把随机 Hadamard 旋转乘进权重，只在少数位置在线做 Hadamard 变换，从而消除激活和 KV 缓存里的离群值，让 LLaMA-2 的权重、激活和 KV 缓存都能直接用 4 bit 整数表示。LLaMA-2-70B 的困惑度只升高 0.47、零样本准确率保留约 99%，单层 prefill 在 RTX 3090 上最多快 3.33 倍，但 7B 这样的小模型精度损失明显更大。"
+    },
+    {
+      "id": "nsa",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "NSA 原生稀疏注意力",
+      "full_title": "Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention",
+      "authors": ["Jingyang Yuan", "Huazuo Gao", "Damai Dai", "Junyu Luo", "Liang Zhao", "Zhengyan Zhang", "Zhenda Xie", "Y. X. Wei", "Lean Wang", "Zhiping Xiao", "Yuqing Wang", "Chong Ruan", "Ming Zhang", "Wenfeng Liang", "Wangding Zeng"],
+      "date": "2025-02",
+      "org": "DeepSeek-AI / 北京大学 / University of Washington",
+      "venue": "ACL 2025（最佳论文）",
+      "arxiv": "2502.11089",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2502.11089" }
+      ],
+      "page": "papers/native-sparse-attention.html",
+      "reading": "papers/native-sparse-attention.html",
+      "tldr": "DeepSeek 提出的原生稀疏注意力：每个 query 只看三份精简的 KV（压缩后的粗粒度块、按分数挑出的 16 个原始块、最近 512 个 token），用门控融合，并让同一 GQA 组的所有头共用一套选择，从而写成高效的 GPU 内核。模型从预训练开始就用它，27B MoE 实验中效果不低于全注意力，64K 序列上注意力内核前向快 9 倍、反向快 6 倍。"
+    },
+    {
+      "id": "megascale",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "MegaScale",
+      "full_title": "MegaScale: Scaling Large Language Model Training to More Than 10,000 GPUs",
+      "authors": ["Ziheng Jiang", "Haibin Lin", "Yinmin Zhong", "Qi Huang", "Yangrui Chen", "Zhi Zhang", "Yanghua Peng", "Xiang Li", "Cong Xie", "Shibiao Nong", "Yulu Jia", "Sun He", "Hongmin Chen", "Zhihao Bai", "Qi Hou", "Shipeng Yan", "Ding Zhou", "Yiyao Sheng", "Zhuo Jiang", "Haohan Xu", "Haoran Wei", "Zhang Zhang", "Pengfei Nie", "Leqi Zou", "Sida Zhao", "Liang Xiang", "Zherui Liu", "Zhe Li", "Xiaoying Jia", "Jianxi Ye", "Xin Jin", "Xin Liu"],
+      "date": "2024-02",
+      "org": "ByteDance / Peking University",
+      "venue": "NSDI 2024",
+      "arxiv": "2402.15627",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2402.15627" }
+      ],
+      "page": "papers/megascale.html",
+      "reading": "papers/megascale.html",
+      "tldr": "字节跳动的万卡大模型训练系统：它改了模型块和优化器，把数据、流水、张量三种并行的通信藏到计算后面，并调优了网络，在 12,288 张 GPU 上训练 175B 模型达到 55.2% MFU，是同条件下 Megatron-LM 的 1.34 倍。它还用心跳、自检、两阶段检查点和 CUDA 事件计时来发现故障和慢节点，在一次持续几周的生产训练中自动恢复了 100 多次，有效训练时间保持在 90% 以上。"
+    },
+    {
+      "id": "mooncake",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "Mooncake",
+      "full_title": "Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving",
+      "authors": ["Ruoyu Qin", "Zheming Li", "Weiran He", "Mingxing Zhang", "Yongwei Wu", "Weimin Zheng", "Xinran Xu"],
+      "date": "2024-06",
+      "org": "Moonshot AI / Tsinghua University",
+      "venue": "FAST 2025",
+      "arxiv": "2407.00079",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2407.00079" },
+        { "label": "Code", "url": "https://github.com/kvcache-ai/Mooncake" }
+      ],
+      "page": "papers/mooncake.html",
+      "reading": "papers/mooncake.html",
+      "tldr": "Kimi 的推理服务平台：把 prefill 和 decode 拆到不同机器，并把 GPU 服务器闲置的 CPU 内存、SSD 和网卡汇成跨机器的 KV 缓存池，调度器同时按“缓存在哪”和“谁更闲”分派请求，过载时按预测的负载提前拒绝。用替身 70B 模型回放真实请求时，满足延迟要求的请求比 vLLM 多约 75%。"
+    },
+    {
       "id": "eagle",
       "track": "ai-infra",
       "kind": "paper",
@@ -1597,7 +1774,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Yuhui Li", "Fangyun Wei", "Chao Zhang", "Hongyang Zhang"],
       "org": "北京大学 / Microsoft Research / Waterloo / Vector Institute",
       "date": "2024-01",
-      "venue": "ICML 2024（EAGLE）；EAGLE-2 / 3 见 arXiv",
+      "venue": "ICML 2024（EAGLE）；EAGLE-2：EMNLP 2024；EAGLE-3：NeurIPS 2025",
       "arxiv": "2401.15077",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2401.15077" },
@@ -1606,7 +1783,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/SafeAILab/EAGLE" }
       ],
       "page": "legacy/tracks/ai-infra/17-eagle.html",
-      "tldr": "不训练独立的小模型，而是在目标模型顶层特征上接一个单层 Transformer 起草：EAGLE-1 把“特征 + 后移一位的 token 嵌入”喂给草稿头，消除采样带来的特征不确定性；EAGLE-2 按草稿置信度动态生长草稿树；EAGLE-3 放弃特征回归、融合低/中/高三层特征，并在训练时模拟多步起草（training-time test），让加速比随训练数据继续增长：最高 6.5×，约为 EAGLE-2 的 1.4×。",
+      "reading": "papers/eagle.html",
+      "tldr": "EAGLE 不另找小模型当草稿器，而是在目标模型输出层之前的特征上接一层 Transformer 来自回归地猜下一个特征，并把已经采出的下一个词一起输入以消除采样带来的歧义，在批大小 1、贪心解码下把 7B–70B 对话模型无损加速约 2.8–3.8 倍。后续的 EAGLE-2 按草稿头的置信度动态生长草稿树，EAGLE-3 去掉特征回归、融合低中高三层特征并在训练时模拟多步起草，最高加速约 6.5 倍。",
       "tags": ["投机解码", "草稿头", "草稿树", "训练时测试"],
       "facts": {
         "problem": "独立草稿模型难对齐、占显存；Medusa 式多头各自独立预测，忽略 token 间依赖",
@@ -5211,6 +5389,16 @@ window.ATLAS_REGISTRY = {
     { "from": "v-jepa", "to": "v-jepa-2", "label": "规模化 + 动作条件预测器" },
     { "from": "lejepa", "to": "le-world-model", "label": "SIGReg 取代 EMA / stop-grad" },
     { "from": "v-jepa-2", "to": "le-world-model", "label": "潜空间规划：冻结大模型 → 端到端小模型" },
+    { "from": "orca", "to": "sarathi-serve", "label": "迭代级调度 → 分块 prefill" },
+    { "from": "flash-attention", "to": "flash-attention-3", "label": "FA2 → Hopper 异步 + FP8" },
+    { "from": "speculative-decoding", "to": "medusa", "label": "独立草稿模型 → 多解码头" },
+    { "from": "infra-basics", "to": "snapkv", "label": "KV 随上下文线性增长 → 按注意力挑着留" },
+    { "from": "infra-basics", "to": "kivi", "label": "KV 显存与带宽 → 2 bit 量化" },
+    { "from": "quarot", "to": "fp4-training", "label": "Hadamard 旋转压平离群值" },
+    { "from": "flash-attention", "to": "nsa", "label": "IO 感知分块 → 硬件对齐的块稀疏" },
+    { "from": "nsa", "to": "deepseek-sparse-attention", "label": "块级稀疏 → token 级稀疏" },
+    { "from": "megatron", "to": "megascale", "label": "3D 并行 → 万卡生产训练" },
+    { "from": "pd-disaggregation", "to": "mooncake", "label": "PD 分离 → 以 KVCache 为中心" },
     { "from": "flash-attention", "to": "flashinfer", "label": "从单算子到服务引擎" },
     { "from": "vllm", "to": "sglang", "label": "块级前缀共享 → 基数树" },
     { "from": "vllm", "to": "pd-disaggregation", "label": "单引擎 → 分池集群" },
@@ -5232,9 +5420,9 @@ window.ATLAS_REGISTRY = {
     { "from": "v-jepa-2-1", "to": "robojepa", "label": "冻结 V-JEPA 2.1-G 作编码器" },
     { "from": "orca", "to": "vllm", "label": "连续批处理 → 分页 KV" },
     { "from": "orca", "to": "pd-disaggregation", "label": "chunked prefill → 物理分离" },
-    { "from": "flash-attention", "to": "flash-attention-4", "label": "Hopper → Blackwell" },
+    { "from": "flash-attention-3", "to": "flash-attention-4", "label": "Hopper → Blackwell" },
     { "from": "sglang", "to": "kv-tiering", "label": "RadixTree → HiRadixTree" },
-    { "from": "pd-disaggregation", "to": "kv-tiering", "label": "KV 即存储（Mooncake）" },
+    { "from": "mooncake", "to": "kv-tiering", "label": "KVCache 池 → 分层存储" },
     { "from": "speculative-decoding", "to": "eagle", "label": "独立草稿模型 → 特征层草稿头" },
     { "from": "megatron", "to": "zero-fsdp", "label": "切模型 → 切数据并行冗余" },
     { "from": "zero-fsdp", "to": "rl-systems", "label": "FSDP / Megatron worker" },

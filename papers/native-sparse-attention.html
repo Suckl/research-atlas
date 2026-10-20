@@ -1,0 +1,759 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NSA 原生稀疏注意力 精读</title>
+<meta name="description" content="DeepSeek 原生稀疏注意力 NSA（ACL 2025 最佳论文）的逐节精读：长上下文注意力的两种开销、推理期稀疏方法的局限、压缩 / 选择 / 滑动窗口三分支与门控、按 GQA 组加载的稀疏内核、27B MoE 预训练实验与效率分析，以及 DSA、MoBA 等后续工作。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="nsa">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · ACL 2025 最佳论文</div>
+  <h1>原生稀疏注意力：与硬件对齐、能端到端训练的稀疏注意力</h1>
+  <p class="en-title">Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention</p>
+  <div class="paper-authors">Jingyang Yuan<sup>∗1,2</sup>, Huazuo Gao<sup>1</sup>, Damai Dai<sup>1</sup>, Junyu Luo<sup>2</sup>, Liang Zhao<sup>1</sup>, Zhengyan Zhang<sup>1</sup>, Zhenda Xie<sup>1</sup>, Y. X. Wei<sup>1</sup>, Lean Wang<sup>1</sup>, Zhiping Xiao<sup>3</sup>, Yuqing Wang<sup>1</sup>, Chong Ruan<sup>1</sup>, Ming Zhang<sup>2</sup>, Wenfeng Liang<sup>1</sup>, Wangding Zeng<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>DeepSeek-AI　<sup>2</sup>北京大学计算机学院 多媒体信息处理重点实验室，PKU-Anker LLM Lab　<sup>3</sup>University of Washington　<sup>∗</sup>在 DeepSeek-AI 实习期间完成（以上按 arXiv v2 署名；ACL 正式版把北大编为 1、DeepSeek-AI 编为 2，并注明 Ming Zhang、Wenfeng Liang、Wangding Zeng 为通讯作者）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2502.11089" target="_blank" rel="noopener">arXiv 2502.11089 ↗</a>
+    <a class="pill" href="https://aclanthology.org/2025.acl-long.1126/" target="_blank" rel="noopener">ACL 2025（最佳论文）↗</a>
+    <a class="pill" href="https://github.com/fla-org/native-sparse-attention" target="_blank" rel="noopener">代码：无官方实现；第三方 fla-org/native-sparse-attention ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">结构拆解：NSA → DSA → V4 谱系与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>27B / 3B</b><span>实验模型：总参数 / 每 token 激活参数</span></div>
+    <div><b>9.0× / 6.0×</b><span>64K 序列注意力前向 / 反向加速（A100，Triton 内核实测）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文（arXiv v2）的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文的许可证不允许转载原图，所以页面里的图都是本站重画的示意图，并附上原图的链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型要处理的文本越来越长：一整本书、一个完整的代码仓库、几万 token 的思维链。标准的注意力机制让每个新 token 都和它前面的所有 token 打一次分，所以训练和预填充时的计算量随长度按平方增长；逐个生成 token 时，每一步都要把前面所有 token 的 KV 缓存从显存里读一遍。论文引用的一个理论估算是：在 64K 长度的上下文上解码，注意力占总延迟的 70–80%。</p>
+<p>一个自然的想法是<b>稀疏注意力</b>：每个 query 只和少数最重要的 key 计算，其余的跳过。这类方法已经有很多，但作者认为它们有两个共同的缺陷。第一，理论上省掉的计算，常常没有变成实际的提速：有的方法只加速预填充或只加速解码，有的方法和当时主流的 GQA 结构冲突。第二，几乎所有方法都只在推理时启用，模型训练时用的仍是完整注意力；推理时突然“少看”一部分，模型并没有为此做过准备，而训练阶段本身的长序列开销也一点没省。</p>
+<p>论文提出的 <b>NSA</b>（Natively trainable Sparse Attention）从预训练开始就让模型使用稀疏注意力。它给每个 query 准备三份精简过的 KV：一份是把每段 token 压缩成一个代表的<b>压缩分支</b>，用来粗略地扫一遍全文；一份是从全文中挑出 16 个最相关的连续块的<b>选择分支</b>，用来细看关键内容；一份是最近 512 个 token 的<b>滑动窗口分支</b>，专管局部。三路注意力的结果用可学习的门控加权求和。选择以 64 个连续 token 为单位，并且同一个 GQA 组里的所有注意力头共用一套选择，这两条约束让它能写成高效的 GPU 内核。</p>
+<p>实验用一个总参数 27B、每 token 激活 3B 的 MoE 模型，分别用全注意力和 NSA 各训练一遍。NSA 版本在通用基准、长上下文基准 LongBench 和蒸馏后的数学推理 AIME 上都不差于、甚至高于全注意力版本；在 A100 上，64K 序列的注意力内核前向快 9.0 倍、反向快 6.0 倍，解码按访存量估计可快 11.6 倍。这篇论文获得了 ACL 2025 最佳论文奖，它的思路后来演变成 DeepSeek-V3.2 的 DeepSeek Sparse Attention（DSA）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：论文的主要结果一览（重画原文图 1 的数字）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="NSA 与全注意力的质量和速度对比" style="--dg-min:720px">
+    <text x="260" y="16" class="t-c t-b">质量：全注意力 vs NSA（分数越高越好）</text>
+    <line x1="50" y1="210" x2="470" y2="210" class="grid-ln"/>
+    <line x1="50" y1="170" x2="470" y2="170" class="grid-ln"/>
+    <line x1="50" y1="130" x2="470" y2="130" class="grid-ln"/>
+    <line x1="50" y1="90" x2="470" y2="90" class="grid-ln"/>
+    <line x1="50" y1="50" x2="470" y2="50" class="grid-ln"/>
+    <line x1="50" y1="250" x2="470" y2="250" class="axis"/>
+    <line x1="50" y1="250" x2="50" y2="44" class="axis"/>
+    <text x="44" y="250" class="t-r t-xs">0</text><text x="44" y="210" class="t-r t-xs">0.1</text><text x="44" y="170" class="t-r t-xs">0.2</text><text x="44" y="130" class="t-r t-xs">0.3</text><text x="44" y="90" class="t-r t-xs">0.4</text><text x="44" y="50" class="t-r t-xs">0.5</text>
+    <rect class="tk off" x="88" y="72.8" width="30" height="177.2"/><rect class="tk enc" x="122" y="67.6" width="30" height="182.4"/>
+    <text x="103" y="64" class="t-c t-xs">.443</text><text x="137" y="59" class="t-c t-xs">.456</text>
+    <rect class="tk off" x="188" y="75.2" width="30" height="174.8"/><rect class="tk enc" x="222" y="62.4" width="30" height="187.6"/>
+    <text x="203" y="66" class="t-c t-xs">.437</text><text x="237" y="54" class="t-c t-xs">.469</text>
+    <rect class="tk off" x="288" y="231.6" width="30" height="18.4"/><rect class="tk enc" x="322" y="201.6" width="30" height="48.4"/>
+    <text x="303" y="223" class="t-c t-xs">.046</text><text x="337" y="193" class="t-c t-xs">.121</text>
+    <rect class="tk off" x="388" y="213.2" width="30" height="36.8"/><rect class="tk enc" x="422" y="191.6" width="30" height="58.4"/>
+    <text x="403" y="205" class="t-c t-xs">.092</text><text x="437" y="183" class="t-c t-xs">.146</text>
+    <text x="120" y="266" class="t-c t-sm">通用 9 项平均</text><text x="220" y="266" class="t-c t-sm">LongBench</text><text x="320" y="266" class="t-c t-sm">AIME@8K</text><text x="420" y="266" class="t-c t-sm">AIME@16K</text>
+    <rect class="tk off" x="120" y="282" width="14" height="12"/><text x="140" y="288" class="t-sm">全注意力</text>
+    <rect class="tk enc" x="220" y="282" width="14" height="12"/><text x="240" y="288" class="t-sm">NSA</text>
+    <text x="745" y="16" class="t-c t-b">速度：64K 序列，NSA 相对全注意力</text>
+    <line x1="560" y1="200" x2="930" y2="200" class="grid-ln"/>
+    <line x1="560" y1="150" x2="930" y2="150" class="grid-ln"/>
+    <line x1="560" y1="100" x2="930" y2="100" class="grid-ln"/>
+    <line x1="560" y1="50" x2="930" y2="50" class="grid-ln"/>
+    <line x1="560" y1="250" x2="930" y2="250" class="axis"/>
+    <line x1="560" y1="250" x2="560" y2="44" class="axis"/>
+    <text x="554" y="250" class="t-r t-xs">0×</text><text x="554" y="200" class="t-r t-xs">3×</text><text x="554" y="150" class="t-r t-xs">6×</text><text x="554" y="100" class="t-r t-xs">9×</text><text x="554" y="50" class="t-r t-xs">12×</text>
+    <rect class="tk mask" x="600" y="56.7" width="60" height="193.3"/><text x="630" y="47" class="t-c t-sm t-b">11.6×</text>
+    <rect class="tk enc" x="715" y="100" width="60" height="150"/><text x="745" y="91" class="t-c t-sm t-b">9.0×</text>
+    <rect class="tk enc" x="830" y="150" width="60" height="100"/><text x="860" y="141" class="t-c t-sm t-b">6.0×</text>
+    <text x="630" y="266" class="t-c t-sm">解码</text><text x="745" y="266" class="t-c t-sm">前向</text><text x="860" y="266" class="t-c t-sm">反向</text>
+    <text x="630" y="283" class="t-c t-xs">按访存量推出的预期值</text><text x="745" y="283" class="t-c t-xs">A100 内核实测</text><text x="860" y="283" class="t-c t-xs">A100 内核实测</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左图是两个 27B 模型在三类评测上的分数：灰色是全注意力，蓝色是 NSA。“通用 9 项平均”来自原文表 1，LongBench 平均来自表 2，AIME 来自表 3（8K 与 16K 是生成长度上限）。右图是 64K 长度下 NSA 相对全注意力的加速比。要特别注意右图三根柱子的性质不同：前向和反向是在 A100 上实测的注意力内核时间之比；解码那根（斜纹）不是实测，而是按每一步要读的 KV 数量算出来的预期值（原文表 4）。原文图 1 把三者画在一起，没有区分。本站示意图，对应 <a href="https://arxiv.org/html/2502.11089v2#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</div>
+</div>
+
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>长上下文时，注意力在训练 / 预填充和解码两个阶段分别贵在哪里？</li>
+  <li>为什么很多稀疏注意力方法“理论上省了，实际上没快”？GQA 和“每个头各选各的”为什么冲突？</li>
+  <li>NSA 的三个分支各管什么？选择分支的块是怎么挑出来的，为什么不需要额外的打分网络？</li>
+  <li>“原生可训练”到底指什么？top-n 选择本身不可导，梯度是怎么流的？</li>
+  <li>NSA 的内核为什么要按“同一位置、同一 GQA 组的所有头”来装载 query，而不是像 FlashAttention 那样按连续位置？</li>
+  <li>9.0×、6.0×、11.6× 分别是在什么条件下得到的？哪些是实测，哪些是估算？质量上的“超过全注意力”应该怎么理解？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：长上下文为什么需要稀疏注意力，现有方法又差在哪</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>推理模型、仓库级代码生成、多轮智能体都需要很长的上下文，而标准注意力的开销随长度快速增长，成了延迟的主要来源。注意力的权重本身是高度集中的，大部分权重落在少数 key 上，所以“只算重要的那部分”看起来顺理成章。那么，已有的稀疏注意力方法为什么在实际部署中表现不佳？一个好的稀疏注意力需要满足哪些条件？这一节先把长上下文下注意力的两种开销讲清楚，再看作者提出的两条要求。</div>
+
+<div class="note-pre"><b>先补一点背景：长上下文下，注意力在两个阶段分别贵在哪里。</b>
+<p>注意力的计算可以想成一次查资料。每个 token 算出一个 query（我想找什么）、一个 key（我能提供什么的标签）和一个 value（我携带的内容）。处理第 \(t\) 个 token 时，用它的 query 和前面 \(t\) 个 token 的 key 逐个求点积，得到的分数经过 softmax 变成权重，再按权重把这些 token 的 value 加起来。（更细的讲解见本站 <a href="vllm.html#n-2-1">vLLM 精读 §2.1</a>。）</p>
+<p><b>训练和预填充：贵在计算。</b>这两个阶段一次处理整段序列，所有 token 同时算。第 \(t\) 个 token 要和前面 \(t\) 个 token 各算一次，长度为 \(N\) 的序列一共约 \(N^2/2\) 对。长度翻倍，注意力的计算量变成 4 倍；而模型其他部分（线性层、MoE 专家）的计算量只和 token 数成正比，长度翻倍只变成 2 倍。所以序列越长，注意力在总计算量里占的比例越大。这个阶段的数据可以大块地喂给矩阵乘法单元，GPU 主要被算力限制，减少注意力的<b>计算量</b>就能直接提速。</p>
+<p><b>解码：贵在读显存。</b>逐个生成时，每一步只算一个新 token，但它要和前面所有 token 的 key、value 做注意力。这些 key 和 value 早就算好存在显存里（即 KV 缓存），每一步都要整份读一遍。读的数据很多、做的计算很少，GPU 的计算单元大部分时间在等数据，速度由显存带宽决定。这个阶段要提速，就得减少每一步<b>读的 KV 数量</b>。还有一点：模型参数是一个批里所有序列共用的，读一遍就能服务整批；KV 缓存却是每条序列各读各的。所以批越大，读 KV 在总读取量里的比例越高。</p>
+<p>用论文实验模型的配置算一笔账（推算，只算矩阵乘法，按 BF16 每个数 2 字节）：这个模型有 30 层，每层 64 个 query 头，每个头的 query / key 是 192 维、value 是 128 维；KV 按 GQA 分成 4 组。</p>
+<ul>
+  <li>每一对 (query, key) 在一层里要做 \(64\times(192+128)\times 2=40{,}960\) 次浮点运算。一条 64K 序列的前向，注意力部分约 \(2^{31}\) 对 × 40,960 × 30 层 ≈ 2,639 TFLOP；线性层按“2 × 激活参数 × token 数”估算约 393 TFLOP。注意力占了约 87%。</li>
+  <li>每个 token 每层要缓存 4 组 × (192 + 128) = 1,280 个数，30 层合计约 75 KiB。一条 64K 序列的 KV 缓存约 5.03 GB，解码时每一步都要读完它；这已经接近每 token 激活的约 30 亿参数（约 6 GB）的读取量。</li>
+</ul>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：一条序列前向一遍，注意力和线性层各占多少计算（论文实验模型的配置，推算）</div>
+  <div class="dia-row"><span class="lbl">8K 序列</span><div class="dia-track"><span class="dia-seg kv" style="flex:41.2">注意力 41 TFLOP</span><span class="dia-seg w" style="flex:49.2">线性层 49 TFLOP</span></div></div>
+  <div class="dia-out">注意力约占 46%。</div>
+  <div class="dia-row"><span class="lbl">64K 序列</span><div class="dia-track"><span class="dia-seg kv" style="flex:2639">注意力 2,639 TFLOP</span><span class="dia-seg w" style="flex:393">线性层 393</span></div></div>
+  <div class="dia-out">长度变成 8 倍，注意力的计算量变成约 64 倍，占比升到约 87%。</div>
+  <div class="dia-note"><b>怎么看：</b>每一行是一条序列前向计算的总量，蓝色是注意力（query 与 key 的点积加上按权重汇总 value），橙色是线性层与 MoE 专家（按每 token 30 亿激活参数估算）。全部为推算：只算矩阵乘法，忽略 softmax、归一化等小操作；训练时前向加反向约是前向的 3 倍，但两者的比例不变。结论是：上下文越长，“让注意力少算一些”带来的收益越大。</div>
+</div>
+
+<p>下面这个小工具可以直观看到两个阶段在 GPU 上的位置。横轴是算术强度（每读 1 字节数据做多少次运算），纵轴是能达到的算力。预填充的点落在右边的“算力屋顶”下，受计算限制；解码的点落在左边的斜坡上，受带宽限制。改变上下文长度和批大小，可以看到解码怎样被 KV 的读取拖住。</p>
+<div data-widget="roofline" data-panel="roofline"></div>
+
+<p>回到论文。作者指出，softmax 注意力天生是稀疏的：对一个 query 来说，大部分权重集中在少数几个 key 上，其他 key 的权重接近于零。只计算这些关键的 (query, key) 对，就能在几乎不损失效果的前提下大幅省掉计算。已有的方法大致分三类：</p>
+<ul>
+  <li><b>KV 缓存淘汰</b>：在解码过程中把“不太重要”的 token 从 KV 缓存里删掉，比如 H2O、SnapKV（本站有 <a href="snapkv.html">SnapKV 精读</a>）。</li>
+  <li><b>按块选择 KV</b>：把 KV 缓存切成块，每一步按 query 估计每块的重要性，只读最重要的几块，比如 Quest、InfLLM。</li>
+  <li><b>采样、聚类或哈希</b>：用局部敏感哈希、k-means 聚类等手段快速找出和 query 最像的 key，比如 MagicPIG、ClusterKV、HashAttention。</li>
+</ul>
+<p>但作者观察到，这些方法在实际部署中常常不如预期。很多方法的实际加速远小于理论上省掉的计算量；而且大多数方法没有训练期的支持，不能让模型在训练中适应并利用稀疏的模式。</p>
+<p>由此，作者提出一个实用的稀疏注意力必须满足的两条要求：</p>
+<ol>
+  <li><b>推理加速要与硬件对齐</b>：省下的计算要真的变成速度，预填充和解码两个阶段都要快，算法设计必须照顾到显存访问和 GPU 调度的特点。</li>
+  <li><b>算法设计要考虑训练</b>：稀疏操作要能参与端到端训练，既降低训练开销，又不损失模型能力。</li>
+</ol>
+<p>NSA 针对这两条各给了一个答案。硬件方面，它把稀疏的单位定为连续的块，让每次访存都是连续的大块读取，并且平衡计算和访存，充分利用 Tensor Core。训练方面，它设计了高效的前向、反向算子，让稀疏注意力可以从头稳定地训练。论文用一个 27B 参数的 Transformer 做预训练实验，引言里写的训练量是 260B token（§4.1 写的是 270B，两处不一致，以下按 §4.1 的 270B），并在 A100 上与 Triton 实现的注意力内核比较速度。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>这里的“稀疏”指的是<b>每个 query 只看一部分 key</b>，不是把模型权重剪成稀疏矩阵。模型参数是完整的、稠密的。</li>
+  <li>引言里“64K 解码时注意力占延迟的 70–80%”是论文所说的理论估算，没有给出是哪个模型、什么批大小下算的，只能当作量级的提示。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 重新审视稀疏注意力：两个“看上去成立”的假设</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>已有的稀疏注意力大多是在一个用全注意力训练好的模型上，推理时再加稀疏。作者认为这种做法有两处想当然的地方，并分别给它们起了名字。第一处叫“高效推理的错觉”：算得少了，不等于跑得快了。第二处叫“可训练稀疏的迷思”：把推理期的方法直接拿去训练，会遇到不可导和反向传播低效两个障碍。这一节逐个拆开，它们正是 NSA 每个设计决定的出发点。</div>
+
+<h4 id="n-2-1">2.1 高效推理的错觉：算得少了，为什么没变快</h4>
+<div class="note-pre"><b>先补一点背景：MHA、MQA 与 GQA。</b>
+<p>标准的多头注意力（MHA）里，每个注意力头都有自己的一套 key 和 value。解码时，每一步要读的 KV 缓存量正比于头数。<b>MQA</b>（Multi-Query Attention）让所有 query 头共用同一套 key 和 value，KV 缓存一下子缩小到原来的“头数分之一”，但模型效果往往会打折扣。<b>GQA</b>（Grouped-Query Attention）是折中：把 query 头分成若干组，组内的头共用一套 key 和 value。论文的实验模型有 64 个 query 头、4 组，也就是每 16 个头共用一套 KV。按上面的维度推算，每个 token 每层只需缓存 1,280 个数；如果改成 MHA，需要 \(64\times(192+128)=20{,}480\) 个，是 16 倍。</p>
+<p>GQA 省下的不只是显存容量，更重要的是解码时每一步<b>读显存的量</b>：同组 16 个头的 query 可以对着同一份 KV 一起计算，KV 只读一遍。当时的主流大模型普遍采用 GQA 或 MQA。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：几个推理期稀疏方法分别在做什么。</b>
+<ul>
+  <li><b>H2O</b>（Heavy-Hitter Oracle，2023）：作者观察到少数 token 在注意力里贡献了大部分权重，称之为“重击者”。H2O 在解码过程中只保留这些重击者和最近的若干 token，把其余 token 的 KV 从缓存里删掉。判断谁是重击者需要统计注意力分数，所以预填充阶段仍要算完整的注意力。</li>
+  <li><b>Quest</b>（ICML 2024）：把 KV 缓存切成页，每页记录 key 在每个维度上的最小值和最大值。解码时用当前 query 和这两个边界估计这一页里可能出现的最大注意力分数，只读分数最高的若干页。它是“按 query 动态选择”，被删掉的 KV 并不真正丢失，下一步可能又被选中。它的摘要报告自注意力最多快 2.23 倍。</li>
+  <li><b>MInference</b>（NeurIPS 2024）：专门加速预填充。它的摘要提到，在单张 A100 上用一个 8B 模型处理 100 万 token 的输入，光预填充就要 30 分钟。它为每个注意力头离线确定一种稀疏形状（A 形、竖线加斜线、块稀疏），推理时据此只算一部分位置。</li>
+</ul>
+</div>
+<p>作者归纳了这些方法跑不快的两个原因。</p>
+<p><b>第一，稀疏只覆盖了某一个阶段。</b>H2O 在解码时稀疏，但预填充时要算完整注意力，还要额外统计注意力分数、建立索引；MInference 正好相反，只加速预填充。只要有一个阶段的开销和全注意力相当，整体加速就有限。而不同任务的瓶颈阶段不同：读一本书写摘要、补全代码，输入很长、输出很短，预填充占大头；长思维链推理输入不长、输出很长，解码占大头。只加速一个阶段的方法，总有一类任务吃亏。</p>
+<p><b>第二，和 GQA / MQA 不兼容。</b>以 Quest 为例，它让每个注意力头独立挑选自己要读的 KV。在 MHA 模型里，每个头本来就有自己的一份 KV，各选各的没有问题，计算量和读取量都按比例减少。但在 GQA 模型里，同一组的 16 个头共用一份 KV，每个头挑的块却各不相同。为了让这 16 个头都算得出来，必须把它们挑中的块的<b>并集</b>都读进来。计算量是减少了，读显存的量却可能接近不稀疏的时候，而解码偏偏是被读显存卡住的。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同一 GQA 组里，“每个头各选各的”和“全组共用一套选择”，要读的 KV 块差多少</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="GQA 组内各头独立选块导致读取并集的示意图" style="--dg-min:760px">
+    <text x="548" y="16" class="t-c t-sm">KV 块 0 … 15（同一组的所有头共用这一份 KV）</text>
+    <text x="248" y="38" class="t-c t-xs">0</text><text x="288" y="38" class="t-c t-xs">1</text><text x="328" y="38" class="t-c t-xs">2</text><text x="368" y="38" class="t-c t-xs">3</text><text x="408" y="38" class="t-c t-xs">4</text><text x="448" y="38" class="t-c t-xs">5</text><text x="488" y="38" class="t-c t-xs">6</text><text x="528" y="38" class="t-c t-xs">7</text><text x="568" y="38" class="t-c t-xs">8</text><text x="608" y="38" class="t-c t-xs">9</text><text x="648" y="38" class="t-c t-xs">10</text><text x="688" y="38" class="t-c t-xs">11</text><text x="728" y="38" class="t-c t-xs">12</text><text x="768" y="38" class="t-c t-xs">13</text><text x="808" y="38" class="t-c t-xs">14</text><text x="848" y="38" class="t-c t-xs">15</text>
+    <text x="20" y="58" class="t-b">(a) 每个头各选各的（如 Quest）</text>
+    <text x="220" y="82" class="t-r t-sm">头 1</text>
+    <rect class="tk off" x="230" y="72" width="36" height="20"/><rect class="tk off" x="270" y="72" width="36" height="20"/><rect class="tk enc" x="310" y="72" width="36" height="20"/><rect class="tk off" x="350" y="72" width="36" height="20"/><rect class="tk off" x="390" y="72" width="36" height="20"/><rect class="tk off" x="430" y="72" width="36" height="20"/><rect class="tk off" x="470" y="72" width="36" height="20"/><rect class="tk off" x="510" y="72" width="36" height="20"/><rect class="tk off" x="550" y="72" width="36" height="20"/><rect class="tk enc" x="590" y="72" width="36" height="20"/><rect class="tk off" x="630" y="72" width="36" height="20"/><rect class="tk off" x="670" y="72" width="36" height="20"/><rect class="tk off" x="710" y="72" width="36" height="20"/><rect class="tk off" x="750" y="72" width="36" height="20"/><rect class="tk off" x="790" y="72" width="36" height="20"/><rect class="tk off" x="830" y="72" width="36" height="20"/>
+    <text x="220" y="108" class="t-r t-sm">头 2</text>
+    <rect class="tk off" x="230" y="98" width="36" height="20"/><rect class="tk off" x="270" y="98" width="36" height="20"/><rect class="tk enc" x="310" y="98" width="36" height="20"/><rect class="tk off" x="350" y="98" width="36" height="20"/><rect class="tk off" x="390" y="98" width="36" height="20"/><rect class="tk off" x="430" y="98" width="36" height="20"/><rect class="tk off" x="470" y="98" width="36" height="20"/><rect class="tk off" x="510" y="98" width="36" height="20"/><rect class="tk off" x="550" y="98" width="36" height="20"/><rect class="tk off" x="590" y="98" width="36" height="20"/><rect class="tk off" x="630" y="98" width="36" height="20"/><rect class="tk off" x="670" y="98" width="36" height="20"/><rect class="tk enc" x="710" y="98" width="36" height="20"/><rect class="tk off" x="750" y="98" width="36" height="20"/><rect class="tk off" x="790" y="98" width="36" height="20"/><rect class="tk off" x="830" y="98" width="36" height="20"/>
+    <text x="220" y="134" class="t-r t-sm">头 3</text>
+    <rect class="tk off" x="230" y="124" width="36" height="20"/><rect class="tk off" x="270" y="124" width="36" height="20"/><rect class="tk off" x="310" y="124" width="36" height="20"/><rect class="tk off" x="350" y="124" width="36" height="20"/><rect class="tk off" x="390" y="124" width="36" height="20"/><rect class="tk enc" x="430" y="124" width="36" height="20"/><rect class="tk off" x="470" y="124" width="36" height="20"/><rect class="tk off" x="510" y="124" width="36" height="20"/><rect class="tk off" x="550" y="124" width="36" height="20"/><rect class="tk enc" x="590" y="124" width="36" height="20"/><rect class="tk off" x="630" y="124" width="36" height="20"/><rect class="tk off" x="670" y="124" width="36" height="20"/><rect class="tk off" x="710" y="124" width="36" height="20"/><rect class="tk off" x="750" y="124" width="36" height="20"/><rect class="tk off" x="790" y="124" width="36" height="20"/><rect class="tk off" x="830" y="124" width="36" height="20"/>
+    <text x="220" y="160" class="t-r t-sm">头 4</text>
+    <rect class="tk enc" x="230" y="150" width="36" height="20"/><rect class="tk off" x="270" y="150" width="36" height="20"/><rect class="tk off" x="310" y="150" width="36" height="20"/><rect class="tk off" x="350" y="150" width="36" height="20"/><rect class="tk off" x="390" y="150" width="36" height="20"/><rect class="tk off" x="430" y="150" width="36" height="20"/><rect class="tk off" x="470" y="150" width="36" height="20"/><rect class="tk off" x="510" y="150" width="36" height="20"/><rect class="tk off" x="550" y="150" width="36" height="20"/><rect class="tk off" x="590" y="150" width="36" height="20"/><rect class="tk off" x="630" y="150" width="36" height="20"/><rect class="tk off" x="670" y="150" width="36" height="20"/><rect class="tk off" x="710" y="150" width="36" height="20"/><rect class="tk off" x="750" y="150" width="36" height="20"/><rect class="tk enc" x="790" y="150" width="36" height="20"/><rect class="tk off" x="830" y="150" width="36" height="20"/>
+    <text x="220" y="192" class="t-r t-sm">要读的块（并集）</text>
+    <rect class="tk pred" x="230" y="182" width="36" height="20"/><rect class="tk off" x="270" y="182" width="36" height="20"/><rect class="tk pred" x="310" y="182" width="36" height="20"/><rect class="tk off" x="350" y="182" width="36" height="20"/><rect class="tk off" x="390" y="182" width="36" height="20"/><rect class="tk pred" x="430" y="182" width="36" height="20"/><rect class="tk off" x="470" y="182" width="36" height="20"/><rect class="tk off" x="510" y="182" width="36" height="20"/><rect class="tk off" x="550" y="182" width="36" height="20"/><rect class="tk pred" x="590" y="182" width="36" height="20"/><rect class="tk off" x="630" y="182" width="36" height="20"/><rect class="tk off" x="670" y="182" width="36" height="20"/><rect class="tk pred" x="710" y="182" width="36" height="20"/><rect class="tk off" x="750" y="182" width="36" height="20"/><rect class="tk pred" x="790" y="182" width="36" height="20"/><rect class="tk off" x="830" y="182" width="36" height="20"/>
+    <text x="878" y="192" class="t-sm t-b">6 块</text>
+    <text x="20" y="226" class="t-b">(b) NSA：组内所有头共用一套选择</text>
+    <text x="220" y="250" class="t-r t-sm">全组共用</text>
+    <rect class="tk off" x="230" y="240" width="36" height="20"/><rect class="tk off" x="270" y="240" width="36" height="20"/><rect class="tk enc" x="310" y="240" width="36" height="20"/><rect class="tk off" x="350" y="240" width="36" height="20"/><rect class="tk off" x="390" y="240" width="36" height="20"/><rect class="tk off" x="430" y="240" width="36" height="20"/><rect class="tk off" x="470" y="240" width="36" height="20"/><rect class="tk off" x="510" y="240" width="36" height="20"/><rect class="tk off" x="550" y="240" width="36" height="20"/><rect class="tk enc" x="590" y="240" width="36" height="20"/><rect class="tk off" x="630" y="240" width="36" height="20"/><rect class="tk off" x="670" y="240" width="36" height="20"/><rect class="tk off" x="710" y="240" width="36" height="20"/><rect class="tk off" x="750" y="240" width="36" height="20"/><rect class="tk off" x="790" y="240" width="36" height="20"/><rect class="tk off" x="830" y="240" width="36" height="20"/>
+    <text x="220" y="276" class="t-r t-sm">要读的块</text>
+    <rect class="tk off" x="230" y="266" width="36" height="20"/><rect class="tk off" x="270" y="266" width="36" height="20"/><rect class="tk pred" x="310" y="266" width="36" height="20"/><rect class="tk off" x="350" y="266" width="36" height="20"/><rect class="tk off" x="390" y="266" width="36" height="20"/><rect class="tk off" x="430" y="266" width="36" height="20"/><rect class="tk off" x="470" y="266" width="36" height="20"/><rect class="tk off" x="510" y="266" width="36" height="20"/><rect class="tk off" x="550" y="266" width="36" height="20"/><rect class="tk pred" x="590" y="266" width="36" height="20"/><rect class="tk off" x="630" y="266" width="36" height="20"/><rect class="tk off" x="670" y="266" width="36" height="20"/><rect class="tk off" x="710" y="266" width="36" height="20"/><rect class="tk off" x="750" y="266" width="36" height="20"/><rect class="tk off" x="790" y="266" width="36" height="20"/><rect class="tk off" x="830" y="266" width="36" height="20"/>
+    <text x="878" y="276" class="t-sm t-b">2 块</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横向 16 格是一个 GQA 组共用的 KV 缓存，按块切开。(a) 里 4 个头（实际一组有 16 个）各自挑 2 块，蓝色是各头的选择；最下面一行橙色是这一步必须从显存读进来的块，也就是并集，共 6 块。每个头只“算”了 2 块，但读显存的量是 6 块，头越多、选择越分散，并集越接近全部。(b) 里全组用同一套选择，读 2 块就够了，每块被 16 个头复用。这就是 NSA 在 §3.3.2 里强制组内共享选择的原因。本站示意图，原文没有对应的图。</div>
+</div>
+
+<p>作者的总结是：很多方法关注的是 KV 缓存缩小了多少、理论计算量少了多少，却没有在真正先进的推理框架和硬件后端上兑现为延迟的降低。要真正提速，算法必须同时照顾到先进的模型结构（GQA / MQA）和高效的硬件实现。</p>
+
+<h4 id="n-2-2">2.2 可训练稀疏的迷思：推理时才稀疏，有什么问题</h4>
+<p>作者坚持“训练时就稀疏”，有两方面的理由。</p>
+<p><b>其一，事后稀疏会损害效果。</b>一个模型在全注意力下训练好，它的所有参数都是按“能看到全部上下文”优化的。推理时突然只让它看一部分，相当于把它推离了训练时走过的优化轨迹。论文引用 MagicPIG 的发现：注意力分数最高的 20% 只覆盖了全部注意力分数的约 70%，剩下的 30% 分散在大量低分 token 上。一些专门负责从长文中检索信息的注意力头（“检索头”），在推理期剪枝时尤其容易受损。</p>
+<p><b>其二，训练本身也需要省。</b>现代大模型的开发里，长序列训练越来越多：用更长的文档预训练，以及长上下文微调、强化学习等后续阶段。现有稀疏方法主要瞄准推理，训练期的长序列开销基本没人解决。</p>
+<p>那么，能不能直接把推理期的稀疏方法拿来训练？作者列出了两个障碍。</p>
+<p><b>障碍一：选择过程里有不可导的部件。</b>ClusterKV 用 k-means 聚类决定哪些 key 归为一组，MagicPIG 用 SimHash 哈希挑选 key。这些离散操作在计算图里是断开的，梯度传不过去，模型没法通过训练学会“该看哪里”。</p>
+<p><b>障碍二：反向传播的效率太低。</b>有些方法理论上可以训练，但它们按单个 token 挑选（比如 HashAttention），计算时要从 KV 缓存的各个角落零散地读取 token。这种不连续的访存没法套用 FlashAttention 这类快速注意力的做法，只能退回到硬件利用率很低的实现，训练反而更慢。</p>
+<div class="note-pre"><b>先补一点背景：FlashAttention 为什么依赖“连续的块”。</b>
+<p>GPU 上有一块很大但较慢的显存（HBM），和每个计算单元旁边一块很小但很快的片上存储（SRAM）。FlashAttention 把 query、key、value 切成固定大小的块：一次把一块 query 和一块 key / value 搬进 SRAM，在片上算完这一块的分数、softmax 和加权和，再换下一块 key / value，用“在线 softmax”把各块的结果正确地合并起来。这样完整的 \(N\times N\) 注意力矩阵从来不需要写回显存。这套做法高效的前提是：每次搬进来的是显存里<b>连续存放的一整块</b>数据，搬进来之后又能交给 Tensor Core 做一次规整的小矩阵乘法。如果要读的 token 东一个西一个，就既不能整块搬，也凑不成规整的矩阵乘法。（详见本站 <a href="flashattention.html#n-3">FlashAttention 精读 §3</a>；FlashAttention 原文也讨论过“块稀疏”的版本，见 <a href="flashattention.html#n-6">§6</a>。）</p>
+</div>
+
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th>稀疏发生在哪个阶段</th><th>论文指出的问题</th></tr>
+  <tr><td>H2O</td><td>只在解码</td><td>预填充仍是完整注意力，还要额外统计分数、建索引</td></tr>
+  <tr><td>MInference</td><td>只在预填充</td><td>解码阶段没有加速</td></tr>
+  <tr><td>Quest</td><td>解码，按页选择</td><td>每个头各选各的，在 GQA 下要读的是组内并集，访存没省多少</td></tr>
+  <tr><td>ClusterKV、MagicPIG</td><td>推理</td><td>聚类、哈希是离散操作，梯度传不过选择过程</td></tr>
+  <tr><td>HashAttention</td><td>理论上可训练</td><td>按单个 token 选择，访存不连续，用不了 FlashAttention 式的分块计算</td></tr>
+  <tr class="hl"><td>NSA</td><td>训练、预填充、解码全程</td><td>本文的目标：按块选择、组内共享、端到端训练</td></tr>
+</table></div>
+
+<h4 id="n-2-3">2.3 结论：稀疏应该是“原生”的</h4>
+<p>推理效率和训练可行性两方面的局限，促使作者从头重新设计稀疏注意力，而不是在已有方法上修补。NSA 要同时满足两条：算得快（预填充、解码、训练三处都快），以及能端到端地训练。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“可训练”在这一节里有两层意思，要分开看。一层是<b>梯度能不能流到决定“看哪里”的那部分参数</b>；另一层是<b>训练能不能真的跑得快</b>。后面会看到，NSA 的 top-n 选块这一步本身仍然是离散、不可导的；它绕过不可导的办法，不是让选择可导，而是让打分直接复用一个本来就在被语言模型损失训练的分支（§3.3.2）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 方法：三个分支、一个门控，再加一个专门的内核</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>NSA 具体怎么为每个 query 准备一份精简的 KV？三个分支各自怎么构造，为什么需要三个而不是一个？选择分支用什么给块打分，打分的开销从哪里省下来？这些设计又怎样落实成一个在 GPU 上真正快的内核？这一节是全文的核心，按论文的顺序分成背景、总体框架、三个分支和内核设计四部分。</div>
+
+<h4 id="n-3-1">3.1 背景：注意力公式与算术强度</h4>
+<p>论文先写下标准注意力。第 \(t\) 个 query \(\mathbf{q}_t\) 和它之前的所有 key \(\mathbf{k}_{:t}\)、value \(\mathbf{v}_{:t}\) 做注意力：</p>
+<div class="formula">$$\mathbf{o}_t=\operatorname{Attn}(\mathbf{q}_t,\mathbf{k}_{:t},\mathbf{v}_{:t})=\sum_{i=1}^{t}\frac{\alpha_{t,i}\,\mathbf{v}_i}{\sum_{j=1}^{t}\alpha_{t,j}},\qquad \alpha_{t,i}=e^{\mathbf{q}_t^{\top}\mathbf{k}_i/\sqrt{d_k}}$$</div>
+<p>这里 \(\alpha_{t,i}\) 是第 \(t\) 个 query 对第 \(i\) 个 key 的未归一化权重，\(d_k\) 是 key 的维度。分母把权重归一化，相当于 softmax。</p>
+<p>接着论文引入<b>算术强度</b>：一个计算任务做的运算次数除以它读写显存的字节数。每块 GPU 有一个临界值，等于峰值算力除以显存带宽。任务的算术强度高于临界值，就是算力受限；低于临界值，就是带宽受限。（这个概念在本站 <a href="flashattention.html#n-2-2">FlashAttention 精读 §2.2</a> 里有图解。）对注意力来说，训练和预填充一次处理大批 token，算术强度高，是算力受限；自回归解码每次只算一个 token 却要读整份 KV 缓存，算术强度低，是带宽受限。所以两个阶段的优化目标不同：<b>训练和预填充要减少计算，解码要减少访存</b>。NSA 想用同一套设计同时做到这两件事。</p>
+
+<h4 id="n-3-2">3.2 总体框架：给每个 query 换一份更紧凑的 KV</h4>
+<p>NSA 的出发点是：不让 \(\mathbf{q}_t\) 面对全部的 \(\mathbf{k}_{:t},\mathbf{v}_{:t}\)，而是根据 \(\mathbf{q}_t\) 和上下文，动态构造一份更紧凑、信息更密集的 \(\tilde K_t,\tilde V_t\)，再在这份精简的 KV 上做注意力：</p>
+<div class="formula">$$\tilde K_t=f_K(\mathbf{q}_t,\mathbf{k}_{:t},\mathbf{v}_{:t}),\quad \tilde V_t=f_V(\mathbf{q}_t,\mathbf{k}_{:t},\mathbf{v}_{:t}),\qquad \mathbf{o}^{*}_t=\operatorname{Attn}(\mathbf{q}_t,\tilde K_t,\tilde V_t)$$</div>
+<p>构造方式可以有好几种，每种叫一个“映射策略” \(c\)。NSA 用了三种：压缩（cmp）、选择（slc）和滑动窗口（win）。每种策略各自算一次注意力，再用门控加权求和：</p>
+<div class="formula">$$\mathbf{o}^{*}_t=\sum_{c\in\{\text{cmp},\,\text{slc},\,\text{win}\}} g_t^{c}\cdot\operatorname{Attn}\big(\mathbf{q}_t,\tilde K_t^{c},\tilde V_t^{c}\big),\qquad g_t^{c}\in[0,1]$$</div>
+<p>门控分数 \(g_t^{c}\) 由当前 token 的输入特征经过一个 MLP 和 sigmoid 得到。注意这里用的是 sigmoid 而不是 softmax：三个门各自在 0 到 1 之间取值，互不约束，加起来不必等于 1。模型可以同时开大三个分支，也可以把某个分支几乎关掉。论文没有说明门控是每个头一个值还是所有头共用；第三方实现 fla-org/native-sparse-attention 的接口里，门控是每个 query 头各一个值。</p>
+<p>记 \(N_t\) 为三个分支的 key 总数，NSA 要保证 \(N_t\ll t\)。按论文的超参数推算：在 64K 位置上，压缩分支约 4,096 个压缩 token、选择分支 1,024 个 token、滑动窗口 512 个 token，合计约 5,632 个，只有全部 65,536 个的约 8.6%。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：NSA 一层注意力的三条路径（数字按论文 §4.1 的超参数）</div>
+  <svg class="dg" viewBox="0 0 960 390" role="img" aria-label="NSA 三分支结构示意图" style="--dg-min:760px">
+    <text x="140" y="31" class="t-r t-sm">历史 token 的 K、V</text>
+    <rect class="tk data" x="150" y="20" width="18" height="22"/><rect class="tk data" x="170" y="20" width="18" height="22"/><rect class="tk data" x="190" y="20" width="18" height="22"/><rect class="tk data" x="210" y="20" width="18" height="22"/><rect class="tk data" x="230" y="20" width="18" height="22"/><rect class="tk data" x="250" y="20" width="18" height="22"/><rect class="tk data" x="270" y="20" width="18" height="22"/><rect class="tk data" x="290" y="20" width="18" height="22"/><rect class="tk data" x="310" y="20" width="18" height="22"/><rect class="tk data" x="330" y="20" width="18" height="22"/><rect class="tk data" x="350" y="20" width="18" height="22"/><rect class="tk data" x="370" y="20" width="18" height="22"/><rect class="tk data" x="390" y="20" width="18" height="22"/><rect class="tk data" x="410" y="20" width="18" height="22"/><rect class="tk data" x="430" y="20" width="18" height="22"/><rect class="tk data" x="450" y="20" width="18" height="22"/><rect class="tk data" x="470" y="20" width="18" height="22"/><rect class="tk data" x="490" y="20" width="18" height="22"/><rect class="tk data" x="510" y="20" width="18" height="22"/><rect class="tk data" x="530" y="20" width="18" height="22"/><rect class="tk data" x="550" y="20" width="18" height="22"/><rect class="tk data" x="570" y="20" width="18" height="22"/><rect class="tk data" x="590" y="20" width="18" height="22"/><rect class="tk data" x="610" y="20" width="18" height="22"/><rect class="tk data" x="630" y="20" width="18" height="22"/><rect class="tk data" x="650" y="20" width="18" height="22"/><rect class="tk data" x="670" y="20" width="18" height="22"/><rect class="tk data" x="690" y="20" width="18" height="22"/><rect class="tk data" x="710" y="20" width="18" height="22"/><rect class="tk data" x="730" y="20" width="18" height="22"/><rect class="tk data" x="750" y="20" width="18" height="22"/><rect class="tk data" x="770" y="20" width="18" height="22"/><rect class="tk data" x="790" y="20" width="18" height="22"/>
+    <text x="820" y="31" class="t-xs">… 当前位置 t</text>
+    <path class="edge" d="M170,44 L170,68"/><path class="edge" d="M480,44 L480,68"/><path class="edge" d="M790,44 L790,68"/>
+    <g class="enc"><rect class="box" x="30" y="70" width="280" height="100" rx="10"/>
+      <text x="170" y="92" class="t-c t-b">① 压缩分支</text>
+      <text x="170" y="116" class="t-c t-sm">每 32 个 token 一块，相邻块错开 16 个</text>
+      <text x="170" y="136" class="t-c t-sm">MLP φ 把一块压成 1 个 key、1 个 value</text>
+      <text x="170" y="156" class="t-c t-sm">64K 处约 4,096 个压缩 token</text></g>
+    <g class="pred"><rect class="box" x="340" y="70" width="280" height="100" rx="10"/>
+      <text x="480" y="92" class="t-c t-b">② 选择分支</text>
+      <text x="480" y="116" class="t-c t-sm">按 64 个 token 切块，取分数最高的 16 块</text>
+      <text x="480" y="136" class="t-c t-sm">其中固定含开头 1 块、最近 2 块</text>
+      <text x="480" y="156" class="t-c t-sm">共 1,024 个原始 token</text></g>
+    <g class="act"><rect class="box" x="650" y="70" width="280" height="100" rx="10"/>
+      <text x="790" y="92" class="t-c t-b">③ 滑动窗口分支</text>
+      <text x="790" y="116" class="t-c t-sm">最近的 512 个 token</text>
+      <text x="790" y="136" class="t-c t-sm">专门处理局部依赖</text>
+      <text x="790" y="156" class="t-c t-sm">512 个原始 token</text></g>
+    <path class="edge" d="M170,172 L170,198"/><path class="edge" d="M480,172 L480,198"/><path class="edge" d="M790,172 L790,198"/>
+    <rect class="box" x="30" y="200" width="280" height="40" rx="8"/><text x="170" y="220" class="t-c t-sm">q<tspan baseline-shift="sub" style="font-size:10px">t</tspan> 对压缩 token 做注意力</text>
+    <rect class="box" x="340" y="200" width="280" height="40" rx="8"/><text x="480" y="220" class="t-c t-sm">q<tspan baseline-shift="sub" style="font-size:10px">t</tspan> 对选中的块做注意力</text>
+    <rect class="box" x="650" y="200" width="280" height="40" rx="8"/><text x="790" y="220" class="t-c t-sm">q<tspan baseline-shift="sub" style="font-size:10px">t</tspan> 对窗口内 token 做注意力</text>
+    <path class="edge idx" d="M296,198 C318,186 330,180 352,174" style="marker-end:url(#ah)"/>
+    <text x="325" y="190" class="t-c t-xs">打分</text>
+    <path class="edge" d="M170,242 L170,262"/><path class="edge" d="M480,242 L480,262"/><path class="edge" d="M790,242 L790,262"/>
+    <g class="reg"><rect class="box" x="110" y="264" width="120" height="30" rx="8"/><text x="170" y="279" class="t-c t-sm">× 门控 g<tspan baseline-shift="super" style="font-size:10px">cmp</tspan></text></g>
+    <g class="reg"><rect class="box" x="420" y="264" width="120" height="30" rx="8"/><text x="480" y="279" class="t-c t-sm">× 门控 g<tspan baseline-shift="super" style="font-size:10px">slc</tspan></text></g>
+    <g class="reg"><rect class="box" x="730" y="264" width="120" height="30" rx="8"/><text x="790" y="279" class="t-c t-sm">× 门控 g<tspan baseline-shift="super" style="font-size:10px">win</tspan></text></g>
+    <path class="edge" d="M170,296 C170,330 380,346 462,346"/><path class="edge" d="M480,296 L480,328"/><path class="edge" d="M790,296 C790,330 580,346 498,346"/>
+    <circle cx="480" cy="346" r="16" class="box"/><text x="480" y="347" class="t-c t-lg">+</text>
+    <text x="480" y="378" class="t-c t-sm">输出 o*<tspan baseline-shift="sub" style="font-size:10px">t</tspan></text>
+    <text x="930" y="372" class="t-r t-xs">门控 = sigmoid(MLP(当前输入))，三个门互不约束</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>最上面一排是当前位置之前的所有 token。它们分三路进入三个分支：蓝色的压缩分支把全文粗略地压成少量代表，橙色的选择分支挑出最相关的 16 个原始块，绿色的滑动窗口分支只看最近 512 个 token。三个分支用的 K、V 各自有独立的投影（§3.3.3 解释原因）。每个分支各做一次注意力，结果乘上各自的门控后相加。中间那条虚线表示选择分支的块分数直接取自压缩分支的注意力分数，不另设打分网络。本站示意图，对应 <a href="https://arxiv.org/html/2502.11089v2#S2.F2" target="_blank" rel="noopener">原文图 2 左 ↗</a>。</div>
+</div>
+
+<h4 id="n-3-3">3.3 第一个分支：把每段 token 压成一个代表（Token Compression）</h4>
+<p>压缩分支把连续的一段 key（或 value）聚合成一个块级的表示，用它代表整段的信息：</p>
+<div class="formula">$$\tilde K^{\text{cmp}}_t=f^{\text{cmp}}_K(\mathbf{k}_{:t})=\Big\{\varphi\big(\mathbf{k}_{id+1:\,id+l}\big)\ \Big|\ 0\leqslant i\leqslant\Big\lfloor\frac{t-l}{d}\Big\rfloor\Big\}$$</div>
+<p>逐项解释：\(l\) 是块长，\(d\) 是相邻两块之间的步长，\(\varphi\) 是一个可学习的 MLP，并带有块内位置编码（让它知道一个 key 在块里的第几个位置），它把一块里的 \(l\) 个 key 映射成 1 个压缩 key。value 同理。条件 \(id+l\leqslant t\) 保证只压缩已经完整出现的块，不会偷看未来的 token。论文取 \(l=32\)、\(d=16\)，所以每块 32 个 token、相邻块重叠一半。</p>
+<p><b>为什么要让块重叠（\(d&lt;l\)）？</b>论文的说法是“减少信息碎片化”。可以这样理解：如果块不重叠，一个关键的短语正好跨在两块的边界上，就会被拆成两半，分别稀释在两个压缩表示里。块重叠一半后，任何一段长 16 的连续 token 都完整地落在某一个块内部，不会被切断。代价是压缩 token 的数量翻倍：位置 \(t\) 处大约有 \(t/16\) 个，而不是 \(t/32\) 个。</p>
+<p>压缩 token 承载的是更粗粒度、更偏高层语义的信息，计算量也小：在 64K 位置上，query 只要和约 4,096 个压缩 key 打分。但只靠压缩一定会丢掉细节：把 32 个 token 压成一个向量，某个具体的数字、某个变量名很可能就模糊了。这就引出了第二个分支。</p>
+
+<h4 id="n-3-4">3.4 第二个分支：挑出最相关的原始块（Token Selection）</h4>
+<p>选择分支的任务是：在全文中找出对当前 query 最重要的部分，把这部分的<b>原始</b> key 和 value 原样拿来做注意力，保住细节。设计上有两个关键决定：按块选，以及用压缩分支的分数来打分。</p>
+<p><b>决定一：按连续的块来选，而不是按单个 token。</b>论文给了两个理由。硬件方面，GPU 读一整段连续内存比按索引零散地读快得多，而且按块计算才能凑成规整的矩阵乘法，用满 Tensor Core；FlashAttention 也正是建立在按块访存和计算之上。数据方面，已有工作（MInference）和本文 §6.2 的可视化都显示，注意力分数在空间上是连续的：相邻的 key 往往重要程度相近。既然重要的 token 本来就成片出现，按块选不会损失多少。</p>
+<p><b>决定二：块的重要性分数直接取自压缩分支。</b>给每个块打分本身可能很贵。但压缩分支在做注意力时，本来就要算出 \(\mathbf{q}_t\) 对每个压缩 key 的注意力概率：</p>
+<div class="formula">$$\mathbf{p}^{\text{cmp}}_t=\operatorname{Softmax}\big(\mathbf{q}_t^{\top}\tilde K^{\text{cmp}}_t\big)$$</div>
+<p>这个向量说明了“当前 query 有多关注全文的每一段”，正好可以拿来当选择分支的块分数，几乎不增加计算。剩下的问题是，压缩块和选择块的切法不一样，需要换算。</p>
+<p>如果两者的切法完全相同（\(l'=l=d\)，\(l'\) 是选择块的长度），分数可以直接沿用。论文的设置是压缩块长 32、步长 16，选择块长 64，切法不同，于是按位置关系把分数折算过去：一个选择块的分数，等于和它在位置上重叠的那些压缩块的分数之和，重叠得越多，加的份量越多。论文用一个双重求和写出这个折算（式 9，要求 \(l\leqslant l'\)，且 \(d\) 能整除 \(l\) 和 \(l'\)）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：压缩块（长 32、步长 16）和选择块（长 64）怎么对齐，选择块 1 的分数从哪来</div>
+  <svg class="dg" viewBox="0 0 960 215" role="img" aria-label="压缩块与选择块的对齐关系" style="--dg-min:760px">
+    <text x="140" y="28" class="t-r t-sm">token 位置</text>
+    <line x1="150" y1="28" x2="918" y2="28" class="axis"/>
+    <text x="150" y="14" class="t-c t-xs">0</text><text x="278" y="14" class="t-c t-xs">32</text><text x="406" y="14" class="t-c t-xs">64</text><text x="534" y="14" class="t-c t-xs">96</text><text x="662" y="14" class="t-c t-xs">128</text><text x="790" y="14" class="t-c t-xs">160</text><text x="918" y="14" class="t-c t-xs">192</text>
+    <line x1="406" y1="22" x2="406" y2="142" style="stroke:var(--text-3);stroke-dasharray:4 3"/>
+    <line x1="662" y1="22" x2="662" y2="142" style="stroke:var(--text-3);stroke-dasharray:4 3"/>
+    <text x="140" y="55" class="t-r t-sm">压缩块（偶数号）</text>
+    <g class="data"><rect class="box" x="150" y="44" width="128" height="22" rx="4"/><text x="214" y="55" class="t-c t-xs">c0</text></g>
+    <g class="data"><rect class="box" x="278" y="44" width="128" height="22" rx="4"/><text x="342" y="55" class="t-c t-xs">c2</text></g>
+    <g class="pred"><rect class="box" x="406" y="44" width="128" height="22" rx="4"/><text x="470" y="55" class="t-c t-sm t-b">c4 ×2</text></g>
+    <g class="pred"><rect class="box" x="534" y="44" width="128" height="22" rx="4"/><text x="598" y="55" class="t-c t-sm t-b">c6 ×2</text></g>
+    <g class="data"><rect class="box" x="662" y="44" width="128" height="22" rx="4"/><text x="726" y="55" class="t-c t-xs">c8</text></g>
+    <g class="data"><rect class="box" x="790" y="44" width="128" height="22" rx="4"/><text x="854" y="55" class="t-c t-xs">c10</text></g>
+    <text x="140" y="83" class="t-r t-sm">压缩块（奇数号）</text>
+    <g class="data"><rect class="box" x="214" y="72" width="128" height="22" rx="4"/><text x="278" y="83" class="t-c t-xs">c1</text></g>
+    <g class="pred"><rect class="box" x="342" y="72" width="128" height="22" rx="4"/><text x="406" y="83" class="t-c t-sm t-b">c3 ×1</text></g>
+    <g class="pred"><rect class="box" x="470" y="72" width="128" height="22" rx="4"/><text x="534" y="83" class="t-c t-sm t-b">c5 ×2</text></g>
+    <g class="pred"><rect class="box" x="598" y="72" width="128" height="22" rx="4"/><text x="662" y="83" class="t-c t-sm t-b">c7 ×1</text></g>
+    <g class="data"><rect class="box" x="726" y="72" width="128" height="22" rx="4"/><text x="790" y="83" class="t-c t-xs">c9</text></g>
+    <text x="140" y="124" class="t-r t-sm">选择块</text>
+    <rect class="box" x="150" y="112" width="256" height="24" rx="4"/><text x="278" y="124" class="t-c t-sm">选择块 0（token 0–63）</text>
+    <g class="enc"><rect class="box" x="406" y="112" width="256" height="24" rx="4"/><text x="534" y="124" class="t-c t-sm t-b">选择块 1（token 64–127）</text></g>
+    <rect class="box" x="662" y="112" width="256" height="24" rx="4"/><text x="790" y="124" class="t-c t-sm">选择块 2（token 128–191）</text>
+    <text x="534" y="166" class="t-c t-sm">选择块 1 的分数 = 1·p(c3) + 2·p(c4) + 2·p(c5) + 2·p(c6) + 1·p(c7)</text>
+    <text x="534" y="190" class="t-c t-xs">权重 = 这个压缩块和选择块 1 重叠了几个 16-token 小段（本站推算，对应原文式 (9) 的双重求和）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是 token 位置，每格 16 个 token。压缩块每块 32 个 token、每隔 16 个起一块，所以相邻块重叠一半；为了看清重叠，偶数号和奇数号分两行画。选择块每块 64 个 token，两条竖虚线是选择块 1 的边界。和选择块 1 有重叠的压缩块是 c3 到 c7（橙色）：c4、c5、c6 完全落在里面，各重叠 2 个小段；c3、c7 只有一半在里面，各重叠 1 个小段。把它们的注意力概率按重叠段数加权求和，就是选择块 1 的分数。原文式 (9) 的双重求和展开后正好给出 1、2、2、2、1 这组权重。注意：arXiv v1 和 v2 的式 (9) 下标写法不同（v1 是 \(+m+n\)，v2 是 \(-m-n\)），哪一组压缩块对应哪一个选择块取决于下标约定，开源实现各自处理；按重叠程度加权的思路是确定的。本站示意图，原文没有对应的图。</div>
+</div>
+
+<p><b>GQA 下的组内共享。</b>§2.1 讲过，如果同一 GQA 组里的每个头各选各的块，解码时就要读并集。所以 NSA 强制组内的所有头使用同一套选择：把组内 \(H\) 个头（论文设置下 \(H=16\)）各自的块分数加起来，作为全组共同的分数：</p>
+<div class="formula">$$\mathbf{p}^{\text{slc}\,\prime}_t=\sum_{h=1}^{H}\mathbf{p}^{\text{slc},(h)}_t$$</div>
+<p><b>取前 n 块。</b>最后按全组分数从高到低排序，保留排名前 \(n\) 的块，把这些块的原始 key 拼接起来（value 同理）：</p>
+<div class="formula">$$\mathcal{I}_t=\{\,i\mid \operatorname{rank}\big(\mathbf{p}^{\text{slc}\,\prime}_t[i]\big)\leqslant n\,\},\qquad \tilde K^{\text{slc}}_t=\operatorname{Cat}\big[\{\mathbf{k}_{il'+1:(i+1)l'}\mid i\in\mathcal{I}_t\}\big]$$</div>
+<p>论文取 \(l'=64\)、\(n=16\)。这 16 块里有 3 块是固定激活的：序列开头的 1 块，以及离当前位置最近的 2 块；真正按分数挑出来的是另外 13 块。选中的 key 一共 \(16\times64=1{,}024\) 个。论文没有解释为什么要固定这 3 块，可以这样理解：固定选中开头块，对应 StreamingLLM 观察到的“注意力汇聚点”（模型习惯把多余的注意力权重放在最开头几个 token 上）；固定选中最近的块，则保证紧挨着当前位置的细节总能被选择分支细看。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：选择分支为一个 query 挑块的完整流程（一个 GQA 组，16 个头）</div>
+  <div class="dia-flow">
+    <span class="dia-box enc">① 压缩分支的注意力<small>16 个头各自得到 p<sup>cmp</sup>（对每个压缩块的注意力概率）</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box">② 换算到选择块<small>按重叠程度加权求和（式 9）</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box">③ 组内相加<small>16 个头的块分数加起来（式 10）</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box pred">④ 取前 16 块<small>含开头 1 块、最近 2 块（式 11）</small></span><span class="dia-arrow">→</span>
+    <span class="dia-box pred">⑤ 读原始 K、V<small>16 块 × 64 = 1,024 个 token，全组 16 个头共用（式 12）</small></span>
+  </div>
+  <div class="dia-note"><b>怎么看：</b>从左到右是一个 query 位置上发生的事。①是压缩分支本来就要做的计算；②③④只涉及长度约为 \(t/64\) 的短向量（64K 位置上约 1,024 个块），开销很小；⑤是唯一需要大块读显存的一步，而且读到的块被全组共用。整个流程里没有任何额外的打分网络或辅助损失。本站示意图，原文没有对应的图。</div>
+</div>
+
+<div class="note-pre"><b>先补一点背景：top-n 不可导，那这个分支是怎么“学会”挑块的？</b>
+<p>“取分数最高的 16 块”是一个离散的决定：分数稍微变一点，选中的集合要么不变、要么突然换一块，没有平滑的梯度可言。所以梯度确实传不过“选哪几块”这一步。NSA 的巧妙之处在于，它根本不需要让梯度穿过这一步。下面是本站按论文公式梳理的梯度路径：</p>
+<ul>
+  <li><b>压缩分支的参数</b>（它的 K、V 投影和 MLP \(\varphi\)）通过压缩分支自己的输出接收语言模型损失的梯度。为了让压缩分支的输出有用，模型必须学会让 \(\mathbf{q}_t\) 对真正相关的段落给出高注意力。这些注意力概率恰好就是选择分支的块分数。于是“打分器”是被语言模型损失间接训练的。</li>
+  <li><b>选择分支的参数</b>（它自己的 K、V 投影，以及共用的 query）通过被选中的那 1,024 个 token 接收梯度，学会怎样利用挑出来的细节。</li>
+  <li><b>门控</b>接收梯度，学会在不同情况下更依赖哪个分支。</li>
+</ul>
+<p>对比 §6.1 里作者试过的两条路：一条是另设一个打分网络，再用辅助损失去监督它（因为选择不可导，打分网络得不到语言模型损失的梯度）；另一条是像 Quest 那样用无参数的启发式打分。NSA 两者都不是：打分来自一个本身就在被主损失训练的分支，不需要额外的损失，也不需要额外的计算。</p>
+</div>
+
+<h4 id="n-3-5">3.5 第三个分支：最近的 512 个 token（Sliding Window）</h4>
+<p>为什么还需要一个专门的滑动窗口分支？论文的解释是“捷径学习”。在注意力里，局部模式（紧挨着的几个 token 之间的关系）学得最快，在训练早期就会主导学习过程。如果只有压缩和选择两个分支，模型很可能主要靠它们来处理局部依赖，压缩和选择这两条处理长距离信息的路就学不好。把局部信息单独交给一个窗口大小 \(w=512\) 的分支，压缩和选择分支就能专心学习各自擅长的长距离模式，不会被局部模式“走捷径”抢走梯度。</p>
+<p>为了进一步防止分支之间互相走捷径，NSA 给三个分支各配了<b>独立的 key 和 value</b>（各自的投影），额外开销很小。这样三个分支的梯度不会因为共用同一份 K、V 而互相干扰。三路结果最后通过门控融合，构成完整的 NSA。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：位置 4,096 上的一个 query，三个分支各自“看到”了哪些 token</div>
+  <svg class="dg" viewBox="0 0 960 200" role="img" aria-label="单个 query 的三分支覆盖范围" style="--dg-min:760px">
+    <text x="160" y="34" class="t-r t-sm">全注意力</text>
+    <rect class="tk enc" x="170" y="24" width="760" height="20"/>
+    <text x="160" y="70" class="t-r t-sm">① 压缩</text>
+    <g class="data"><rect class="box" x="170" y="60" width="760" height="20" rx="3"/></g>
+    <text x="550" y="70" class="t-c t-xs">约 255 个压缩 token 覆盖全部历史，每个代表 32 个 token（粗粒度）</text>
+    <text x="160" y="106" class="t-r t-sm">② 选择</text>
+    <rect class="tk off" x="170" y="96" width="760" height="20"/>
+    <rect class="tk pred" x="170" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="229.4" y="96" width="23.8" height="20"/>
+    <rect class="tk pred" x="300.6" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="395.6" y="96" width="35.6" height="20"/>
+    <rect class="tk pred" x="526.3" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="609.4" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="692.5" y="96" width="23.8" height="20"/>
+    <rect class="tk pred" x="775.6" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="823.1" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="858.8" y="96" width="11.9" height="20"/>
+    <rect class="tk pred" x="906.3" y="96" width="23.8" height="20"/>
+    <text x="160" y="142" class="t-r t-sm">③ 滑动窗口</text>
+    <rect class="tk off" x="170" y="132" width="665" height="20"/>
+    <rect class="tk act" x="835" y="132" width="95" height="20"/>
+    <line x1="170" y1="162" x2="930" y2="162" class="axis"/>
+    <text x="170" y="178" class="t-c t-xs">0</text><text x="360" y="178" class="t-c t-xs">1024</text><text x="550" y="178" class="t-c t-xs">2048</text><text x="740" y="178" class="t-c t-xs">3072</text><text x="930" y="178" class="t-r t-xs">4096（当前位置）</text>
+    <text x="170" y="194" class="t-xs">↑ 开头块（固定）</text><text x="550" y="194" class="t-c t-xs">其余 13 块按分数挑选</text><text x="930" y="194" class="t-r t-xs">最近 2 块（固定）↑</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是 token 位置，当前 query 位于 4,096。第一行是全注意力：4,096 个 token 全部细看。第二行是压缩分支：全部历史都被覆盖，但每个压缩 token 代表 32 个原始 token，只能“看个大概”（推算：\(\lfloor(4096-32)/16\rfloor+1=255\) 个）。第三行是选择分支：64 个块中挑出 16 块（橙色，每块 64 个 token），开头 1 块和最近 2 块是固定的，其余 13 块的位置是本站随意画的。第四行是滑动窗口：最近 512 个 token（绿色）。三路合计约 1,791 个 key（推算），这个长度下约为全注意力的 44%；到 64K 时降到约 8.6%。本站示意图，对应 <a href="https://arxiv.org/html/2502.11089v2#S2.F2" target="_blank" rel="noopener">原文图 2 右 ↗</a>（原文画的是三个分支的二维注意力掩码）。</div>
+</div>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>NSA 减少的是每一步要“读”和“算”的 KV，不是要“存”的 KV。</b>选择分支随时可能挑中历史上的任何一块，所以全部原始 K、V 都得留着；再加上三个分支各有独立的 K、V，压缩分支还要存约 \(t/16\) 个压缩 token。按本站推算，NSA 的 KV 缓存存储量约为同样结构的全注意力的 1.06 倍，再加上窗口的固定开销，并不比全注意力小。论文没有讨论 KV 存储。（后来 DeepSeek-V4 的 CSA 改为直接在存储层面压缩，见文末。）</li>
+  <li><b>短序列上 NSA 并不稀疏。</b>当 \(t\leqslant 1{,}024\) 时，16 个 64 token 的块已经覆盖全部历史，选择分支等于细看所有 token。所以在大多数几百到一两千 token 的普通基准上，NSA 实际上是“全注意力 + 压缩分支 + 窗口分支 + 门控”的组合，而不是一个稀疏模型。这一点对理解 §4 的通用基准结果很重要。</li>
+</ul></div>
+
+<h4 id="n-3-6">3.6 内核设计：按 GQA 组装载 query</h4>
+<p>算法定下来之后，要让它在 GPU 上真的快。NSA 的内核用 Triton 编写（Triton 是 OpenAI 开源的一种用 Python 写 GPU 内核的语言，按“块”来描述计算，由编译器负责底层优化）。因为 MHA 解码时访存量太大、效率低，论文只针对 GQA 和 MQA 这类共享 KV 的结构设计内核。压缩分支和滑动窗口分支的注意力本质上是普通的稠密注意力（只是 key 少了），可以直接用现成的 FlashAttention-2 内核；真正需要专门设计的是选择分支。</p>
+<p><b>为什么不能照搬 FlashAttention 的切法？</b>FlashAttention 的做法是：每个线程块负责一个头里<b>一段连续位置</b>的 query（比如 64 或 128 个相邻位置），把这块 query 装进 SRAM，然后依次装入 KV 块计算。对稠密注意力这很理想：相邻位置的 query 要看的 KV 几乎相同，一块 KV 装进来能被整块 query 复用。但在选择分支里，每个位置都有自己的一套 16 块。同一块里的 64 个相邻 query 挑中的块往往各不相同，要么把它们的并集都装进来（大部分计算被掩码丢掉），要么就得频繁地装入、换出，访存效率都很差。</p>
+<p><b>NSA 换了一种分组方式。</b>它不按“同一个头的连续位置”分组，而是按“<b>同一个位置、同一个 GQA 组的所有头</b>”分组。这些头恰好共用同一套选中的块（§3.4 的组内共享），于是：</p>
+<ul>
+  <li><b>以组为中心装载数据</b>：每次内层循环开始时，装入位置 \(t\) 上这一组所有头的 query，构成一个 \(h\times d_k\) 的小矩阵（论文设置下是 \(16\times192\)），以及它们共用的块索引 \(\mathcal{I}_t\)。</li>
+  <li><b>共享地读取 KV</b>：内层循环按 \(\mathcal{I}_t\) 依次把选中的连续 KV 块装进 SRAM，每次一个大小为 \(B_k\times d_k\) 的 K 块和 \(B_k\times d_v\) 的 V 块（\(B_k\) 能整除选择块长 \(l'\)）。每块只读一次，被组内所有头复用。</li>
+  <li><b>外层循环交给网格调度</b>：每个位置的内层循环长度都约等于 \(n\) 个块，几乎相同，所以论文把“遍历位置 / 输出”的外层循环直接放进 Triton 的网格（grid）里并行，由 GPU 调度到各个流多处理器（SM）上，负载天然均衡。</li>
+</ul>
+<p>论文说，这个设计通过两点达到“接近最优的算术强度”：组内共享消除了重复的 KV 传输；各 SM 之间的计算负载均衡。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：两种 query 分组方式下，一个线程块需要装入多少 KV 块</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="FlashAttention 式分组与 NSA 按 GQA 组分组的对比" style="--dg-min:780px">
+    <text x="245" y="18" class="t-c t-b">FlashAttention 式：同一个头的 8 个连续位置</text>
+    <text x="720" y="18" class="t-c t-b">NSA 式：同一位置、同一组的所有头</text>
+    <text x="304" y="36" class="t-c t-xs">KV 块 0 … 11</text><text x="784" y="36" class="t-c t-xs">KV 块 0 … 11</text>
+    <text x="140" y="54" class="t-r t-xs">位置 t</text><text x="140" y="78" class="t-r t-xs">t+1</text><text x="140" y="102" class="t-r t-xs">t+2</text><text x="140" y="126" class="t-r t-xs">t+3</text><text x="140" y="150" class="t-r t-xs">t+4</text><text x="140" y="174" class="t-r t-xs">t+5</text><text x="140" y="198" class="t-r t-xs">t+6</text><text x="140" y="222" class="t-r t-xs">t+7</text>
+    <g>
+      <rect class="tk enc" x="150" y="44" width="22" height="20"/><rect class="tk off" x="176" y="44" width="22" height="20"/><rect class="tk off" x="202" y="44" width="22" height="20"/><rect class="tk off" x="228" y="44" width="22" height="20"/><rect class="tk enc" x="254" y="44" width="22" height="20"/><rect class="tk off" x="280" y="44" width="22" height="20"/><rect class="tk off" x="306" y="44" width="22" height="20"/><rect class="tk off" x="332" y="44" width="22" height="20"/><rect class="tk off" x="358" y="44" width="22" height="20"/><rect class="tk enc" x="384" y="44" width="22" height="20"/><rect class="tk off" x="410" y="44" width="22" height="20"/><rect class="tk off" x="436" y="44" width="22" height="20"/>
+      <rect class="tk enc" x="150" y="68" width="22" height="20"/><rect class="tk off" x="176" y="68" width="22" height="20"/><rect class="tk off" x="202" y="68" width="22" height="20"/><rect class="tk off" x="228" y="68" width="22" height="20"/><rect class="tk off" x="254" y="68" width="22" height="20"/><rect class="tk enc" x="280" y="68" width="22" height="20"/><rect class="tk off" x="306" y="68" width="22" height="20"/><rect class="tk off" x="332" y="68" width="22" height="20"/><rect class="tk off" x="358" y="68" width="22" height="20"/><rect class="tk enc" x="384" y="68" width="22" height="20"/><rect class="tk off" x="410" y="68" width="22" height="20"/><rect class="tk off" x="436" y="68" width="22" height="20"/>
+      <rect class="tk off" x="150" y="92" width="22" height="20"/><rect class="tk enc" x="176" y="92" width="22" height="20"/><rect class="tk off" x="202" y="92" width="22" height="20"/><rect class="tk off" x="228" y="92" width="22" height="20"/><rect class="tk enc" x="254" y="92" width="22" height="20"/><rect class="tk off" x="280" y="92" width="22" height="20"/><rect class="tk off" x="306" y="92" width="22" height="20"/><rect class="tk off" x="332" y="92" width="22" height="20"/><rect class="tk off" x="358" y="92" width="22" height="20"/><rect class="tk off" x="384" y="92" width="22" height="20"/><rect class="tk enc" x="410" y="92" width="22" height="20"/><rect class="tk off" x="436" y="92" width="22" height="20"/>
+      <rect class="tk enc" x="150" y="116" width="22" height="20"/><rect class="tk off" x="176" y="116" width="22" height="20"/><rect class="tk off" x="202" y="116" width="22" height="20"/><rect class="tk off" x="228" y="116" width="22" height="20"/><rect class="tk off" x="254" y="116" width="22" height="20"/><rect class="tk off" x="280" y="116" width="22" height="20"/><rect class="tk enc" x="306" y="116" width="22" height="20"/><rect class="tk off" x="332" y="116" width="22" height="20"/><rect class="tk off" x="358" y="116" width="22" height="20"/><rect class="tk off" x="384" y="116" width="22" height="20"/><rect class="tk off" x="410" y="116" width="22" height="20"/><rect class="tk enc" x="436" y="116" width="22" height="20"/>
+      <rect class="tk off" x="150" y="140" width="22" height="20"/><rect class="tk off" x="176" y="140" width="22" height="20"/><rect class="tk enc" x="202" y="140" width="22" height="20"/><rect class="tk off" x="228" y="140" width="22" height="20"/><rect class="tk enc" x="254" y="140" width="22" height="20"/><rect class="tk off" x="280" y="140" width="22" height="20"/><rect class="tk off" x="306" y="140" width="22" height="20"/><rect class="tk off" x="332" y="140" width="22" height="20"/><rect class="tk off" x="358" y="140" width="22" height="20"/><rect class="tk enc" x="384" y="140" width="22" height="20"/><rect class="tk off" x="410" y="140" width="22" height="20"/><rect class="tk off" x="436" y="140" width="22" height="20"/>
+      <rect class="tk enc" x="150" y="164" width="22" height="20"/><rect class="tk off" x="176" y="164" width="22" height="20"/><rect class="tk off" x="202" y="164" width="22" height="20"/><rect class="tk off" x="228" y="164" width="22" height="20"/><rect class="tk off" x="254" y="164" width="22" height="20"/><rect class="tk off" x="280" y="164" width="22" height="20"/><rect class="tk off" x="306" y="164" width="22" height="20"/><rect class="tk enc" x="332" y="164" width="22" height="20"/><rect class="tk off" x="358" y="164" width="22" height="20"/><rect class="tk off" x="384" y="164" width="22" height="20"/><rect class="tk enc" x="410" y="164" width="22" height="20"/><rect class="tk off" x="436" y="164" width="22" height="20"/>
+      <rect class="tk off" x="150" y="188" width="22" height="20"/><rect class="tk off" x="176" y="188" width="22" height="20"/><rect class="tk off" x="202" y="188" width="22" height="20"/><rect class="tk enc" x="228" y="188" width="22" height="20"/><rect class="tk off" x="254" y="188" width="22" height="20"/><rect class="tk enc" x="280" y="188" width="22" height="20"/><rect class="tk off" x="306" y="188" width="22" height="20"/><rect class="tk off" x="332" y="188" width="22" height="20"/><rect class="tk off" x="358" y="188" width="22" height="20"/><rect class="tk off" x="384" y="188" width="22" height="20"/><rect class="tk off" x="410" y="188" width="22" height="20"/><rect class="tk enc" x="436" y="188" width="22" height="20"/>
+      <rect class="tk enc" x="150" y="212" width="22" height="20"/><rect class="tk off" x="176" y="212" width="22" height="20"/><rect class="tk off" x="202" y="212" width="22" height="20"/><rect class="tk off" x="228" y="212" width="22" height="20"/><rect class="tk off" x="254" y="212" width="22" height="20"/><rect class="tk off" x="280" y="212" width="22" height="20"/><rect class="tk off" x="306" y="212" width="22" height="20"/><rect class="tk off" x="332" y="212" width="22" height="20"/><rect class="tk enc" x="358" y="212" width="22" height="20"/><rect class="tk enc" x="384" y="212" width="22" height="20"/><rect class="tk off" x="410" y="212" width="22" height="20"/><rect class="tk off" x="436" y="212" width="22" height="20"/>
+    </g>
+    <text x="140" y="262" class="t-r t-xs">要装入的块</text>
+    <rect class="tk pred" x="150" y="252" width="22" height="20"/><rect class="tk pred" x="176" y="252" width="22" height="20"/><rect class="tk pred" x="202" y="252" width="22" height="20"/><rect class="tk pred" x="228" y="252" width="22" height="20"/><rect class="tk pred" x="254" y="252" width="22" height="20"/><rect class="tk pred" x="280" y="252" width="22" height="20"/><rect class="tk pred" x="306" y="252" width="22" height="20"/><rect class="tk pred" x="332" y="252" width="22" height="20"/><rect class="tk pred" x="358" y="252" width="22" height="20"/><rect class="tk pred" x="384" y="252" width="22" height="20"/><rect class="tk pred" x="410" y="252" width="22" height="20"/><rect class="tk pred" x="436" y="252" width="22" height="20"/>
+    <text x="245" y="290" class="t-c t-sm">8 行各选 3 块，并集是全部 12 块；每块只被少数几行用到</text>
+    <text x="620" y="54" class="t-r t-xs">头 1</text><text x="620" y="78" class="t-r t-xs">头 2</text><text x="620" y="102" class="t-r t-xs">头 3</text><text x="620" y="126" class="t-r t-xs">头 4</text><text x="620" y="150" class="t-r t-xs">头 5</text><text x="620" y="174" class="t-r t-xs">头 6</text><text x="620" y="198" class="t-r t-xs">头 7</text><text x="620" y="222" class="t-r t-xs">头 8 …</text>
+    <g>
+      <rect class="tk off" x="630" y="44" width="22" height="188"/><rect class="tk off" x="656" y="44" width="22" height="188"/><rect class="tk enc" x="682" y="44" width="22" height="188"/><rect class="tk off" x="708" y="44" width="22" height="188"/><rect class="tk off" x="734" y="44" width="22" height="188"/><rect class="tk off" x="760" y="44" width="22" height="188"/><rect class="tk enc" x="786" y="44" width="22" height="188"/><rect class="tk off" x="812" y="44" width="22" height="188"/><rect class="tk off" x="838" y="44" width="22" height="188"/><rect class="tk enc" x="864" y="44" width="22" height="188"/><rect class="tk off" x="890" y="44" width="22" height="188"/><rect class="tk off" x="916" y="44" width="22" height="188"/>
+    </g>
+    <text x="620" y="262" class="t-r t-xs">要装入的块</text>
+    <rect class="tk off" x="630" y="252" width="22" height="20"/><rect class="tk off" x="656" y="252" width="22" height="20"/><rect class="tk pred" x="682" y="252" width="22" height="20"/><rect class="tk off" x="708" y="252" width="22" height="20"/><rect class="tk off" x="734" y="252" width="22" height="20"/><rect class="tk off" x="760" y="252" width="22" height="20"/><rect class="tk pred" x="786" y="252" width="22" height="20"/><rect class="tk off" x="812" y="252" width="22" height="20"/><rect class="tk off" x="838" y="252" width="22" height="20"/><rect class="tk pred" x="864" y="252" width="22" height="20"/><rect class="tk off" x="890" y="252" width="22" height="20"/><rect class="tk off" x="916" y="252" width="22" height="20"/>
+    <text x="720" y="290" class="t-c t-sm">全组共用 3 块：每块读一次，被所有头复用</text>
+    <text x="480" y="318" class="t-c t-xs">左：外层沿序列方向切 query 块。右：外层（Triton grid）沿“位置 × GQA 组”并行，内层只扫这一组选中的 KV 块。</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>每张小图的一行是线程块里的一个 query，一列是一个 KV 块，蓝色表示这个 query 选中了这一块。左图按 FlashAttention 的习惯，把同一个头上 8 个相邻位置放进一个线程块：每个位置挑的块不同，合起来几乎要装入所有块，装进来的块大多只被一两行用到。右图按 NSA 的做法，把同一位置、同一组的头（论文里是 16 个，这里画 8 个）放进一个线程块：它们共用同一套选择，只需装入 3 块，每块被所有行复用，而且这些行正好凑成一个能交给 Tensor Core 的小矩阵。本站示意图，对应 <a href="https://arxiv.org/html/2502.11089v2#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>（原文画的是 query、KV 在显存与 SRAM 之间的装载路径）。</div>
+</div>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>这个内核依赖“每组的头足够多”。</b>右图那个小矩阵的行数等于每组的头数。Tensor Core 做矩阵乘法有最小尺寸（Triton 的矩阵乘要求每一维至少 16），论文的模型每组正好 16 个头，刚好满足。如果换成每组只有 4 个头的常见模型（例如 Llama-3-8B 有 32 个 query 头、8 组 KV），就得补零凑到 16 行，四分之三的算力白白浪费。后来的 FSA 正是针对这个问题提出了另一种循环顺序（见文末）。</li>
+  <li><b>“接近最优的算术强度”要读仔细。</b>它的意思是：在给定的稀疏模式下，没有多读一个不需要的 KV 块。这并不等于这个内核像稠密的 FlashAttention-2 那样被算力限制。按本站推算，右图里每读入一个 key 只被 16 个头使用，每字节数据对应的运算远少于稠密注意力（一个 query 块有 64–128 行），单看这一步更接近带宽受限；相邻位置挑中的块往往大量重叠，重复读取有一部分可能落在 L2 缓存里。论文没有给出内核达到的 TFLOPs 或带宽利用率。</li>
+  <li><b>论文只描述了前向内核。</b>反向传播时，许多 query 要把梯度累加到同一个被选中的 KV 块上，写回的冲突和调度都更复杂。论文没有介绍反向内核的做法，§5 测得的反向加速也明显低于前向。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S3.SS3" target="_blank" rel="noopener">§3.3 三个分支 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S3.SS4" target="_blank" rel="noopener">§3.4 内核 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 实验：同样的数据和训练量，NSA 比全注意力差吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>NSA 让模型每个位置只看一小部分 KV，代价是不是效果变差？论文的对照办法是：用同一个骨干模型、同样的数据和训练量，分别训练一个全注意力版本和一个 NSA 版本，再从三个角度比较：通用能力、长上下文能力、经过推理数据微调后的数学推理能力。长上下文部分还加入了几种推理期稀疏方法作为对手。读这一节时要一直问：比较的两边是否只差注意力这一处？评测的输入有多长？</div>
+
+<h4 id="n-4-1">4.1 预训练设置：一个 27B 的 MoE 模型</h4>
+<div class="note-pre"><b>先补一点背景：MoE 骨干与 YaRN。</b>
+<p><b>MoE（混合专家）</b>把前馈层换成很多个“专家”小网络，每个 token 只交给其中少数几个专家处理，所以总参数很大，每个 token 实际用到的参数（激活参数）却很少。本文用的是 DeepSeekMoE 结构：专家切得很细，另有少数几个所有 token 都会经过的“共享专家”。这一结构的来龙去脉见本站 <a href="deepseek-v3.html#n-2-2">DeepSeek-V3 精读 §2.1.2</a>。</p>
+<p><b>YaRN</b> 是一种扩展 RoPE 位置编码适用长度的方法。RoPE 用不同频率的旋转来表示位置（见本站 <a href="roformer.html">RoFormer 精读</a>），模型在 8K 长度上训练后，直接用到 32K 会遇到没见过的旋转角度。YaRN 按频率分段调整这些角度，再配合少量继续训练，就能把上下文窗口扩展开。</p>
+</div>
+<p>实验骨干结合了 GQA 和 MoE，这也是当时先进大模型的常见做法。具体配置如下：</p>
+<div class="table-wrap"><table>
+  <tr><th>项目</th><th>设置</th></tr>
+  <tr><td>规模</td><td>总参数 27B，每 token 激活 3B</td></tr>
+  <tr><td>层数 / 隐藏维度</td><td>30 层，2560 维</td></tr>
+  <tr><td>注意力</td><td>GQA，4 组，共 64 个注意力头（每组 16 个）；每个头 \(d_q=d_k=192\)，\(d_v=128\)</td></tr>
+  <tr><td>MoE</td><td>DeepSeekMoE：72 个路由专家 + 2 个共享专家，每 token 选 6 个；为训练稳定，第一层用 SwiGLU 形式的普通 MLP 代替 MoE</td></tr>
+  <tr><td>NSA 超参数</td><td>压缩块长 \(l=32\)，步长 \(d=16\)；选择块长 \(l'=64\)，选中块数 \(n=16\)（含固定的开头 1 块、最近 2 块）；滑动窗口 \(w=512\)</td></tr>
+  <tr><td>训练数据</td><td>两个模型都在 270B token 的 8K 长度文本上预训练，再在 32K 长度文本上用 YaRN 做继续训练和监督微调，以适应长上下文；论文称两者都“训练到完全收敛”</td></tr>
+</table></div>
+<p>原文图 4 画了两个模型约 6 万步的预训练损失曲线：两条曲线都平稳下降，NSA 的损失一直略低于全注意力（ACL 正式版的图注措辞是“略低”）。损失低一点说明 NSA 至少没有因为稀疏而学得更差。论文没有给出两条曲线的具体数值，见 <a href="https://arxiv.org/html/2502.11089v2#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。</p>
+
+<h4 id="n-4-2">4.2 对照的基线</h4>
+<p>除了全注意力，长上下文评测还加入了四种推理期稀疏方法，它们都作用在训练好的全注意力模型上：</p>
+<ul>
+  <li><b>H2O</b>：KV 缓存淘汰，保留重击者和最近的 token（§2.1）。</li>
+  <li><b>InfLLM</b>：不需要训练的长上下文方法。它保留开头的“汇聚点”token 和局部上下文，把更早的内容切块存起来，从每块里选几个代表 key 来估计这块的重要性，按需取回。</li>
+  <li><b>Quest</b>：按页记录 key 的最小、最大值，按 query 估计每页的上界分数，只读最高的几页（§2.1）。</li>
+  <li><b>Exact-Top</b>：先算出完整的注意力分数，再为每个 query 精确地挑出分数最高的 \(n\) 个 key，只在这些位置上做注意力。它不省任何计算，是一个“如果能完美地按 token 挑选会怎样”的参照。</li>
+</ul>
+<p>三类评测的对照方式不同。通用评测的大部分样本都短于这些基线的局部窗口，基线和全注意力实际上没有区别，所以只比 NSA 和全注意力。长上下文评测比较所有方法，并把所有稀疏方法的稀疏度设为相同。思维链推理需要在长文本上微调，而推理期稀疏方法不支持训练，所以只比 NSA 和全注意力。</p>
+
+<h4 id="n-4-3">4.3 通用能力：九项基准</h4>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th class="num">MMLU</th><th class="num">MMLU-PRO</th><th class="num">CMMLU</th><th class="num">BBH</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">DROP</th><th class="num">MBPP</th><th class="num">HumanEval</th><th class="num">平均</th></tr>
+  <tr><td>评测方式</td><td class="num">5-shot</td><td class="num">5-shot</td><td class="num">5-shot</td><td class="num">3-shot</td><td class="num">8-shot</td><td class="num">4-shot</td><td class="num">1-shot F1</td><td class="num">3-shot pass@1</td><td class="num">0-shot pass@1</td><td></td></tr>
+  <tr><td>全注意力</td><td class="num"><b>0.567</b></td><td class="num">0.279</td><td class="num">0.576</td><td class="num">0.497</td><td class="num">0.486</td><td class="num">0.263</td><td class="num">0.503</td><td class="num"><b>0.482</b></td><td class="num">0.335</td><td class="num">0.443</td></tr>
+  <tr class="hl"><td>NSA</td><td class="num">0.565</td><td class="num"><b>0.286</b></td><td class="num"><b>0.587</b></td><td class="num"><b>0.521</b></td><td class="num"><b>0.520</b></td><td class="num"><b>0.264</b></td><td class="num"><b>0.545</b></td><td class="num">0.466</td><td class="num"><b>0.348</b></td><td class="num"><b>0.456</b></td></tr>
+</table></div>
+<p>表格数字来自原文表 1。九项里 NSA 在七项上更高，平均分 0.456 对 0.443；MMLU 低 0.002，MBPP 低 0.016。提升最大的是两个偏推理的任务：DROP 高 0.042，GSM8K 高 0.034。论文的解释是，稀疏注意力的预训练迫使模型把注意力集中在最重要的信息上，相当于过滤掉了无关注意力路径带来的噪声。</p>
+<p>本站对这个解释持保留态度。§3.5 末尾说过，输入不超过约 1,000 个 token 时，NSA 的选择分支已经覆盖全部历史，根本不稀疏；这些基准的提示大多在这个量级（少样本提示一般几百到两三千 token）。所以在这里起作用的，更可能是 NSA 改变了注意力的结构（三个分支、独立的 K、V、门控、额外参数），而不是“稀疏过滤了噪声”。论文自己也承认，NSA 在短序列上发挥不出效率优势。</p>
+
+<h4 id="n-4-4">4.4 长上下文：大海捞针与 LongBench</h4>
+<p><b>大海捞针。</b>这个测试把一句关键信息（“针”）插在一篇很长的无关文本（“草堆”）里的不同深度，问模型这句信息的内容。原文图 5 是一张热力图：横轴是上下文长度，从 1K 到 64K；纵轴是针所在的深度，从 0% 到 100%；颜色表示检索准确率。NSA 在 64K 以内所有长度、所有深度上都是满分。论文把这归功于分层设计：压缩 token 以很低的代价扫一遍全局、找出相关的段落，选择分支再把这些段落的原始 token 细看一遍，所以既有全局视野，又不丢细节。见 <a href="https://arxiv.org/html/2502.11089v2#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a>。</p>
+<p><b>LongBench。</b>这是一个由多种长文本任务组成的评测集。为了让稀疏度一致，论文把所有稀疏基线每个 query 能激活的 token 数都设为 2,560，这正是 NSA 处理 32K 序列时平均激活的 token 数（推算核对：平均位置上约 1,024 个压缩 token + 1,024 个选中 token + 512 个窗口 token = 2,560）。按 StreamingLLM 的做法，这 2,560 个里包括开头 128 个和最近 512 个 token。论文还去掉了几个“所有模型得分都很低、比较没有意义”的子集。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th class="num">MFQA-en</th><th class="num">MFQA-zh</th><th class="num">Qasper</th><th class="num">HPQ</th><th class="num">2Wiki</th><th class="num">GovRpt</th><th class="num">Dur</th><th class="num">PassR-en</th><th class="num">PassR-zh</th><th class="num">LCC</th><th class="num">平均</th></tr>
+  <tr><td>H2O</td><td class="num">0.428</td><td class="num">0.429</td><td class="num">0.308</td><td class="num">0.112</td><td class="num">0.101</td><td class="num">0.231</td><td class="num">0.208</td><td class="num">0.704</td><td class="num">0.421</td><td class="num">0.092</td><td class="num">0.303</td></tr>
+  <tr><td>InfLLM</td><td class="num">0.474</td><td class="num">0.517</td><td class="num">0.356</td><td class="num">0.306</td><td class="num">0.250</td><td class="num">0.277</td><td class="num">0.257</td><td class="num">0.766</td><td class="num">0.486</td><td class="num">0.143</td><td class="num">0.383</td></tr>
+  <tr><td>Quest</td><td class="num">0.495</td><td class="num">0.561</td><td class="num">0.365</td><td class="num">0.295</td><td class="num">0.245</td><td class="num">0.293</td><td class="num">0.257</td><td class="num">0.792</td><td class="num">0.478</td><td class="num">0.135</td><td class="num">0.392</td></tr>
+  <tr><td>Exact-Top</td><td class="num">0.502</td><td class="num">0.605</td><td class="num">0.397</td><td class="num">0.321</td><td class="num">0.288</td><td class="num">0.316</td><td class="num">0.291</td><td class="num">0.810</td><td class="num">0.548</td><td class="num">0.156</td><td class="num">0.423</td></tr>
+  <tr><td>全注意力</td><td class="num"><b>0.512</b></td><td class="num">0.623</td><td class="num">0.409</td><td class="num">0.350</td><td class="num">0.305</td><td class="num"><b>0.324</b></td><td class="num">0.294</td><td class="num">0.830</td><td class="num"><b>0.560</b></td><td class="num">0.163</td><td class="num">0.437</td></tr>
+  <tr class="hl"><td>NSA</td><td class="num">0.503</td><td class="num"><b>0.624</b></td><td class="num"><b>0.432</b></td><td class="num"><b>0.437</b></td><td class="num"><b>0.356</b></td><td class="num">0.307</td><td class="num"><b>0.341</b></td><td class="num"><b>0.905</b></td><td class="num">0.550</td><td class="num"><b>0.232</b></td><td class="num"><b>0.469</b></td></tr>
+</table></div>
+<p>表格数字来自原文表 2。子集的含义：MFQA-en / MFQA-zh 和 Qasper 是单文档问答；HPQ（HotpotQA）、2Wiki（2WikiMultihopQA）和 Dur（DuReader）是多文档问答，其中前两个需要在多篇文档之间做多跳推理；GovRpt（GovReport）是长报告摘要（原文表头把它和多文档问答归在一栏）；PassR-en / PassR-zh 是合成的段落检索任务；LCC 是代码补全。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：LongBench 平均分（每个稀疏方法每个 query 激活约 2,560 个 token）</div>
+  <div class="dia-row"><span class="lbl">H2O</span><div class="dia-track"><span class="dia-seg oth" style="flex:303">0.303</span><span style="flex:197"></span></div></div>
+  <div class="dia-row"><span class="lbl">InfLLM</span><div class="dia-track"><span class="dia-seg oth" style="flex:383">0.383</span><span style="flex:117"></span></div></div>
+  <div class="dia-row"><span class="lbl">Quest</span><div class="dia-track"><span class="dia-seg oth" style="flex:392">0.392</span><span style="flex:108"></span></div></div>
+  <div class="dia-row"><span class="lbl">Exact-Top</span><div class="dia-track"><span class="dia-seg oth" style="flex:423">0.423</span><span style="flex:77"></span></div></div>
+  <div class="dia-row"><span class="lbl">全注意力</span><div class="dia-track"><span class="dia-seg w" style="flex:437">0.437</span><span style="flex:63"></span></div></div>
+  <div class="dia-row"><span class="lbl">NSA</span><div class="dia-track"><span class="dia-seg kv" style="flex:469">0.469</span><span style="flex:31"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>条的长度按 0 到 0.5 画。灰色是四种推理期稀疏方法，它们都作用在同一个全注意力模型上；橙色是全注意力本身；蓝色是从头用 NSA 训练的模型。值得注意的是排序：即使是“完美挑选”的 Exact-Top 也比全注意力低 0.014，说明在一个用全注意力训练出来的模型上事后稀疏，无论挑得多准都会掉分；而 NSA 反而比全注意力高 0.032。本站示意图，数字来自原文表 2。</div>
+</div>
+<p>论文强调的几处：NSA 在两个多跳问答上比全注意力高 0.087（HPQ）和 0.051（2Wiki），代码理解（LCC）高 0.069，英文段落检索高 0.075。论文认为原因有二：一是稀疏模式在预训练中端到端地被优化，注意力模块和模型其他部分是一起适应的；二是分层的设计兼顾了局部和全局信息。也要看到 NSA 低于全注意力的子集：MFQA-en 低 0.009，GovRpt 低 0.017，PassR-zh 低 0.010。</p>
+
+<h4 id="n-4-5">4.5 思维链推理：蒸馏后的 AIME</h4>
+<p>为了看 NSA 能否配合先进的后训练方式，作者测试它通过后训练学会数学思维链推理的能力。论文认为在这个规模的模型上强化学习效果有限，所以改用从 DeepSeek-R1 蒸馏：用 100 亿（10B）token、长度 32K 的数学推理轨迹做监督微调，得到 Full Attention-R 和 NSA-R 两个可比的模型。评测用 2024 年的美国数学邀请赛 AIME 24：采样温度 0.7、top-p 0.95，每题生成 16 个回答取平均准确率；生成长度分别限制在 8K 和 16K token，看更长的推理链是否带来更高的准确率。</p>
+<div class="table-wrap"><table>
+  <tr><th>生成长度上限</th><th class="num">8,192</th><th class="num">16,384</th></tr>
+  <tr><td>Full Attention-R</td><td class="num">0.046</td><td class="num">0.092</td></tr>
+  <tr class="hl"><td>NSA-R</td><td class="num"><b>0.121</b></td><td class="num"><b>0.146</b></td></tr>
+</table></div>
+<p>表格数字来自原文表 3。8K 上限下 NSA-R 高 0.075，16K 下高 0.054。论文据此认为，预训练学到的稀疏注意力模式能有效捕捉数学推导中的长距离逻辑依赖，而且它的设计能随推理深度增长保持足够的上下文信息。附录 A 给了两道题的对比：第一道题 NSA-R 思考了 2,275 个 token 后答对（33），全注意力模型思考了 9,392 个 token 后答错（131）；第二道题 NSA-R 思考 15,147 个 token 答对（25），全注意力模型思考 16,223 个 token 答错（45/2）。</p>
+<p>这些分数的绝对值很低，换算成题数更直观（推算）：AIME 24 一共 30 道题，0.046 相当于平均做对约 1.4 道，0.121 约 3.6 道；16K 上限下分别约 2.8 道和 4.4 道。</p>
+
+<h4 id="n-4-6">4.6 结果的份量</h4>
+<p>这一组实验设计得比多数稀疏注意力论文更有说服力：两个模型用同样的骨干、同样的数据和训练量，从头训练，只有注意力不同。但下面几点会影响这些数字的分量。</p>
+<ul>
+  <li><b>两个模型并非只差“稀疏”这一处。</b>NSA 多了两套独立的 K、V 投影、压缩用的 MLP 和门控 MLP，论文没有报告两个模型的参数量差别。如果每个分支都有和全注意力同样大小的 K、V 投影，多出来的参数约为 2 亿（推算：\(2560\times1280\times2\) 个分支 × 30 层 ≈ 1.97 亿），约占 30 亿激活参数的 6.6%。所以“NSA 比全注意力好”不能全部归功于稀疏。</li>
+  <li><b>通用基准上的比较几乎不涉及稀疏。</b>如 §4.3 所说，这些输入短到 NSA 的选择分支能覆盖全部历史。它们说明的是“换成 NSA 的结构没有伤害短文本能力”，而不是“稀疏让模型更聪明”。</li>
+  <li><b>每个结果只有一次运行。</b>论文没有给出多次训练或多次评测的方差。通用基准上不少差距只有千分之几到百分之一左右（比如 MATH 0.263 对 0.264、MMLU 0.567 对 0.565），落在一般评测噪声的范围里。</li>
+  <li><b>LongBench 的对照有两种性质。</b>和 H2O、InfLLM、Quest、Exact-Top 的比较，是“同一个全注意力模型，推理时换不同的稀疏方法”，激活的 token 数对齐在 2,560；而和全注意力的比较，是两个分别训练出来的模型之间的比较。另外，子集是在看过所有模型的分数之后才剔除的。</li>
+  <li><b>大海捞针只展示了 NSA。</b>论文没有给出全注意力模型的大海捞针结果；单根针的检索也是相对容易的长上下文测试。还要注意模型只微调到 32K，64K 已经超出训练长度。</li>
+  <li><b>AIME 的样本很小、分数很低。</b>30 道题、两种上限、各一个模型，差距相当于平均多做对 1–2 道。生成长度又被截断在 8K 和 16K，比训练时的 32K 短得多。附录的例子里 NSA-R 的思考过程短得多（2,275 对 9,392 个 token），如果这是普遍现象，那么 8K 上限下的优势有一部分可能来自 NSA-R 的推理更短、更容易在截断前给出答案，而不完全是推理能力更强。附录的两道题是挑选出来的展示，不能当作统计证据。</li>
+  <li><b>规模有限。</b>27B（激活 3B）、270B token 的训练量，比当时一线模型小一到两个数量级。这篇论文本身没有更大规模的证据；后来 DeepSeek 在 671B 的 V3.2 上用的是另一套机制（DSA，见文末）。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S4.T1" target="_blank" rel="noopener">表 1 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S4.T2" target="_blank" rel="noopener">表 2 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S4.T3" target="_blank" rel="noopener">表 3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 效率分析：训练和解码分别快了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>NSA 少看了很多 KV，这些省下来的计算和访存，在 GPU 上变成了多少实际的速度？训练时（前向、反向）和解码时的加速比分别是多少，随长度怎样变化？这些数字是怎么得到的，哪些是测出来的，哪些是算出来的？</div>
+<p>效率测试在一台 8 卡 A100 的机器上进行。模型配置和 §4 相同：GQA 4 组、每组 16 个头，query / key 维度 192、value 维度 128；NSA 的超参数也相同（\(l=32\)、\(d=16\)、\(l'=64\)、\(n=16\)、\(w=512\)）。</p>
+
+<h4 id="n-5-1">5.1 训练速度：注意力内核的前向和反向</h4>
+<p>为了在同一个后端上公平比较，作者把 Triton 实现的 NSA 注意力，和 Triton 实现的 FlashAttention-2（代表全注意力）放在一起比。原文图 6 是两张柱状图，分别画前向和反向的耗时（毫秒），横轴是 8K、16K、32K、64K 四种上下文长度；NSA 的柱子由“稀疏选择内核”和“压缩与滑动窗口注意力”两部分叠成，柱子上标着相对 FlashAttention-2 的加速比：</p>
+<div class="table-wrap"><table>
+  <tr><th>上下文长度</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th><th class="num">64K</th></tr>
+  <tr><td>前向加速（实测）</td><td class="num">2.1×</td><td class="num">3.8×</td><td class="num">6.3×</td><td class="num">9.0×</td></tr>
+  <tr><td>反向加速（实测）</td><td class="num">1.1×</td><td class="num">2.0×</td><td class="num">3.4×</td><td class="num">6.0×</td></tr>
+  <tr><td>注意力计算量之比（推算）</td><td class="num">2.3×</td><td class="num">4.0×</td><td class="num">6.4×</td><td class="num">9.1×</td></tr>
+</table></div>
+<p>前两行来自原文图 6。论文把加速归功于两点：按块访存让读取是合并的连续读，用满了 Tensor Core；内核里精心安排的循环顺序消除了重复的 KV 传输。加速比随长度增长，因为全注意力的计算量按平方涨，NSA 的选择和窗口两部分却是固定的。</p>
+<p>第三行是本站推算的理论上限，用来判断实测数字离理想有多远。全注意力里，长度为 \(N\) 的序列约有 \(N^2/2\) 对 (query, key)。NSA 里，位置 \(t\) 的 query 大约要看 \(t/16\) 个压缩 token、1,024 个选中 token 和 512 个窗口 token，对所有位置求和约为 \(N^2/32+1536N\)。两者相除：</p>
+<div class="formula">$$\frac{N^2/2}{N^2/32+1536\,N}=\frac{16N}{N+49152}$$</div>
+<p>代入四个长度，得到 2.3、4.0、6.4、9.1。前向的实测值（2.1、3.8、6.3、9.0）几乎贴着这个理论值，说明 NSA 的前向内核把省下的计算基本都兑现了。反向的实测值低得多，64K 时只有 6.0 倍，论文没有解释原因（§3.6 提到论文没有描述反向内核）。</p>
+<p>这个公式还揭示了一个论文没有明说的性质：NSA 的计算量仍然是 \(O(N^2)\)，只是常数小了 16 倍，因为压缩分支的 key 数随位置线性增长。长度趋于无穷时，加速比的上限是 16 倍（对应步长 \(d=16\)）。比如到 100 万 token，理论比值约 15.3 倍（推算）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：NSA 相对全注意力的加速比随长度变化（实测、预期与推算）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="不同长度下的前向、反向、解码加速比" style="--dg-min:760px">
+    <line x1="80" y1="225" x2="920" y2="225" class="grid-ln"/><line x1="80" y1="190" x2="920" y2="190" class="grid-ln"/><line x1="80" y1="155" x2="920" y2="155" class="grid-ln"/><line x1="80" y1="120" x2="920" y2="120" class="grid-ln"/><line x1="80" y1="85" x2="920" y2="85" class="grid-ln"/><line x1="80" y1="50" x2="920" y2="50" class="grid-ln"/>
+    <line x1="80" y1="260" x2="920" y2="260" class="axis"/><line x1="80" y1="260" x2="80" y2="44" class="axis"/>
+    <text x="72" y="260" class="t-r t-xs">0×</text><text x="72" y="225" class="t-r t-xs">2×</text><text x="72" y="190" class="t-r t-xs">4×</text><text x="72" y="155" class="t-r t-xs">6×</text><text x="72" y="120" class="t-r t-xs">8×</text><text x="72" y="85" class="t-r t-xs">10×</text><text x="72" y="50" class="t-r t-xs">12×</text>
+    <rect class="tk enc" x="124" y="223.25" width="40" height="36.75"/><rect class="tk act" x="170" y="240.75" width="40" height="19.25"/><rect class="tk mask" x="216" y="190" width="40" height="70"/>
+    <text x="144" y="214" class="t-c t-xs">2.1</text><text x="190" y="232" class="t-c t-xs">1.1</text><text x="236" y="181" class="t-c t-xs">4.0</text>
+    <line x1="118" y1="220" x2="214" y2="220" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+    <rect class="tk enc" x="334" y="193.5" width="40" height="66.5"/><rect class="tk act" x="380" y="225" width="40" height="35"/><rect class="tk mask" x="426" y="148" width="40" height="112"/>
+    <text x="354" y="184" class="t-c t-xs">3.8</text><text x="400" y="216" class="t-c t-xs">2.0</text><text x="446" y="139" class="t-c t-xs">6.4</text>
+    <line x1="328" y1="190" x2="424" y2="190" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+    <rect class="tk enc" x="544" y="149.75" width="40" height="110.25"/><rect class="tk act" x="590" y="200.5" width="40" height="59.5"/><rect class="tk mask" x="636" y="100.75" width="40" height="159.25"/>
+    <text x="564" y="140" class="t-c t-xs">6.3</text><text x="610" y="191" class="t-c t-xs">3.4</text><text x="656" y="91" class="t-c t-xs">9.1</text>
+    <line x1="538" y1="148" x2="634" y2="148" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+    <rect class="tk enc" x="754" y="102.5" width="40" height="157.5"/><rect class="tk act" x="800" y="155" width="40" height="105"/><rect class="tk mask" x="846" y="57" width="40" height="203"/>
+    <text x="774" y="93" class="t-c t-xs">9.0</text><text x="820" y="146" class="t-c t-xs">6.0</text><text x="866" y="48" class="t-c t-xs">11.6</text>
+    <line x1="748" y1="100" x2="844" y2="100" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+    <text x="190" y="278" class="t-c t-sm">8K</text><text x="400" y="278" class="t-c t-sm">16K</text><text x="610" y="278" class="t-c t-sm">32K</text><text x="820" y="278" class="t-c t-sm">64K</text>
+    <rect class="tk enc" x="90" y="294" width="14" height="12"/><text x="110" y="300" class="t-sm">前向（A100 实测）</text>
+    <rect class="tk act" x="260" y="294" width="14" height="12"/><text x="280" y="300" class="t-sm">反向（A100 实测）</text>
+    <rect class="tk mask" x="430" y="294" width="14" height="12"/><text x="450" y="300" class="t-sm">解码（按访存量推出的预期）</text>
+    <line x1="660" y1="300" x2="690" y2="300" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/><text x="698" y="300" class="t-sm">注意力计算量之比（本站推算）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>四组柱子对应四种上下文长度，纵轴是 NSA 相对全注意力的加速倍数。蓝色（前向）和绿色（反向）是原文图 6 在 A100 上实测的注意力内核耗时之比；斜纹（解码）是原文表 4 按访存量推出的预期值，不是实测；黑色虚线是本站按 \(16N/(N+49152)\) 推算的注意力计算量之比。读法：蓝色柱顶几乎贴着虚线，说明前向把理论节省基本兑现；绿色柱明显低于虚线，说明反向还有不少开销没压下去；解码的预期值比训练的更高，因为解码只取决于读多少 KV，而 NSA 在解码时要读的量是固定的 1,536 加上 \(s/16\)。本站示意图，数字来自 <a href="https://arxiv.org/html/2502.11089v2#S5.F6" target="_blank" rel="noopener">原文图 6 ↗</a> 与 <a href="https://arxiv.org/html/2502.11089v2#S5.T4" target="_blank" rel="noopener">表 4 ↗</a>。</div>
+</div>
+
+<h4 id="n-5-2">5.2 解码速度：每一步要读多少 KV</h4>
+<p>解码时注意力的速度主要由读显存决定，也就是每一步要加载多少 KV 缓存。设已缓存的序列长度为 \(s\)，NSA 每一步最多只需读取约 \((s-l)/d\) 个压缩 token、\(nl'=1{,}024\) 个选中 token 和 \(w=512\) 个窗口 token。原文表 4 列出了“等效 token 数”的访存量：</p>
+<div class="table-wrap"><table>
+  <tr><th>上下文长度</th><th class="num">8,192</th><th class="num">16,384</th><th class="num">32,768</th><th class="num">65,536</th></tr>
+  <tr><td>全注意力（要读的 token）</td><td class="num">8,192</td><td class="num">16,384</td><td class="num">32,768</td><td class="num">65,536</td></tr>
+  <tr><td>NSA（要读的 token）</td><td class="num">2,048</td><td class="num">2,560</td><td class="num">3,584</td><td class="num">5,632</td></tr>
+  <tr><td>预期加速</td><td class="num">4×</td><td class="num">6.4×</td><td class="num">9.1×</td><td class="num">11.6×</td></tr>
+</table></div>
+<p>本站核对过，表中 NSA 一行恰好等于 \(s/16+1{,}024+512\)：比如 64K 时是 4,096 + 1,024 + 512 = 5,632。预期加速就是两行之比。论文的理由是：解码的算术强度低、受带宽限制，所以耗时近似和访存量成正比。同样的推算可以写成 \(16s/(s+24576)\)，它的上限也是 16 倍；到 128K 约 13.5 倍，到 100 万 token 约 15.6 倍（推算）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：解码一步要读的 KV，NSA 拆成三部分（按同一比例尺画）</div>
+  <div class="dia-row"><span class="lbl">8K 全注意力</span><div class="dia-track"><span class="dia-seg w" style="flex:8192">8,192</span><span style="flex:57344"></span></div></div>
+  <div class="dia-row"><span class="lbl">8K NSA</span><div class="dia-track"><span class="dia-seg kv" style="flex:512"></span><span class="dia-seg res" style="flex:1024"></span><span class="dia-seg cmp" style="flex:512"></span><span style="flex:63488"></span></div></div>
+  <div class="dia-out">2,048 = 压缩 512 + 选中 1,024 + 窗口 512</div>
+  <div class="dia-row"><span class="lbl">64K 全注意力</span><div class="dia-track"><span class="dia-seg w" style="flex:65536">65,536 个 token，约 5.03 GB（推算）</span></div></div>
+  <div class="dia-row"><span class="lbl">64K NSA</span><div class="dia-track"><span class="dia-seg kv" style="flex:4096">压缩</span><span class="dia-seg res" style="flex:1024"></span><span class="dia-seg cmp" style="flex:512"></span><span style="flex:59904"></span></div></div>
+  <div class="dia-out">5,632 = 压缩 4,096 + 选中 1,024 + 窗口 512，约 0.43 GB（推算），是全注意力的 8.6%</div>
+  <div class="dia-note"><b>怎么看：</b>每一行的总宽度代表 65,536 个 token，条的长度是这一步要读的 KV 数量。橙色是全注意力；NSA 拆成蓝色（压缩 token，随长度增长）、橙色斜纹（选中的 16 块，固定 1,024）和绿色（窗口，固定 512）。长度越长，NSA 里只有蓝色那段在长，所以比例越来越小。GB 数按论文模型每 token 30 层共约 75 KiB 的 KV 推算。本站示意图，数字来自原文表 4。</div>
+</div>
+
+<h4 id="n-5-3">5.3 结果的份量：这些速度数字测的是什么</h4>
+<ul>
+  <li><b>只测了注意力内核，没有端到端的数字。</b>9.0 倍和 6.0 倍是注意力这一个算子的耗时之比，不是整个模型训练一步的提速，也不是推理服务的吞吐或延迟。论文没有报告端到端的训练吞吐、MFU，也没有报告端到端的解码延迟。</li>
+  <li><b>解码的 11.6 倍不是测出来的。</b>它是按每一步读多少 KV 推出的预期值，前提是“解码耗时和访存量成正比”。真实的解码还要读模型参数、做 top-n 选择、跑门控和压缩 MLP，这些都会摊薄加速。原文图 1 把这个预期值和两个实测值并排画，正文里也写成“实现了最多 11.6 倍的加速”，读者很容易以为它是实测。</li>
+  <li><b>基线是 Triton 版的 FlashAttention-2，硬件是 A100。</b>作者选 Triton 版是为了“同一个后端”公平比较，NSA 自己也是 Triton 写的。论文没有和更常用的 CUDA 版 FlashAttention-2 比较，也没有交代 Triton 版和它的速度差距。DeepSeek 自己训练模型用的是 H800（Hopper 架构），在 Hopper 上全注意力的强基线是 FlashAttention-3（见 <a href="flashattention-3.html">FA3 精读</a>），论文没有给出 Hopper 上的数字。批大小、序列条数等测试参数也没有给出。</li>
+  <li><b>NSA 那根柱子包含什么，交代得不完全。</b>按图例，NSA 的耗时包含选择分支内核和压缩、窗口两部分注意力；压缩用的 MLP、块分数的换算与 top-n 排序、门控是否计入，论文没有说明。</li>
+  <li><b>“降低预训练计算”在本文的设置下收益有限。</b>论文的预训练是在 8K 长度上做的。按原文图 6，8K 时注意力前向只快 2.1 倍、反向只快 1.1 倍；按 §1 的推算，8K 时注意力只占前向计算的约 46%。所以这次预训练实际省下的计算并不多，NSA 训练端的优势要在更长的序列上才明显。论文没有给出预训练总耗时的对比。</li>
+  <li><b>速度与质量是同一套超参数下的。</b>效率测试和 §4 的质量评测用的是同一组 NSA 超参数和同一个模型结构，这一点是对齐的。但质量最突出的长上下文结果是在 32K 以内（LongBench）和 64K（大海捞针），而最大的速度数字在 64K，两者对应的长度不完全一致。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 讨论：走过的弯路，和“注意力是成块的”这个观察</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在设计出 NSA 之前，作者试过把已有的稀疏方法改造成可训练的版本，它们为什么失败了？“按连续块选择”这个设计又是从哪里得到的启发？这一节回顾了开发过程，说明了 NSA 的几个关键选择是被哪些失败逼出来的。</div>
+
+<h4 id="n-6-1">6.1 其他选择策略遇到的困难</h4>
+<p><b>基于 key 聚类的方法</b>（如 ClusterKV）把同一类的 key 和 value 放在连续的显存区域里，理论上既能训练也能推理，但有三个实际困难。第一，动态聚类本身的计算开销不小。第二，各个簇的大小不均衡，算子很难优化；在 MoE 系统里，专家并行（EP）各组的执行时间本来就可能不均，再叠加上簇的不均衡，会造成持续的负载失衡。第三，实现上要求定期重新聚类，训练也得按块顺序进行，限制很多。</p>
+<p><b>其他按块选择的方法</b>（如 Quest、InfLLM）为每个 KV 块计算一个重要性分数，按和 \(\mathbf{q}_t\) 的相似度选出前 \(n\) 块。作者指出两种常见的打分方式各有问题：</p>
+<ul>
+  <li><b>用神经网络打分，靠辅助损失训练。</b>因为选择不可导，打分网络从语言模型损失那里拿不到梯度，只能另设一个辅助损失来监督它。这增加了算子开销，往往还会降低模型效果。作者实现了一个版本：为每个 token 增加额外的 query，为每个块增加代表 key，用它们估计块的重要性；监督信号是把真实注意力分数在每个 key 块内做平均池化得到的块级分布，用 KL 散度让打分去拟合它。为了照顾解码效率，query 保持逐 token 的粒度，而不是按块平均。论文说这个思路和 SeerAttention 类似。</li>
+  <li><b>用无参数的启发式打分。</b>照 Quest 的办法，直接用 query 和每块 key 逐维度的最小、最大值相乘来估计分数，不引入任何参数。问题是召回率低：真正重要的块经常没被选上。作者还试了“冷启动”：前 1,000 步先用全注意力，之后再切换到启发式选块。</li>
+</ul>
+<p>作者在一个结构相似的 3B 模型上比较了这两种方法、NSA 和全注意力的训练损失（原文图 7，约 3 万步）。两种替代方法的损失都比 NSA 高；图中 NSA 的曲线也低于全注意力。见 <a href="https://arxiv.org/html/2502.11089v2#S6.SS1" target="_blank" rel="noopener">原文 §6.1 与图 7 ↗</a>。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：给块打分的几种办法，以及它们怎么得到训练信号</div>
+  <div class="dia-cols">
+    <div class="dia-box"><b>辅助损失训练的打分网络</b><small>额外的 query 和每块的代表 key 打分；用 KL 散度去拟合“块内平均后的真实注意力”。代价：额外的算子和参数，论文实验中损失更高。类似 SeerAttention。</small></div>
+    <div class="dia-box"><b>无参数启发式</b><small>query × 每块 key 的逐维最小、最大值（Quest 的做法），不训练任何东西。代价：召回率低，真正重要的块常被漏掉；加 1,000 步全注意力冷启动也没救回来。</small></div>
+    <div class="dia-box enc"><b>NSA：复用压缩分支的注意力</b><small>块分数 = 压缩分支本来就算出的注意力概率，按重叠换算、组内相加。打分器通过压缩分支自己的输出接受主损失训练，不需要额外损失，几乎没有额外计算。</small></div>
+    <div class="dia-box pred"><b>后来的 DSA：独立的“闪电索引器”</b><small>少量头、ReLU、FP8 的轻量打分器，逐 token 打分；输入与主模型断开，只用 KL 散度向主注意力的分布对齐（详见文末）。和左一列同属“蒸馏打分器”一类，但用在一个已经训练好的大模型上。</small></div>
+  </div>
+  <div class="dia-note"><b>怎么看：</b>四个框是四种回答“这一块有多重要”的办法，区别在于分数从哪里来、打分器靠什么训练。前三个出自本文 §6.1 与 §3.3.2；第四个是后来 DeepSeek-V3.2 的做法，放在这里便于对比。本站示意图，原文没有对应的图。</div>
+</div>
+
+<h4 id="n-6-2">6.2 可视化：注意力分数是成块出现的</h4>
+<p>为了寻找设计灵感，作者把预训练好的 27B 全注意力模型的注意力图画了出来（原文图 8）。图的纵轴是 query 位置（0 到约 256），横轴是 key / value 位置（0 到约 1,024），颜色越亮表示注意力分数越高（色标从 −3 到 −1，看起来是对数刻度）。图上可以看到，高分区域往往成片地聚在一起：相邻的 key 常常有相近的注意力分数，形成竖条或小块。这说明在序列中相邻的 token 可能和 query 有某种共同的语义关系，具体是什么关系，作者说还需要进一步研究。正是这个观察让作者决定按连续的 token 块而不是单个 token 来选择，既提高计算效率，又能保住高注意力的区域。见 <a href="https://arxiv.org/html/2502.11089v2#S6.F8" target="_blank" rel="noopener">原文图 8 ↗</a>。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>图 8 只展示了一个模型、一个片段的注意力图，是定性的观察，不是统计结论；它可以说明“按块选择是合理的”，但不能说明块长 64 是最优的。另外，§6.1 的对照实验是在 3B 模型上做的，论文只给出了损失曲线，没有下游评测；而且实验里的辅助损失方法是作者自己的实现，未必代表这一类方法的最好水平。后来的 DSA 恰恰选择了“用 KL 蒸馏训练一个独立打分器”这条路，并在 671B 模型上效果持平（见文末），说明这条路在不同的设置下是走得通的。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>NSA 在稀疏注意力的谱系里处于什么位置？和已有的三类方法相比，它的差别到底在哪里？论文最后承认了哪些局限？</div>
+<p>论文把已有的稀疏注意力分成三类。</p>
+<ul>
+  <li><b>固定的稀疏模式。</b>最常见的是滑动窗口，每个 query 只看固定窗口内的 token。StreamingLLM 把开头的“注意力汇聚点”和局部窗口结合起来处理连续的文本流；MoA、DuoAttention 也利用了类似的局部加汇聚点信息；更早的 Longformer 把局部窗口注意力和少数全局 token 交替使用。和它们相比，NSA 不依赖预先规定的模式，而是让模型自己学会看哪里，因此有可能利用到完整的上下文。</li>
+  <li><b>动态的 token 剪枝。</b>H2O、BUZZ、SepLLM 在解码时自适应地淘汰被认为不重要的 token，减少 KV 缓存；FastGen、HeadKV 给不同的注意力头分配不同的策略；SnapKV 在预填充时根据注意力权重选出关键的 KV 保留下来。它们都只在推理时起作用，NSA 则在训练阶段就原生地引入稀疏。</li>
+  <li><b>按 query 选择。</b>Quest 用 query 与每块 key 的逐维最小、最大值估计块的重要性；InfLLM 结合固定模式和检索，保留汇聚点、局部上下文和可检索的块；HashAttention 把找关键 token 看成推荐问题，用学到的函数把 query 和 key 映射到汉明空间；ClusterKV 先对 key 聚类，再按 query 和簇的相似度挑簇；MInference 和 TokenSelect 按 token 级的重要性挑选 KV；SeerAttention 把 query 和 key 切成空间块，做块级选择。NSA 的不同在于，它在模型的整个生命周期（训练、预填充、解码）里都实现了与硬件对齐的稀疏计算。</li>
+</ul>
+<p><b>结论。</b>NSA 是一种与硬件对齐的稀疏注意力结构：在一个可训练的结构里，把分层的 token 压缩和按块的 token 选择结合起来，在保持全注意力水平的同时加速训练和推理。论文报告它在通用基准上和全注意力相当，在长上下文评测上更强，推理能力也有提升，同时注意力计算的延迟明显下降。</p>
+<p><b>局限。</b>ACL 正式版增加了一段局限说明：本文只考虑了单层注意力图内部的稀疏，跨层的稀疏留待以后研究；Triton 实现相对原生 CUDA 内核有一些抽象开销，还有进一步做硬件优化的空间。</p>
+<div class="note-warn"><b>版本差异：</b>arXiv v2（2025-02-27）相对 v1（2025-02-16）主要改了两处公式的下标（式 7 的起始下标从 1 改为 0，式 9 的 \(+m+n\) 改为 \(-m-n\)）并扩充了相关工作；实验数字没有变化。ACL 正式版重排了结构，把“重新审视稀疏注意力”、相关工作、6.1 节、可视化等移到附录，并把预训练损失曲线放进附录 D。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.11089v2#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://arxiv.org/html/2502.11089v2#S8" target="_blank" rel="noopener">§8 结论 ↗</a> · <a href="https://aclanthology.org/2025.acl-long.1126.pdf" target="_blank" rel="noopener">ACL 正式版 PDF（含局限）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p><b>获奖与代码。</b>这篇论文被 ACL 2025 主会接收（长文，论文集第 23078–23097 页），并获得 ACL 2025 最佳论文奖，是当年四篇最佳论文之一。DeepSeek 没有发布 NSA 的官方代码（截至 2026-10-20，deepseek-ai 组织下没有 NSA 的仓库）。社区很快出现了几个第三方实现：fla-org/native-sparse-attention（Triton 内核，2025-02-21 创建，后来加入了在线 top-k 选择内核和完整的训练支持）、lucidrains/native-sparse-attention-pytorch（PyTorch 参考实现）、XunhaoLai/native-sparse-attention-triton。它们都不是论文作者发布的，细节（比如式 9 的下标、门控的粒度）各有取舍。</p>
+
+<h4 id="n-impact-1">同期工作：Kimi 的 MoBA</h4>
+<p>NSA 首版发布两天后（2025-02-18），月之暗面（Moonshot AI）发布了 <a href="https://arxiv.org/abs/2502.13189" target="_blank" rel="noopener">MoBA（Mixture of Block Attention）</a>，思路相近但更简单。它把 MoE 的路由思想用到注意力上：把上下文切成块，每个 query 用自己和每块 key 的平均值做内积，选出分数最高的 k 块，当前所在的块总是被选中；打分没有任何可学习参数。MoBA 强调可以在全注意力和稀疏注意力之间无缝切换，实践中还让最后几层保持全注意力；它在实现上复用 FlashAttention 的变长内核，论文报告 100 万 token 时预填充的注意力最多快 6.5 倍，并称已用于支持 Kimi 的长上下文请求。和 NSA 相比，MoBA 没有压缩分支的输出（块的平均 key 只用来打分）、没有独立的滑动窗口分支，也没有按 GQA 组共享选择的专门设计。</p>
+
+<h4 id="n-impact-2">DeepSeek Sparse Attention（V3.2）：从块选择到 token 选择</h4>
+<p>2025 年 9 月，DeepSeek 发布 V3.2-Exp，同年 12 月发布 <a href="https://arxiv.org/abs/2512.02556" target="_blank" rel="noopener">DeepSeek-V3.2 的技术报告</a>。和前一版 V3.1-Terminus 相比，V3.2 唯一的结构改动是引入 <b>DeepSeek Sparse Attention（DSA）</b>。DSA 由两部分组成：一个“闪电索引器”，用少量的头、ReLU 激活、FP8 精度给当前 query 和每个历史 token 打分；以及一个细粒度的 token 选择机制，每个 query 只取分数最高的 2,048 个 KV 条目做注意力。这样主注意力的复杂度从 \(O(L^2)\) 降到 \(O(Lk)\)，索引器本身仍是 \(O(L^2)\)，但计算量小得多。</p>
+<p>和 NSA 的关系可以从三处看：</p>
+<ul>
+  <li><b>继承：选择必须被多个 query 头共享。</b>V3.2 报告在说明为什么基于 MLA 的“MQA 模式”实现 DSA 时，直接引用了 NSA：在内核层面，每个 KV 条目必须被多个 query 共享，计算才高效。在 MLA 的 MQA 模式下，一个潜向量同时是所有头的 key 和 value，所以选一次、所有头共用，这正是 NSA“组内共享选择”的极端形式。</li>
+  <li><b>改变一：按 token 选，而不是按块选。</b>NSA 为了让访存连续而按 64 个 token 成块选择；DSA 回到逐 token 选择，靠专门写的稀疏注意力内核（FlashMLA 在 2025-09-29 开源了 token 级稀疏内核）和高效的 top-k 内核来弥补访存的不连续。</li>
+  <li><b>改变二：从已训练好的模型继续训练，打分器用蒸馏训练。</b>NSA 从预训练开始就稀疏，打分复用压缩分支。DSA 从 V3.1-Terminus 的检查点出发：先冻结主模型、保持稠密注意力，只训练索引器 1,000 步（每步 16 条 128K 序列，共 2.1B token），用 KL 散度让索引器的分布去拟合主注意力在各头上求和后的分布；再打开稀疏选择，训练全部参数 15,000 步（每步 480 条 128K 序列，共 943.7B token）。索引器的输入与主模型的计算图断开，只受 KL 损失训练，主模型只受语言模型损失训练。这正是 NSA §6.1 里试过并认为不如 NSA 的“辅助损失”路线，只是场景换成了“改造一个已训练好的 671B 模型”，而 V3.2 报告称效果与 V3.1-Terminus 持平。</li>
+</ul>
+<p>这条路线的细节、伪代码和简答题，见本站<a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DSA 结构拆解页</a>。</p>
+
+<h4 id="n-impact-3">DeepSeek-V4：压缩 + 选择 + 滑动窗口的再组合</h4>
+<p>2026 年 4 月的 <a href="https://arxiv.org/abs/2606.19348" target="_blank" rel="noopener">DeepSeek-V4</a> 采用了混合注意力：<b>CSA</b>（Compressed Sparse Attention）先把每 \(m\) 个 token 的 KV 压成一个条目（V4-Flash 与 V4-Pro 都取 \(m=4\)，相邻条目有重叠），再在压缩条目上做 DSA 式的稀疏选择；<b>HCA</b>（Heavily Compressed Attention）用大得多的压缩率（128）压缩、不做稀疏选择；两者交替使用，并且每层都另配一个小的滑动窗口分支补回最近 token 的细节。压缩、按分数选择、滑动窗口，这三种成分和 NSA 的三个分支如出一辙，但组合方式不同：V4 是在存储层面压缩，KV 缓存本身变短了，这弥补了 NSA 和 DSA“只减少读取、不减少存储”的不足。V4 报告称在 100 万 token 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV 缓存只有 10%。需要说明的是，本站检索 V4 报告全文没有找到对 NSA 的引用，“如出一辙”是本站的解读。V4 的完整拆解见<a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4 拆解页</a>。</p>
+
+<h4 id="n-impact-4">其他跟进</h4>
+<ul>
+  <li><b>DSA 被其他模型采用。</b><a href="https://arxiv.org/abs/2602.15763" target="_blank" rel="noopener">GLM-5</a>（2026-02）在摘要中写明采用 DSA 来降低训练和推理成本、同时保持长上下文能力。DeepSeek 在 2026 年 9 月开源的 DeepSelect（DSA 用的 top-k 内核）说明，DSA 用在了 V3.2、V4 和 V4.1 上。</li>
+  <li><b>对 NSA 的批评与改进：InfLLM-V2。</b>MiniCPM 团队的 <a href="https://arxiv.org/abs/2509.24663" target="_blank" rel="noopener">InfLLM-V2</a>（2025-09）认为，NSA 引入了过多额外参数（三套 K、V、压缩 MLP、门控），并且打破了“先在短文本上预训练、再在长文本上微调”的常规流程，导致收敛慢、难以加速。它的做法是不加参数、复用稠密注意力的参数，短输入时用稠密注意力，长输入时平滑切换到稀疏；论文报告比稠密注意力快 4 倍，在长上下文理解和思维链推理上分别保留 98.1% 和 99.7% 的效果。<a href="https://arxiv.org/abs/2506.07900" target="_blank" rel="noopener">MiniCPM4</a> 与 MiniCPM4.1 用的就是这套机制。</li>
+  <li><b>内核层面的改进：FSA。</b><a href="https://arxiv.org/abs/2508.18224" target="_blank" rel="noopener">FSA（Flash Sparse Attention）</a>（2025-08）指出，NSA 的内核强制了一种只有在每个 GQA 组的 query 头较多时才高效的循环顺序（§3.6 的注意事项），而主流模型每组的头数要少得多。FSA 换了一种循环顺序，报告内核延迟最多降低 3.5 倍（平均 1.6 倍），端到端训练最多快 1.25 倍（平均 1.09 倍），预填充最多快 1.36 倍（平均 1.11 倍）。</li>
+</ul>
+<p>回头看，NSA 留下的最持久的东西，可能不是三个分支这个具体结构，而是两条原则：稀疏的选择必须和 KV 的共享方式（GQA / MQA / MLA）对齐，否则访存省不下来；以及稀疏要在训练中出现，模型才能真正适应它。DSA、CSA 都保留了这两条，而在“按块还是按 token”“从头训练还是继续训练”“只减读取还是连存储也压缩”这些问题上做了不同的选择。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：论文本身、作者参与的其他公开论文、机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Jingyang Yuan</b>（第一作者）<div class="aff">北京大学计算机学院（多媒体信息处理重点实验室、PKU-Anker LLM Lab）；DeepSeek-AI</div>论文脚注说明本工作在 DeepSeek-AI 实习期间完成。也是 DeepSeek 的 mHC（arXiv 2512.24880）作者之一。</div>
+  <div class="author-card"><b>Huazuo Gao</b><div class="aff">DeepSeek-AI</div>DeepSeekMoE（arXiv 2401.06066）与无辅助损失负载均衡（arXiv 2408.15664）的作者之一。</div>
+  <div class="author-card"><b>Damai Dai</b><div class="aff">DeepSeek-AI</div>DeepSeekMoE 的第一作者，本文实验骨干正是 DeepSeekMoE 结构。</div>
+  <div class="author-card"><b>Junyu Luo</b><div class="aff">北京大学计算机学院</div></div>
+  <div class="author-card"><b>Liang Zhao、Zhengyan Zhang、Y. X. Wei、Yuqing Wang</b><div class="aff">DeepSeek-AI</div></div>
+  <div class="author-card"><b>Zhenda Xie</b><div class="aff">DeepSeek-AI</div>mHC 的第一作者，DeepSeekMoE 作者之一。</div>
+  <div class="author-card"><b>Lean Wang</b><div class="aff">DeepSeek-AI</div>无辅助损失负载均衡策略（arXiv 2408.15664）的第一作者，该策略后来用于 DeepSeek-V3。</div>
+  <div class="author-card"><b>Zhiping Xiao</b><div class="aff">University of Washington</div></div>
+  <div class="author-card"><b>Chong Ruan</b><div class="aff">DeepSeek-AI</div>DeepSeekMoE 作者之一。</div>
+  <div class="author-card senior"><b>Ming Zhang</b>（通讯作者，ACL 版）<div class="aff">北京大学计算机学院教授、博士生导师</div>学院主页列出的研究方向包括文本挖掘与图机器学习。</div>
+  <div class="author-card senior"><b>Wenfeng Liang</b>（通讯作者，ACL 版）<div class="aff">DeepSeek-AI</div>DeepSeek 创始人；arXiv 上本文的提交人。</div>
+  <div class="author-card senior"><b>Wangding Zeng</b>（通讯作者，ACL 版）<div class="aff">DeepSeek-AI</div>DeepSeekMoE 作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：ACL 2025 主会长文（<a href="https://aclanthology.org/2025.acl-long.1126/" target="_blank" rel="noopener">2025.acl-long.1126</a>，第 23078–23097 页），获 <a href="https://2025.aclweb.org/program/awards/" target="_blank" rel="noopener">ACL 2025 最佳论文奖</a>（四篇之一）。arXiv 首版 2025-02-16，v2 2025-02-27。</li>
+  <li><b>代码</b>：没有官方实现。第三方实现（star 数截至 2026-10-20）：<a href="https://github.com/fla-org/native-sparse-attention" target="_blank" rel="noopener">fla-org/native-sparse-attention</a> 1,025 star（MIT）；<a href="https://github.com/lucidrains/native-sparse-attention-pytorch" target="_blank" rel="noopener">lucidrains/native-sparse-attention-pytorch</a> 816 star（MIT）；<a href="https://github.com/XunhaoLai/native-sparse-attention-triton" target="_blank" rel="noopener">XunhaoLai/native-sparse-attention-triton</a> 284 star（Apache-2.0）。</li>
+  <li><b>采用</b>：DeepSeek 公开发布的模型中，V3.2 用的是 DSA、V4 用的是 CSA / HCA，本站没有找到直接采用 NSA 原始三分支结构的 DeepSeek 模型；它的后继 DSA 用于 DeepSeek-V3.2-Exp / V3.2 / V4 / V4.1，并被 GLM-5 采用。DeepSeek 为 DSA 开源了 token 级稀疏注意力内核（<a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">FlashMLA</a>，2025-09-29）和 top-k 内核（<a href="https://github.com/deepseek-ai/DeepSelect" target="_blank" rel="noopener">DeepSelect</a>，2026-09）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek 稀疏注意力拆解</a>：NSA → DSA → V4 CSA / HCA 的谱系、伪代码与简答题。</li>
+  <li><a href="flashattention.html">FlashAttention 精读</a>（分块、在线 softmax、块稀疏扩展）与 <a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 拆解页</a>；Hopper 上的后续见 <a href="flashattention-3.html">FlashAttention-3 精读</a>。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MLA 与 DeepSeekMoE，本文骨干和 DSA 的基础。</li>
+  <li><a href="snapkv.html">SnapKV 精读</a>：一种典型的推理期 KV 压缩方法，可以和本文的“原生稀疏”对照着读。</li>
+  <li><a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4 与 mHC 拆解页</a>：CSA / HCA 混合注意力。</li>
+  <li><a href="vllm.html">vLLM 精读</a>：KV 缓存为什么是解码的瓶颈。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Jingyang Yuan et al. <em>Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention.</em> <a href="https://arxiv.org/abs/2502.11089" target="_blank" rel="noopener">arXiv:2502.11089</a>（v1 2025-02-16，v2 2025-02-27），ACL 2025。arXiv 版本以 arXiv 非独占分发许可（<a href="https://arxiv.org/licenses/nonexclusive-distrib/1.0/" target="_blank" rel="noopener">arXiv.org perpetual non-exclusive license</a>）发布，该许可不允许转载原图。本页是对论文的中文精读笔记，正文与所有示意图均为本站撰写和绘制，并非翻译或复制；数字与结论以原文为准，标“推算”的为本站计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

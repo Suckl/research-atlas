@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KIVI 精读</title>
+<meta name="description" content="KIVI（ICML 2024）逐节精读：为什么 key 缓存要按通道量化、value 缓存要按 token 量化，分组加全精度残差窗口的流式设计，融合反量化的矩阵乘内核，以及显存与吞吐实验到底和谁比、在什么条件下成立。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="kivi">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · ICML 2024</div>
+  <h1>KIVI：不用调参的非对称 2 bit KV 缓存量化</h1>
+  <p class="en-title">KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache</p>
+  <div class="paper-authors">Zirui Liu<sup>1,*</sup>, Jiayi Yuan<sup>1,*</sup>, Hongye Jin<sup>2</sup>, Shaochen (Henry) Zhong<sup>1</sup>, Zhaozhuo Xu<sup>3</sup>, Vladimir Braverman<sup>1</sup>, Beidi Chen<sup>4</sup>, Xia Hu<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Rice University　<sup>2</sup>Texas A&amp;M University　<sup>3</sup>Stevens Institute of Technology　<sup>4</sup>Carnegie Mellon University　<sup>*</sup>共同一作（论文注明作者顺序由抛硬币决定）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noopener">arXiv 2402.02750 ↗</a>
+    <a class="pill" href="https://proceedings.mlr.press/v235/liu24bz.html" target="_blank" rel="noopener">ICML 2024（PMLR 235）↗</a>
+    <a class="pill" href="https://github.com/jy-yuan/KIVI" target="_blank" rel="noopener">Code: jy-yuan/KIVI ↗</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>436</b><span>GitHub star（jy-yuan/KIVI，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 CC BY 4.0 发布，所以原图直接放在讲到它的地方；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据或公开代码算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型推理服务想降低每个请求的成本，最直接的办法是把很多请求放进一个批（batch）一起算。批越大、上下文越长，模型为每个请求保存的 <b>KV 缓存</b>（每一层注意力算过的 key 和 value）就越大。它会带来两个麻烦：一是显存装不下，批开不大；二是每生成一个 token 都要把全部 KV 缓存从显存读一遍，读的时间比算的时间还长。想同时缓解这两个问题，最简单的办法是让每个数占更少的字节，也就是<b>量化</b>。</p>
+<p>在这篇论文之前，KV 缓存的量化基本只停留在“每个 token 一组、4 bit、四舍五入”这种最朴素的做法上，再往下压到 2 bit，模型的准确率就明显崩掉。作者先做了一个细致的观察：<b>key 缓存里有少数几个固定的通道数值特别大，value 缓存则没有这种规律</b>。由此得出一个不对称的方案：key 按<b>通道</b>分组量化，value 按 <b>token</b> 分组量化。因为按通道分组要跨越多个 token，而 token 是一个一个生成出来的，作者又设计了“分组量化部分 + 最近若干个 token 保持全精度”的流式数据结构，并写了把反量化和矩阵乘融合在一起的 GPU 内核。这套方法叫 <b>KIVI</b>，不需要任何校准数据或微调。</p>
+<p>论文报告：在 Llama-2、Mistral 上，2 bit 的 KIVI 在常规生成任务和长上下文任务上的分数与 16 bit 很接近（Falcon-7B 需要 4 bit）；在一张 A100-80GB 上跑 Llama-2-7B，同样的显存能装下 4 倍的批，吞吐量是 16 bit 基线的 2.35–3.47 倍。后面第 6 节会把这些数字背后的比较条件一条条拆开：基线是什么、批多大、序列多长、精度和速度是不是在同一设置下测的。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>KV 缓存为什么会同时卡住显存容量和解码速度？</li>
+  <li>整数量化里的缩放因子、零点、分组、“按 token”和“按通道”分别是什么意思？</li>
+  <li>为什么 key 必须按通道量化，而 value 必须按 token 量化？这两个结论各自靠什么证据？</li>
+  <li>按通道量化要跨 token，生成时 token 又是一个一个来的，KIVI 怎么解决这个矛盾？那段全精度的“残差窗口”有什么用、要付出多少显存？</li>
+  <li>“峰值显存降低 2.6 倍、批大 4 倍、吞吐 2.35–3.47 倍”分别是拿什么和什么比、在什么条件下测的？</li>
+  <li>后来的推理引擎有没有用 KIVI 这套方案？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：KV 缓存为什么成了新的瓶颈</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>推理服务靠把很多请求凑成一批来摊薄成本，可批一大、上下文一长，KV 缓存就会比模型参数本身还大，而且每一步都要整个读一遍。已有的工作从三个方向缩小它，各有代价。作者为什么认为“量化”是最简单有效的方向？在他们之前，KV 缓存量化做到了什么程度，卡在哪里？</div>
+
+<div class="note-pre"><b>先补一点背景：KV 缓存有多大，为什么它既占显存又拖慢速度。</b>
+<p>语言模型生成文字是一个 token 一个 token 往后接的。生成第 \(t\) 个 token 时，每一层注意力都要拿当前 token 的 query 去和前面所有 token 的 key 比相似度，再用得到的权重把前面所有 token 的 value 加权平均。前面那些 token 的 key 和 value 在之前的步骤里已经算过，所以系统把它们存下来反复使用，这份数据就是 KV 缓存。它的来龙去脉和显存管理，本站在 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a> 里讲过，这里只算一下它的大小。</p>
+<p>每个 token 在每一层都要存一个 key 向量和一个 value 向量。以论文测速用的 Llama-2-7B 为例，它有 32 层，每层的 key、value 都是 4096 维，用 16 bit（2 字节）存：</p>
+<div class="formula">$$\underbrace{2}_{\text{key 和 value}}\times\underbrace{32}_{\text{层数}}\times\underbrace{4096}_{\text{维度}}\times\underbrace{2\ \text{字节}}_{\text{FP16}}=512\ \text{KB / token}$$</div>
+<p>一个 4096 token 的请求就要 2 GB 的 KV 缓存（推算）。论文引言里还举了两个更大的例子：PaLM-540B 在批大小 512、上下文 2048 时，KV 缓存约 3 TB，是参数量的 3 倍；OPT-175B 在批大小 512、输入 512、输出 32 时，KV 缓存 1.2 TB，是权重的 3.8 倍（这两个数分别引自 Pope 等人和 FlexGen 的论文）。</p>
+<p>KV 缓存不只占地方，还拖慢速度。解码时每一步只为每个请求算一个新 token，计算量很小，但 GPU 必须把整份参数和这个批的全部 KV 缓存从显存（HBM）读进芯片上的高速缓存（SRAM）才能算。读数据的时间远大于算的时间，计算单元大部分时候在等数据，这叫<b>受显存带宽限制</b>（memory-bound）。批越大、序列越长，每一步要读的 KV 就越多。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：Llama-2-7B 每解码一步要从显存读多少数据（每个请求按约 500 个 token 计）</div>
+  <div class="dia-row"><span class="lbl">批大小 8</span><div class="dia-track"><span class="dia-seg w" style="flex:12.6">参数 12.6 GB</span><span class="dia-seg kv" style="flex:2">KV 2.0</span></div></div>
+  <div class="dia-row"><span class="lbl">批大小 32</span><div class="dia-track"><span class="dia-seg w" style="flex:12.6">参数 12.6 GB</span><span class="dia-seg kv" style="flex:7.8">KV 7.8 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">批大小 96</span><div class="dia-track"><span class="dia-seg w" style="flex:12.6">参数 12.6 GB</span><span class="dia-seg kv" style="flex:23.4">KV 23.4 GB</span></div></div>
+  <div class="dia-out">按 A100-80GB 约 2 TB/s 的显存带宽，读一遍参数约 6.6 ms；批大小 96 时读一遍 KV 约 12 ms，已经是参数的近两倍。</div>
+  <div class="dia-note">推算：参数 6.74B × 2 字节；每个 token 的 KV 512 KB；每个请求 500 个 token 约 250 MB。这里 1 KB = 1024 字节，与论文测显存所用的 PyTorch 统计口径一致。500 个 token 取自论文测速所用的平均长度（输入 161 + 输出 338，见 §6.7）。</div>
+</div>
+
+<p>论文把当时缩小 KV 缓存的工作分成三类，每一类都有明显的代价：</p>
+<ul>
+  <li><b>减少 KV 的头数。</b>多查询注意力（MQA）和分组查询注意力（GQA）让多个 query 头共用一组 key、value，KV 缓存直接按比例变小。代价是必须从头训练或者继续训练模型，对已经训练好的模型不能直接用。</li>
+  <li><b>扔掉不重要的 token。</b>比如 H2O 只保留注意力分数累计最高的一部分 token 的 KV（本站 <a href="snapkv.html">SnapKV 精读</a> 讲的也是这一类）。代价是被扔掉的信息找不回来，后面如果又需要它，模型就答不上来。</li>
+  <li><b>从系统层面想办法。</b>比如 FlexGen 把 KV 缓存挪到 CPU 内存或硬盘，vLLM 用分页的方式消除显存碎片。这些办法让显存用得更充分，但每个 token 的 KV 仍然是那么多字节，该读的数据一点没少。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：MQA 和 GQA。</b>
+<p>标准的多头注意力（MHA）里，每个注意力头都有自己的 query、key、value。Llama-2-7B 有 32 个头，就要存 32 组 key、value。MQA 让所有头共用一组 key、value，KV 缓存缩小到 1/32；GQA 折中一下，比如 32 个 query 头分成 8 组，每组共用一组 key、value，KV 缓存缩小到 1/4。论文实验里的 Falcon-7B 用的是 MQA，附录里的 Llama-3-8B 和 Mistral-7B-v0.2 用的是 GQA（8 个 KV 头）。这一点在第 6 节解释实验结果时会用到：KV 已经被结构压缩过的模型，再量化时余量更小。</p>
+</div>
+<p>相比之下，量化直接减少每个数占的字节，不改模型结构、不丢 token，还能和上面三类方法叠加使用，所以作者认为它是最简单有效的方向。问题在于，当时对 KV 缓存的量化研究很少：权重量化已经有 GPTQ、AWQ 等大量工作，而 KV 缓存只有 FlexGen、H2O、ATOM 等少数工作用过最朴素的 4 bit 四舍五入量化。原因之一是 KV 缓存是“流式”产生的，每一步只多出一个 token，很多为权重设计的复杂方法用不上。更重要的是，没有人仔细看过 KV 缓存里的数值长什么样，也就说不清它难在哪里、极限在哪里。</p>
+<p>作者的第一项工作就是看数据，得到两个观察：</p>
+<ul>
+  <li><b>key 缓存</b>里有少数几个固定的通道，数值远大于其他通道。所以 key 应该<b>按通道</b>量化：把同一个通道、不同 token 的数放在一组。这样大数值的通道只影响它自己，不会连累其他正常通道。</li>
+  <li><b>value 缓存</b>没有明显的异常通道。但实验表明它只能<b>按 token</b>量化，因为注意力的输出本质上是把各个 token 的 value 按权重混合起来，按 token 量化能把误差关在每个 token 自己内部，一个 token 的量化不会拖累别的 token。</li>
+</ul>
+<p>基于这两个观察，作者提出 KIVI，并声明了两项贡献：一是对常用模型 KV 缓存的异常值分布和量化误差做了系统分析，解释了 key 和 value 为什么要用不同的量化方式；二是一个不需要微调、对硬件友好的 2 bit KV 缓存量化算法，在 Llama-2-7B 上把峰值显存（含模型权重）降低 2.6 倍，从而支持最多 4 倍的批大小和 2.35–3.47 倍的吞吐量。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>KV 缓存量化只压缩 KV，不压缩模型参数。批很小、序列很短时，显存的大头是参数，量化 KV 省不下多少；只有当 KV 缓存的体积和参数相当甚至更大时（大批量或长上下文），它的收益才明显。论文所有的效率实验都刻意处在这个区间（§6.7）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：推理时 key 和 value 是怎么产生、怎么被用的</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KV 缓存在推理的两个阶段里分别是怎么产生、怎么被读取的？它的形状是什么？为什么说它决定了推理的显存和速度？后面所有的量化设计都建立在这几个公式上，所以先把记号定下来。</div>
+<p>推理分两个阶段。<b>预填充</b>（prefill）阶段一次性处理整个输入提示，为每一层算出所有输入 token 的 key 和 value 并存进缓存；<b>解码</b>（decoding）阶段一次生成一个 token，每一步既要读缓存，又要把新 token 的 key、value 追加进去。</p>
+<p><b>预填充。</b>设输入张量为 \(X\in\mathbb{R}^{b\times l_{\text{prompt}}\times d}\)，其中 \(b\) 是批大小，\(l_{\text{prompt}}\) 是提示长度，\(d\) 是隐藏维度。某一层的 key 和 value 由两个权重矩阵算出：</p>
+<div class="formula">$$X_K = X W_K,\qquad X_V = X W_V,\qquad W_K, W_V\in\mathbb{R}^{d\times d}$$</div>
+<p>算完之后，\(X_K\) 和 \(X_V\) 就被存进显存，留给后面的解码使用。</p>
+<p><b>解码。</b>设当前输入 token 的向量为 \(t\in\mathbb{R}^{b\times 1\times d}\)。先算出它的 key、value 并拼到缓存末尾，再用它的 query 去做注意力：</p>
+<div class="formula">$$X_K\leftarrow \mathrm{Concat}(X_K,\ tW_K),\quad X_V\leftarrow \mathrm{Concat}(X_V,\ tW_V)$$
+$$t_Q = tW_Q,\qquad A=\mathrm{Softmax}\big(t_Q X_K^{\top}\big),\qquad t_O = A X_V$$</div>
+<p>这里 \(A\) 是当前 token 对前面每个 token 的注意力权重，\(t_O\) 是注意力的输出。为了简洁，论文省略了除以 \(\sqrt{d}\) 的缩放、多头的拆分和输出投影层，这不影响后面的讨论。</p>
+<p>请注意两个矩阵乘法里 key 和 value 的角色完全不同：key 出现在 softmax 的<b>里面</b>，它的数值决定每个 token 分到多少权重；value 出现在 softmax 的<b>外面</b>，它被按权重混合成输出。第 4 节解释为什么 key 和 value 要用不同的量化方式时，靠的就是这个区别。</p>
+<p><b>显存和速度。</b>生成 \(l_{\text{gen}}\) 个 token 之后，每一层的 KV 缓存形状是 \(b\times(l_{\text{prompt}}+l_{\text{gen}})\times d\)，和批大小、总长度都成正比。每生成一个 token，GPU 都要把这份缓存从显存搬进 SRAM 一次，搬运期间计算单元基本闲着。所以 KV 缓存的字节数同时决定了“能开多大的批”和“每一步要等多久”。</p>
+<div class="note-pre"><b>先补一点背景：HBM、SRAM 与受带宽限制的解码。</b>
+<p>GPU 的显存（HBM）容量大但离计算单元远，A100 的带宽约 2 TB/s；芯片上的 SRAM 很快但只有几十 MB。任何计算都得先把数据从 HBM 搬进 SRAM。解码时，每个请求每一步只做“一个向量乘一个矩阵”（\(t_Q\) 乘 \(X_K^{\top}\)），每读进一个数只做一次乘加，算力几乎用不上，耗时基本等于“读的字节数 ÷ 带宽”。这就是为什么 KV 缓存的字节数少一半，解码这一部分的时间理论上也能少一半。更完整的讨论见本站 <a href="flashattention.html">FlashAttention 精读</a>。</p>
+</div>
+<p>下面的计算器可以选模型、批大小和上下文长度，看 KV 缓存相对参数有多大（计算器里的 dtype 只有 BF16 和 FP8 两档；2 bit 大约再除以 4，加上缩放参数的开销后见 §3 和 §5 的推算）。</p>
+<div data-widget="roofline" data-panel="kv"></div>
+<div class="note-warn"><b>论文记号和真实模型的差别：</b>公式里把 key、value 当成一个 \(d\) 维向量，真实模型会把 \(d\) 拆成多个头，每个头 128 维（Llama-2、Mistral），注意力在每个头内部单独算。KIVI 的官方代码也是在每个头内部分组量化的：按 token 量化时，一组是同一个 token 在某个头里相邻的 \(G\) 个通道；按通道量化时，一组是某个头的某一个通道上相邻的 \(G\) 个 token。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 初步研究：拿最朴素的量化去压 KV 缓存，会发生什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KV 缓存是一边生成一边增长的，什么样的量化方法才用得上？用最朴素的“分组 + 四舍五入”量化时，分组的方向（按 token 还是按通道）对 key 和 value 各有什么影响？大家常用的按 token 4 bit 量化，能不能直接压到 2 bit？要读懂这一节的表格，先得把整数量化的几个基本概念讲清楚。</div>
+
+<h4 id="n-3-1">3.1 先补课：整数量化是怎么回事</h4>
+<div class="note-pre"><b>先补一点背景：缩放因子、零点和四舍五入。</b>
+<p>量化就是用少数几个整数“档位”去近似一组实数。用 \(B\) 个 bit 只能表示 \(2^B\) 个档位：4 bit 有 16 档，2 bit 只有 4 档（0、1、2、3）。为了让这几个档位覆盖这组数的实际范围，需要两个参数：<b>零点</b> \(z\)，表示整数 0 对应的实数；<b>缩放因子</b> \(s\)，表示相邻两档之间差多少。论文用的公式是：</p>
+<div class="formula">$$Q(X)=\Big\lfloor \frac{X-z_X}{s_X}\Big\rceil,\qquad X' = Q(X)\cdot s_X + z_X,\qquad z_X=\min X,\quad s_X=\frac{\max X-\min X}{2^B-1}$$</div>
+<p>这里 \(\lfloor\cdot\rceil\) 表示四舍五入到最近的整数，存进显存的是整数 \(Q(X)\) 加上 \(s_X\)、\(z_X\) 两个参数；用的时候再按第二个式子把它还原成近似值 \(X'\)，这一步叫<b>反量化</b>。因为每个数最多被“挪”到半档之外，所以误差不超过 \(s_X/2\)。</p>
+<p>走一遍例子。一组 8 个数 \([-1.0,\,-0.4,\,0.1,\,0.3,\,0.6,\,1.1,\,1.4,\,2.0]\)，用 2 bit 量化：最小值 \(-1.0\) 就是零点，范围 3.0 分成 3 段，步长 \(s=1.0\)，四个档位对应的实数是 \(-1,\ 0,\ 1,\ 2\)。每个数被送到最近的档位上，结果如下图。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：2 bit 非对称量化把 8 个数送到 4 个档位上</div>
+  <svg class="dg" viewBox="0 0 760 225" role="img" aria-label="八个实数被四舍五入到四个整数档位的示意图" style="max-width:760px;--dg-min:620px">
+    <line x1="210" y1="62" x2="210" y2="150" style="stroke:var(--border-strong);stroke-dasharray:3 4"/>
+    <line x1="390" y1="62" x2="390" y2="150" style="stroke:var(--border-strong);stroke-dasharray:3 4"/>
+    <line x1="570" y1="62" x2="570" y2="150" style="stroke:var(--border-strong);stroke-dasharray:3 4"/>
+    <text x="22" y="50" class="t-sm">原始值</text>
+    <text x="22" y="150" class="t-sm">档位</text>
+    <g>
+      <circle cx="120" cy="50" r="6" style="fill:var(--c-enc)"/><text x="120" y="30" class="t-c t-sm">−1.0</text>
+      <circle cx="228" cy="50" r="6" style="fill:var(--c-enc)"/><text x="228" y="30" class="t-c t-sm">−0.4</text>
+      <circle cx="318" cy="50" r="6" style="fill:var(--c-enc)"/><text x="318" y="30" class="t-c t-sm">0.1</text>
+      <circle cx="354" cy="50" r="6" style="fill:var(--c-enc)"/><text x="354" y="30" class="t-c t-sm">0.3</text>
+      <circle cx="408" cy="50" r="6" style="fill:var(--c-enc)"/><text x="408" y="30" class="t-c t-sm">0.6</text>
+      <circle cx="498" cy="50" r="6" style="fill:var(--c-enc)"/><text x="498" y="30" class="t-c t-sm">1.1</text>
+      <circle cx="552" cy="50" r="6" style="fill:var(--c-enc)"/><text x="552" y="30" class="t-c t-sm">1.4</text>
+      <circle cx="660" cy="50" r="6" style="fill:var(--c-enc)"/><text x="660" y="30" class="t-c t-sm">2.0</text>
+    </g>
+    <path class="edge" d="M120,58 L120,138"/>
+    <path class="edge" d="M228,58 L298,138"/>
+    <path class="edge" d="M318,58 L302,138"/>
+    <path class="edge" d="M354,58 L306,138"/>
+    <path class="edge" d="M408,58 L476,138"/>
+    <path class="edge" d="M498,58 L482,138"/>
+    <path class="edge" d="M552,58 L486,138"/>
+    <path class="edge" d="M660,58 L660,138"/>
+    <line x1="90" y1="150" x2="700" y2="150" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <g style="stroke:var(--c-pred);stroke-width:3">
+      <line x1="120" y1="142" x2="120" y2="158"/><line x1="300" y1="142" x2="300" y2="158"/><line x1="480" y1="142" x2="480" y2="158"/><line x1="660" y1="142" x2="660" y2="158"/>
+    </g>
+    <text x="120" y="174" class="t-c t-b">整数 0</text><text x="120" y="192" class="t-c t-sm">还原为 −1.0</text>
+    <text x="300" y="174" class="t-c t-b">整数 1</text><text x="300" y="192" class="t-c t-sm">还原为 0.0</text>
+    <text x="480" y="174" class="t-c t-b">整数 2</text><text x="480" y="192" class="t-c t-sm">还原为 1.0</text>
+    <text x="660" y="174" class="t-c t-b">整数 3</text><text x="660" y="192" class="t-c t-sm">还原为 2.0</text>
+    <text x="390" y="215" class="t-c t-xs">虚线是四舍五入的分界（相邻两档的中点）；z = min = −1.0，s = (2.0 − (−1.0)) / (2² − 1) = 1.0</text>
+  </svg>
+  <div class="dia-note">本站示意图。还原后的值是 \([-1,0,0,0,1,1,1,2]\)，每个数的误差都不超过半个步长 0.5。关键在于：步长由这一组里的<b>最大值和最小值</b>决定，只要组里混进一个特别大的数，步长就会被撑大，其余所有数的误差都跟着变大。</div>
+</div>
+
+<div class="note-pre"><b>先补一点背景：对称与非对称、分组、按 token 与按通道。</b>
+<ul>
+  <li><b>对称与非对称。</b>对称量化把零点固定为 0，档位以 0 为中心对称分布，适合大致以 0 为中心的数据；非对称量化像上面那样用最小值当零点，档位覆盖 \([\min,\max]\)，数据偏向一边时不浪费档位。2 bit 只有 4 档，浪费一档都很心疼，所以 KIVI 用的是带零点的非对称量化。</li>
+  <li><b>分组（group-wise）。</b>如果整个张量共用一对 \(s,z\)，一个极端值就会毁掉所有数的精度。所以通常把张量切成很多小组，每组 \(G\) 个数共用一对 \(s,z\)，\(G\) 叫<b>组大小</b>。组越小越精确，但每组都要多存两个 16 bit 参数：\(G=32\) 时，平均每个数多出 \(2\times16/32=1\) bit，所以“2 bit 量化”实际每个数约占 3 bit，相对 16 bit 压缩约 5.3 倍（推算）。</li>
+  <li><b>按 token 还是按通道。</b>把一层的 KV 缓存看成一个矩阵 \(X\in\mathbb{R}^{l\times d}\)：每一行是一个 token，每一列是一个通道（向量的一个维度）。<b>按 token</b> 量化让同一行里的数共用参数，一个 token 的若干个通道成一组；<b>按通道</b>量化让同一列里的数共用参数，一个通道上的若干个 token 成一组。下面的原文图 1 画的就是这两种切法。</li>
+</ul>
+</div>
+<figure class="paper-fig"><div class="imgs one"><img src="kivi/fig/fig1-quant-scheme.svg" alt="原文图 1：按 token 量化与按通道量化" loading="lazy" style="max-width:420px"></div>
+<figcaption><b>原文图 1。怎么看：</b>两个蓝色大方块都是同一个 KV 缓存矩阵 \(X\)，竖着是 token（共 \(l_{\text{prompt}}\) 行），横着是通道（共 \(d\) 列）。左图是按 token 量化：红色虚线框住的是一行，旁边那根竖条表示每一行有自己的一对 \(s_X, z_X\)，一共 \(l_{\text{prompt}}\) 对。右图是按通道量化：红色虚线框住的是一列，上面那根横条表示每一列有自己的一对参数，一共 \(d\) 对。KIVI 实际用的是分组版本：按 token 时一行再切成每 \(G\) 个通道一组，按通道时一列再切成每 \(G\) 个 token 一组。</figcaption></figure>
+
+<div class="note-pre"><b>先补一点背景：为什么 KV 缓存只能用“四舍五入”这种最简单的量化。</b>
+<p>权重量化里效果最好的方法，比如 GPTQ，会利用一批校准数据求解一个优化问题，逐列调整量化后的权重来抵消误差，一个模型要算几十分钟到几小时。这对权重没问题，因为权重量化一次就能一直用。但 KV 缓存是推理时一个 token 一个 token 现场产生的，每一步都得马上量化，根本没有时间做优化。所以作者认为最灵活的选择是<b>就近取整</b>（round-to-nearest）：算出最小值、最大值，直接四舍五入。标题里的“tuning-free”就是指这一点：不需要校准数据，也不需要微调模型。</p>
+<p>另一个常用的说法是<b>伪量化</b>（fake quantization）：把数据量化后立刻反量化回 16 bit 再参与计算。它不省显存，只用来模拟“量化误差会让准确率掉多少”，方便快速比较各种方案。本节和 §6.2 的对比表都是伪量化的结果。</p>
+</div>
+
+<h4 id="n-3-2">3.2 初步实验：哪种组合能撑到 2 bit</h4>
+<p>前人的做法通常是对 key 和 value 都按 token 量化。原因很实际：按 token 量化时，新 token 的 KV 只依赖它自己，量化好就能直接拼到已有缓存的末尾。按通道量化则要把多个 token 放在一组，新 token 来了没法单独处理，实现起来麻烦得多。为了先弄清楚效果，作者在实验里用补零的办法凑齐整组：token 数不够分组时在末尾补 0，这样所有 token 都被量化，四种组合可以公平比较。</p>
+<p>实验在 Llama-2-13B 上做，任务是 CoQA（对话式问答，精确匹配准确率）和 TruthfulQA（这里用生成版本，指标是 BLEU），组大小统一为 32，全部是伪量化。结果如下（数字来自原文表 1；K、V 后面的“T”表示按 token，“C”表示按通道）：</p>
+<div class="table-wrap"><table>
+<tr><th>Llama-2-13B，组大小 32</th><th class="num">CoQA</th><th class="num">TruthfulQA</th></tr>
+<tr><td>16 bit（不量化）</td><td class="num">66.37</td><td class="num">29.53</td></tr>
+<tr><td>4 bit（K-T，V-T）</td><td class="num">66.48</td><td class="num">29.51</td></tr>
+<tr><td>2 bit（K-T，V-T）</td><td class="num">52.93</td><td class="num">24.98</td></tr>
+<tr><td>2 bit（K-C，V-C）</td><td class="num">2.88</td><td class="num">0.74</td></tr>
+<tr><td>2 bit（K-T，V-C）</td><td class="num">2.80</td><td class="num">0.26</td></tr>
+<tr class="hl"><td>2 bit（K-C，V-T）</td><td class="num">63.53</td><td class="num">28.60</td></tr>
+</table></div>
+<p>作者从表里读出三条观察：</p>
+<ul>
+  <li><b>观察 1：</b>常用的“key、value 都按 token”在 4 bit 时几乎无损（CoQA 66.48 对 66.37），但降到 2 bit 就明显掉分（CoQA 掉到 52.93）。这说明前人的做法到 4 bit 就到头了。</li>
+  <li><b>观察 2：</b>只要 value 按通道量化，不管 key 怎么量化，模型都几乎完全失效（CoQA 不到 3 分）。</li>
+  <li><b>观察 3：</b>在 2 bit 下，唯一表现好的组合是“key 按通道、value 按 token”（CoQA 63.53，只比 16 bit 低 2.8 分）。</li>
+</ul>
+<p>这三条观察就是 KIVI 的出发点：key 和 value 需要沿<b>不同的方向</b>分组。下一节回答“为什么”。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>“非对称”这个词有两层意思。</b>在量化文献里，“非对称量化”通常指带零点的量化（上面讲的 \(z=\min\)）。KIVI 标题里的 “Asymmetric” 则主要指 key 和 value 用不同的量化方向，论文 §4.2.1 明确把“key 按通道、value 按 token”称为“我们的非对称量化”。KIVI 恰好两层意思都占：它对 key、value 区别对待，每一组内部也用带零点的量化。</li>
+  <li><b>这张表还不是 KIVI。</b>这里所有 token 都被量化了，也没有后面要讲的全精度残差窗口。§6.2 会看到，这个区别在数学推理这类难任务上影响很大。</li>
+  <li><b>同一行数字在两张表里不一致。</b>“4 bit（K-T，V-T）”这一行，表 1 写的是 66.48 / 29.51，而表 3 中 Llama-2-13B 的同一配置写的是 66.73 / 29.14；其余几行两张表一致。论文没有解释这个差别，可能来自不同批次的实验。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S3.T1" target="_blank" rel="noopener">原文表 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 为什么 key 要按通道、value 要按 token</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上一节的表格只告诉我们“key 按通道、value 按 token”效果最好，没有说为什么。作者分别从两个角度解释：key 的问题出在数值分布上（有固定的异常通道），value 的问题出在它在注意力里的用法上（输出只由少数几个 token 决定）。两条理由性质不同，所以分开讲。</div>
+
+<h4 id="n-4-1">4.1 key：少数几个通道的数值特别大，而且一直是那几个</h4>
+<div class="note-pre"><b>先补一点背景：激活里的“异常通道”。</b>
+<p>早在 KV 缓存量化之前，研究权重和激活量化的人就发现，大模型的激活（每一层的中间结果）里有少数几个特征维度的数值常年比其他维度大几十倍，而且不管输入是什么，总是那几个维度。LLM.int8() 把这些维度单独拿出来用 16 bit 算，SmoothQuant 把激活里的大数值“挪”一部分到权重上，AWQ 根据激活的大小决定保护哪些权重通道，处理的都是这个现象。key 是激活乘以权重 \(W_K\) 得到的，所以继承了类似的结构并不奇怪。</p>
+</div>
+<p>作者把 Llama-2-13B 和 Falcon-7B 若干层的 key、value 缓存画成了三维图：</p>
+<figure class="paper-fig"><div class="imgs one"><img src="kivi/fig/fig2-kv-magnitude.jpg" alt="原文图 2：Llama-2-13B 与 Falcon-7B 的 key、value 缓存数值大小" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>上排是 Llama-2-13B 第 16 层和第 31 层第 0 个头，下排是 Falcon-7B 第 16 层和第 20 层第 0 个头；每一层都是左边 key、右边 value。每张小图的两个水平轴分别是 token（0–200）和通道（Llama 一个头有 128 个通道，Falcon 是 64 个），高度和颜色表示数值的绝对值，越红越大。看 key 的四张图：少数几个通道沿着整个 token 轴竖起一道道红色的“墙”，绝对值到 10–15，其余通道都趴在 2.5 以下；而且这几道墙在所有 token 上都在同一个位置。再看 value 的四张图：数值都在 2.5 以内，红色的尖峰零零散散，看不出哪个通道或哪个 token 特别突出。图片由本站把原文 8 张 SVG 子图转成一张 JPEG 拼合，内容未改动。</figcaption></figure>
+<p>“异常值集中在固定的通道上”这件事，正好决定了分组方向。如果按 token 分组，每一组都横跨所有通道，必然把那个大数值通道也包含进来，于是每一组的范围都被它撑大，步长跟着变大，其余正常通道的数都会被粗暴地挤到同一两个档位上。如果按通道分组，大数值通道自己成组，它的步长大只影响它自己；正常通道各自成组，步长小、误差也小。下面用一个具体的小例子走一遍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个异常通道如何毁掉按 token 量化（4 个 token × 8 个通道，2 bit）</div>
+  <div style="overflow-x:auto">
+  <table style="width:auto;font-size:.82rem">
+    <tr><th></th><th class="num">通道 0</th><th class="num">1</th><th class="num">2</th><th class="num" style="background:var(--c-pred-bg)">3（异常）</th><th class="num">4</th><th class="num">5</th><th class="num">6</th><th class="num">7</th></tr>
+    <tr><td>token 1</td><td class="num">0.3</td><td class="num">−0.8</td><td class="num">0.5</td><td class="num" style="background:var(--c-pred-bg)">12.0</td><td class="num">−0.2</td><td class="num">0.9</td><td class="num">−0.6</td><td class="num">0.1</td></tr>
+    <tr><td>token 2</td><td class="num">0.0</td><td class="num">−0.5</td><td class="num">0.7</td><td class="num" style="background:var(--c-pred-bg)">11.2</td><td class="num">0.4</td><td class="num">0.6</td><td class="num">−0.9</td><td class="num">0.3</td></tr>
+    <tr><td>token 3</td><td class="num">−0.4</td><td class="num">−0.7</td><td class="num">0.2</td><td class="num" style="background:var(--c-pred-bg)">13.1</td><td class="num">0.1</td><td class="num">1.0</td><td class="num">−0.3</td><td class="num">−0.2</td></tr>
+    <tr><td>token 4</td><td class="num">0.6</td><td class="num">−0.2</td><td class="num">0.4</td><td class="num" style="background:var(--c-pred-bg)">12.4</td><td class="num">−0.5</td><td class="num">0.8</td><td class="num">−0.7</td><td class="num">0.0</td></tr>
+  </table>
+  </div>
+  <div class="dia-flow"><span class="dia-box pred">按 token（量化 token 1 这一行）<small>范围 −0.8 到 12.0，步长 ≈ 4.27，档位 −0.8 / 3.47 / 7.73 / 12.0</small></span><span class="dia-arrow">→</span><span class="dia-box">还原为 [−0.8, −0.8, −0.8, 12.0, −0.8, −0.8, −0.8, −0.8]<small>7 个正常通道全被压到同一档，误差最大 1.7，这一行原来的信息几乎全丢了</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">按通道（量化通道 0 这一列）<small>范围 −0.4 到 0.6，步长 ≈ 0.33</small></span><span class="dia-arrow">→</span><span class="dia-box">还原为 [0.27, −0.07, −0.4, 0.6]<small>误差最大 0.07</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">按通道（量化异常通道 3）<small>范围 11.2 到 13.1，步长 ≈ 0.63</small></span><span class="dia-arrow">→</span><span class="dia-box">还原为 [11.83, 11.2, 13.1, 12.47]<small>误差最大 0.17，相对于 12 左右的数值很小</small></span></div>
+  <div class="dia-note">本站示意图，数字是编的，只用来说明机制；真实的组大小是 32。真实 key 缓存里的异常值同样“沿通道成墙、沿 token 稳定”（原文图 2），所以按通道分组时每一组内部的数值都比较接近，步长自然小。</div>
+</div>
+<p>key 的误差为什么特别要紧？因为 key 进入的是注意力打分 \(t_Q X_K^{\top}\)，打分再经过 softmax 的指数运算才变成权重。某个 token 的打分如果偏了 \(\delta\)，它的权重就被乘上大约 \(e^{\delta}\)：打分偏 0.7，权重差不多翻倍。打分的误差被指数放大后，所有 token 的权重分配都会跟着变形。作者测了两种量化方式下 key 本身的相对误差和注意力权重的相对误差（原文表 2 的上半部分，Llama-2-13B，对所有层、所有头取平均）：</p>
+<div class="table-wrap"><table>
+<tr><th>Llama-2-13B</th><th class="num">key 按 token</th><th class="num">key 按通道</th></tr>
+<tr><td>key 缓存的平均相对误差 \(\big\lVert (X_K-X_K')/X_K\big\rVert_F\)</td><td class="num">13.67</td><td class="num">4.55</td></tr>
+<tr><td>注意力权重的平均相对误差 \(\big\lVert (A-A')/A\big\rVert_F\)</td><td class="num">47.00</td><td class="num">9.60</td></tr>
+<tr><td>注意力稀疏度</td><td class="num" colspan="2">84.3%</td></tr>
+</table></div>
+<p>其中 \(A'=\mathrm{Softmax}(t_Q X_K^{\prime\top})\) 是用量化后的 key 算出的权重。按 token 量化时，key 的误差约为按通道的 3 倍（13.67 对 4.55），传到注意力权重上就变成约 4.9 倍（47.00 对 9.60，推算），论文的说法是“将近 5 倍”。这和原文图 2 看到的现象一致：异常通道把按 token 量化的步长撑大了。</p>
+
+<h4 id="n-4-2">4.2 value：没有异常通道，但输出只看少数几个 token</h4>
+<p>value 的情况不一样。原文图 2 里 value 没有异常通道，按理说按 token 和按通道量化的误差应该差不多。表 2 下半部分也证实了这一点：value 本身的相对误差，按 token 是 4.57，按通道是 3.73，按通道甚至略好一些。可是观察 2 说，value 一按通道量化，模型就完全失效。只看 value 本身的误差，解释不了这个现象。</p>
+<p>作者换了一个角度：value 的用处是被注意力权重混合成输出 \(t_O=AX_V\)，所以真正该看的是<b>输出的误差</b>：</p>
+<div class="formula">$$\Delta=\Big\lVert \frac{AX_V - AX_V'}{AX_V}\Big\rVert_F$$</div>
+<div class="table-wrap"><table>
+<tr><th>Llama-2-13B</th><th class="num">value 按 token</th><th class="num">value 按通道</th></tr>
+<tr><td>value 缓存的平均相对误差 \(\big\lVert (X_V-X_V')/X_V\big\rVert_F\)</td><td class="num">4.57</td><td class="num">3.73</td></tr>
+<tr class="hl"><td>注意力输出的平均相对误差 \(\Delta\)</td><td class="num">3.55</td><td class="num">49.89</td></tr>
+</table></div>
+<p>输出误差的差距一下子拉开到约 14 倍（49.89 对 3.55，推算；论文写的是“将近 15 倍”）。作者给出的直觉来自注意力的稀疏性。把输出的第 \(i\) 行写开：</p>
+<div class="formula">$$[AX_V]_{i*}=\sum_{j=1}^{l_{\text{prompt}}} A_{ij}\,[X_V]_{j*}$$</div>
+<p>输出是各个 token 的 value 行按注意力权重 \(A_{ij}\) 加权求和。注意力权重通常非常稀疏，大部分权重集中在少数几个“重要”的 token 上（表 2 测得的注意力稀疏度是 84.3%），所以输出基本上就是这几个重要 token 的 value 的组合。按 token 量化时，每个 token 的误差被关在它自己的那一行里，别的 token 量化得好不好，都不影响重要 token 的精度；输出的误差也就只取决于那几行量化得准不准。</p>
+<div class="note-pre"><b>本站补充的一层解释（论文没有这样展开）：为什么按通道量化会特别伤害“重要 token”。</b>
+<p>按通道量化时，一个 token 在某个通道上的值，和这个通道上另外 31 个 token 共用一对 \(s,z\)，步长由这 32 个数的范围决定。如果某个重要 token 的 value 恰好比同组其他 token 小，它就会分到一个对它来说过于粗糙的步长，相对误差可能非常大。按 token 量化时，每个 token 的步长由它自己的数值范围决定，不会有哪一行被“拖累”。平均下来，两种方式的误差差不多（4.57 对 3.73），但按通道量化无法保证“每一行都量化得好”。而注意力输出恰恰只依赖少数几行，只要其中一行被拖累，输出就会出大错。换句话说：表 2 上面那一行看的是<b>平均误差</b>，下面那一行反映的是<b>最要紧的那几行的误差</b>。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：key 和 value 的量化误差走的是两条不同的路</div>
+  <div class="dia-flow"><span class="dia-box enc">key 的量化误差<small>异常通道撑大按 token 量化的步长</small></span><span class="dia-arrow">→</span><span class="dia-box enc">注意力打分出错<small>\(t_Q X_K^{\prime\top}\)</small></span><span class="dia-arrow">→</span><span class="dia-box enc">softmax 指数放大<small>打分偏 \(\delta\)，权重乘上约 \(e^{\delta}\)</small></span><span class="dia-arrow">→</span><span class="dia-box enc">所有 token 的权重一起变形<small>对策：按通道量化，让异常通道自成一组</small></span></div>
+  <div class="dia-flow"><span class="dia-box act">value 的量化误差<small>没有异常通道，平均误差两种方式差不多</small></span><span class="dia-arrow">→</span><span class="dia-box act">按权重加权求和<small>\(\sum_j A_{ij}[X_V]_{j*}\)</small></span><span class="dia-arrow">→</span><span class="dia-box act">权重集中在少数 token<small>注意力稀疏</small></span><span class="dia-arrow">→</span><span class="dia-box act">输出只看那几行准不准<small>对策：按 token 量化，把误差关在每一行里</small></span></div>
+  <div class="dia-note">本站示意图，概括原文 §3.2 的两段分析。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li><b>表 2 只来自一个模型。</b>所有数字都是 Llama-2-13B 的，论文没有写这张表用的比特数和组大小，按上下文应当是表 1 的 2 bit、组大小 32 设置（<span class="unverified">本站推断，论文未写明</span>）。</li>
+  <li><b>误差的定义比较特别。</b>\(\lVert (X-X')/X\rVert_F\) 是先逐元素相除再取 Frobenius 范数，分母里接近 0 的元素会让数值变得很大，所以 13.67、47.00 这些数不是百分比，只适合在同一行内左右比较。“注意力稀疏度 84.3%”论文也没有给出精确定义。</li>
+  <li><b>这是经验解释，不是证明。</b>key 的异常通道从哪里来，论文只说和激活异常值的已知现象一致。后来的工作把它和旋转位置编码（RoPE）联系起来：KVQuant 选择在加 RoPE 之前量化 key，KIVI 合作者参与的一篇 ICML 2025 论文把 Q、K 中集中出现的大数值归因于 RoPE（见“后来怎么样了”）。KIVI 官方代码是在加完 RoPE 之后才量化 key 的。RoPE 本身见本站 <a href="roformer.html">RoFormer 精读</a>。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S3.T2" target="_blank" rel="noopener">原文表 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 KIVI：在流式生成里实现“key 按通道、value 按 token”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>value 按 token 量化很好办，新 token 来了单独量化、拼到末尾即可。key 按通道量化却要把同一通道上的多个 token 凑成一组，而生成时 token 是一个一个来的，第 1 个 token 到了，第 2 到第 32 个还不知道是什么。KIVI 怎么解决这个矛盾？注意力怎么在“一部分是 2 bit、一部分是 16 bit”的缓存上计算？这样做额外要花多少显存，又换来了什么？最后，怎样在 GPU 上实现，才能让省下的字节真正变成省下的时间？</div>
+
+<h4 id="n-5-1">5.1 分组部分 + 残差部分</h4>
+<p>KIVI 的办法是把 key 缓存切成两段。设当前缓存里有 \(l\) 个 token：</p>
+<ul>
+  <li><b>分组部分</b> \(X_{K_g}=X_K[:l-r]\)：前面 \(l-r\) 个 token，个数正好是组大小 \(G\) 的整数倍，可以整整齐齐按通道分组量化，只存 2 bit 的 \(Q(X_{K_g})\)。</li>
+  <li><b>残差部分</b> \(X_{K_r}=X_K[l-r:]\)：最后 \(r\) 个凑不满一组的 token，先用 16 bit 原样存着。</li>
+</ul>
+<p>解码时，每个新 token 的 key \(t_K\) 先追加到残差部分。等残差部分攒够 \(R\) 个 token（\(R\) 叫<b>残差长度</b>，是一个超参数，必须是 \(G\) 的整数倍），就把这 \(R\) 个 token 按通道量化，拼到分组部分的末尾，再把残差部分清空。注意力打分用分块矩阵乘法分两段算，再拼起来：</p>
+<div class="formula">$$A_g = t_Q\,Q(X_{K_g})^{\top},\qquad X_{K_r}\leftarrow\mathrm{Concat}(X_{K_r},\,t_K),\qquad A_r = t_Q\,X_{K_r}^{\top},\qquad A=\mathrm{Concat}(A_g,\,A_r)$$</div>
+<p>value 本来就按 token 量化，不存在凑组的问题，但作者同样给它留了一段全精度的尾巴，为的是保住准确率。做法是维护一个长度为 \(R\) 的队列：新 token 的 value 进队；队列超过 \(R\) 时，把最老的那个 token 弹出来，按 token 量化后拼到已量化部分的末尾。所以 value 永远保留最近 \(R\) 个 token 的 16 bit 副本，而 key 的 16 bit 部分在 0 到 \(R-1\) 个 token 之间周期性地涨落。</p>
+<p>算完打分之后，softmax 作用在整条打分向量上，然后按 value 的切分位置把权重分成两段，各自去乘对应的 value：</p>
+<div class="formula">$$t_O = A_g'\,Q(X_{V_g}) + A_r'\,X_{V_r},\qquad A_g'=\mathrm{Softmax}(A)[:-R],\quad A_r'=\mathrm{Softmax}(A)[-R:]$$</div>
+<p>这里 \(A_g'\)、\(A_r'\) 是按 value 的分界切开的两段权重（原文算法 1 里写作 \(A_g\)、\(A_r\)，和上面打分时的记号重名，这里加撇区分）。key 和 value 的“已量化 / 全精度”分界一般不在同一个位置，但 token 的顺序是一致的，所以先对整条打分做 softmax、再按 value 的分界切开，结果是对的。</p>
+<p><b>预填充阶段</b>也有一个细节：注意力计算用的是没量化的精确 key 和 value，传给下一层的结果也是精确的；只有存进缓存的那一份是量化过的。预填充时 key 按 \(R\) 的整数倍切：\(r=l\bmod R\)，前 \(l-r\) 个 token 量化，剩下的进残差；value 则是最后 \(R\) 个 token 留 16 bit，其余量化。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="kivi/fig/fig3-kivi-algorithm.png" alt="原文图 3：KIVI 算法在预填充和解码阶段的流程" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>实线框是全精度张量，虚线框是低精度张量，绿色是存在缓存里的东西。左半是预填充：\(X_K\)、\(X_Q\) 算出注意力 \(A\)，再和 \(X_V\) 算出输出 \(X_O\)，这一路都用精确值；同时 \(X_K\) 沿虚线“按通道量化”、\(X_V\) 沿虚线“按 token 量化”，存进右边的 KV 缓存：量化的 \(Q(X_{K_g})\)、\(Q(X_{V_g})\) 加上全精度的 \(X_{K_r}\)、\(X_{V_r}\)。右半是解码（图里只画了 key 的部分）：新 token 的 \(t_K\) 接到 \(X_{K_r}\) 下面，\(t_Q\) 和它做普通矩阵乘得到 \(1\times r\) 的黄色打分 \(A_r\)；\(t_Q\) 和量化的 \(Q(X_{K_g})\) 做融合了反量化的 Q_MatMul，得到 \(1\times(l-r)\) 的红色打分 \(A_g\)；两段拼成完整的 \(1\times l\) 打分 \(A\)。左边竖着的虚线箭头表示：残差攒满一定长度时，把它量化成 \(Q'(X_{K_g})\) 并入分组部分。图中这个条件写成 \(\mathrm{len}(X_{K_r})=G_k\)，正文和算法 1 写的是残差长度 \(R\)；按官方代码，触发条件是攒满 \(R\) 个 token。</figcaption></figure>
+
+<div class="dia">
+  <div class="dia-title">示意图：key 的残差“攒满再量化”，value 的残差是“滑动窗口”（玩具设置：组大小 G = 4，残差长度 R = 4，提示 10 个 token）</div>
+  <div class="dia-row"><span class="lbl">预填充后 · key</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">预填充后 · value</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell b">7</span><span class="cell b">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 11 个后 · key</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 11 个后 · value</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell b">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 12 个后 · key</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell c">9</span><span class="cell c">10</span><span class="cell c">11</span><span class="cell c">12</span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 12 个后 · value</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell b">9</span><span class="cell b">10</span><span class="cell b">11</span><span class="cell b">12</span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 14 个后 · key</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell a">9</span><span class="cell a">10</span><span class="cell a">11</span><span class="cell a">12</span><span class="cell b">13</span><span class="cell b">14</span></div></div>
+  <div class="dia-row"><span class="lbl">生成第 14 个后 · value</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span><span class="cell a">9</span><span class="cell a">10</span><span class="cell b">11</span><span class="cell b">12</span><span class="cell b">13</span><span class="cell b">14</span></div></div>
+  <div class="dia-note">本站示意图。蓝色 = 已量化（2 bit），绿色 = 全精度（16 bit），橙色 = 这一步刚攒满 R 个、随即被整组按通道量化的 key（第 12 步算完注意力后，9–12 号 token 的 key 一起量化，残差清空）。value 每一步都把最老的全精度 token 弹出去量化，始终保留最近 R 个。论文实验的真实设置是 G = 32、R = 128（效率实验另测了 R = 32）。</div>
+</div>
+
+<h4 id="n-5-2">5.2 残差窗口的代价和好处</h4>
+<p><b>代价。</b>按设计，key 和 value 的全精度部分都不超过 \(R\) 个 token，实际中 \(R\le128\)。作者认为，序列长度 \(l_{\text{prompt}}+l_{\text{gen}}\) 通常远大于 \(R\)，所以这部分 16 bit 数据的显存开销相对 2 bit 带来的节省可以忽略，长上下文时尤其如此。</p>
+<p><b>好处。</b>新来的 key、value 总是先以全精度进入残差部分，所以 KIVI 实际上维护了一个“最近 token 的全精度滑动窗口”：key 的窗口平均约 \(R/2\) 个 token（在 0 到 \(R\) 之间涨落），value 的窗口固定是 \(R\) 个。生成时模型往往很关注最近的几个 token，比如做数学题时，下一步推导主要依赖刚刚写出的那几步。把这些 token 留成全精度，难任务上的准确率就能保住。§6.2 会看到，在 GSM8K 上有没有这个窗口差别非常大。</p>
+<p>不过，“可以忽略”这个判断取决于序列有多长。论文自己的测速实验里，每个请求只有约 500 个 token（输入 161 + 输出 338，见 §6.7），这时 \(R=128\) 的窗口占的比例并不小。下面按 Llama-2-7B 算一笔账：</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个约 500 token 的请求，KV 缓存占多少显存（Llama-2-7B，组大小 32）</div>
+  <div class="dia-row"><span class="lbl">FP16 基线</span><div class="dia-track"><span class="dia-seg kv" style="flex:249">全部 16 bit：249 MB</span></div></div>
+  <div class="dia-row"><span class="lbl">KIVI-2，R = 128</span><div class="dia-track"><span class="dia-seg kv" style="flex:48">16 bit 窗口 48</span><span class="dia-seg cmp" style="flex:37.7">2 bit 38</span><span class="dia-seg" style="flex:163.3;background:none"></span></div></div>
+  <div class="dia-out">合计约 86 MB，是基线的 1/2.9；其中一半以上是全精度窗口。</div>
+  <div class="dia-row"><span class="lbl">KIVI-2，R = 32</span><div class="dia-track"><span class="dia-seg kv" style="flex:12">12</span><span class="dia-seg cmp" style="flex:44.4">2 bit 44</span><span class="dia-seg" style="flex:192.6;background:none"></span></div></div>
+  <div class="dia-out">合计约 56 MB，是基线的 1/4.4。</div>
+  <div class="dia-note">推算：每个 token 的 key 或 value 在 32 层里共 256 KB（16 bit）；2 bit 加上每组 32 个数共用的两个 16 bit 参数，相当于每个数 3 bit，即 48 KB。按 498 个 token 计，R = 128 时 key 的全精度部分平均 64 个、value 128 个；R = 32 时分别为 16 和 32。这两个压缩比（2.9 倍、4.4 倍）和原文图 5 中最大批大小之比（256 ÷ 96 ≈ 2.7，384 ÷ 96 = 4）很接近，后者还受模型权重和临时缓冲区的影响。</div>
+</div>
+<p>这笔账解释了一个实验现象：§6.7 的测速里，\(R=32\) 能开到的批比 \(R=128\) 大一半，吞吐也高出一截。窗口越短越省显存，代价是全精度的最近 token 更少；§6.6 的消融显示，在 GSM8K 上 \(R=32\) 和 \(R=128\) 差别不大。</p>
+
+<h4 id="n-5-3">5.3 系统实现：把反量化融进矩阵乘</h4>
+<div class="note-pre"><b>先补一点背景：为什么“先反量化、再做矩阵乘”反而更慢。</b>
+<p>§2 讲过，解码时注意力的每个矩阵乘法其实是“一个向量乘一个矩阵”（GEMV），耗时几乎全花在从显存读数据上。量化的意义在于少读字节：2 bit 加参数约 3 bit，只有 16 bit 的 3/16。可是如果实现成两个独立的 GPU 内核，第一个内核把 2 bit 数据读进来、反量化成 16 bit、再写回显存，第二个内核再把这份 16 bit 数据读一遍做矩阵乘，那么总共要读写约“3/16 + 1 + 1”份 16 bit 数据的量，比完全不量化还多一倍（推算）。省字节的唯一办法是把两步放进同一个内核：读进 2 bit 数据后，直接在寄存器里解包、乘缩放因子、加零点，马上和 query 相乘累加，16 bit 的中间结果从不写回显存。这就是<b>内核融合</b>。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：分开的两个内核 vs 融合内核（以 \(t_Q\,Q(X_{K_g})^{\top}\) 为例）</div>
+  <div class="dia-flow"><span class="dia-box">显存里的 2 bit 缓存</span><span class="dia-arrow">→</span><span class="dia-box pred">内核 1：反量化<small>写回一份 16 bit 副本</small></span><span class="dia-arrow">→</span><span class="dia-box pred">显存里的 16 bit 副本</span><span class="dia-arrow">→</span><span class="dia-box pred">内核 2：GEMV<small>再读一遍 16 bit</small></span></div>
+  <div class="dia-out">读写量约为 16 bit 缓存的 2.2 倍（推算），量化反而变慢</div>
+  <div class="dia-flow"><span class="dia-box">显存里的 2 bit 缓存</span><span class="dia-arrow">→</span><span class="dia-box enc">一个融合内核<small>每个 32 bit 整数里解出 16 个 2 bit 值 → 在寄存器里乘 \(s\) 加 \(z\) → 与 \(t_Q\) 相乘，用 FP32 累加</small></span><span class="dia-arrow">→</span><span class="dia-box enc">只写回打分 \(A_g\)<small>\(1\times(l-r)\)，很小</small></span></div>
+  <div class="dia-out">读写量约为 16 bit 缓存的 3/16（推算）</div>
+  <div class="dia-note">本站示意图。融合内核的细节来自官方代码 <code>quant/csrc/gemv_cuda.cu</code>，文件开头的注释说明它参考了 AWQ 的官方实现和 llama_cu_awq 项目里的 GEMV 内核。</div>
+</div>
+<p>论文对实现只写了三句话：反量化和矩阵乘用 CUDA 融合在一起（原文图 3 里的 Q_MatMul），分组量化用 Triton 写成一个内核，整套方法与只量化权重的方法完全兼容。官方代码补充了更多细节：</p>
+<ul>
+  <li><b>两个矩阵乘都用同一个融合内核。</b>打分 \(t_Q Q(X_{K_g})^{\top}\) 和输出 \(A_g' Q(X_{V_g})\) 都调用 <code>cuda_bmm_fA_qB_outer</code>，它对每个头做一次“16 bit 向量乘打包的低比特矩阵”，支持 2 bit 和 4 bit；2 bit 时每个 32 bit 整数里打包 16 个数。</li>
+  <li><b>量化和打包用 Triton。</b><code>triton_quantize_and_pack_along_last_dim</code> 沿最后一维按组求最小值、最大值，四舍五入后打包。key 先转置成“通道 × token”的布局再调用它，于是“沿最后一维分组”就变成了按通道、每 \(G\) 个 token 一组。</li>
+  <li><b>其余部分是普通 PyTorch。</b>全精度残差那一段的矩阵乘、softmax（升到 FP32 算）、拼接都直接用 PyTorch 完成。所以一次注意力其实要启动好几个内核，并不是像 FlashAttention 那样一个内核从头算到尾。</li>
+</ul>
+<div class="note-warn"><b>论文 vs 官方代码，以及实现上的局限：</b>
+<ul>
+  <li>代码在加完旋转位置编码（RoPE）之后才量化 key；缩放因子和零点以 16 bit 存储，所以组大小 32 时每个数额外多 1 bit（§3.1 的推算即基于此）。</li>
+  <li>当前主分支的 Llama 实现要求打开 FlashAttention（<code>config.use_flash = True</code>，用于预填充）。按仓库的更新记录，2024 年 4 月加入 Mistral 系列，2025 年 1 月加入了带 GQA 的实现并支持 Llama-3 系列。代码会随版本变化，本页描述的是 2026-10 主分支的状态。</li>
+  <li>KIVI 是在 Hugging Face Transformers 的 <code>generate</code> 里实现的：静态批，缓存是普通张量，量化部分每次增长都要用 <code>torch.cat</code> 拼出一个新张量。它没有和 PagedAttention、连续批处理这类服务系统的机制结合。作者自己也说，把量化操作和前面的计算再融合一步，还能更快，留作未来工作。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#A1" target="_blank" rel="noopener">附录 A（算法 1）↗</a> · <a href="https://github.com/jy-yuan/KIVI/blob/main/models/llama_kivi.py" target="_blank" rel="noopener">官方代码 llama_kivi.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实验：准确率掉了多少，显存和吞吐省了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>2 bit 的 KIVI 在常规长度和长上下文任务上，准确率比 16 bit 掉了多少？全精度残差窗口到底有多重要，组大小和残差长度该怎么选？摘要里“峰值显存降低 2.6 倍、批大 4 倍、吞吐 2.35–3.47 倍”这几个数，是在什么模型、什么硬件、什么批大小下，拿什么基线比出来的？最后用“结果的份量”一段把比较条件逐条摆出来。</div>
+
+<h4 id="n-6-1">6.1 实验是怎么设计的</h4>
+<p><b>模型。</b>三个系列：Llama / Llama-2（7B、13B 及其对话版本）、Falcon-7B 和 Mistral-7B。Llama 和 Mistral（正文用的版本）是多头注意力，Falcon-7B 是多查询注意力，所有头只有一组 key、value。附录另外测了 Llama-3-8B-Instruct、Mistral-7B-Instruct-v0.2（都是 8 个 KV 头的 GQA）和 LongChat-7B-v1.5-32K。KIVI 实现在 Hugging Face Transformers 代码库上。</p>
+<p><b>超参数。</b>参照 FlexGen 的做法，组大小 \(G\) 在所有实验里都取 32；残差长度 \(R\) 取 128。附录 C 另给出了 \(R=32\) 的全部结果。下文 KIVI-2 指 key、value 都是 2 bit，KIVI-4 指都是 4 bit。</p>
+<p><b>任务。</b>分常规长度和长上下文两组。常规长度用 LM-Eval 框架里的三个生成任务：CoQA（精确匹配准确率）、TruthfulQA（BLEU 分数）、GSM8K（精确匹配准确率）。长上下文用 LongBench 里四类共 8 个任务，最大序列长度 Mistral 设为 8192，其余模型设为 4096。另外还做了“大海捞针”测试。</p>
+<div class="note-pre"><b>先补一点背景：这几个评测分别测什么。</b>
+<ul>
+  <li><b>CoQA</b>：给一段文章，进行多轮问答，答案要从文章里找，按精确匹配计分。</li>
+  <li><b>TruthfulQA</b>：专门设计的容易诱导模型说出常见误解的问题。这里用的是生成版本，指标是生成答案与参考答案的 BLEU 分数，噪声比较大。</li>
+  <li><b>GSM8K</b>：小学数学应用题，模型要写出多步推导再给出数字答案，只有最终答案对才算对。推导要一步步引用前面写过的内容，是论文眼中“最难的生成任务”之一。</li>
+  <li><b>LongBench</b>：一个中英双语的长上下文基准，包含单文档问答、多文档问答、摘要、少样本学习、合成任务、代码补全等类别。论文选了 Qasper（单文档问答，F1）、QMSum 和 MultiNews（摘要，ROUGE）、TREC（分类）、TriviaQA（F1）、SAMSum（ROUGE）、LCC 和 RepoBench-P（代码补全，相似度）。不同任务的指标不同，所以“平均分”只适合在同一个模型的不同设置之间比较。</li>
+  <li><b>大海捞针</b>（Needle-in-a-Haystack，NIAH）：在一大段无关文字的某个位置藏一句“通行码是 xxxxxxx”，最后问模型通行码是多少。改变文字总长度和藏的位置（深度），画成一张热力图，看模型在哪些格子里找得到。</li>
+</ul>
+</div>
+<p>作者特意没有用 MMLU 这类选择题。原因在脚注里：这类任务只需要一步解码，直接读取第一步输出的概率。而 KIVI 在预填充阶段用的是精确的 key 和 value（§5.1），第一步的输出完全不受量化影响，所以这类任务测不出 KV 缓存量化的损失。只有生成多个 token、后面的 token 要读取量化过的缓存时，量化误差才会显现出来。</p>
+
+<h4 id="n-6-2">6.2 伪量化的对比：残差窗口为什么关键</h4>
+<p>作者先在四个模型上重复了 §3.2 的伪量化对比（原文表 3 的前几行），结论和表 1 一致：在四种 2 bit 组合里，“key 按通道、value 按 token”始终最好。但在 GSM8K 这种难任务上，即便是这个最好的组合，伪量化的分数也比 16 bit 低很多。而真正的 KIVI-2 只比 16 bit 低 2 分左右。两者唯一的区别是：伪量化把所有 token 都量化了，KIVI 保留了最近 token 的全精度窗口。下图把 GSM8K 这一列画出来：</p>
+<div class="dia">
+  <div class="dia-title">示意图：GSM8K 准确率，16 bit 与三种 2 bit 方案（数据来自原文表 3）</div>
+  <svg class="dg" viewBox="0 0 730 322" role="img" aria-label="四个模型在 GSM8K 上不同量化方案的准确率柱状图" style="max-width:730px;--dg-min:600px">
+    <g class="grid">
+      <line x1="70" y1="250" x2="700" y2="250" class="axis"/>
+      <line x1="70" y1="197.5" x2="700" y2="197.5" class="grid-ln"/>
+      <line x1="70" y1="145" x2="700" y2="145" class="grid-ln"/>
+      <line x1="70" y1="92.5" x2="700" y2="92.5" class="grid-ln"/>
+      <line x1="70" y1="40" x2="700" y2="40" class="grid-ln"/>
+      <text x="62" y="250" class="t-r t-xs">0</text><text x="62" y="197.5" class="t-r t-xs">10</text><text x="62" y="145" class="t-r t-xs">20</text><text x="62" y="92.5" class="t-r t-xs">30</text><text x="62" y="40" class="t-r t-xs">40</text>
+      <text x="20" y="145" class="t-c t-sm" transform="rotate(-90 20 145)">GSM8K 准确率（%）</text>
+    </g>
+    <g>
+      <rect x="90" y="179.1" width="26" height="70.9" style="fill:var(--c-tgt)"/><text x="103" y="172" class="t-c t-xs">13.5</text>
+      <rect x="122" y="245.6" width="26" height="4.4" style="fill:var(--c-loss)"/><text x="135" y="239" class="t-c t-xs">0.8</text>
+      <rect x="154" y="219.8" width="26" height="30.2" style="fill:var(--c-pred)"/><text x="167" y="213" class="t-c t-xs">5.8</text>
+      <rect x="186" y="183.1" width="26" height="66.9" style="fill:var(--c-enc)"/><text x="199" y="176" class="t-c t-xs">12.7</text>
+      <text x="151" y="268" class="t-c t-sm">Llama-2-7B</text>
+    </g>
+    <g>
+      <rect x="247" y="131" width="26" height="119" style="fill:var(--c-tgt)"/><text x="260" y="124" class="t-c t-xs">22.7</text>
+      <rect x="279" y="226.1" width="26" height="23.9" style="fill:var(--c-loss)"/><text x="292" y="219" class="t-c t-xs">4.6</text>
+      <rect x="311" y="185.9" width="26" height="64.1" style="fill:var(--c-pred)"/><text x="324" y="179" class="t-c t-xs">12.2</text>
+      <rect x="343" y="141" width="26" height="109" style="fill:var(--c-enc)"/><text x="356" y="134" class="t-c t-xs">20.8</text>
+      <text x="308" y="268" class="t-c t-sm">Llama-2-13B</text>
+    </g>
+    <g>
+      <rect x="404" y="226.1" width="26" height="23.9" style="fill:var(--c-tgt)"/><text x="417" y="219" class="t-c t-xs">4.6</text>
+      <rect x="436" y="247.2" width="26" height="2.8" style="fill:var(--c-loss)"/><text x="449" y="240" class="t-c t-xs">0.5</text>
+      <rect x="468" y="243.2" width="26" height="6.8" style="fill:var(--c-pred)"/><text x="481" y="236" class="t-c t-xs">1.3</text>
+      <rect x="500" y="232.1" width="26" height="17.9" style="fill:var(--c-enc)"/><text x="513" y="225" class="t-c t-xs">3.4</text>
+      <text x="465" y="268" class="t-c t-sm">Falcon-7B</text>
+    </g>
+    <g>
+      <rect x="561" y="48.6" width="26" height="201.4" style="fill:var(--c-tgt)"/><text x="574" y="42" class="t-c t-xs">38.4</text>
+      <rect x="593" y="223.75" width="26" height="26.25" style="fill:var(--c-loss)"/><text x="606" y="217" class="t-c t-xs">5.0</text>
+      <rect x="625" y="111.1" width="26" height="138.9" style="fill:var(--c-pred)"/><text x="638" y="104" class="t-c t-xs">26.5</text>
+      <rect x="657" y="60.9" width="26" height="189.1" style="fill:var(--c-enc)"/><text x="670" y="54" class="t-c t-xs">36.0</text>
+      <text x="622" y="268" class="t-c t-sm">Mistral-7B</text>
+    </g>
+    <g>
+      <rect x="80" y="283" width="12" height="12" style="fill:var(--c-tgt)"/><text x="98" y="289" class="t-sm">16 bit</text>
+      <rect x="380" y="283" width="12" height="12" style="fill:var(--c-enc)"/><text x="398" y="289" class="t-sm">KIVI-2（K 按通道，V 按 token，保留全精度窗口）</text>
+      <rect x="80" y="303" width="12" height="12" style="fill:var(--c-loss)"/><text x="98" y="309" class="t-sm">伪量化 2 bit（K 按 token，V 按 token）</text>
+      <rect x="380" y="303" width="12" height="12" style="fill:var(--c-pred)"/><text x="398" y="309" class="t-sm">伪量化 2 bit（K 按通道，V 按 token）</text>
+    </g>
+  </svg>
+  <div class="dia-note">本站根据原文表 3 重画的简化柱状图（数值四舍五入到一位小数）。对比橙色和蓝色两根柱子：量化方向完全相同，差别只在 KIVI 保留了最近一段 token 的全精度窗口（key 平均约 64 个、value 128 个）。紫色是 16 bit，红色是前人常用的“都按 token”方案。Falcon-7B 的基础分数本来就很低，这一组看不出什么。</div>
+</div>
+<p>以 Llama-2-13B 为例：伪量化“K 按通道、V 按 token”在 GSM8K 上只有 12.21，KIVI-2 是 20.77，16 bit 是 22.67。Mistral-7B 上三者分别是 26.46、36.01、38.36。作者据此认为，全精度滑动窗口是 KIVI 在数学推理这类难任务上保住准确率的关键。</p>
+
+<h4 id="n-6-3">6.3 常规长度的生成任务</h4>
+<p>下表摘自原文表 3，只列出 16 bit、FlexGen 式的 4 bit 按 token 伪量化（作为前人做法的参照）和 KIVI 的两个版本。所有 KIVI 结果都用 \(G=32\)、\(R=128\)。</p>
+<div class="table-wrap"><table>
+<tr><th>模型</th><th>设置</th><th class="num">CoQA</th><th class="num">TruthfulQA</th><th class="num">GSM8K</th></tr>
+<tr><td rowspan="4">Llama-2-7B</td><td>16 bit</td><td class="num">63.88</td><td class="num">30.76</td><td class="num">13.50</td></tr>
+<tr><td>4 bit 按 token（伪量化）</td><td class="num">64.82</td><td class="num">29.85</td><td class="num">12.28</td></tr>
+<tr><td>KIVI-4</td><td class="num">63.78</td><td class="num">30.80</td><td class="num">13.80</td></tr>
+<tr class="hl"><td>KIVI-2</td><td class="num">63.05</td><td class="num">33.95</td><td class="num">12.74</td></tr>
+<tr><td rowspan="4">Llama-2-13B</td><td>16 bit</td><td class="num">66.37</td><td class="num">29.53</td><td class="num">22.67</td></tr>
+<tr><td>4 bit 按 token（伪量化）</td><td class="num">66.73</td><td class="num">29.14</td><td class="num">20.92</td></tr>
+<tr><td>KIVI-4</td><td class="num">66.38</td><td class="num">29.49</td><td class="num">23.65</td></tr>
+<tr class="hl"><td>KIVI-2</td><td class="num">66.23</td><td class="num">29.84</td><td class="num">20.77</td></tr>
+<tr><td rowspan="4">Falcon-7B</td><td>16 bit</td><td class="num">59.83</td><td class="num">23.20</td><td class="num">4.55</td></tr>
+<tr><td>4 bit 按 token（伪量化）</td><td class="num">58.53</td><td class="num">22.94</td><td class="num">3.26</td></tr>
+<tr><td>KIVI-4</td><td class="num">59.67</td><td class="num">22.58</td><td class="num">4.47</td></tr>
+<tr class="hl"><td>KIVI-2</td><td class="num">57.48</td><td class="num">24.98</td><td class="num">3.41</td></tr>
+<tr><td rowspan="4">Mistral-7B</td><td>16 bit</td><td class="num">67.40</td><td class="num">30.45</td><td class="num">38.36</td></tr>
+<tr><td>4 bit 按 token（伪量化）</td><td class="num">67.80</td><td class="num">29.83</td><td class="num">36.85</td></tr>
+<tr><td>KIVI-4</td><td class="num">66.95</td><td class="num">30.49</td><td class="num">37.30</td></tr>
+<tr class="hl"><td>KIVI-2</td><td class="num">66.35</td><td class="num">32.17</td><td class="num">36.01</td></tr>
+</table></div>
+<p>论文的结论是：在 Llama 和 Mistral 上，KIVI-2 的准确率最多掉约 2 个百分点。最大的一处是 Mistral-7B 的 GSM8K，从 38.36 降到 36.01，掉了 2.35 分；Llama-2-13B 的 GSM8K 掉 1.90 分。值得注意的是，2 bit 的 KIVI-2 和 4 bit 按 token 的前人做法分数相当（比如 Llama-2-13B 的 GSM8K 是 20.77 对 20.92），而前者的 KV 只占后者的约一半显存。</p>
+<p>Falcon-7B 是例外：KIVI-2 的 CoQA 从 59.83 降到 57.48，需要用 KIVI-4 才能保持准确率。作者的解释是 Falcon 用多查询注意力，KV 缓存只有一个头，本身已经被高度压缩过了，再压到 2 bit 余量就不够。</p>
+<div class="note-warn"><b>读这张表时要注意：</b>
+<ul>
+  <li>KIVI-2 在 TruthfulQA 上反而高于 16 bit（Llama-2-7B 是 33.95 对 30.76），这不说明量化能提升真实性。TruthfulQA 生成版用的是 BLEU，量化让措辞稍有变化，分数就会上下波动，应当看成噪声。</li>
+  <li>GSM8K 的分数是基础模型（非对话版）做 GSM8K 的结果，Llama-2-7B 只有 13.50，题目做对的本来就少，1 分左右的差别在统计上并不可靠。论文没有报告多次运行的方差。</li>
+  <li>论文说的“掉 2%”指的是绝对分数掉 2 个点，不是相对下降 2%。按相对值算，Llama-2-13B 的 GSM8K 下降约 8%（推算）。</li>
+</ul></div>
+
+<h4 id="n-6-4">6.4 长上下文：LongBench</h4>
+<p>原文表 4 在 8 个 LongBench 任务上测了 6 个模型。下面只列平均分（附录表 8–10 的三个 GQA / 长上下文模型测的是 15 个任务，一并列出）：</p>
+<div class="table-wrap"><table>
+<tr><th>模型</th><th class="num">16 bit</th><th class="num">KIVI-4</th><th class="num">KIVI-2</th><th class="num">KIVI-2 − 16 bit</th></tr>
+<tr><td>Llama2-7B</td><td class="num">44.52</td><td class="num">44.59</td><td class="num">44.27</td><td class="num">−0.25</td></tr>
+<tr><td>Llama2-13B</td><td class="num">44.85</td><td class="num">44.48</td><td class="num">44.69</td><td class="num">−0.16</td></tr>
+<tr><td>Llama2-7B-Chat</td><td class="num">45.95</td><td class="num">45.83</td><td class="num">45.67</td><td class="num">−0.28</td></tr>
+<tr><td>Llama2-13B-Chat</td><td class="num">45.96</td><td class="num">46.44</td><td class="num">45.52</td><td class="num">−0.44</td></tr>
+<tr><td>Falcon-7B</td><td class="num">8.71</td><td class="num">8.78</td><td class="num">7.95</td><td class="num">−0.76</td></tr>
+<tr><td>Mistral-7B</td><td class="num">46.58</td><td class="num">46.56</td><td class="num">45.85</td><td class="num">−0.73</td></tr>
+<tr><td>Llama-3-8B-Instruct（附录表 8）</td><td class="num">45.21</td><td class="num">45.31</td><td class="num">44.37</td><td class="num">−0.84</td></tr>
+<tr><td>Mistral-7B-Instruct-v0.2（附录表 9）</td><td class="num">43.54</td><td class="num">43.53</td><td class="num">42.43</td><td class="num">−1.11</td></tr>
+<tr><td>LongChat-7B-v1.5-32K（附录表 10）</td><td class="num">38.72</td><td class="num">38.79</td><td class="num">38.30</td><td class="num">−0.42</td></tr>
+</table></div>
+<p>最后一列是本站算的差值。从平均分看，KIVI-4 基本无损，KIVI-2 的损失在 1 分以内或略超 1 分，作者据此认为 KIVI 在各种长上下文生成任务上对准确率的影响很小。</p>
+<p>但平均分会把个别任务上的明显下降摊平。翻开附录的单项分数，KIVI-2 在两个 GQA 模型上有几处掉得不少：Llama-3-8B-Instruct 的代码补全 LCC 从 57.00 降到 50.84，RepoBench-P 从 51.22 降到 46.65；Mistral-7B-Instruct-v0.2 的段落检索（PR）从 89.33 降到 80.83。这两个模型每层只有 8 个 KV 头，和 Falcon 一样“KV 已经被结构压缩过”，与 §6.3 对 Falcon 的解释方向一致；需要逐字复现上文的代码补全、需要精确定位某一段的检索，也正是对 key 的精度最敏感的任务。同样的模型用 KIVI-4，这几项都回到了基线水平（LCC 57.36、RepoBench-P 52.03、PR 89.42）。</p>
+<div class="note-warn"><b>读这张表时要注意：</b>Falcon-7B 的 16 bit 平均分只有 8.71，说明这个模型本身就处理不了 4096 长度的 LongBench，这一行不能用来说明量化好坏。主表的长度上限是 4096（Mistral 为 8192），所以“长上下文”在这里指的是几千 token，不是几万。</div>
+
+<h4 id="n-6-5">6.5 大海捞针</h4>
+<p>附录 B 交代了设置：沿用 Mohtashami 和 Jaggi 的通行码检索模板，通行码是 7 位数字，填充文字用 Paul Graham 的随笔；横轴按单词数而不是 token 数计，以消除不同分词器的差别。</p>
+<figure class="paper-fig"><div class="imgs"><img src="kivi/fig/fig4a-niah-llama3-8b.svg" alt="原文图 4(a)：Llama-3-8B-Instruct 基线的大海捞针结果" loading="lazy"><img src="kivi/fig/fig4d-niah-mistral-7b.svg" alt="原文图 4(d)：Mistral-7B-Instruct-v0.2 基线的大海捞针结果" loading="lazy"></div>
+<figcaption><b>原文图 4 (a)(d)。怎么看：</b>每张热力图的横轴是填充文字的总单词数（0.5K 到 20K），纵轴是通行码藏的位置（0 表示开头，1 表示末尾），每个格子绿色表示找到了，红色表示没找到；右上角标注最长处约等于多少 token。左图是 Llama-3-8B-Instruct 的 16 bit 基线，20K 单词约 27K token，所有格子都是绿色；右图是 Mistral-7B-Instruct-v0.2 的 16 bit 基线，20K 单词约 30K token，只有“4K 单词、深度 0.22”一格是红色。原文图 4 还有 (b)(c)(e)(f) 四张子图，分别是两个模型加 KIVI-2、KIVI-4 的结果。本站核对了 arXiv 上的图片文件：(b)(c) 与 (a) 是同一个图像文件，(e)(f) 与 (d) 也是同一个文件，也就是说论文展示的三种设置结果逐格相同，所以这里只放两张。</figcaption></figure>
+<p>作者据此得出结论：即使 KV 缓存只有 2 bit，KIVI 也能保持模型的长上下文检索能力。</p>
+<div class="note-warn"><b>这张图有两处论文没有解释：</b>
+<ul>
+  <li>Llama-3-8B-Instruct 的原生上下文长度是 8K（论文附录表 8 自己也这么写），但图上测到了约 27K token，而且基线全对。论文没有说是否用了位置插值之类的长度扩展方法（<span class="unverified">本站无法确认这一设置</span>）。</li>
+  <li>三种设置的图像完全相同，可能是结果确实逐格一致，也可能是放错了图，论文正文只有一句结论，读者无法区分。</li>
+</ul></div>
+
+<h4 id="n-6-6">6.6 消融：组大小和残差长度</h4>
+<p>作者在“最难的生成任务之一” GSM8K 上，用 Llama-2-13B 的 KIVI-2 做了两组消融（原文表 5）：</p>
+<div class="table-wrap"><table>
+<tr><th>固定 R = 128，改组大小 G</th><th class="num">32</th><th class="num">64</th><th class="num">128</th></tr>
+<tr><td>GSM8K</td><td class="num">20.77</td><td class="num">21.00</td><td class="num">17.29</td></tr>
+</table></div>
+<div class="table-wrap"><table>
+<tr><th>固定 G = 32，改残差长度 R</th><th class="num">32</th><th class="num">64</th><th class="num">96</th><th class="num">128</th></tr>
+<tr><td>GSM8K</td><td class="num">20.62</td><td class="num">19.86</td><td class="num">20.55</td><td class="num">20.77</td></tr>
+</table></div>
+<p><b>组大小。</b>32 和 64 差不多，到 128 明显下降（17.29）。原因是缩放因子和零点按组计算，组越大，一组里出现极端值的机会越多，步长越粗。作者提醒，在长输入下组大小对压缩效果影响很大：组越小，每个数分摊的参数开销越多（组大小 32 时每个数多 1 bit，64 时多 0.5 bit，推算）。</p>
+<p><b>残差长度。</b>32、64、96、128 之间没有一致的规律：128 最好，32 和 96 接近，64 反而最差。作者强调，这几个取值之间的差别不显著，但“有一个足够长的残差窗口”本身很重要，因为它带来的提升很大。对照 §6.2：完全没有窗口的伪量化只有 12.21，任何一个 \(R\) 都在 19.86 以上。</p>
+<p>附录 C 把 \(R=32\) 的结果补全了（原文表 6、表 7）。和 \(R=128\) 相比，大多数分数只差零点几：Llama-2-7B 的 GSM8K 是 13.57（\(R=128\) 时 12.74，16 bit 13.50），LongBench 平均 44.08（\(R=128\) 时 44.27）。最大的差别在 Mistral-7B 的 GSM8K：34.34，比 \(R=128\) 的 36.01 低 1.67 分，比 16 bit 低 4.02 分。这一点在下面讨论吞吐时很重要，因为最高的吞吐数字正是在 \(R=32\) 下测的。</p>
+
+<h4 id="n-6-7">6.7 效率：显存和吞吐</h4>
+<p><b>怎么测的。</b>作者参照 vLLM 论文，用 ShareGPT 的统计构造负载：平均输入长度 161、平均输出长度 338。模型是 Llama-2-7B，硬件是一张 NVIDIA A100（80GB）。做法是不断加大批大小直到显存溢出，记录峰值显存和吞吐量，比较 16 bit 基线和 KIVI（\(R=32\) 与 \(R=128\) 两种）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="kivi/fig/fig5-memory-throughput.svg" alt="原文图 5：KIVI 与 16 bit 基线的显存占用和吞吐量" loading="lazy" style="max-width:420px"></div>
+<figcaption><b>原文图 5。怎么看：</b>两张图的横轴都是批大小（同时处理的请求数）。上图纵轴是峰值显存（GB，包含模型权重），下图纵轴是吞吐量（每秒生成的 token 数）。橙色是 16 bit 基线，绿色是 KIVI（\(R=128\)），蓝色是 KIVI（\(R=32\)）。基线的显存涨得最快，批大小 96 时已用到约 59 GB，再往上就测不了；KIVI 两条线涨得慢得多，分别测到 256 和 384。下图里基线的吞吐量停在 700 多，甚至随批变大略有下降；KIVI 的吞吐随批变大一路上升，蓝线最高到 2600 多。还要注意最左边批大小 32 那一点：两条 KIVI 线都比基线低。</figcaption></figure>
+<p>论文正文只给出了三个结论数字。本站从原文图 5 的矢量图坐标读出了每个数据点（推算，读数误差约 ±1%）：</p>
+<div class="table-wrap"><table>
+<tr><th>批大小</th><th class="num">基线显存 GB</th><th class="num">基线 token/s</th><th class="num">KIVI R=128 显存</th><th class="num">KIVI R=128 token/s</th><th class="num">KIVI R=32 显存</th><th class="num">KIVI R=32 token/s</th></tr>
+<tr><td>32</td><td class="num">28.2</td><td class="num">760</td><td class="num">18.1</td><td class="num">614</td><td class="num">16.1</td><td class="num">632</td></tr>
+<tr><td>64</td><td class="num">43.8</td><td class="num">748</td><td class="num">23.5</td><td class="num">1190</td><td class="num">19.6</td><td class="num">1267</td></tr>
+<tr><td>96</td><td class="num">59.3</td><td class="num">640</td><td class="num">29.0</td><td class="num">1415</td><td class="num">23.0</td><td class="num">1713</td></tr>
+<tr><td>128</td><td class="num">—</td><td class="num">—</td><td class="num">34.4</td><td class="num">1555</td><td class="num">26.5</td><td class="num">2020</td></tr>
+<tr><td>192</td><td class="num">—</td><td class="num">—</td><td class="num">45.3</td><td class="num">1691</td><td class="num">33.4</td><td class="num">2301</td></tr>
+<tr><td>256</td><td class="num">—</td><td class="num">—</td><td class="num">56.2</td><td class="num">1783</td><td class="num">40.3</td><td class="num">2473</td></tr>
+<tr><td>384</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">54.1</td><td class="num">2633</td></tr>
+</table></div>
+<p>有了这张表，就能看出摘要里的几个数分别是怎么来的：</p>
+<ul>
+  <li><b>“批大 4 倍”</b>：基线最大测到 96（约 59 GB），KIVI（\(R=32\)）在差不多的显存（约 54 GB）下测到 384，384 ÷ 96 = 4。</li>
+  <li><b>“吞吐 2.35–3.47 倍”</b>：拿 KIVI 各自的最高吞吐，除以基线的最高吞吐（批大小 32 时的约 760 token/s）。\(R=128\)：1783 ÷ 760 ≈ 2.35；\(R=32\)：2633 ÷ 760 ≈ 3.46（推算，与论文的 2.35、3.47 吻合）。所以这个区间的两端对应的是两种残差长度，不是不同的模型或负载。</li>
+  <li><b>“峰值显存降低 2.6 倍（含权重）”</b>：论文没有说是哪一点。在同一批大小 96 下，基线 59.3 GB，KIVI（\(R=32\)）23.0 GB，比值约 2.58，与 2.6 吻合（推算）；同一批大小下 \(R=128\) 只有约 2.0 倍。</li>
+</ul>
+<p>作者还说，上下文和输出越长，吞吐的提升会越大；把 KV 缓存的量化操作和前面的计算融合起来，还能进一步加速，留作未来工作。这两句都没有实验支持。</p>
+
+<h4 id="n-6-8">6.8 结果的份量</h4>
+<p>把前面的数字放在一起，下面逐条说明它们各自在什么条件下成立、匹配了什么、没匹配什么。</p>
+<ul>
+  <li><b>基线是什么。</b>16 bit 基线是 Hugging Face Transformers 里的普通推理（官方测速脚本 <code>mem_spd_test.py</code> 用的是 <code>model.generate</code>，整批同时开始、同时结束），不是 vLLM 这类带 PagedAttention 和连续批处理的服务系统。这个基线在大批量下效率不高：它的吞吐从批大小 32 到 96 不升反降（760 → 640，读图推算）。正常情况下，解码受带宽限制时批越大吞吐越高，这条线说明基线每一步除了读写 KV 还有可观的额外开销。所以 2.35–3.47 倍应理解为“在同一套 HF 代码里，把 KV 换成 2 bit 后多装请求带来的收益”，不能直接换算成相对 vLLM 等服务引擎的加速。</li>
+  <li><b>收益来自哪里。</b>在同一个批大小 96 下，KIVI（\(R=32\)）的吞吐已经是基线的约 2.7 倍（1713 对 640，推算）；而如果只按每一步读的字节估算（参数 12.6 GB + KV，从约 36 GB 降到约 18 GB），理想加速只有约 2 倍（推算）。超出的部分说明，基线在大批量下的额外开销也随 KV 体积增长，量化 KV 顺带把它压小了。换句话说，吞吐倍数里既有“批更大”的贡献，也有“每步读写更少”的贡献，还有基线实现本身的低效。</li>
+  <li><b>小批量时 KIVI 更慢。</b>批大小 32 时，KIVI 的吞吐比基线低约 17–19%（614、632 对 760，推算）。这时 KV 还不算大，量化、打包、拆成多个内核计算的开销占了上风。Hugging Face 的文档对它自己的量化缓存也有同样的提醒：上下文短、显存够用时，量化缓存会损害延迟。论文没有报告首 token 延迟、每 token 延迟这类延迟指标。</li>
+  <li><b>负载和规模。</b>效率实验只有一个模型（Llama-2-7B，多头注意力）、一张 A100-80GB、一种长度（平均约 500 token）。公开的测速脚本里，每个请求的输入都是同一段约 160 个 token 的重复文本（"t,t,t,…"），输出上限设为 338 个 token，并没有使用 ShareGPT 的真实长度分布（<span class="unverified">本站无法确认论文图 5 是否就是用这份脚本跑的，但脚本的默认参数与论文设置一致</span>）。对于 GQA 模型，KV 本来就只有 MHA 的 1/4，同样的 2 bit 量化能腾出的显存在绝对值上少得多。</li>
+  <li><b>速度和精度是不是同一设置。</b>最高的 3.47 倍用的是 \(R=32\)、\(G=32\)、Llama-2-7B。附录 C 正好有这个模型在 \(R=32\) 下的准确率：CoQA 62.85（16 bit 63.88）、TruthfulQA 33.01（30.76）、GSM8K 13.57（13.50）、LongBench 平均 44.08（44.52），损失很小，所以对 Llama-2-7B 而言，这组速度和精度数字是匹配的。但换成 Mistral-7B，\(R=32\) 的 GSM8K 比 16 bit 低 4.02 分，论文没有报告 Mistral 的吞吐。2.35 倍那一端（\(R=128\)）对应的是正文表 3、表 4 的准确率设置。</li>
+  <li><b>收益是真实的，不是理论值。</b>显存是用 PyTorch 统计的实际峰值（包括权重和临时缓冲区），吞吐是真实内核跑出来的墙钟时间，不是按字节数推出来的理论值。准确率实验中，KIVI 的结果也是用实际的量化实现跑的；只有表 1 和表 3 里那几行“2 bit（K-?，V-?）”是伪量化。</li>
+  <li><b>和谁比了，没和谁比。</b>准确率方面，唯一的“前人方法”参照是 FlexGen 式的 4 bit 按 token 伪量化（表 3 中的“4bit（K-T，V-T）”行）。论文没有和同期的 KVQuant、ATOM 的 KV 量化、SmoothQuant 的 8 bit KV 对比，也没有和 H2O 这类丢 token 的方法在同等显存下对比。效率方面，只比了 16 bit 的 HF 基线，没有比任何其他 KV 量化方法的速度。</li>
+  <li><b>“长上下文”有多长。</b>准确率测到了几千 token（LongBench）和约 3 万 token（大海捞针）；效率只测了约 500 token 的序列。“上下文越长提升越大”是推论，不是测量结果；而 §5.2 的推算说明，序列短时全精度窗口占比不小，序列越长 KIVI 的压缩比确实会越接近 5.3 倍的上限。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S4.T3" target="_blank" rel="noopener">原文表 3 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S4.T4" target="_blank" rel="noopener">原文表 4 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S4.T5" target="_blank" rel="noopener">原文表 5 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#A3" target="_blank" rel="noopener">附录 C ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#A4" target="_blank" rel="noopener">附录 D ↗</a> · <a href="https://github.com/jy-yuan/KIVI/blob/main/mem_spd_test.py" target="_blank" rel="noopener">官方测速脚本 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KIVI 和当时其他的量化方法、系统优化、丢 token 方法是什么关系？哪些是互补的，哪些在做同一件事？作者最后给自己的工作下了什么结论，又留了什么没做完？</div>
+<p><b>权重量化。</b>LLM 量化的主流是只量化权重：AWQ 根据激活的大小决定保护哪些权重，把权重压到 INT4 甚至 INT3；GPTQ 用近似的二阶信息逐列量化权重；SqueezeLLM 按敏感度做非均匀量化，并把少数异常值拆成稀疏矩阵单独存。这些方法压的是权重，KIVI 压的是 KV 缓存，两者可以叠加。</p>
+<p><b>激活和 KV 的量化。</b>和 KIVI 最接近的是 SmoothQuant：它用一个等价变换把激活里的量化难度挪一部分给权重，让激活更容易量化，能把 KV 缓存压到 8 bit 而几乎不掉点；但按 ATOM 的报告，压到 4 bit 及以下时准确率会明显下降。FlexGen 对 key 和 value 都用 4 bit 分组量化。关于“key 比 value 有更多异常值”，ATOM 也有过类似的观察；KIVI 的贡献是对此做了更全面的分析，并据此设计了按通道量化。作者特别注明，同期的 KVQuant 独立地得出了相似的观察和做法。</p>
+<p><b>系统层面的工作。</b>vLLM 用 PagedAttention 管理显存，S3 预测每个请求要用多少显存，它们都能降低 KV 缓存的显存需求、提高吞吐。作者认为这条路线与 KIVI 正交，系统优化可以叠加在 KIVI 之上。</p>
+<p><b>丢 token 的方法。</b>H2O 只保留对注意力分数贡献大的少数 token；Scissorhands 利用“重要的 token 一直重要”这一假设压缩 KV；StreamingLLM 基于“注意力汇聚点”（attention sink）现象，只保留最开头的几个 token 和最近的窗口。KIVI 则保留所有 token，只是把它们存成低精度，作者认为两者也可以组合。</p>
+<p><b>结论与未来工作。</b>作者系统分析了常用 LLM 的 KV 缓存数值分布，得出 key 应按通道量化、value 应按 token 量化的结论，并据此提出了不需要调参、即插即用的 2 bit KV 缓存量化算法 KIVI。在真实的 LLM 负载上，它支持最多 4 倍的批大小和 3.47 倍的吞吐量。下一步，作者打算继续优化实现，减少预填充和解码阶段量化操作本身的开销。</p>
+<div class="note-warn"><b>“正交、可以叠加”是主张，不是实验结论。</b>论文没有做任何组合实验，而组合起来并不总是那么顺：按通道量化要求同一组的 \(G\) 个 token 共享缩放参数，丢 token 的方法如果从一组里删掉几个，这一组就得重新量化；PagedAttention 按固定大小的块管理 KV，每个请求还要额外维护一段全精度残差，块的大小也最好和组大小对齐。这几点是本站的分析，后面“后来怎么样了”里会看到，主流推理引擎最终选择了按 token 的缩放方式。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2402.02750v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2402.02750v2#S6" target="_blank" rel="noopener">§6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 后来怎么样了</h3>
+<p>KIVI 发表后成了 KV 缓存量化方向最常被拿来对比的基线之一（引用数见页首）。“key 有固定的异常通道、要按通道处理”这个观察被广泛接受，但工业界的推理引擎最后走了一条更保守的路：先普及 8 bit 的 FP8 KV 缓存，再逐步加入 4 bit 方案，而且大多用按 token（每个头）的缩放，再配合旋转来对付异常通道。下面分四部分讲。</p>
+
+<h4 id="n-8-1">8.1 同期工作：KVQuant</h4>
+<p>KVQuant（Hooper 等，arXiv 2401.18079，首版 2024-01-31，NeurIPS 2024）几乎和 KIVI 同时出现（KIVI 的第一版于 2023-12-29 发在 ResearchGate，arXiv 首版 2024-02-05），也独立发现了 key 应该按通道量化。它在此基础上多走了几步：</p>
+<ul>
+  <li><b>在加 RoPE 之前量化 key。</b>旋转位置编码会按位置旋转 key 的各对通道，把原本稳定的通道结构搅乱；先量化、用的时候再加 RoPE，量化误差更小。</li>
+  <li><b>非均匀的数据类型。</b>不用等间距的档位，而是每层根据校准数据和敏感度挑选一组最合适的档位位置。这需要事先用少量数据离线校准，因此不像 KIVI 那样完全不用调参。</li>
+  <li><b>按向量的稠密加稀疏分解。</b>每个向量里少数离群值单独用稀疏格式存成高精度，其余数的范围就小了很多。</li>
+</ul>
+<p>它报告 3 bit 时在 Wikitext-2 和 C4 上的困惑度损失小于 0.1，能在一张 A100-80GB 上为 LLaMA-7B 服务最长 100 万 token 的上下文、在 8 卡系统上达到 1000 万；自写的 CUDA 内核在矩阵向量乘上相对 16 bit 最高约 1.7 倍。两篇论文的评测口径不同：KVQuant 以困惑度为主，KIVI 以生成任务为主，彼此也没有直接对比。</p>
+
+<h4 id="n-8-2">8.2 Hugging Face Transformers 的量化缓存</h4>
+<p>2024 年年中，Hugging Face Transformers 加入了量化 KV 缓存（<code>cache_implementation="quantized"</code>）。v4.44 的文档写明，这个功能“在很大程度上受 KIVI 启发”；KIVI 仓库在 2024-06-07 的更新里也记录了这件事。不过它并没有照搬 KIVI：据 Hugging Face 2024-05-16 的博客，它对 key 和 value 都按 token 量化，以避免每一步重新量化；它保留了 KIVI 的全精度残差窗口，博客建议残差长度取 128。量化后端可选 quanto（int2、int4）或 HQQ（2026-10 的文档列出 int1 到 int8）。博客给出的数字是：int4 缓存约省 2.5 倍显存；在 A100-80GB 上配合 FlashAttention，量化缓存能生成到约 128K token，16 bit 缓存只能到约 40K；int2 的质量下降明显；批大小较大时生成速度会变慢。</p>
+<p>这和 KIVI 自己的取舍形成了对照：KIVI 为了 2 bit 的准确率选了按通道量化 key，代价是实现复杂；Hugging Face 为了实现简单选了按 token，代价是 int2 的质量下降明显，文档和博客的示例用的都是 int4。</p>
+
+<h4 id="n-8-3">8.3 推理引擎：FP8 先普及，4 bit 随后跟上</h4>
+<ul>
+  <li><b>vLLM。</b>很早就支持 FP8 KV 缓存（<code>--kv-cache-dtype fp8</code>，即 E4M3，另有 E5M2）。缩放因子默认是整个张量一个、取 1.0（不校准）；也可以用 LLM Compressor 在数据上校准出按注意力头的缩放（仅 FlashAttention 后端）。vLLM 2026-04-22 的博客系统评估了 FP8 KV：存储减半；在 H100 上跑 Llama-3.1-8B、并发 8、约 20K 输入 / 2K 输出时，输出吞吐从 450.3 提到 517.5 token/s（+14.9%）；推理类任务最多掉 1–2 分；在 Hopper 上 128K 长度的大海捞针，修复累加精度问题之前 FP8 只有 13%（BF16 是 91%），修复后回到 89%。截至 2026-10-20，vLLM 最新文档的 <code>--kv-cache-dtype</code> 还列出了按 token、按头的 INT8 / INT4 模式（先做一次随机 Hadamard 旋转，再对每个 token 每个头做带零点的量化）、NVFP4，以及若干基于 TurboQuant 的选项。</li>
+  <li><b>SGLang。</b>截至 2026-10 的文档支持 <code>fp8_e4m3</code>、<code>fp8_e5m2</code>，以及两种 FP4（E2M1）配方 <code>nvfp4</code> 和 <code>fp4_mx_block16</code>；FP8 建议提供校准好的缩放因子文件，否则默认 1.0，可能影响准确率。</li>
+  <li><b>TensorRT-LLM。</b>支持 FP8 和 NVFP4 的 KV 缓存；NVFP4 KV 需要先用 NVIDIA ModelOpt 离线量化。</li>
+  <li><b>LMDeploy。</b>从 v0.4.0 起支持在线的 INT4 / INT8 KV 量化，按头、按 token、带零点，不需要校准数据。文档给出 llama2-chat-7b 的每秒请求数从 14.98（16 bit）提高到 19.01（INT8）和 20.81（INT4），即 1.27 倍和 1.39 倍（文档没有写 GPU 型号）；后来又加入了 TurboQuant 选项（key 4 bit、value 2 bit）。</li>
+</ul>
+<p>把这些放在一起，可以看到一个清楚的趋势：主流引擎几乎都采用<b>按 token（每个头）</b>的缩放，在这几个引擎的文档里没有看到 KIVI 式“key 按通道 + 全精度残差窗口”的 2 bit 方案。本站的理解是：服务引擎按固定大小的块管理 KV（见 <a href="vllm.html#n-4">vLLM 精读 §4</a>），按 token 的缩放因子可以和这个 token 的数据存在同一个块里，写入一次就不再变；按通道分组则要跨多个 token 共享参数，每个请求都得额外维护一段全精度缓冲、攒满再量化，和块管理、前缀共享都不好配合。对付 key 的异常通道，引擎更倾向于用<b>旋转</b>：先乘一个正交的 Hadamard 矩阵，把集中在少数通道上的大数值摊到所有通道上，再按 token 量化就不怕了。这正是 <a href="quarot.html">QuaRot 精读</a> 讲的思路。另一方面，FP8 是 Hopper 之后 GPU 张量核原生支持的格式，据 vLLM 的博客，开启 FP8 KV 后注意力里的两次矩阵乘也直接用 FP8 计算，不需要像 KIVI 那样自己写反量化内核，这大概也是 FP8 最先普及的原因之一（FP8 格式见<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">旧版 FP8 拆解页</a>）。</p>
+
+<h4 id="n-8-4">8.4 后续研究</h4>
+<ul>
+  <li><b>QServe</b>（Lin 等，arXiv 2405.04532，2024-05）：W4A8KV4，即权重 4 bit、激活 8 bit、KV 缓存 4 bit。它用一个叫 SmoothAttention 的技巧把 key 异常通道的大数值按通道缩小、把对应的倍数挪到 query 上，于是 key 更容易量化到 4 bit。与 TensorRT-LLM 比，最大服务吞吐在 Llama-3-8B 上是 1.2 倍（A100）/ 1.4 倍（L40S），在 Qwen1.5-72B 上是 2.4 倍 / 3.5 倍。</li>
+  <li><b>GEAR</b>（Kang 等，arXiv 2403.05527，2024-03）：先把大部分 KV 量化到超低精度，再用一个低秩矩阵近似量化误差、一个稀疏矩阵纠正离群值，报告近乎无损的 4 bit KV 压缩，吞吐最多 2.38 倍、峰值显存最多降 2.29 倍。</li>
+  <li><b>KIVI 作者的评测基准</b>（Yuan 等，arXiv 2407.01527，2024-07）：把 KV 量化、丢 token、提示压缩、线性时间序列模型和混合架构放在同一套长上下文任务（7 类、10 多种方法）上比较，回答“压缩 KV 到底要付出什么”。据 Zirui Liu 的主页，这篇论文被 EMNLP 2024 接收。</li>
+  <li><b>异常通道从哪里来</b>（Jin 等，arXiv 2502.01563，ICML 2025，KIVI 一作 Zirui Liu 为合作者）：发现集中的大数值稳定出现在 query 和 key 的特定区域，而 value 里没有，并把它归因于 RoPE；量化时忽略这些大数值，会让依赖上下文理解的任务明显变差。这给 KIVI 的经验观察补上了一个机理解释。</li>
+  <li><b>TurboQuant</b>（Zandieh 等，arXiv 2504.19874，2025-04）：先做随机旋转，再对每个坐标用最优的标量量化，最后对残差做 1 bit 的 QJL 变换，以得到内积的无偏估计。它报告 KV 缓存在每个通道 3.5 bit 时质量完全不变，2.5 bit 时只有轻微下降。如上所述，vLLM 和 LMDeploy 都已加入基于它的选项。</li>
+</ul>
+<p>最后，KV 缓存还可以从量化以外的方向缩小，而且能和量化叠加：在结构上减少 KV 头（GQA），或者把 KV 压进一个低维潜在向量（DeepSeek 的 MLA，见 <a href="deepseek-v3.html">DeepSeek-V3 精读</a>）；在 token 维度上只保留重要的 token（见 <a href="snapkv.html">SnapKV 精读</a>）；或者把 KV 放到 CPU 内存和 SSD 上分层存储（见<a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">旧版 KV cache 分层存储页</a>）。vLLM 文档里已经出现了 <code>fp8_ds_mla</code>、<code>nvfp4_ds_mla</code> 这类“MLA + 低精度”的组合选项。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Zirui Liu</b>（共同一作）<div class="aff">Rice University（论文署名）；现为明尼苏达大学（UMN）计算机系助理教授</div>据其主页，在 Rice 期间与 Xia Hu、Vladimir Braverman 合作；研究长上下文、长推理等大模型问题与推理基础设施，也是 Self-Extend 的作者之一。</div>
+  <div class="author-card"><b>Jiayi Yuan</b>（共同一作）<div class="aff">Rice University（论文署名）</div>KIVI 代码仓库 jy-yuan/KIVI 的维护者；后续 KV 缓存压缩评测基准（arXiv 2407.01527）的第一作者。</div>
+  <div class="author-card"><b>Hongye Jin</b><div class="aff">Texas A&amp;M University（论文署名）</div>Self-Extend（“LLM Maybe LongLM”，ICML 2024 Spotlight）的第一作者，研究不微调扩展上下文窗口。</div>
+  <div class="author-card"><b>Shaochen (Henry) Zhong</b><div class="aff">Rice University（论文署名）</div>KV 缓存压缩评测基准的合作者。</div>
+  <div class="author-card"><b>Zhaozhuo Xu</b><div class="aff">Stevens Institute of Technology 计算机系助理教授</div>2023 年于 Rice University 获博士学位，研究机器学习与随机化算法（Stevens 教师主页）。</div>
+  <div class="author-card senior"><b>Vladimir Braverman</b><div class="aff">Rice University（论文署名）</div>长期研究流式算法与 sketching 等亚线性算法，此前任教于 Johns Hopkins University；博士毕业于 UCLA。</div>
+  <div class="author-card senior"><b>Beidi Chen</b><div class="aff">Carnegie Mellon University 电子与计算机工程系助理教授（2023 年秋起），InfiniAI Lab 负责人</div>研究高效机器学习；KIVI 引用的 FlexGen、H2O、StreamingLLM 等工作的作者之一。</div>
+  <div class="author-card senior"><b>Xia (Ben) Hu</b><div class="aff">Rice University 计算机系教授</div>此前任教于 Texas A&amp;M University；其团队开发了 AutoKeras，主页列出的近期工作包括 KIVI 和 LongLM（Self-Extend）。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：ICML 2024，收录于 PMLR 第 235 卷，第 32332–32344 页。</li>
+  <li><b>开源</b>：<a href="https://github.com/jy-yuan/KIVI" target="_blank" rel="noopener">jy-yuan/KIVI</a> 仓库 436 个 star、58 个 fork（截至 2026-10-20），MIT 许可；仓库创建于 2024-02-02，论文 arXiv 首版前三天。</li>
+  <li><b>采用</b>：Hugging Face Transformers 的量化 KV 缓存在文档中注明“在很大程度上受 KIVI 启发”（v4.44 文档），但实现上对 key 也按 token 量化（Hugging Face 博客，2024-05-16）。截至 2026-10，本站查阅的 vLLM、SGLang、TensorRT-LLM、LMDeploy 文档里没有看到 KIVI 式的按通道 key 量化选项，它们采用 FP8 / FP4 或按 token 的 INT4 / INT8 方案（见 §8.3）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：KV 缓存从哪来、为什么限制批大小，以及分页式的 KV 管理。</li>
+  <li><a href="quarot.html">QuaRot 精读</a>：用旋转消除异常通道，把权重、激活和 KV 缓存都压到 4 bit。</li>
+  <li><a href="snapkv.html">SnapKV 精读</a>：另一条缩小 KV 的路，只保留重要的 token。</li>
+  <li><a href="flashattention.html">FlashAttention 精读</a>：HBM 与 SRAM、受带宽限制的注意力计算。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MLA 从结构上压缩 KV 缓存。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html#kv-size">旧版：LLM 推理的计算特征（KV 缓存大小）</a></li>
+  <li><a href="../legacy/tracks/ai-infra/08-fp8-formats.html">旧版：FP8 格式拆解</a></li>
+  <li><a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">旧版：KV cache 分层存储</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noopener">arXiv:2402.02750</a>（v2）。原文图 1、图 4 (a)(d)、图 5 取自 arXiv HTML 版本，作者 Zirui Liu、Jiayi Yuan 等，按 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 使用，未做修改；原文图 2 由本站把 8 张 SVG 子图转换并拼合为一张 JPEG，原文图 3 由 SVG 转换为 PNG，图像内容未改动。表格数字摘自原文表 1–10；“推算”标注的数字和从原文图 5 读出的数据点为本站计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

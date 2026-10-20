@@ -742,6 +742,46 @@ window.ATLAS_METRICS = {
    "citations": 1576,
    "influential": 128,
    "s2": "1386b8a11929cf02da291c56aca353e33bbc22ed"
+  },
+  "2401.10774": {
+   "citations": 1015,
+   "influential": 172,
+   "s2": "57e7af0b69325fafb371ef5d502e39ef9c90ef7e"
+  },
+  "2402.02750": {
+   "citations": 779,
+   "influential": 121,
+   "s2": "a3e000e0d7f64c1d094c2a8bf6f43992cbabe91b"
+  },
+  "2402.15627": {
+   "citations": 424,
+   "influential": 39,
+   "s2": "6dc5c6190dfbe55c8b45b7b23800614c21e5b51c"
+  },
+  "2404.00456": {
+   "citations": 761,
+   "influential": 175,
+   "s2": "dd85e6cab147d237a0b1ab6f674570d3efb4d4a0"
+  },
+  "2404.14469": {
+   "citations": 1075,
+   "influential": 219,
+   "s2": "1784c987e681d60c634765fe64c8d9c26f73d5ff"
+  },
+  "2407.00079": {
+   "citations": 304,
+   "influential": 26,
+   "s2": "f3d401f01aa5cb2eb3974196efda8895d06610c7"
+  },
+  "2407.08608": {
+   "citations": 755,
+   "influential": 81,
+   "s2": "5d1ca53a0b41f4f5c960cd9997556d7180d6b88d"
+  },
+  "2502.11089": {
+   "citations": 563,
+   "influential": 48,
+   "s2": "23c2e21b6a5789724715f2986fdc586a517ffe57"
   }
  }
 };

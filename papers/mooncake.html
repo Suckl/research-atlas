@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mooncake 精读</title>
+<meta name="description" content="Mooncake（Kimi 的推理服务平台，arXiv 2407.00079，FAST 2025 最佳论文）的逐节精读：PD 分离、分布式 KV 缓存池、以 KV 缓存为中心的调度、分块流水线 prefill、过载时的提前拒绝，以及各个数字的分量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="mooncake">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · FAST 2025（最佳论文）</div>
+  <h1>Mooncake：以 KV 缓存为中心的分离式大模型推理服务架构</h1>
+  <p class="en-title">Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving</p>
+  <div class="paper-authors">Ruoyu Qin<sup>♠♡1</sup>, Zheming Li<sup>♠1</sup>, Weiran He<sup>♠</sup>, Mingxing Zhang<sup>♡2</sup>, Yongwei Wu<sup>♡</sup>, Weimin Zheng<sup>♡</sup>, Xinran Xu<sup>♠2</sup></div>
+  <div class="paper-affil"><sup>♠</sup>Moonshot AI（月之暗面）　<sup>♡</sup>Tsinghua University（清华大学）　<sup>1</sup>共同一作（Ruoyu Qin 的部分工作在 Moonshot AI 实习期间完成）　<sup>2</sup>通讯作者　（以上为 arXiv 版署名；会议版与期刊版作者更多，见“作者”一节）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2407.00079" target="_blank" rel="noopener">arXiv 2407.00079 ↗</a>
+    <a class="pill" href="https://www.usenix.org/conference/fast25/presentation/qin" target="_blank" rel="noopener">FAST 2025（会议版，标题不同）↗</a>
+    <a class="pill" href="https://doi.org/10.1145/3773772" target="_blank" rel="noopener">ACM TOS 期刊版 ↗</a>
+    <a class="pill" href="https://github.com/kvcache-ai/Mooncake" target="_blank" rel="noopener">Code: kvcache-ai/Mooncake ↗</a>
+    <a class="pill" href="https://github.com/kvcache-ai/Mooncake/tree/main/FAST25-release" target="_blank" rel="noopener">公开 trace ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">结构拆解：PD 分离架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>6,840</b><span>GitHub star（kvcache-ai/Mooncake，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。arXiv 版以非独占许可发布，不允许转载原图，所以本页的图都是本站自己画的示意图或按论文数据重画的简化图，并附原图链接。标“推算”的数字是本站根据论文数据或公开配置算出来的；标“从图上读出”的数字是本站按原图的矢量坐标换算出来的，二者都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>Kimi 是月之暗面（Moonshot AI）的聊天助手，以能读很长的材料出名。用户经常一次贴进几万字的文档再提问，同一份文档还会在后续几轮对话里被反复带上。对这样的服务来说，GPU 的大部分时间不是花在“一个字一个字往外写”上，而是花在“把很长的输入读一遍”上，也就是 <b>prefill</b>。论文公开的一小时请求样本里，平均每个请求输入 8,590 个 token，输出只有 182 个 token。</p>
+<p>模型读输入时，会为每个 token 算出一份 <b>KV 缓存</b>。如果两个请求的开头完全相同（同一份文档、同一段系统提示、同一段对话历史），这部分 KV 缓存也完全相同，算过一次就可以存起来，下次直接取来用。难处在于：长输入的 KV 缓存非常大，按 LLaMA2-70B 的结构，一个 token 约 320 KB，8k 个 token 就是约 2.7 GB（推算），GPU 显存存不了多少；而一个请求被分到哪台机器，又决定了它能不能用上存在别处的缓存。Mooncake 的回答是围绕 KV 缓存来设计整个服务：</p>
+<ul>
+  <li>把 prefill 和 decode 拆到两组不同的机器上（<b>PD 分离</b>），让两边各自按自己的延迟要求优化；</li>
+  <li>把 GPU 服务器上本来闲着的 CPU 内存、SSD 和高速网卡汇成一个跨机器的 <b>KV 缓存池</b>，用存储空间换计算；</li>
+  <li>用一个全局调度器 <b>Conductor</b>，同时看“哪台机器存着这个请求能复用的缓存”和“哪台机器现在忙不忙”，决定请求去哪里；</li>
+  <li>Kimi 经常处于<b>过载</b>状态，所以调度器还要决定拒绝哪些请求，并且要在浪费算力之前就拒绝。</li>
+</ul>
+<p>论文（arXiv 版）在 8 卡 A800 节点组成的测试集群上，用一个与 LLaMA2-70B 结构相同的“替身模型”和 vLLM 对比：在两个公开的长文本数据集上，满足延迟要求时的吞吐分别提高 20% 和 40%；在人为构造的 16k–128k 超长输入上提高 50%–525%；按真实时间戳回放线上请求时，满足延迟要求的请求多约 75%。同一工作的会议版（FAST 2025，获最佳论文奖）换了标题，补充了 KV 缓存池的实现和新的实验，并给出生产统计：与此前基于 vLLM 的系统相比，Kimi 在 A800 和 H800 集群上分别能多处理 115% 和 107% 的请求。</p>
+<p><b>本页按哪个版本讲。</b>本页按 arXiv 最新版 v5（2026-10-08）的章节逐节讲。v5 的正文与 2024-07 的 v3 相同，只更正了 trace 的几项统计数字（第 4 节会说明）。会议版和 2025 年的期刊版（ACM Transactions on Storage）结构差别很大，第 10 节专门讲它们多出来的内容，以及它们的数字为什么和 arXiv 版不同。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>prefill 和 decode 各自卡在什么资源上？TTFT 和 TBT 各管哪一段？</li>
+  <li>“以 KV 缓存为中心”具体指什么？一个请求在 Mooncake 里依次经过哪几步？</li>
+  <li>为什么超长输入的 prefill 要跨多台机器，为什么作者不用序列并行，而用“分块流水线并行”？</li>
+  <li>调度器怎么在“多复用缓存”和“别去太忙的机器”之间权衡？热门缓存怎么被自动复制到多台机器？</li>
+  <li>过载时为什么要“提前拒绝”？为什么简单的提前拒绝会让负载来回振荡，预测又怎么缓解它？</li>
+  <li>525%、75%、115% 这些数字分别是在什么条件下、和谁比出来的？哪些来自生产，哪些来自回放实验？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：Kimi 要解的是一个带约束的优化问题</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Kimi 作为“模型即服务”（MaaS）的提供商，目标是在满足延迟要求的前提下，让集群每秒有效完成的请求尽可能多，因为这直接决定收入。提高吞吐有哪两种基本手段？它们各自会伤害哪个延迟指标？作者为什么由此认为，推理服务的调度应该围绕 KV 缓存来做？</div>
+
+<div class="note-pre"><b>先补一点背景：一个请求的两个阶段与 KV 缓存。</b>
+<p>大模型回答一个请求分两步（原理详见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。<b>prefill</b>：把用户的整段输入一次性送进模型，所有输入 token 同时计算，得到第一个输出 token；同时把每个输入 token 在每一层算出的 key 和 value 存下来，这就是 <b>KV 缓存</b>。<b>decode</b>：之后每一步只输入上一步刚生成的那个 token，读取前面全部 token 的 KV 缓存做注意力，生成下一个 token，并把新 token 的 KV 追加进缓存，直到生成结束。</p>
+<p>两个阶段受限的资源不同。prefill 一次处理成千上万个 token，计算量很大，主要受 GPU 算力限制。decode 每一步每个请求只处理一个 token，计算量很小，却要把整份权重和所有请求的 KV 缓存从显存读一遍，主要受显存带宽限制。<a href="distserve.html#n-2-1">DistServe 精读 §2.1</a> 用 roofline 模型把这一点讲得很细。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：TTFT、TBT、SLO 和 goodput。</b>
+<p>用户感受到的速度分两段。<b>TTFT</b>（time to first token，首 token 延迟）是从请求到达到收到第一个输出 token 的时间，包括排队和 prefill。<b>TBT</b>（time between tokens，token 间隔）是之后相邻两个输出 token 之间隔了多久，由 decode 每一步的耗时决定。DistServe 用的是 TPOT（平均每个输出 token 的时间），意思相近：TBT 关心每一个间隔，TPOT 关心平均间隔。</p>
+<p>服务商给这两个数定的上限叫 <b>SLO</b>（service-level objective，服务水平目标），通常写成分位数形式，比如“90% 的请求 TTFT 不超过某个值”。在满足 SLO 的前提下，系统每秒最多能完成的请求数，DistServe 等工作称为 <b>goodput</b>（有效吞吐），详见 <a href="distserve.html#n-1">DistServe 精读 §1</a>。</p>
+</div>
+
+<p>作者把提高吞吐的手段归成两类，而每一类都会伤害一个延迟指标：</p>
+<ul>
+  <li><b>尽量复用 KV 缓存，少做计算。</b>如果新请求的开头和以前某个请求相同，就把那部分 KV 缓存取来用，prefill 只算剩下的部分。但缓存可能存在别的机器上，或者存在比显存慢的存储里，取过来要花时间，这段时间会加到 TTFT 上。</li>
+  <li><b>让每个批里的 token 尽量多，把 GPU 用满。</b>decode 阶段一个批里的请求越多，读一遍权重就能为越多请求各生成一个 token，GPU 的利用率（MFU，见下框）越高。但批越大，每一步就越慢，TBT 就越长。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：MFU。</b>
+<p><b>MFU</b>（model FLOPs utilization，模型算力利用率）等于模型实际完成的有效浮点运算量，除以同一段时间里 GPU 理论上能完成的浮点运算量。例如一台 8 卡 A800 的 BF16 稠密算力峰值约 8 × 312 TFLOPS ≈ 2.5 PFLOPS（NVIDIA 公开规格）；如果它每秒只完成 0.5 PFLOPS 的模型计算，MFU 就是 20%。decode 每一步计算很少，MFU 通常很低；把更多请求拼进一个批，是提高 MFU 最直接的办法。</p>
+</div>
+<p>所以两种手段都不能无限制地用，必须在 SLO 之内权衡。作者由此得出全文的出发点：<b>KV 缓存在哪里、能不能复用、往哪里搬，是推理服务调度的核心</b>。他们据此设计了一个以 KV 缓存为中心的分离式架构 Mooncake。一个请求到来后，全局调度器 Conductor 为它选定一对 prefill 实例和 decode 实例，然后分三步执行：</p>
+<ol>
+  <li>把尽可能多的可复用 KV 缓存搬到选中的 prefill 实例上；</li>
+  <li>按块、按层完成 prefill，并把新算出的 KV 缓存一边算一边源源不断地送往 decode 实例；</li>
+  <li>decode 实例载入全部 KV 缓存，把请求加入连续批处理，逐个生成输出 token。</li>
+</ol>
+<p>流程本身很直接，难在“选哪一对实例”。在 prefill 一侧，想多复用缓存，就倾向于把请求发给存着最长匹配前缀的机器；但如果缓存存在较慢的存储层，等它取回来可能让 TTFT 超标；一个热门缓存所在的机器被许多请求同时读取，网络还会拥塞，等待更久。因此 Conductor 还要预判各个缓存块将来会被用多少：最热的块应该复制到多台机器上分摊读取，最冷的块应该换出去，省下占用的空间。另外，prefill 节点的 CPU 内存大部分划给了全局缓存池，剩下的可用空间也是调度的一个约束。在 decode 一侧，目标是让一个批里聚集尽量多的 token，约束是 TBT 的 SLO，以及显存能装下的 KV 缓存总量。</p>
+<p>作者特别强调的是第三个问题：<b>过载</b>。已有的研究大多假设资源够用，只研究怎么把利用率提上去。但现实中 GPU 供应紧张，Kimi 的用户量增长又快，高峰期经常过载。这时系统必须决定拒绝哪些请求，而且最好在浪费算力之前就拒绝：如果一个请求做完了 prefill，才发现 decode 那边已经没有空位，前面的 prefill 就白算了。作者还发现，简单地“提前拒绝”反而会让负载来回振荡，必须预测短期内的负载才能缓解。论文把这类问题称为<b>面向过载的调度</b>，并说明这部分只是初步结果。</p>
+<p>后面的章节依次是：架构总览（§3）、公开的真实请求 trace（§4）、prefill 池的实现，包括跨节点的分块流水线并行和逐层 prefill（§5）、以 KV 缓存为中心的调度（§6）、面向过载的调度（§7）和实验（§8）。作者在引言末尾写道，Mooncake 是当时 Kimi 的主要服务平台，扛住了指数式增长的负载。</p>
+<div class="note-warn"><b>读之前先有个预期：</b>这是一份描述大规模生产系统的设计报告，而不是一个可以照着复现的算法论文。很多设计只给思路、不给参数（例如 prefill 的分块大小、流水线组的节点数、热点复制的阈值）；实验全部用一个结构与 LLaMA2-70B 相同的替身模型完成，Kimi 实际用的模型和线上 SLO 都没有公开。读的时候，最有价值的是它暴露出来的取舍：为什么这样拆、拆完之后哪里变难了。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识与问题定义：两个阶段的耗时规律，以及“只算完整完成的请求”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>prefill 和 decode 的耗时分别怎样随输入长度和批大小变化？SLO 具体怎么定？论文的“有效吞吐”和其他工作的 goodput 有什么不同？这个不同为什么直接引出了后面的“提前拒绝”？</div>
+
+<p>论文图 2 在替身 LLaMA2-70B 上测了两组数据，数值都归一化到最大值为 1。左边是 prefill：批大小固定为 1，输入从 8k 增加到 128k token。右边是 decode：上下文固定为 8k，批大小从 1 增加到 16。下图是本站按原图的矢量坐标读出数值后重画的简化版，只保留了 5 个代表点。</p>
+<div class="dia">
+  <div class="dia-title">简化重画：prefill 随输入变长越来越贵，decode 随批变大几乎不变慢</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="prefill 与 decode 的归一化耗时和吞吐" style="--dg-min:640px">
+    <text x="250" y="16" class="t-c t-sm t-b">prefill：批大小 = 1，输入长度变化</text>
+    <text x="730" y="16" class="t-c t-sm t-b">decode：上下文 = 8k，批大小变化</text>
+    <line x1="60" y1="240" x2="440" y2="240" class="axis"/><line x1="60" y1="240" x2="60" y2="50" class="axis"/>
+    <line x1="540" y1="240" x2="920" y2="240" class="axis"/><line x1="540" y1="240" x2="540" y2="50" class="axis"/>
+    <line x1="60" y1="60" x2="440" y2="60" class="grid-ln"/><line x1="540" y1="60" x2="920" y2="60" class="grid-ln"/>
+    <line x1="60" y1="150" x2="440" y2="150" class="grid-ln"/><line x1="540" y1="150" x2="920" y2="150" class="grid-ln"/>
+    <text x="52" y="60" class="t-r t-xs">1.0</text><text x="52" y="150" class="t-r t-xs">0.5</text><text x="52" y="240" class="t-r t-xs">0</text>
+    <text x="532" y="60" class="t-r t-xs">1.0</text><text x="532" y="150" class="t-r t-xs">0.5</text><text x="532" y="240" class="t-r t-xs">0</text>
+    <!-- prefill throughput bars (act) -->
+    <g class="act">
+      <rect class="box" x="82" y="60" width="36" height="180"/>
+      <rect class="box" x="162" y="69.7" width="36" height="170.3"/>
+      <rect class="box" x="242" y="86.6" width="36" height="153.4"/>
+      <rect class="box" x="322" y="110" width="36" height="130"/>
+      <rect class="box" x="402" y="143.2" width="36" height="96.8"/>
+    </g>
+    <text x="100" y="256" class="t-c t-xs">8k</text><text x="180" y="256" class="t-c t-xs">16k</text><text x="260" y="256" class="t-c t-xs">32k</text><text x="340" y="256" class="t-c t-xs">64k</text><text x="420" y="256" class="t-c t-xs">128k</text>
+    <text x="100" y="232" class="t-c t-xs">1.00</text><text x="180" y="232" class="t-c t-xs">0.95</text><text x="260" y="232" class="t-c t-xs">0.85</text><text x="340" y="232" class="t-c t-xs">0.72</text><text x="420" y="232" class="t-c t-xs">0.54</text>
+    <!-- prefill latency line (loss) -->
+    <polyline points="100,234 180,227.2 260,211.6 340,172.9 420,60" style="fill:none;stroke:var(--c-loss);stroke-width:2.2"/>
+    <circle cx="100" cy="234" r="3.5" style="fill:var(--c-loss)"/><circle cx="180" cy="227.2" r="3.5" style="fill:var(--c-loss)"/><circle cx="260" cy="211.6" r="3.5" style="fill:var(--c-loss)"/><circle cx="340" cy="172.9" r="3.5" style="fill:var(--c-loss)"/><circle cx="420" cy="60" r="3.5" style="fill:var(--c-loss)"/>
+    <text x="340" y="164" class="t-r t-xs" style="fill:var(--c-loss)">0.37</text><text x="412" y="52" class="t-r t-xs" style="fill:var(--c-loss)">耗时 1.00</text><text x="252" y="203" class="t-r t-xs" style="fill:var(--c-loss)">0.16</text>
+    <!-- decode throughput bars (enc) -->
+    <g class="enc">
+      <rect class="box" x="562" y="226.1" width="36" height="13.9"/>
+      <rect class="box" x="642" y="212.1" width="36" height="27.9"/>
+      <rect class="box" x="722" y="185.8" width="36" height="54.2"/>
+      <rect class="box" x="802" y="127" width="36" height="113"/>
+      <rect class="box" x="882" y="60" width="36" height="180"/>
+    </g>
+    <text x="580" y="256" class="t-c t-xs">1</text><text x="660" y="256" class="t-c t-xs">2</text><text x="740" y="256" class="t-c t-xs">4</text><text x="820" y="256" class="t-c t-xs">8</text><text x="900" y="256" class="t-c t-xs">16</text>
+    <text x="580" y="220" class="t-c t-xs">0.08</text><text x="660" y="206" class="t-c t-xs">0.16</text><text x="740" y="180" class="t-c t-xs">0.30</text><text x="820" y="121" class="t-c t-xs">0.63</text><text x="900" y="232" class="t-c t-xs">1.00</text>
+    <!-- decode latency line (loss) -->
+    <polyline points="580,75.8 660,75.6 740,71.3 820,62.3 900,60.9" style="fill:none;stroke:var(--c-loss);stroke-width:2.2"/>
+    <circle cx="580" cy="75.8" r="3.5" style="fill:var(--c-loss)"/><circle cx="660" cy="75.6" r="3.5" style="fill:var(--c-loss)"/><circle cx="740" cy="71.3" r="3.5" style="fill:var(--c-loss)"/><circle cx="820" cy="62.3" r="3.5" style="fill:var(--c-loss)"/><circle cx="900" cy="60.9" r="3.5" style="fill:var(--c-loss)"/>
+    <text x="580" y="92" class="t-c t-xs" style="fill:var(--c-loss)">耗时 0.80</text><text x="900" y="76" class="t-c t-xs" style="fill:var(--c-loss)">0.99</text>
+    <text x="250" y="280" class="t-c t-xs">输入长度（token）</text><text x="730" y="280" class="t-c t-xs">批大小（请求数）</text>
+    <rect x="300" y="26" width="12" height="10" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="316" y="31" class="t-xs">每秒处理的 token 数（柱）</text>
+    <line x1="140" y1="31" x2="160" y2="31" style="stroke:var(--c-loss);stroke-width:2.2"/><text x="164" y="31" class="t-xs">单次耗时（线）</text>
+    <rect x="780" y="26" width="12" height="10" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="796" y="31" class="t-xs">每秒生成的 token 数（柱）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>两张小图的纵轴都是归一化后的数值（各自的最大值为 1）。柱子是吞吐（每秒处理或生成的 token 数），红线是一次 prefill 或一步 decode 的耗时。左图要看红线：输入长 16 倍，耗时涨约 30 倍，所以柱子越来越矮。右图要看柱子：批大 16 倍，吞吐涨约 13 倍，而红线几乎是平的。数值为从图上读出，对应 <a href="https://arxiv.org/html/2407.00079v5#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>；原图画了 8k–128k 的 16 个点和批大小 1–16 的 16 个点。</div>
+</div>
+<p><b>先看 prefill。</b>输入长度翻 16 倍（8k → 128k），耗时涨了约 30 倍，每秒处理的 token 数掉到约一半。原因是 Transformer 里两类计算随长度增长的速度不同：线性层（注意力里的投影和 MLP）对每个 token 的计算量固定，总量随输入长度 \(n\) 线性增长；注意力要让每个 token 和它前面所有 token 两两打分，总量随 \(n^2\) 增长。输入越长，注意力占的比例越大，总耗时就涨得比长度更快。</p>
+<p>可以粗算一下（推算）。LLaMA2-70B 约 690 亿参数，线性层对每个 token 约需 \(2\times 69\times10^{9}\approx1.4\times10^{11}\) 次浮点运算。因果注意力对一段长 \(n\) 的输入，平均每个 token 约需 \(2nLd\) 次浮点运算（层数 \(L=80\)，隐藏维度 \(d=8192\)）。\(n=8\text{k}\) 时，注意力每个 token 约 \(1.1\times10^{10}\) 次，只占总量的 7%；\(n=128\text{k}\) 时约 \(1.7\times10^{11}\) 次，已经超过线性层。于是每个 token 的成本涨到约 2.1 倍，每秒能处理的 token 数降到约 0.48，和图上读出的 0.54 是同一个量级。两者不完全一致，是因为真实注意力内核的效率本身也随长度变化。</p>
+<p><b>再看 decode。</b>批大小从 1 增加到 16，每一步的耗时只增加了约 24%，每秒生成的 token 数却增加了约 13 倍。原因是 decode 每一步的时间主要花在从显存读数据上：要读整份权重（BF16 下约 138 GB，由 8 张卡分摊），还要读批里每个请求的 KV 缓存（8k 上下文时每个请求约 2.7 GB）。批大小从 1 到 16，要读的总字节数从约 141 GB 涨到约 181 GB，只多了约 29%，和耗时的涨幅相近（推算）；而产出的 token 数变成了 16 倍。这就是 decode 要尽量组大批的原因，也是 TBT 会随批变大而慢慢变长的原因。</p>
+<p>正因为两个阶段的规律截然不同，服务商给它们定了不同的指标：prefill 看 TTFT，decode 看 TBT。</p>
+
+<p><b>SLO 怎么定。</b>论文用相对值描述 SLO：\(\text{TTFT}_{P90}=4\times\) 的意思是，90% 的请求的 TTFT 不超过“同样条件下单独运行这个请求、没有任何干扰时的 TTFT”的 4 倍。§8 的端到端实验用的是 \(\text{TTFT}_{P90}=10\times\) 和 \(\text{TBT}_{P90}=5\times\)。真实部署里用的是固定的 TTFT 和 TBT 上限，具体数值论文没有公开。监控发现 SLO 不能满足时，只有两条路：加机器，或者拒绝一部分新请求。</p>
+<p><b>为什么“拒绝谁”成了核心问题。</b>GPU 供应紧张，临时扩容通常做不到，所以过载时的调度，核心就是决定拒绝哪些请求。作者的目标仍是在满足 SLO 的前提下最大化吞吐，也就是其他工作说的 goodput，但计数方式更严格：<b>只有完整执行完的请求才算数</b>。一个请求如果中途被放弃，它已经消耗的 prefill 计算和已经生成的 token 一概不算，相应的资源全部浪费。由此得到一个直接的推论：如果一个请求注定无法在 SLO 内完成，就应该越早拒绝越好。要做到这一点，既要把 prefill 和 decode 两边的架构做好，也要能预测短期内的负载。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个请求在 Mooncake 里的时间线，以及在哪一刻拒绝代价最小</div>
+  <div class="dia-row"><span class="lbl">一个请求</span><div class="dia-track"><span class="dia-seg oth" style="flex:1.2">排队</span><span class="dia-seg res" style="flex:0.8">取缓存</span><span class="dia-seg cmp" style="flex:3.5">prefill（只算没命中的部分）</span><span class="dia-seg w" style="flex:0.7">载入</span><span class="dia-seg kv" style="flex:0.9">t₂</span><span class="dia-seg kv" style="flex:0.9">t₃</span><span class="dia-seg kv" style="flex:0.9">t₄</span><span class="dia-seg kv" style="flex:0.9">…</span></div></div>
+  <div class="dia-out">TTFT = 排队 + 取缓存 + prefill（KV 边算边传给 decode 节点）；TBT = 此后相邻输出 token 的间隔。</div>
+  <div class="dia-row"><span class="lbl">到达时就拒绝</span><div class="dia-track"><span class="dia-seg frag" style="flex:1">拒绝</span><span class="dia-seg" style="flex:9"></span></div></div>
+  <div class="dia-out">没有消耗任何 GPU 时间，用户立刻收到“稍后再试”。</div>
+  <div class="dia-row"><span class="lbl">prefill 后才拒绝</span><div class="dia-track"><span class="dia-seg oth" style="flex:1.2">排队</span><span class="dia-seg res" style="flex:0.8">取缓存</span><span class="dia-seg cmp" style="flex:3.5">prefill（白算）</span><span class="dia-seg frag" style="flex:1">拒绝</span><span class="dia-seg" style="flex:3.5"></span></div></div>
+  <div class="dia-out">prefill 消耗的算力全部浪费，而这段算力本可以服务另一个能完成的请求。</div>
+  <div class="dia-note">本站示意图，长度不按比例。“取缓存”和“载入”在 Mooncake 里大部分与计算重叠（§5.2），这里为了看清楚单独画出。</div>
+</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>相对 SLO 的绝对值随输入长度变化很大。粗算一下，一个 128k 的输入在 8 卡 A800 上单独 prefill，满算力也要十几秒（推算），10 倍就是两三分钟。所以 §8 里“满足 SLO”的含义，和线上用户感受到的固定上限不是一回事。</li>
+  <li>这里的 goodput 与 DistServe 的不同。DistServe 看的是“达标请求的比例是否不低于 90%”，没完成的请求只是不达标；Mooncake 强调被放弃的请求已经消耗的资源是净损失。这个差别正是第 7 节“提前拒绝”的出发点。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 架构总览：三个资源池、一个调度器，请求走四步</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Mooncake 由哪些部件组成？“分布式 KV 缓存池”建在哪里、里面的缓存块怎么组织，才能让不同请求找到可以共享的部分？一个请求从到达到输出依次经过哪四步，每一步里 KV 缓存在哪两处之间移动？</div>
+
+<div class="note-pre"><b>先补一点背景：一台 GPU 服务器上的三层存储。</b>
+<p>一台 8 卡 GPU 服务器上，能存 KV 缓存的地方有三层。<b>GPU 显存</b>（HBM）：每张 A800 有 80 GB，带宽约 2 TB/s，但要先放模型权重，剩下的才能给 KV 缓存。<b>CPU 内存</b>（DRAM）：整机常见 1–2 TB（Mooncake 的期刊版提到初期每个节点给缓存池划了约 1 TB），容量比显存大一个数量级，但 GPU 要经过 PCIe 才能读到，带宽小一个数量级。<b>本地 SSD</b>：容量再大一个数量级，速度再慢一个数量级。推理服务主要靠 GPU 干活，CPU 内存和 SSD 往往大量闲着，这正是 Mooncake 要利用的资源。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：RDMA，以及 KV 缓存搬一次要多久。</b>
+<p>机器之间传数据，普通做法走 TCP：数据要经过操作系统内核、被拷贝好几次，CPU 也要全程参与。<b>RDMA</b>（远程直接内存访问）让一台机器的网卡直接读写另一台机器事先登记过的内存，不经过对方的 CPU 和内核，所以延迟低、带宽能跑满。<b>GPUDirect RDMA</b> 再进一步，让网卡直接读写 GPU 显存，省掉先拷到 CPU 内存的一步。论文测试集群的每个节点配有合计最高 800 Gbps 的 RDMA 网卡，约合 100 GB/s。</p>
+<p>算一笔账（推算）。LLaMA2-70B 有 80 层、8 个 KV 头、每个头 128 维，用 BF16 存储时，一个 token 的 KV 缓存是</p>
+<div class="formula">$$\underbrace{2}_{K\ \text{和}\ V}\times\underbrace{80}_{\text{层}}\times\underbrace{8}_{\text{KV 头}}\times\underbrace{128}_{\text{每头维度}}\times\underbrace{2\ \text{字节}}_{\text{BF16}}=327{,}680\ \text{字节}\approx 320\ \text{KB}$$</div>
+<p>一段 8k token 的前缀就是约 2.7 GB。按 100 GB/s 传，只要约 27 毫秒；而在 8 卡 A800 上把这 8k token 重新 prefill 一遍，按 50% 的 MFU 估算约需 1 秒。传比算快几十倍，“用存储换计算”才划得来。如果网络只有 100 Gbps（约 12.5 GB/s），传同样的数据要约 0.2 秒，优势就小得多。下面的计算器可以换模型和链路自己算（选 Llama-3-70B，它的 KV 形状与 LLaMA2-70B 相同）。</p>
+<div data-widget="roofline" data-panel="kv"></div>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：Mooncake 的整体结构（本站重画）</div>
+  <svg class="dg" viewBox="0 0 960 420" role="img" aria-label="Mooncake 架构：Conductor、prefill 池、decode 池与分布式 KV 缓存池" style="--dg-min:720px">
+    <!-- Conductor -->
+    <g class="tgt"><rect class="box" x="14" y="40" width="194" height="350" rx="10"/></g>
+    <text x="111" y="62" class="t-c t-b">Conductor</text>
+    <text x="111" y="80" class="t-c t-xs">全局调度器</text>
+    <rect class="box" x="28" y="96" width="166" height="56" rx="6"/>
+    <text x="111" y="116" class="t-c t-sm">缓存感知的</text><text x="111" y="134" class="t-c t-sm">prefill 调度（§6.1）</text>
+    <rect class="box" x="28" y="164" width="166" height="56" rx="6"/>
+    <text x="111" y="184" class="t-c t-sm">KV 缓存均衡调度</text><text x="111" y="202" class="t-c t-sm">热点复制（§6.2）</text>
+    <rect class="box" x="28" y="232" width="166" height="56" rx="6"/>
+    <text x="111" y="252" class="t-c t-sm">按负载选择</text><text x="111" y="270" class="t-c t-sm">decode 实例</text>
+    <rect class="box" x="28" y="300" width="166" height="56" rx="6"/>
+    <text x="111" y="320" class="t-c t-sm">过载时</text><text x="111" y="338" class="t-c t-sm">提前拒绝（§7）</text>
+    <!-- prefill pool -->
+    <rect class="frame" x="236" y="14" width="484" height="150" rx="10"/>
+    <text x="248" y="30" class="t-sm t-b">Prefill 池</text>
+    <g class="act"><rect class="box" x="262" y="40" width="196" height="54" rx="6"/></g>
+    <text x="360" y="58" class="t-c t-sm">GPU 显存：分页 KV</text><text x="360" y="78" class="t-c t-xs">本地分块 prefill 调度</text>
+    <g class="reg"><rect class="box" x="262" y="102" width="196" height="50" rx="6"/></g>
+    <text x="360" y="120" class="t-c t-sm">CPU 内存 / SSD</text><text x="360" y="138" class="t-c t-xs">属于全局 KV 缓存池</text>
+    <g class="act"><rect class="box" x="510" y="40" width="196" height="54" rx="6"/></g>
+    <text x="608" y="58" class="t-c t-sm">GPU 显存：分页 KV</text><text x="608" y="78" class="t-c t-xs">本地分块 prefill 调度</text>
+    <g class="reg"><rect class="box" x="510" y="102" width="196" height="50" rx="6"/></g>
+    <text x="608" y="120" class="t-c t-sm">CPU 内存 / SSD</text><text x="608" y="138" class="t-c t-xs">属于全局 KV 缓存池</text>
+    <line x1="460" y1="67" x2="508" y2="67" class="edge"/>
+    <text x="484" y="56" class="t-c t-xs">CPP</text>
+    <!-- KV pool band -->
+    <g class="reg"><rect class="box" x="236" y="180" width="484" height="62" rx="8"/></g>
+    <text x="478" y="202" class="t-c t-b">分布式 KV 缓存池（所有节点的 CPU 内存 + SSD）</text>
+    <text x="478" y="224" class="t-c t-xs">按前缀哈希去重的分页块；由 Messenger 经（GPUDirect）RDMA 在节点间搬运</text>
+    <!-- decode pool -->
+    <rect class="frame" x="236" y="258" width="484" height="150" rx="10"/>
+    <text x="248" y="400" class="t-sm t-b">Decode 池</text>
+    <g class="reg"><rect class="box" x="262" y="268" width="196" height="50" rx="6"/></g>
+    <text x="360" y="286" class="t-c t-sm">CPU 内存</text><text x="360" y="304" class="t-c t-xs">接收 KV，再异步载入显存</text>
+    <g class="enc"><rect class="box" x="262" y="326" width="196" height="56" rx="6"/></g>
+    <text x="360" y="346" class="t-c t-sm">GPU 显存：分页 KV</text><text x="360" y="366" class="t-c t-xs">连续批处理 + 本地调度</text>
+    <g class="reg"><rect class="box" x="510" y="268" width="196" height="50" rx="6"/></g>
+    <text x="608" y="286" class="t-c t-sm">CPU 内存</text><text x="608" y="304" class="t-c t-xs">接收 KV，再异步载入显存</text>
+    <g class="enc"><rect class="box" x="510" y="326" width="196" height="56" rx="6"/></g>
+    <text x="608" y="346" class="t-c t-sm">GPU 显存：分页 KV</text><text x="608" y="366" class="t-c t-xs">连续批处理 + 本地调度</text>
+    <!-- links -->
+    <line x1="208" y1="96" x2="234" y2="96" class="edge tgt" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <line x1="208" y1="330" x2="234" y2="330" class="edge tgt" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <line x1="360" y1="152" x2="360" y2="178" class="edge reg"/>
+    <line x1="608" y1="178" x2="608" y2="154" class="edge reg"/>
+    <line x1="360" y1="244" x2="360" y2="266" class="edge reg"/>
+    <line x1="608" y1="244" x2="608" y2="266" class="edge reg"/>
+    <!-- goals -->
+    <rect class="box" x="740" y="40" width="206" height="124" rx="8"/>
+    <text x="843" y="60" class="t-c t-sm t-b">prefill 阶段的目标</text>
+    <text x="843" y="82" class="t-c t-sm">最大化 KV 缓存复用</text>
+    <text x="843" y="104" class="t-c t-xs">约束：TTFT SLO</text>
+    <text x="843" y="122" class="t-c t-xs">MFU 不低于下限</text>
+    <text x="843" y="140" class="t-c t-xs">KV 总量 ≤ CPU 内存</text>
+    <rect class="box" x="740" y="268" width="206" height="114" rx="8"/>
+    <text x="843" y="288" class="t-c t-sm t-b">decode 阶段的目标</text>
+    <text x="843" y="310" class="t-c t-sm">最大化吞吐</text>
+    <text x="843" y="332" class="t-c t-xs">约束：TBT SLO</text>
+    <text x="843" y="350" class="t-c t-xs">KV 总量 ≤ 显存</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左边紫色的 Conductor 统管一切；中间上方是 prefill 池（绿色是 GPU，青色是 CPU 内存和 SSD），下方是 decode 池（蓝色是 GPU）；中间那条青色横带表示所有节点的 CPU 内存和 SSD 合起来构成的全局 KV 缓存池，竖箭头表示 KV 缓存在 GPU 与缓存池之间流动。右侧是两个阶段各自的优化目标和约束。本站示意图，对应 <a href="https://arxiv.org/html/2407.00079v5#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</div>
+</div>
+<p>上图是 Mooncake 的整体结构。它把集群拆成三类资源池，再用一个调度器统一管理：</p>
+<ul>
+  <li><b>Prefill 池</b>：一组只做 prefill 的实例。每个实例的显存里用分页方式存 KV 缓存（PagedAttention 的做法，见 <a href="vllm.html#n-4-2">vLLM 精读 §4.2</a>），并有一个本地调度器负责把长输入切块执行。特别长的输入可以由几个实例组成流水线一起处理（§5.1 的分块流水线并行，CPP）。</li>
+  <li><b>Decode 池</b>：一组只做 decode 的实例，用连续批处理逐 token 生成，本地调度器负责组批。</li>
+  <li><b>分布式 KV 缓存池</b>：它不是另外一组存储服务器，而是把上面这些 GPU 服务器自己的 CPU 内存、SSD 和 RDMA 网卡汇到一起。作者的说法是，这些资源本来就闲着，拿来做缓存不增加额外成本，还能提供“贴近 GPU”的前缀缓存。</li>
+  <li><b>Conductor</b>：全局调度器，根据 KV 缓存当前分布在哪里、各实例负载如何来分派请求；如果对后续推理有利，它还会复制或换出某些缓存块。</li>
+</ul>
+<p>图右侧写的两个优化目标，几乎就是全文的提纲。prefill 阶段要在“TTFT 达标、MFU 不低于下限、KV 缓存总量不超过 CPU 内存”三个约束下，尽量多复用缓存。decode 阶段要在“TBT 达标、KV 缓存总量不超过显存”两个约束下，尽量提高吞吐。注意 prefill 一侧的容量约束是 CPU 内存而不是显存，§5.2 会解释为什么显存在 prefill 端不再是瓶颈。</p>
+
+<h4 id="n-3-1">3.1 缓存池里的块：带前缀的哈希</h4>
+<p>在 CPU 内存里，KV 缓存按固定大小的块（页）存放。每个块带一个哈希值，这个哈希不只由本块的 token 决定，还把前一个块的哈希也算进去：第一块 \(A=\text{Hash}(a)\)，第二块 \(B=\text{Hash}(A+b)\)，第三块 \(C=\text{Hash}(B+c)\)，依此类推。这样一来，两个块的哈希相同，就意味着从开头到这一块为止的所有 token 都相同，对应的 KV 缓存也完全相同，可以只存一份（去重）。新请求来了，把它的输入同样切块、算出哈希，从第一块开始去缓存里查，一直查到第一个查不到的块为止，前面那些就是可以复用的前缀。</p>
+<div class="dia">
+  <div class="dia-title">示意图：带前缀的块哈希，怎样找出可复用的前缀</div>
+  <div class="dia-row"><span class="lbl">已缓存的请求</span><div class="cells"><span class="cell a">A</span><span class="cell a">B</span><span class="cell a">C</span><span class="cell a">D</span><span class="cell a">E</span><span class="cell a">F</span></div></div>
+  <div class="dia-out">A = H(a)，B = H(A + b)，C = H(B + c)……每个哈希都“记住”了它前面的全部内容。</div>
+  <div class="dia-row"><span class="lbl">新请求</span><div class="cells"><span class="cell b">A</span><span class="cell b">B</span><span class="cell b">C</span><span class="cell b">D</span><span class="cell b">E</span><span class="cell c">F′</span><span class="cell c">G′</span><span class="cell c">H′</span></div></div>
+  <div class="dia-out">前 5 块的哈希全部命中（绿色）：直接载入这 5 块的 KV。第 6 块内容不同，哈希变成 F′，从这里开始要重新计算（橙色），后面的块即使字面上和别处相同也不再查。</div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2407.00079v5#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>（原图还画出了 prefill 实例与 decode 实例之间经 Messenger 读、写、传输、载入 KV 缓存的过程）。</div>
+</div>
+<p>为什么要把前缀算进哈希？因为同一段文字出现在不同的前文后面，它的 KV 缓存是不同的：注意力让每个 token 的 key 和 value 都混入了前文的信息（见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a> 末尾的提醒）。如果只按本块的内容算哈希，就会把两段“字面相同、前文不同”的块误认成同一个，复用出错误的结果。</p>
+<p>缓存满了要淘汰时，可以用 LRU（最久没被用到的先淘汰）、LFU（被用得最少的先淘汰），或者按请求特点设计的策略。块在 CPU 与 GPU 之间、机器与机器之间的搬运，由每个节点上一个独立的进程 <b>Messenger</b> 负责，它基于 RDMA，条件允许时用 GPUDirect RDMA。有了这个缓存池，Kimi 还能对外提供“上下文缓存”（context caching）接口：用户主动声明某段长前缀会被反复使用，系统就把它的 KV 缓存留住，进一步提高复用。</p>
+
+<h4 id="n-3-2">3.2 一个请求的四步</h4>
+<p>分词完成后，Conductor 为请求选定一组 prefill 节点和一个 decode 节点，然后按下面四步执行：</p>
+<div class="dia">
+  <div class="dia-title">示意图：请求在 Mooncake 里的四步，以及 KV 缓存的流向</div>
+  <div class="dia-flow"><span class="dia-box tgt">Conductor<small>选定 prefill 组与 decode 节点</small></span><span class="dia-arrow">→</span><span class="dia-box reg">① KV 复用<small>按前缀块 ID，从（可能是远端的）CPU 内存载入显存</small></span><span class="dia-arrow">→</span><span class="dia-box act">② 增量 prefill<small>只算未命中的 token；新 KV 写回 CPU 内存</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box reg">③ KV 传输<small>Messenger 把每层刚算出的 KV 流式送到 decode 节点的 CPU 内存，与 ② 重叠</small></span><span class="dia-arrow">→</span><span class="dia-box enc">④ decode<small>KV 全部到达后加入连续批处理；载入显存与解码异步重叠</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2407.00079v5#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。原图用星号和剑号注明：prefill 端的载入和写回是逐层进行、与计算并行的（§5.2）；decode 端的载入与 GPU 解码异步并行，避免 GPU 空等。</div>
+</div>
+<ol>
+  <li><b>KV 复用。</b>选中的 prefill 节点（或节点组）收到三样东西：原始输入、可复用前缀的块 ID、为这个请求分配的全部块 ID。它按前缀块 ID 从远端的 CPU 内存把前缀的 KV 缓存载入显存，作为起点。没有可复用的前缀，这一步就跳过。</li>
+  <li><b>增量 prefill。</b>prefill 节点利用载入的前缀，只计算剩下没命中的 token，并把新算出的“增量”KV 缓存写回 CPU 内存。如果没命中的 token 数超过阈值 \(prefill\_chunk\)，就把 prefill 切成几块、以流水线方式执行。这个阈值的选法是让单块足以把 GPU 算力用满，通常大于 1000 个 token。为什么切块之后仍然坚持把 prefill 单独放在一个池里，§5.1 解释。</li>
+  <li><b>KV 传输。</b>每个节点上的 Messenger 负责管理和搬运缓存，它作为推理实例里的一个独立进程运行，收到信号后执行跨机器的高速传输。这一步是异步的，和上一步重叠：每一层的 KV 一算出来，就流式送往目标 decode 节点的 CPU 内存，从而减少等待。</li>
+  <li><b>decode。</b>全部 KV 缓存到达 decode 节点的 CPU 内存后，请求在下一轮加入连续批处理，开始逐 token 生成。</li>
+</ol>
+<p>第 4 步有一个容易忽略的细节。Conductor 在请求刚到时就按 decode 节点的<b>当前</b>负载预选了它，以保证 TBT 不超标；但等 prefill 做完，那个 decode 节点的负载可能已经变了，所以 decode 节点的本地调度器会再检查一次。如果这次检查不通过，请求会被拒绝，前面的 prefill 就白做了。这正是第 2 节说的那种浪费，第 7 节的“提前拒绝”就是为了减少它。</p>
+<p>第 1 步选哪个 prefill 节点，要同时照顾三个目标：尽量多复用 KV 缓存、让各个 prefill 节点的负载均衡、保证 TTFT 不超标。三者经常互相冲突，这就引出了第 6 节的“以 KV 缓存为中心的调度”。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“分离式 KV 缓存”不是另建一套存储集群，而是 GPU 服务器自带的内存和 SSD 拼起来的。好处是不花额外的钱，代价是缓存的容量和带宽跟着推理节点的数量和网卡走。</li>
+  <li>复用要求从开头起逐块完全相同。两个请求只是中间有一大段相同（比如同一篇文档放在不同的问题之后），这种缓存方式复用不了。块越大，越难整块相同；公开 trace 用的是 512 token 一块，会议版说实际块大小在 16 到 512 token 之间，取决于模型大小和网络传输的最佳粒度。</li>
+  <li>arXiv 版描述的传输路径是先落到 decode 节点的 CPU 内存，再载入显存。后来开源的版本同时支持 GPU 到 GPU 直接传（GPUDirect RDMA）和经 CPU 内存中转两种方式（第 10 节）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 公开的真实请求 trace：长输入、短输出、热点极不均衡</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>论文公开了一份一小时的线上请求 trace。它怎样在不泄露任何用户内容的前提下，保留“哪些请求可以共享缓存”这一信息？从这份 trace 能看出 Kimi 的负载有什么特点？要把缓存的好处吃满，缓存池需要多大？</div>
+<p>为了方便别人研究，作者从线上一小时的请求里抽样，做成一份公开的 trace，共 23,608 条记录。为了保留请求之间的缓存关系，抽样时优先把同一会话里的请求一起收进来。每条记录只有四个字段：</p>
+<ul>
+  <li><b>timestamp</b>：请求的相对到达时间，单位毫秒，范围 0 到 3,600,000（一小时）。</li>
+  <li><b>input_length / output_length</b>：输入和输出的 token 数。trace 里没有任何真实文本或 token，这一点和 Splitwise 公开的 trace 做法相同。</li>
+  <li><b>hash_ids</b>：把输入按 512 个 token 一块切开，每块按 3.1 节的方式算出“包含前缀”的哈希，再重新映射成全局唯一的整数编号。编号相同，就说明这一块连同它前面的所有 token 都相同，可以复用对应的 KV 缓存。</li>
+</ul>
+<p>论文给的两条样例（原文 Listing 1）很能说明 hash_ids 的用法：</p>
+<div class="dia">
+  <div class="dia-title">原文的两条样例：前 12 块编号相同，可以共享 6,144 个 token 的 KV 缓存</div>
+  <div class="dia-row"><span class="lbl">请求 1<br>t = 27,482 ms<br>输入 6,955 / 输出 52</span><div class="cells"><span class="cell b">46</span><span class="cell b">47</span><span class="cell b">48</span><span class="cell b">49</span><span class="cell b">50</span><span class="cell b">51</span><span class="cell b">52</span><span class="cell b">53</span><span class="cell b">54</span><span class="cell b">55</span><span class="cell b">56</span><span class="cell b">57</span><span class="cell c" style="width:42px">2353</span><span class="cell c" style="width:42px">2354</span></div></div>
+  <div class="dia-row"><span class="lbl">请求 2<br>t = 30,535 ms<br>输入 6,472 / 输出 26</span><div class="cells"><span class="cell b">46</span><span class="cell b">47</span><span class="cell b">48</span><span class="cell b">49</span><span class="cell b">50</span><span class="cell b">51</span><span class="cell b">52</span><span class="cell b">53</span><span class="cell b">54</span><span class="cell b">55</span><span class="cell b">56</span><span class="cell b">57</span><span class="cell c" style="width:42px">2366</span></div></div>
+  <div class="dia-note">绿色是两条请求共有的块编号，橙色是各自独有的块。每块 512 个 token，最后一块可能不满。数据取自原文 Listing 1，也可以在 <a href="https://github.com/kvcache-ai/Mooncake/tree/main/FAST25-release" target="_blank" rel="noopener">公开的 trace 文件 ↗</a> 里看到。</div>
+</div>
+<p>两条请求相隔约 3 秒到达，前 12 个编号完全相同，说明它们的前 12 × 512 = 6,144 个 token 一模一样，比如同一份文档或同一段长提示。后一条请求可以直接复用前一条的这部分 KV 缓存，只需计算剩下的约 330 个 token（推算：6,472 − 6,144 = 328）。作者说，据他们所知，这是第一份可以用来研究真实缓存复用的公开数据集。</p>
+
+<h4 id="n-4-1">4.1 统计特征：输入很长，输出很短</h4>
+<p>trace 的平均输入是 8,590 个 token，平均输出是 182 个 token（原文图 5 是两者的分布直方图）。论文还说“平均输入输出比约为 720”，这个数容易误读。本站用公开的 trace 文件核算过：720 是“每个请求的输入长度除以输出长度”之后再取平均（720.1）；如果用“平均输入除以平均输出”，只有约 47。两者差这么多，是因为有大量输出极短的请求：输出长度的中位数只有 30 个 token，这些请求的输入输出比动辄上千，把平均值拉了上去。另外，输入长度的中位数是 6,345，90% 分位是 16,794，最长约 12.6 万 token（以上均为本站对公开 trace 的统计）。作者说这反映了 Kimi 擅长长文本的特点，不代表所有负载都如此。</p>
+
+<h4 id="n-4-2">4.2 缓存要多大：命中率随容量的变化</h4>
+<p>作者假设整个集群只有一个全局缓存池，按 trace 的顺序回放请求，比较了三种淘汰策略在不同容量下的命中率（原文表 1）：LRU、LFU，以及 LengthAwareCache（类似 LFU，但优先保留在请求中靠后位置出现的块）。这里的命中率按块计算：所有请求查询的块里，有多少比例能在缓存中找到，并且它前面的块也都找到了（满足前缀匹配）。</p>
+<div class="dia">
+  <div class="dia-title">按原文表 1 重画：缓存容量与命中率</div>
+  <svg class="dg" viewBox="0 0 660 290" role="img" aria-label="三种淘汰策略的命中率随缓存容量的变化" style="max-width:660px">
+    <line x1="70" y1="230" x2="620" y2="230" class="axis"/><line x1="70" y1="230" x2="70" y2="30" class="axis"/>
+    <line x1="70" y1="70" x2="620" y2="70" class="grid-ln"/><line x1="70" y1="130" x2="620" y2="130" class="grid-ln"/><line x1="70" y1="190" x2="620" y2="190" class="grid-ln"/>
+    <text x="62" y="70" class="t-r t-xs">55%</text><text x="62" y="130" class="t-r t-xs">45%</text><text x="62" y="190" class="t-r t-xs">35%</text>
+    <text x="100" y="246" class="t-c t-xs">1,000</text><text x="210" y="246" class="t-c t-xs">10,000</text><text x="300" y="246" class="t-c t-xs">30,000</text><text x="370" y="246" class="t-c t-xs">50,000</text><text x="460" y="246" class="t-c t-xs">100,000</text><text x="570" y="246" class="t-c t-xs">无限</text>
+    <text x="100" y="262" class="t-c t-xs">≈0.17 TB</text><text x="210" y="262" class="t-c t-xs">≈1.7 TB</text><text x="300" y="262" class="t-c t-xs">≈5 TB</text><text x="370" y="262" class="t-c t-xs">≈8.4 TB</text><text x="460" y="262" class="t-c t-xs">≈17 TB</text>
+    <text x="345" y="282" class="t-c t-xs">缓存容量（块，每块 512 token；第二行为按 LLaMA2-70B 的 KV 大小推算的字节数）</text>
+    <polyline points="100,196 210,124 300,76 370,70 460,70 570,70" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+    <polyline points="100,196 210,160 300,100 370,70 460,70 570,70" style="fill:none;stroke:var(--c-pred);stroke-width:2;stroke-dasharray:6 3"/>
+    <polyline points="100,196 210,160 300,100 370,82 460,76 570,70" style="fill:none;stroke:var(--c-act);stroke-width:2;stroke-dasharray:2 3"/>
+    <circle cx="100" cy="196" r="3.5" style="fill:var(--c-enc)"/><circle cx="210" cy="124" r="3.5" style="fill:var(--c-enc)"/><circle cx="300" cy="76" r="3.5" style="fill:var(--c-enc)"/><circle cx="370" cy="70" r="3.5" style="fill:var(--c-enc)"/><circle cx="460" cy="70" r="3.5" style="fill:var(--c-enc)"/><circle cx="570" cy="70" r="3.5" style="fill:var(--c-enc)"/>
+    <text x="100" y="212" class="t-c t-xs">34%</text><text x="210" y="114" class="t-c t-xs" style="fill:var(--c-enc)">46%</text><text x="210" y="176" class="t-c t-xs" style="fill:var(--c-pred)">40%</text><text x="300" y="116" class="t-c t-xs" style="fill:var(--c-pred)">50%</text><text x="300" y="66" class="t-c t-xs" style="fill:var(--c-enc)">54%</text><text x="370" y="96" class="t-c t-xs" style="fill:var(--c-act)">53%</text><text x="570" y="60" class="t-c t-xs">55%</text>
+    <line x1="420" y1="160" x2="444" y2="160" style="stroke:var(--c-enc);stroke-width:2.4"/><text x="450" y="160" class="t-xs">LRU</text>
+    <line x1="420" y1="178" x2="444" y2="178" style="stroke:var(--c-pred);stroke-width:2;stroke-dasharray:6 3"/><text x="450" y="178" class="t-xs">LFU</text>
+    <line x1="420" y1="196" x2="444" y2="196" style="stroke:var(--c-act);stroke-width:2;stroke-dasharray:2 3"/><text x="450" y="196" class="t-xs">LengthAwareCache</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是缓存能存多少块（不是等距刻度，只是把表 1 的 6 个容量依次排开），纵轴是命中率。三条线从左到右上升，在 50,000 块左右都碰到 55% 的天花板；容量较小时 LRU（蓝实线）明显最好。横轴第二行的字节数是本站推算：每块 512 token × 320 KB ≈ 168 MB。数据来自 <a href="https://arxiv.org/html/2407.00079v5#S4.T1" target="_blank" rel="noopener">原文表 1 ↗</a>（v5 的数值）。</div>
+</div>
+<p>容量从 1,000 块增加到 50,000 块，命中率从 34% 升到 55%；再往上几乎不再增长，因为 55% 已经是无限容量时的上限：即使什么都不淘汰，仍有 45% 的块查询落空，因为这些块在整个小时里是第一次出现，之前从没算过。三种策略里 LRU 最好，作者认为这是因为同一会话的请求在时间上挨得很近，最近用过的块最可能马上再用。本站用公开的 trace 文件自己写了一个 LRU 前缀缓存的回放，在六个容量下得到 0.553、0.552、0.551、0.537、0.460、0.340，与表 1 的 LRU 一行完全一致。</p>
+<p>作者特别提醒：不能由此得出“缓存不需要更大”的结论，因为这份样本只是真实负载的一小部分，真实场景需要的容量要按比例放大。换成字节算更直观（推算，按 LLaMA2-70B 的 KV 大小）：仅这一小时的样本，要吃满 55% 的命中率就需要约 50,000 块，也就是约 8.4 TB，远超一台机器的内存（会议版说每个节点约 1 TB）。这就是缓存池必须跨机器的原因。</p>
+<p><b>块的热度极不均衡。</b>原文图 6 画的是“每个块被命中多少次”的累积分布：超过一半的块从未被复用，而少数块被访问了上万次。本站统计公开 trace：183,166 个不同的块里，有 78.5% 只出现在一个请求中；最热的一个块出现在 10,938 个请求里，几乎占所有请求的一半，很可能是一段公共的系统提示。如果这样的热门块只存在一台机器上，所有请求都去那台机器读，就会造成传输拥塞，所以必须把它复制到多台机器上（§6.2）。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>版本差异。</b>arXiv v3（2024-07）写的是平均输入 7,590、命中率从 30% 升到 50%、理论上最多复用 50%；v5 更正为 8,590、34% → 55%、55%。本站对公开 trace 的回放与 v5 一致，所以 v3 的数字应视为笔误。</li>
+  <li><b>这份 trace 到底代表什么负载。</b>arXiv 版把它描述为线上请求的一个子集。会议版后来公开了三份 trace，其中“Tool&amp;Agent”（工具与智能体调用）那一份同样是 23,608 条请求、平均输入 8,596、平均输出 182，本站核对发现两者的长度统计和最热的块几乎完全相同。所以这份 trace 更像工具和智能体调用的负载：系统提示很长、输出很短。把它当作“Kimi 普通聊天”的代表要谨慎；会议版另有一份对话负载，平均输入约 1.2 万、输出约 343（第 10 节）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · 本站统计用的文件：<a href="https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/arxiv-trace/mooncake_trace.jsonl" target="_blank" rel="noopener">mooncake_trace.jsonl ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 Prefill 池的实现：为什么还要单独一个池，长输入怎么跨机器算</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>decode 节点必须单独成池，这一点没有争议；但 prefill 是否也要单独成池，当时还有争论。chunked prefill 可以把长输入切块塞进 decode 批里，在同一组机器上兼顾两边，那为什么 Mooncake 仍然坚持把 prefill 拆出去？超长输入的 prefill 一台 8 卡机器太慢，要几台机器一起算，又该怎么分工？</div>
+<div class="note-pre"><b>先补一点背景：chunked prefill。</b>
+<p>Sarathi-Serve 等工作提出的 <b>chunked prefill</b>（分块预填充）不把 prefill 和 decode 拆到不同机器上，而是把一个长输入切成固定大小的块，每次只算一块，并和正在 decode 的请求拼在同一个批里执行。这样，正在生成的请求不会被一个长 prefill 卡住太久；同时 decode 批里混入了一块 prefill，计算量变大，GPU 利用率也更高。详见 <a href="sarathi-serve.html">Sarathi-Serve 精读页</a>。</p>
+</div>
+<p>作者承认 chunked prefill 有两个明显的好处：一是不分离时所有节点一视同仁，调度更简单；二是把 prefill 块塞进 decode 批，能提高 decode 批的计算强度，从而提高 MFU。但仔细权衡之后，他们决定保留分离架构。只有当一个请求的 prefill 不需要切块、能一次做完，而且塞进 decode 批也不会违反 TBT SLO 时，才把它直接塞进 decode 批里执行（这实际上只适用于短请求）。理由有两条：</p>
+<ol>
+  <li>处理长上下文时，prefill 节点需要与 decode 节点不同的跨节点并行方式（§5.1）；</li>
+  <li>分离之后，prefill 端出现了一个节省显存的独特机会（§5.2）。</li>
+</ol>
+
+<h4 id="n-5-1">5.1 跨节点 prefill：张量并行、序列并行，还是分块流水线</h4>
+<p>近来模型支持的上下文从 8k 涨到 128k，甚至 100 万 token。这类长上下文请求的输入往往是输出的 10 到 100 倍，所以优化 TTFT 成了关键。长输入的 prefill 有大量可以并行的计算，一台 8 卡机器不够快，自然希望多台机器一起算。问题是怎么分工。</p>
+<div class="note-pre"><b>先补一点背景：把一个请求的 prefill 分给多台机器的三种方式。</b>
+<ul>
+  <li><b>张量并行</b>（TP）：把每一层的矩阵乘拆开，每张卡算一部分，每层算完要做两次 all-reduce 把结果合起来（原理见 <a href="megatron-lm.html#n-3-5">Megatron-LM 精读 §3.5</a>）。在一台机器内部走 NVLink 没问题；扩到多台机器，这两次 all-reduce 就要走机器之间的 RDMA 网络，慢得多。</li>
+  <li><b>序列并行</b>（SP）：把一个请求的输入序列切成几段，每台机器负责一段 token。线性层各算各的，注意力需要别的段的 key 和 value，于是像 Ring Attention 那样，把各段的 KV 沿着一个环依次传给下一台机器。这依赖注意力运算可以分段累加的性质（论文称之为结合律），每层至少要跨机器通信一次，但传的只是 KV，比 TP 的通信量小得多。</li>
+  <li><b>流水线并行</b>（PP）：把模型的层按顺序切成几段，每台机器负责一段，数据像在流水线上一样依次流过各台机器，只在段与段的边界上传一次激活。</li>
+</ul>
+</div>
+<p>作者对三种方式的判断如下。<b>跨节点 TP</b> 每层两次走 RDMA 的 all-reduce，会显著拉低 prefill 节点的 MFU。<b>SP</b> 大大减少了通信、提高了 MFU，但对短请求来说，它的 MFU 仍然不如单机 TP。理想的部署因此要把 prefill 节点再分成两组：一组只用 TP，处理普通请求；一组用 SP，只在长请求非得靠它才能满足 TTFT 时才用。这第二层拆分又带来新麻烦：两组各要多少台机器？负载一变，固定的划分就会让一部分机器闲着。LoongServe 提出的弹性序列并行可以动态伸缩 SP 组，但要事先建立全局通信组，还让 Conductor 在调整期间要额外考虑缓存复用和 SLO 违约，对需要频繁在线扩缩的生产环境来说太复杂。而且 SP 每层仍要跨机器通信，既拉低 MFU，又和 KV 缓存的跨机器传输抢网络带宽。</p>
+<p>用一个 8k token 的块粗算一下三者的跨机器通信量（推算，只看数量级，BF16，隐藏维度 8192，80 层）：</p>
+<div class="table-wrap"><table>
+<tr><th>方式</th><th>每层要跨机器传什么</th><th class="num">一个 8k 块的跨机器流量</th><th class="num">按 100 GB/s 约需</th></tr>
+<tr><td>跨节点 TP</td><td>每层两次 all-reduce，每次与激活同量级（8k × 8192 × 2 字节 ≈ 134 MB）</td><td class="num">约 20 GB 量级</td><td class="num">约 0.2 秒</td></tr>
+<tr><td>SP（两台机器）</td><td>每层把一段的 K、V 传给另一台（GQA 下每 token 每层 4 KB）</td><td class="num">约 2.7 GB</td><td class="num">约 27 毫秒</td></tr>
+<tr><td>CPP（两段流水线）</td><td>只在两段的边界传一次激活</td><td class="num">约 134 MB</td><td class="num">约 1.3 毫秒</td></tr>
+</table></div>
+<p>作为参照，这个 8k 块在两台 8 卡 A800 上的计算时间约 0.5 秒（推算，按 50% MFU）。跨节点 TP 的通信和计算是同一个量级，而且每层都要同步；流水线的通信几乎可以忽略。</p>
+<p>Mooncake 的做法叫<b>分块流水线并行</b>（chunked pipeline parallelism，CPP）。prefill 集群里每 X 个节点编成一个流水线组（论文没有给出 X 的取值），组内每个节点负责模型连续的一段层。一个请求的输入被切成若干块，每块不超过 \(prefill\_chunk\) 个 token。同一个请求的不同块可以同时在不同节点上处理：第 1 块在第一个节点上算完前一段层，交给第二个节点继续算后一段层；与此同时，第一个节点已经开始算第 2 块。</p>
+<p>为什么后一块可以在前一块还没走完全部层时就开始？这要用到 decoder-only 模型“自回归”的性质：第 \(k\) 块里的 token 只看得到它前面的 token。所以第 2 块在第 \(\ell\) 层计算注意力时，只需要第 1、2 块在第 \(\ell\) 层的 key 和 value；而第 1 块在第 \(\ell\) 层的 KV，正是负责第 \(\ell\) 层的那个节点刚刚算出、就存在它自己显存里的。因此每个节点只要按块的顺序依次处理，既不用等整个请求，也不用向别的节点要 KV。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一个长请求切成 4 块，三种做法的完成时间</div>
+  <svg class="dg" viewBox="0 0 960 250" role="img" aria-label="单节点、跨节点张量并行与分块流水线并行的时间线对比" style="--dg-min:720px">
+    <text x="10" y="44" class="t-sm">单节点（80 层）</text>
+    <text x="10" y="94" class="t-sm">跨节点 TP（两台）</text>
+    <text x="10" y="144" class="t-sm">CPP 节点 1（1–40 层）</text>
+    <text x="10" y="184" class="t-sm">CPP 节点 2（41–80 层）</text>
+    <g class="act">
+      <rect class="box" x="200" y="30" width="176" height="28" rx="4"/><rect class="box" x="376" y="30" width="176" height="28" rx="4"/><rect class="box" x="552" y="30" width="176" height="28" rx="4"/><rect class="box" x="728" y="30" width="176" height="28" rx="4"/>
+      <rect class="box" x="200" y="80" width="88" height="28" rx="4"/><rect class="box" x="341" y="80" width="88" height="28" rx="4"/><rect class="box" x="482" y="80" width="88" height="28" rx="4"/><rect class="box" x="623" y="80" width="88" height="28" rx="4"/>
+      <rect class="box" x="200" y="130" width="88" height="28" rx="4"/><rect class="box" x="288" y="130" width="88" height="28" rx="4"/><rect class="box" x="376" y="130" width="88" height="28" rx="4"/><rect class="box" x="464" y="130" width="88" height="28" rx="4"/>
+      <rect class="box" x="292" y="170" width="88" height="28" rx="4"/><rect class="box" x="380" y="170" width="88" height="28" rx="4"/><rect class="box" x="468" y="170" width="88" height="28" rx="4"/><rect class="box" x="556" y="170" width="88" height="28" rx="4"/>
+    </g>
+    <rect x="288" y="80" width="53" height="28" style="fill:url(#hatch);stroke:var(--c-mask)"/><rect x="429" y="80" width="53" height="28" style="fill:url(#hatch);stroke:var(--c-mask)"/><rect x="570" y="80" width="53" height="28" style="fill:url(#hatch);stroke:var(--c-mask)"/><rect x="711" y="80" width="53" height="28" style="fill:url(#hatch);stroke:var(--c-mask)"/>
+    <text x="288" y="44" class="t-c t-sm">块 1</text><text x="464" y="44" class="t-c t-sm">块 2</text><text x="640" y="44" class="t-c t-sm">块 3</text><text x="816" y="44" class="t-c t-sm">块 4</text>
+    <text x="244" y="94" class="t-c t-sm">1</text><text x="385" y="94" class="t-c t-sm">2</text><text x="526" y="94" class="t-c t-sm">3</text><text x="667" y="94" class="t-c t-sm">4</text>
+    <text x="244" y="144" class="t-c t-sm">1</text><text x="332" y="144" class="t-c t-sm">2</text><text x="420" y="144" class="t-c t-sm">3</text><text x="508" y="144" class="t-c t-sm">4</text>
+    <text x="336" y="184" class="t-c t-sm">1</text><text x="424" y="184" class="t-c t-sm">2</text><text x="512" y="184" class="t-c t-sm">3</text><text x="600" y="184" class="t-c t-sm">4</text>
+    <line x1="284" y1="158" x2="300" y2="170" class="edge"/><line x1="372" y1="158" x2="388" y2="170" class="edge"/><line x1="460" y1="158" x2="476" y2="170" class="edge"/><line x1="548" y1="158" x2="564" y2="170" class="edge"/>
+    <line x1="904" y1="22" x2="904" y2="66" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 3"/><text x="900" y="16" class="t-r t-xs" style="fill:var(--c-loss)">完成：8 个单位</text>
+    <line x1="764" y1="72" x2="764" y2="116" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 3"/><text x="770" y="94" class="t-xs" style="fill:var(--c-loss)">约 6.4 个单位</text>
+    <line x1="644" y1="164" x2="644" y2="206" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 3"/><text x="650" y="184" class="t-xs" style="fill:var(--c-loss)">约 5 个单位</text>
+    <line x1="200" y1="222" x2="904" y2="222" class="axis"/>
+    <text x="552" y="240" class="t-c t-xs">时间 →（绿色 = 计算，斜纹 = 跨机器 all-reduce，小箭头 = 段边界上传一次激活）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>单节点每块要算满 80 层，记为 2 个单位，四块共 8 个单位。跨节点 TP 让每块的计算减半，但每块都附带一段跨机器通信（斜纹，这里示意性地画成 0.6 个单位）。CPP 中两台机器各管一半的层：节点 1 算完块 1 的前 40 层就交给节点 2，自己马上开始块 2，两台机器同时在忙，约 5 个单位完成。本站示意图，数字只为说明形状；它忽略了一个事实：后面的块要和更长的前文做注意力，计算会更慢一些。</div>
+</div>
+<p>CPP 带来两个好处。第一，和训练里的流水线并行一样，它只在段与段的边界上通信，传的只是一块的激活，而且很容易和计算重叠；所以 MFU 更高，也不会和 KV 缓存的传输抢网络。第二，它对长短输入一视同仁：短输入只有一块，顺着流水线走一遍，多出来的只是几次很小的边界传输，没有明显的额外开销；长输入则自动被切成多块并行起来。所以它不需要像序列并行那样，随负载变化频繁地重新划分节点。作者提到，按 token 切块的流水线在训练系统里已有先例（他们引用的是 TeraPipe），但据他们所知，这是第一次用在推理上，因为长上下文推理是最近才出现的需求。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>CPP 并不减少一个请求的总计算量，它只是让同一个请求的不同块在不同机器上同时进行，从而缩短 TTFT。论文没有给出 CPP 本身的实测（没有单独的消融实验），也没有公开流水线组的节点数和分块大小；“比 SP 更好”是基于通信量和运维复杂度的论证，而不是并排测出来的结论。</div>
+
+<h4 id="n-5-2">5.2 逐层 prefill：让 KV 缓存一层层流出显存</h4>
+<p>除了算力，显存也是稀缺资源，作者希望尽量缩短状态（主要是 KV 缓存）占用显存的时间。他们用一个简单的量衡量“占用代价”：一个请求的 KV 缓存大小为 \(S\)、处理时间为 \(T\)，占用代价就是 \(S\times T\)。如果用 chunked prefill，把一个长请求切块、每块和别的 decode 请求拼在一起执行，\(T\) 会被拉长，占用代价也随之变大。</p>
+<p>反过来，prefill 是一层一层算的，而且是算力受限的：GPU 忙于计算，显存带宽和 PCIe 相对空闲。这就可以让 KV 缓存的搬运和计算重叠，进一步缩短 KV 缓存在显存里停留的时间。Mooncake 用异步的“发起”和“等待”操作实现这一点：</p>
+<ol>
+  <li>每一层的注意力开始之前，先等这一层的 KV（可复用的前缀部分）异步载入完成，同时发起下一层 KV 的异步载入；</li>
+  <li>这一层的注意力算完后，立刻发起这一层新 KV 的异步写出；</li>
+  <li>所有层都算完后，等所有写出操作完成。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：算完再整体写出 vs 逐层写出</div>
+  <svg class="dg" viewBox="0 0 960 200" role="img" aria-label="串行写出与逐层写出 KV 缓存的时间线" style="--dg-min:640px">
+    <text x="10" y="40" class="t-sm">串行：计算</text><text x="10" y="74" class="t-sm">串行：写出 KV</text>
+    <text x="10" y="128" class="t-sm">逐层：计算</text><text x="10" y="162" class="t-sm">逐层：写出 KV</text>
+    <g class="act">
+      <rect class="box" x="160" y="26" width="100" height="26" rx="3"/><rect class="box" x="260" y="26" width="100" height="26" rx="3"/><rect class="box" x="360" y="26" width="100" height="26" rx="3"/><rect class="box" x="460" y="26" width="100" height="26" rx="3"/>
+      <rect class="box" x="160" y="114" width="100" height="26" rx="3"/><rect class="box" x="260" y="114" width="100" height="26" rx="3"/><rect class="box" x="360" y="114" width="100" height="26" rx="3"/><rect class="box" x="460" y="114" width="100" height="26" rx="3"/>
+    </g>
+    <g class="reg">
+      <rect class="box" x="560" y="60" width="80" height="26" rx="3"/><rect class="box" x="640" y="60" width="80" height="26" rx="3"/><rect class="box" x="720" y="60" width="80" height="26" rx="3"/><rect class="box" x="800" y="60" width="80" height="26" rx="3"/>
+      <rect class="box" x="260" y="148" width="80" height="26" rx="3"/><rect class="box" x="360" y="148" width="80" height="26" rx="3"/><rect class="box" x="460" y="148" width="80" height="26" rx="3"/><rect class="box" x="560" y="148" width="80" height="26" rx="3"/>
+    </g>
+    <text x="210" y="40" class="t-c t-xs">第 1 层</text><text x="310" y="40" class="t-c t-xs">第 2 层</text><text x="410" y="40" class="t-c t-xs">第 3 层</text><text x="510" y="40" class="t-c t-xs">第 4 层</text>
+    <text x="600" y="74" class="t-c t-xs">层 1</text><text x="680" y="74" class="t-c t-xs">层 2</text><text x="760" y="74" class="t-c t-xs">层 3</text><text x="840" y="74" class="t-c t-xs">层 4</text>
+    <text x="210" y="128" class="t-c t-xs">第 1 层</text><text x="310" y="128" class="t-c t-xs">第 2 层</text><text x="410" y="128" class="t-c t-xs">第 3 层</text><text x="510" y="128" class="t-c t-xs">第 4 层</text>
+    <text x="300" y="162" class="t-c t-xs">层 1</text><text x="400" y="162" class="t-c t-xs">层 2</text><text x="500" y="162" class="t-c t-xs">层 3</text><text x="600" y="162" class="t-c t-xs">层 4</text>
+    <line x1="880" y1="20" x2="880" y2="94" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 3"/><text x="876" y="14" class="t-r t-xs" style="fill:var(--c-loss)">KV 全部离开显存</text>
+    <line x1="640" y1="108" x2="640" y2="182" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:3 3"/><text x="646" y="190" class="t-xs" style="fill:var(--c-loss)">只多出最后一层的写出时间</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>绿色是每一层的计算，青色是把这一层新算出的 KV 写出到 CPU 内存。串行做法要等所有层算完才开始写，KV 缓存在显存里多待了整段写出时间；逐层做法在第 \(\ell+1\) 层计算的同时写出第 \(\ell\) 层，只多出最后一层的写出时间。载入前缀 KV 的方向相反，原理相同。本站示意图，只画了 4 层。</div>
+</div>
+<p>这样一来，prefill 实例的执行时间大约等于“载入 KV 的时间”和“正常 prefill 的时间”二者中较大的那个；哪个更大，取决于前缀缓存占输入的比例：前缀越长，要载入的越多，要计算的越少。原文图 7 比较了两种做法下，写出 KV 缓存给 prefill 增加的额外延迟（逐层做法的额外延迟定义为：逐层 prefill 的总耗时减去完全不写出 KV 时的 prefill 耗时）：</p>
+<div class="dia">
+  <div class="dia-title">从原文图 7 读出：写出 KV 缓存带来的额外延迟（秒）</div>
+  <div class="dia-row"><span class="lbl">8k · 串行</span><div class="dia-track"><span class="dia-seg res" style="flex:11">0.11</span><span class="dia-seg" style="flex:79"></span></div></div>
+  <div class="dia-row"><span class="lbl">8k · 逐层</span><div class="dia-track"><span class="dia-seg cmp" style="flex:10">0.10</span><span class="dia-seg" style="flex:80"></span></div></div>
+  <div class="dia-row"><span class="lbl">32k · 串行</span><div class="dia-track"><span class="dia-seg res" style="flex:23">0.23</span><span class="dia-seg" style="flex:67"></span></div></div>
+  <div class="dia-row"><span class="lbl">32k · 逐层</span><div class="dia-track"><span class="dia-seg cmp" style="flex:12">0.12</span><span class="dia-seg" style="flex:78"></span></div></div>
+  <div class="dia-row"><span class="lbl">64k · 串行</span><div class="dia-track"><span class="dia-seg res" style="flex:42">0.42</span><span class="dia-seg" style="flex:48"></span></div></div>
+  <div class="dia-row"><span class="lbl">64k · 逐层</span><div class="dia-track"><span class="dia-seg cmp" style="flex:10">0.10</span><span class="dia-seg" style="flex:80"></span></div></div>
+  <div class="dia-row"><span class="lbl">128k · 串行</span><div class="dia-track"><span class="dia-seg res" style="flex:87">0.87</span><span class="dia-seg" style="flex:3"></span></div></div>
+  <div class="dia-row"><span class="lbl">128k · 逐层</span><div class="dia-track"><span class="dia-seg cmp" style="flex:10">0.10</span><span class="dia-seg" style="flex:80"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>每行条形的长度按 0–0.9 秒同一比例画。输入越长，串行写出的延迟越大（128k 时约 0.87 秒），逐层写出始终约 0.1 秒。数值为本站按原图矢量坐标读出（替身 LLaMA2-70B），对应 <a href="https://arxiv.org/html/2407.00079v5#S5.F7" target="_blank" rel="noopener">原文图 7 ↗</a>；原图还有 16k 一组。</div>
+</div>
+<p>这种重叠最大的好处是：只要显存放得下单个请求，prefill 调度时就可以不管显存还剩多少，因为 KV 缓存一层层地流出显存，不会在显存里堆积。所以图 1 中 prefill 节点的调度只考虑 KV 缓存的分布和可用的 CPU 内存。作者还设想把省出来的显存派上别的用场。例如 OpenAI 的批处理 API 允许用户提交一批不急的请求，价格便宜一半，只承诺 24 小时内完成。这类请求没有严格的 TBT 要求，因此只要显存装得下它们的 KV 缓存，就可以把它们的 decode 也塞进 prefill 节点执行，进一步提高 MFU。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>逐层重叠能把写出时间藏起来，前提是每一层的计算时间不短于搬运这一层 KV 的时间。长输入的 prefill 满足这一点（计算随长度超线性增长，KV 只线性增长）；很短的输入计算很快，就未必藏得住。另外，\(S\times T\) 只是一个直观的代价指标，论文没有给出它省下了多少显存、多放了多少请求的测量。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 以 KV 缓存为中心的调度：去命中最长的机器，还是去最闲的机器</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>已有系统通常按“每个实例分到了多少请求”来做负载均衡。Mooncake 为什么要把前缀命中长度、可复用缓存块的分布也考虑进来？在“去命中最长的机器”和“去最闲的机器”之间，它怎么权衡？热门缓存被大家抢着读时，又怎样在不预测未来的情况下把它复制开？这一节只讨论正常负载，过载留给第 7 节。</div>
+<div class="note-pre"><b>先补一点背景：单机的前缀缓存。</b>
+<p>vLLM 和 SGLang 当时都已经能在一台机器内部复用前缀的 KV 缓存：SGLang 用基数树找出新请求和已缓存内容的最长公共前缀，并在等待队列里优先执行命中多的请求（见 <a href="sglang.html#n-3-1">SGLang 精读 §3.1</a> 和 <a href="sglang.html#n-3-4">§3.4 缓存感知调度</a>）。但这些缓存只在本机的显存（或内存）里，别的实例用不上。一旦集群有很多实例，请求被分到哪个实例，就决定了它能不能命中缓存。</p>
+</div>
+
+<h4 id="n-6-1">6.1 全局 prefill 调度：估一估在每个实例上的 TTFT</h4>
+<p>Mooncake 选 prefill 实例时，不只看负载，还看前缀命中长度和可复用缓存块的分布。把请求发给前缀命中更长的实例，可以少算很多；但如果那台实例正忙，排队时间可能抵消掉省下的计算，甚至让 TTFT 超标。为了同时考虑这两件事，作者提出一个缓存感知的全局调度算法（原文算法 1），核心思想是：<b>对每个候选实例，估计这个请求在它上面的 TTFT，然后选最小的</b>。具体步骤是：</p>
+<ol>
+  <li>把新请求的输入切块，按 3.1 节的方式算出每块“带前缀”的哈希键；</li>
+  <li>拿这些键逐个去和每个 prefill 实例的缓存键比较，得到这个请求在该实例上的前缀命中长度 \(prefix\_len\)（不同实例不一样）；</li>
+  <li>根据请求长度和 \(prefix\_len\) 估计在该实例上的 prefill 执行时间，再加上该实例的排队等待时间，得到在该实例上的预计 TTFT；</li>
+  <li>把请求分给预计 TTFT 最短的实例，并更新这个实例的缓存信息和队列时间；</li>
+  <li>如果连最短的 TTFT 都满足不了 SLO，Conductor 直接向上层返回 HTTP 429（Too Many Requests）。</li>
+</ol>
+<p>论文还提到，vLLM 已经实现了类似的前缀复用逻辑，但它的开源版只支持本机缓存，做不到跨实例。下面用一组示意数字走一遍（数字为本站虚构，只用来说明取舍；prefill 时间按每 1k 个未命中 token 约 0.125 秒粗估，传输按 100 GB/s、每 token 320 KB 推算）：</p>
+<div class="table-wrap"><table>
+<tr><th>候选</th><th class="num">可用前缀</th><th class="num">要算的 token</th><th class="num">预计 prefill</th><th class="num">排队</th><th class="num">预计 TTFT</th></tr>
+<tr><td>实例 A（命中最长，但很忙）</td><td class="num">12k</td><td class="num">4k</td><td class="num">0.5 s</td><td class="num">6.0 s</td><td class="num">6.5 s</td></tr>
+<tr><td>实例 B（命中较短，较闲）</td><td class="num">4k</td><td class="num">12k</td><td class="num">1.5 s</td><td class="num">0.5 s</td><td class="num">2.0 s</td></tr>
+<tr><td>实例 C（没有命中，最闲）</td><td class="num">0</td><td class="num">16k</td><td class="num">2.0 s</td><td class="num">0.2 s</td><td class="num">2.2 s</td></tr>
+<tr><td>实例 B，并从 A 拉取多出的 8k 前缀</td><td class="num">12k</td><td class="num">4k</td><td class="num">0.5 s</td><td class="num">0.5 s + 传输 0.03 s</td><td class="num"><b>约 1.0 s</b></td></tr>
+</table></div>
+<p>请求共 16k token。只看缓存会选 A，但 A 要排队 6 秒，TTFT 最差；只看负载会选 C，白白放弃了可复用的前缀；只看本机缓存的“缓存感知”调度会选 B（2.0 秒）。如果允许 B 从 A 那里把多出的 8k 前缀拉过来（2.7 GB，约 27 毫秒），TTFT 降到约 1 秒；而且这么做之后，B 上也有了这段热门前缀的副本，下一个类似的请求就多了一个去处。最后一行正是 6.2 节要讲的“缓存均衡”。</p>
+<p>这个框架的骨架很简单，复杂之处藏在几个估计量的工程实现里。<b>prefill 时间</b>：用离线测试数据拟合一个预测模型（会议版说是多项式回归），输入是请求长度和前缀命中长度。Transformer 的计算模式非常规则，只要离线数据足够，预测误差就很小。<b>排队时间</b>：把队列里所有请求的预计 prefill 时间加起来。实际实现中，对各个实例的 TTFT 估计是并行算的，耗时相对推理本身可以忽略。<b>传输时间</b>最难预测：它不仅取决于要传多少数据，还取决于当时的网络状况，尤其是发送方是否正在拥塞。热门缓存所在的机器最容易成为发送端的瓶颈，这就引出了热门块的复制问题。</p>
+<p>把原文算法 1 改写成一段简化的伪代码（变量名为本站所起）：</p>
+<pre><code class="lang-py"><span class="tok-k">def</span> <span class="tok-f">schedule</span>(req, prefill_pool, decode_pool):
+    keys = prefix_hash(req.tokens, block_size)            <span class="tok-c"># 带前缀的块哈希</span>
+    best_len, holder = longest_match(prefill_pool, keys)   <span class="tok-c"># 全集群最长的前缀命中在哪台</span>
+    best_ttft, chosen = inf, <span class="tok-k">None</span>
+    <span class="tok-k">for</span> inst <span class="tok-k">in</span> prefill_pool:
+        local_len = inst.match(keys)                       <span class="tok-c"># 本机能复用多少</span>
+        t_queue = inst.est_queue_time()
+        <span class="tok-k">if</span> best_len &lt; <span class="tok-n">THRESH</span> * local_len:                 <span class="tok-c"># 远端多不了多少：只用本机缓存</span>
+            ttft = t_queue + est_prefill(len(req), local_len)
+        <span class="tok-k">else</span>:                                              <span class="tok-c"># 远端多很多：算上把它拉过来的时间</span>
+            t_xfer = est_transfer(holder, inst, best_len - local_len)
+            ttft = t_xfer + t_queue + est_prefill(len(req), best_len)
+        <span class="tok-k">if</span> ttft &lt; best_ttft:
+            best_ttft, chosen = ttft, inst
+    d, tbt = pick_decode_by_load(decode_pool)               <span class="tok-c"># decode 端按负载选</span>
+    <span class="tok-k">if</span> best_ttft &gt; TTFT_SLO <span class="tok-k">or</span> tbt &gt; TBT_SLO:
+        <span class="tok-k">return</span> reject(<span class="tok-n">429</span>)                                 <span class="tok-c"># 注定超标：直接拒绝</span>
+    <span class="tok-k">if</span> best_len &gt; <span class="tok-n">THRESH</span> * chosen.match(keys):
+        transfer_kv(holder, chosen)                        <span class="tok-c"># 顺手把热点前缀复制过去</span>
+    <span class="tok-k">return</span> chosen, d</code></pre>
+
+<h4 id="n-6-2">6.2 缓存负载均衡：不预测未来，让热点自己复制开</h4>
+<p>在 Mooncake 集群里，每台 prefill 机器管理着自己本地的一批前缀缓存（它们都在这台机器的内存里，同时属于全局缓存池）。这些缓存的使用频率差别极大：系统提示几乎被每个请求访问，而某份长文档的缓存可能只有一个用户会用到。所以从分布式缓存系统的角度看，“副本放在哪里”本身就是一个负载均衡问题：要让全局调度既能命中缓存，又不会都挤到少数机器上。</p>
+<p>一个直观但行不通的方案是：收集每个块的全局使用情况，用预测模型估计它将来会被用多少，再据此安排副本。问题是，和 prefill 时间不同，负载本身高度动态、变化很快，对一个用户量快速增长的服务商来说，准确预测未来的使用情况是不可能的。因此作者提出一个基于启发式的<b>热点自动迁移</b>方案，它不需要精确的预测：</p>
+<ul>
+  <li>前面说过，请求不一定会被分给前缀命中最长的实例，因为那台实例可能太忙。这时 Conductor 把缓存所在的位置连同请求一起交给另一台实例；这台实例主动从持有者那里拉取 KV 缓存，并在本地存一份。</li>
+  <li>更重要的是，如果全集群最好的远端命中长度，不超过本机可复用前缀长度乘以一个阈值，就宁可在本机把缺的 token 算出来，而不去远端拉取。这个阈值目前是人工调的，作者说将来可以由算法自适应调整。</li>
+</ul>
+<p>这两条规则既缩短了请求的 prefill 时间，又顺带让热门缓存被自动复制到更多机器上：越热的前缀，越常出现“持有者太忙、请求被分到别处并把缓存拉过去”的情况，于是副本越多。</p>
+<div class="note-warn"><b>原文的一处措辞：</b>论文正文写的是“如果额外的 prefill 时间短于传输时间，就把缓存位置和请求转给另一台实例”，单看这句话，比较的方向不太好理解。算法 1 的写法更清楚：先用“远端最长命中 ÷ 本机命中”与阈值比较，决定是否考虑拉取；考虑拉取时，把传输时间计入预计 TTFT，和其他候选一起比较。上面的伪代码按算法 1 改写。</div>
+<p><b>实验。</b>作者用夜间空闲的机器搭了一个 8 个 prefill 实例加 8 个 decode 实例的 Mooncake 集群，回放 23,000 条真实请求，比较四种 prefill 调度：随机选、选负载最轻的（负载均衡）、只看本机缓存的缓存感知调度（§6.1）、再加上缓存负载均衡的完整版本（作者称为 KVCache-centric，即 §6.1 + §6.2）。指标是平均 TTFT 和 TTFT 的 SLO 达标率。</p>
+<div class="dia">
+  <div class="dia-title">原文图 8 与会议版图 5 中标注的平均 TTFT（秒）</div>
+  <div class="dia-row"><span class="lbl">随机</span><div class="dia-track"><span class="dia-seg frag" style="flex:92.07">92.07</span><span class="dia-seg" style="flex:0.5"></span></div></div>
+  <div class="dia-row"><span class="lbl">负载均衡</span><div class="dia-track"><span class="dia-seg res" style="flex:60.41">60.41</span><span class="dia-seg" style="flex:32.16"></span></div></div>
+  <div class="dia-row"><span class="lbl">缓存感知</span><div class="dia-track"><span class="dia-seg oth" style="flex:14.36">14.36</span><span class="dia-seg" style="flex:78.21"></span></div></div>
+  <div class="dia-row"><span class="lbl">KVCache-centric</span><div class="dia-track"><span class="dia-seg cmp" style="flex:6.26">6.26</span><span class="dia-seg" style="flex:86.31"></span></div></div>
+  <div class="dia-out">arXiv 版：8P + 8D，回放 23,000 条真实请求，替身 LLaMA2-70B。</div>
+  <div class="dia-row"><span class="lbl">随机</span><div class="dia-track"><span class="dia-seg frag" style="flex:19.65">19.65</span><span class="dia-seg" style="flex:72.92"></span></div></div>
+  <div class="dia-row"><span class="lbl">负载均衡</span><div class="dia-track"><span class="dia-seg res" style="flex:5.27">5.27</span><span class="dia-seg" style="flex:87.3"></span></div></div>
+  <div class="dia-row"><span class="lbl">本机缓存感知</span><div class="dia-track"><span class="dia-seg oth" style="flex:3.58">3.58</span><span class="dia-seg" style="flex:88.99"></span></div></div>
+  <div class="dia-row"><span class="lbl">全局缓存感知</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3.07">3.07</span><span class="dia-seg" style="flex:89.5"></span></div></div>
+  <div class="dia-out">会议版：16 台 8 卡 A800，回放对话 trace，替身 LLaMA3-70B。</div>
+  <div class="dia-note"><b>怎么看：</b>所有条形按同一比例画（0–92 秒），越短越好。上面四行是 arXiv 版原图 8 上标注的数值（原图的纵轴是 TTFT，并画了 SLO 线；本站按原图文字顺序把数值对应到四种策略），下面四行是会议版图 5 上标注的数值。两组都是“随机 &gt; 负载均衡 &gt; 只看本机缓存 &gt; 全局缓存感知”。对应 <a href="https://arxiv.org/html/2407.00079v5#S6.F8" target="_blank" rel="noopener">原文图 8 ↗</a>。</div>
+</div>
+<p>论文正文只给了定性结论：缓存感知和缓存均衡都显著降低了 TTFT，完整版本在平均 TTFT 和达标率两个指标上都优于随机和负载均衡调度。按图上标注的数值，从“只看本机缓存”到加上缓存均衡，平均 TTFT 从 14.36 秒降到 6.26 秒；会议版的对应数字是从 3.58 秒降到 3.07 秒，即再降 14%。两组的绝对值相差很大（随机调度分别是 92 秒和 20 秒），说明它们是在不同的集群规模、不同的 trace 和不同的负载强度下测的，能比较的只是同一组内部的先后顺序。</p>
+<div class="note-warn"><b>读的时候要注意：</b>平均 TTFT 在高负载下主要由排队时间决定，所以几十秒的数字说明实验故意把集群压到了很重的负载。在这种负载下，任何能减少重复计算的策略都会被放大。SLO 达标率的具体数值论文正文没有给出。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 面向过载的调度：拒绝要趁早，但不能只看眼前</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>大多数研究假设所有请求最终都会被处理，只优化吞吐或延迟。真实的商业服务里，用户请求的增长远快于集群扩容的速度，高峰期过载是常态。过载时，系统该按什么标准拒绝请求？PD 分离为什么让这件事变得更难？“提前拒绝”为什么会引起负载来回振荡，预测又怎么缓解它？</div>
+<div class="note-pre"><b>先补一点背景：准入控制。</b>
+<p>任何在线服务都有容量上限。请求超过上限时，与其让所有请求一起排长队、最后人人都超时，不如在入口就拒掉一部分，让被接收的请求能按时完成。这叫<b>准入控制</b>（admission control），也叫负载削减。HTTP 429（Too Many Requests）就是告诉客户端“现在太忙，请稍后再试”。准入控制的关键是两件事：怎么衡量“系统现在有多忙”，以及在什么时刻做决定。决定得越晚，被拒请求已经消耗的资源就越多。</p>
+</div>
+<p>作者的原则是：系统在负载达到预设阈值之前尽可能多地接收请求，超过阈值之后，剩下的请求要么直接拒绝，要么推迟重试。分离架构让调度更灵活，但也带来了耦合系统没有、此前的 PD 分离工作（Splitwise、DistServe、TetriInfer）也没有讨论过的新问题。</p>
+
+<h4 id="n-7-1">7.1 “系统负载”怎么定义</h4>
+<p>在 prefill 和 decode 放在一起的传统系统里，两个阶段互相干扰，TTFT 和 TBT 都很难预测，所以负载通常只能粗略地定义为“正在处理的请求数 ÷ 系统的最大容量”。Mooncake 的两个阶段在不同机器上独立运行，各自的延迟可以预测得比较准，所以作者直接用 SLO 的满足程度来衡量负载。设 \(l_{ttft}\) 和 \(l_{tbt}\) 分别是 TTFT 和 TBT 的 SLO 上限：一个 prefill 实例的负载，就是它上面预测的最大 TTFT 与 \(l_{ttft}\) 之比；一个 decode 实例的负载，就是它上面预测的最大 TBT 与 \(l_{tbt}\) 之比。比值接近 1，说明再多接请求就要超标了。</p>
+<p>有了这两个量，调度要做两个决定：第一，根据 prefill 实例的负载，决定是否接收这个请求的 prefill；第二，prefill 完成后，根据 decode 实例的负载，决定是否让它进入 decode。</p>
+
+<h4 id="n-7-2">7.2 提前拒绝：把 decode 端的检查挪到 prefill 之前</h4>
+<p>问题出在这两个决定之间隔着一段时间。一个请求先被 prefill 接收，等它算完要进入 decode 时，decode 实例可能已经满了，只好拒绝它，前面的 prefill 计算就白费了。结果是，prefill 实例看起来一直在满负荷工作，真正被成功处理的请求却比这个负荷所暗示的少。</p>
+<p>自然的改进是把 decode 端的负载检查提前到 prefill 开始之前，作者称之为<b>提前拒绝</b>（Early Rejection）：请求一到达，Conductor 就取 prefill 池和 decode 池两者负载中<b>较大</b>的那个来决定是否接收。这显著减少了被拒请求造成的无效计算，也让两边的负载更均衡。</p>
+
+<h4 id="n-7-3">7.3 提前拒绝带来的负载振荡</h4>
+<p>但提前拒绝引入了新问题。原文图 9 是线上一个 20 台机器的集群在采用提前拒绝之后，20 分钟内 prefill 机器和 decode 机器的负载曲线：两条曲线大幅度地来回摆动，而且相位相反，一边高时另一边低。作者观察到，prefill 机器越少、prefill 阶段越长，这种振荡越明显。</p>
+<p>原因在于“预测 decode 负载”和“请求真正进入 decode”之间存在时间差：调度依据的是 decode 端<b>当前</b>的负载，而这个负载反映的其实是过去接收的请求。这就像洗澡时调水温：热水要过几秒才流到喷头，你根据当前水温去拧阀门，结果总是拧过头，水温忽冷忽热。论文图 10(a) 用一个理论例子把这个过程分成四个阶段：</p>
+<div class="dia">
+  <div class="dia-title">示意图：只看 decode 当前负载的提前拒绝，会让两边负载反相振荡</div>
+  <svg class="dg" viewBox="0 0 960 280" role="img" aria-label="提前拒绝与基于预测的提前拒绝下 prefill 和 decode 负载曲线" style="--dg-min:680px">
+    <text x="250" y="18" class="t-c t-sm t-b">(a) 只看 decode 的当前负载</text>
+    <text x="710" y="18" class="t-c t-sm t-b">(b) 预测 prefill 完成后的 decode 负载</text>
+    <line x1="40" y1="220" x2="460" y2="220" class="axis"/><line x1="40" y1="220" x2="40" y2="50" class="axis"/>
+    <line x1="500" y1="220" x2="920" y2="220" class="axis"/><line x1="500" y1="220" x2="500" y2="50" class="axis"/>
+    <line x1="40" y1="60" x2="460" y2="60" class="grid-ln"/><line x1="500" y1="60" x2="920" y2="60" class="grid-ln"/>
+    <text x="34" y="60" class="t-r t-xs">满</text><text x="34" y="220" class="t-r t-xs">0</text>
+    <line x1="145" y1="50" x2="145" y2="220" class="frame"/><line x1="250" y1="50" x2="250" y2="220" class="frame"/><line x1="355" y1="50" x2="355" y2="220" class="frame"/>
+    <text x="92" y="238" class="t-c t-xs">① 接收</text><text x="197" y="238" class="t-c t-xs">② 拒绝</text><text x="302" y="238" class="t-c t-xs">③ 接收</text><text x="407" y="238" class="t-c t-xs">④ 拒绝</text>
+    <path d="M40,172 C80,150 120,64 145,60 C170,64 210,180 250,188 C275,180 320,64 355,60 C380,64 430,170 460,185" style="fill:none;stroke:var(--c-act);stroke-width:2.5"/>
+    <path d="M40,190 L110,188 C130,180 160,72 200,64 C225,60 240,72 262,124 C282,172 320,182 340,170 C360,150 380,72 420,64 L460,62" style="fill:none;stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:7 4"/>
+    <path d="M500,172 C540,100 560,82 600,84 C640,86 680,80 720,84 C760,88 800,80 840,84 L920,84" style="fill:none;stroke:var(--c-act);stroke-width:2.5"/>
+    <path d="M500,190 C560,188 600,128 640,98 C680,90 720,94 760,92 C800,90 860,94 920,92" style="fill:none;stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:7 4"/>
+    <text x="710" y="238" class="t-c t-xs">一直在接收，两边都稳定在高负载</text>
+    <line x1="560" y1="262" x2="590" y2="262" style="stroke:var(--c-act);stroke-width:2.5"/><text x="596" y="262" class="t-xs">prefill 负载</text>
+    <line x1="700" y1="262" x2="730" y2="262" style="stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:7 4"/><text x="736" y="262" class="t-xs">decode 负载</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>纵轴是负载（0 到满载），横轴是时间。左图中绿线（prefill）和蓝色虚线（decode）交替冲高：① 两边都闲，大量接收，prefill 满载；② 这批请求进入 decode，decode 满载，于是拒绝新请求，prefill 闲下来；③ decode 的请求陆续完成而没有新的进来，decode 负载下降，又开始大量接收；④ 重复 ②。右图在接收时就预测“这些请求做完 prefill 时 decode 会有多忙”，接收速度被提前压住，两边都稳定在较高的负载上。本站示意图，对应 <a href="https://arxiv.org/html/2407.00079v5#S7.F10" target="_blank" rel="noopener">原文图 10 ↗</a>（原图本身也是理论示意，不是实测）；实测的振荡见 <a href="https://arxiv.org/html/2407.00079v5#S7.F9" target="_blank" rel="noopener">原文图 9 ↗</a>。</div>
+</div>
+<ol>
+  <li><b>阶段 1</b>：prefill 和 decode 的负载都很低，Conductor 大量接收请求，直到 prefill 实例满载。</li>
+  <li><b>阶段 2</b>：这些请求做完 prefill，进入 decode，decode 负载变高。Conductor 看到 decode 很忙，开始拒绝新请求，于是 prefill 的负载下降。</li>
+  <li><b>阶段 3</b>：没有新请求进入 decode，decode 的负载随着请求陆续完成而下降。Conductor 又开始大量接收，直到 prefill 再次满载。</li>
+  <li><b>阶段 4</b>：decode 负载再次升高，Conductor 再次拒绝，prefill 再次闲下来。</li>
+</ol>
+<p>两边轮流忙、轮流闲，整个集群的资源利用率就上不去。</p>
+
+<h4 id="n-7-4">7.4 基于预测的提前拒绝</h4>
+<p>解决办法是不看 decode 的当前负载，而是预测“新请求做完 prefill、真正进入 decode 时，decode 会有多忙”，再据此决定是否接收（原文图 10(b)）。这件事的核心是预测接下来一段时间的 decode 负载，作者讨论了两种粒度：</p>
+<ul>
+  <li><b>请求级预测</b>：预测每个请求会输出多少个 token。如果知道输出长度，就能比较准确地估计每个请求的 TTFT 和 TBT，进而算出某个时刻 decode 实例上有多少请求完成、多少新请求加入，得到那一刻的负载。但预测输出长度要么代价高（论文在这里引用的是 TetriInfer，它为此额外运行一个长度预测模型），要么不准；过载时资源本来就紧张，又最需要准确的预测，所以请求级预测特别难。</li>
+  <li><b>系统级预测</b>：不预测单个请求何时结束，只估计一段时间之后各 decode 实例上总的批大小或 TBT 状况。这种预测是持续滚动进行的，对精度要求低得多，更适合过载场景。</li>
+</ul>
+<p>Mooncake 目前用的是系统级预测，做法很朴素：假设每个请求的 decode 阶段都持续同样长的时间 \(t_d\)。对未来某个时刻 \(t\)：先把到 \(t\) 为止 prefill 实例能完成的请求加到 decode 实例上；再把到 \(t\) 为止 decode 时间已经超过 \(t_d\)、也就是会完成的请求移除；最后计算所有 decode 实例的平均 TBT 与 \(l_{tbt}\) 之比，作为预测的负载。请求级预测留作将来的工作。</p>
+<p>用一组示意数字看看两种规则的差别（为便于理解，把 decode 负载近似成“在跑请求数 ÷ 容量”，容量设为 400 个请求，\(t_d=30\) 秒，都是虚构的数字）：此刻 decode 上有 200 个请求，负载 50%；其中 60 个已经跑了 20 秒以上，10 秒内会完成；prefill 端正在处理的 260 个请求 10 秒内会做完 prefill。只看当前负载的规则看到 50%，会继续大量接收。预测规则估计 10 秒后 decode 上有 \(200-60+260=400\) 个请求，负载 100%，于是此刻就应该收紧接收。反过来，如果 decode 此刻 95% 满、但很多请求马上要完成，而 prefill 端几乎是空的，预测规则会继续接收，避免 prefill 白白闲着。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“每个请求 decode 时间都一样”是一个很粗的假设，在输出长度差异很大的负载里，误差会不小。论文没有报告预测的准确度，也没有给出采用预测之后的实测负载曲线（图 10 两张都是示意图），效果只体现在第 8 节过载实验的拒绝数上（本页 8.5）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 实验：和 vLLM 比，在什么条件下快、快多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>实验想证明三件事：在长上下文场景下，分离架构加缓存复用比当时主流的耦合式系统 vLLM 能扛更多请求；回放真实请求时，有更多请求能满足 SLO；过载时，提前拒绝能少浪费算力。这些结论是在什么模型、什么机器、什么负载、和什么配置的 vLLM 比出来的？每个数字到底是什么意思？</div>
+
+<h4 id="n-8-1">8.1 实验是怎么设计的</h4>
+<p><b>模型。</b>为了保护专有信息、也为了便于复现，论文的全部实验都用一个“替身模型”（dummy model）完成，它与 LLaMA2-70B 的结构相同。论文没有说它的权重是怎么来的；这类替身模型通常不关心输出内容，只保证计算量和 KV 缓存大小与真实模型一致。Kimi 实际使用的模型没有公开。</p>
+<p><b>机器。</b>每个节点 8 张 A800-SXM4-80GB，节点内用 NVLink 互联；节点之间用 RDMA 网卡，带宽最高 800 Gbps。每个节点按启动参数，要么跑一个 prefill 实例，要么跑一个 decode 实例。</p>
+<p><b>负载。</b>论文用了四类数据（原文表 2）：</p>
+<div class="table-wrap"><table>
+<tr><th>数据</th><th class="num">平均输入</th><th class="num">平均输出</th><th class="num">可复用比例</th><th>到达方式</th></tr>
+<tr><td>ArXiv Summarization（长论文摘要）</td><td class="num">8,088</td><td class="num">229</td><td class="num">约 0%</td><td>泊松过程</td></tr>
+<tr><td>L-Eval（长文本评测集）</td><td class="num">19,019</td><td class="num">72</td><td class="num">&gt; 80%</td><td>泊松过程</td></tr>
+<tr><td>模拟数据</td><td class="num">16k / 32k / 64k / 128k</td><td class="num">512</td><td class="num">50%</td><td>泊松过程</td></tr>
+<tr><td>真实数据（23,000 条线上请求）</td><td class="num">7,955</td><td class="num">194</td><td class="num">约 50%</td><td>按真实时间戳回放</td></tr>
+</table></div>
+<p>泊松过程是模拟“大量用户各自随机发请求”的标准做法（见 <a href="vllm.html#n-6-1">vLLM 精读 §6.1</a>），通过调节每秒请求数（RPS）来控制负载。</p>
+<p><b>指标。</b>论文关注的是“满足 SLO 时的吞吐”：在不同的 RPS 下测 TTFT 和 TBT 的 90% 分位数（P90），能在更高的 RPS 下仍然达标，就说明吞吐更高。达标线这样定：在最低的 RPS 下观察到的 TTFT 和 TBT，分别乘以 10 和 5。超过达标线就算违反 SLO，相应消耗的资源视为浪费。为了方便比较，所有 TTFT 和 TBT 都除以各自的达标线，于是图上的达标线统一是 1.0。</p>
+<p><b>基线。</b>对照系统是 vLLM：它有连续批处理和 PagedAttention，吞吐很高，但 prefill 和 decode 在同一组 GPU 上耦合执行，长上下文的 prefill 会打断正在进行的 decode。arXiv 版没有写 vLLM 的版本，也没有说是否打开了前缀缓存或 chunked prefill；会议版写明用的是 v0.5.1（当时的最新版），并把前缀缓存和 chunked prefill 两个功能分别单独测试（那个版本不能同时打开）。</p>
+<div class="note-pre"><b>先补一点背景：怎么读“归一化 P90 延迟—请求速率”的图。</b>
+<p>原文图 11、图 12 都是同一种画法：横轴是每秒到达的请求数，纵轴是 P90 TTFT 或 P90 TBT 除以达标线后的值，达标线是 1.0 处的虚线。请求少时曲线平稳地贴着底部；请求多到系统处理不过来，就开始排队，曲线急剧上翘。一个系统的“吞吐”就是它的 TTFT 和 TBT 两条曲线都还在 1.0 以下时的最大 RPS。要注意：实验只在几个离散的 RPS 上测量，所以这个“最大 RPS”只能精确到相邻两个测点之间。</p>
+</div>
+
+<h4 id="n-8-2">8.2 公开数据集：同样 4 台机器，多扛 20% 和 40%</h4>
+<p>基线是 4 个 vLLM 实例（vLLM-[4M]，每台机器一个实例）。Mooncake 用两种配置：3 台 prefill 加 1 台 decode（Mooncake-[3P+1D]），以及 2 台 prefill 加 2 台 decode（Mooncake-[2P+2D]）。三种配置都用 4 台机器、32 张 GPU，硬件数量是对齐的。</p>
+<p>结果（原文图 11）：在满足 SLO 的前提下，Mooncake-[3P+1D] 的吞吐在 ArXiv Summarization 上比 vLLM-[4M] 高 20%，在 L-Eval 上高 40%。L-Eval 上的提升更大，是因为这个数据集里超过 80% 的内容可以复用，Mooncake 的前缀缓存大幅减少了 prefill 时间。以 ArXiv Summarization 为例（从图上读出）：Mooncake-[3P+1D] 在 3.0 req/s 时 P90 TTFT 恰好落在达标线上（约 0.996），而 vLLM-[4M] 在 2.5 req/s 时 P90 TBT 已到 0.91，3.0 req/s 时 TTFT 超标，3.0 ÷ 2.5 = 1.2，与论文的 20% 一致。</p>
+<p>Mooncake-[2P+2D] 的 TBT 更低，但 TTFT 不如另外两种配置，原因是 prefill 和 decode 的负载不平衡：两台 prefill 机器处理长输入不够快，请求在 prefill 端排队。作者认为，真实集群里对 prefill 和 decode 的需求在一段时间内大体稳定，只有短暂的小幅失衡，所以两种实例的比例可以预先设定好；更灵活的部署和角色转换留待将来研究。</p>
+
+<h4 id="n-8-3">8.3 模拟的超长输入：+50% 到 +525% 是怎么来的</h4>
+<p>模拟数据的输入长度分别固定为 16k、32k、64k 和 128k token，输出 512 个 token，一半内容可以复用。集群配置同上。作者特别说明：模拟数据里的超长请求会严重打断 vLLM 的 decode，为此<b>让 vLLM 逐个处理请求，而不是组批</b>。Mooncake 照常组批，由于两阶段分离，prefill 几乎不影响 decode，TBT 始终没有超标。论文的结论是：在相同的 TTFT 和 TBT 约束下，Mooncake 的吞吐比 vLLM 高 50% 到 525%。</p>
+<p>论文没有说明每个百分比来自哪个输入长度。本站按原文图 12 的矢量坐标读出每个测点的归一化 P90 值，整理如下（括号里是达标前最后一个测点的归一化 P90 TTFT；所有 TBT 都在达标线以下）：</p>
+<div class="table-wrap"><table>
+<tr><th>输入长度</th><th>测量的请求速率（req/s）</th><th>vLLM-[4M] 最后达标</th><th>vLLM 首次超标</th><th>Mooncake-[3P+1D] 最后达标</th><th class="num">倍数</th></tr>
+<tr><td>16k</td><td>0.1, 0.2, 0.5, 1.0, 1.25, 1.5</td><td>0.2（0.53）</td><td>0.5</td><td>1.25（0.85）</td><td class="num">6.25（即 +525%）</td></tr>
+<tr><td>32k</td><td>0.1, 0.2, 0.5, 0.6</td><td>0.2（0.63）</td><td>0.5</td><td>0.6（0.89，已是最大测点）</td><td class="num">≥ 3</td></tr>
+<tr><td>64k</td><td>0.05, 0.1, 0.2, 0.3, 0.4</td><td>0.2（0.91）</td><td>0.3</td><td>0.3（0.89）</td><td class="num">1.5（即 +50%）</td></tr>
+<tr><td>128k</td><td>0.02, 0.05, 0.10, 0.11, 0.12, 0.14</td><td>0.12（0.76）</td><td>0.14</td><td>0.14（0.48，已是最大测点）</td><td class="num">≥ 1.17</td></tr>
+</table></div>
+<p>由此可以看出两件事。第一，<b>525% 来自 16k 这一组，而且受测点间隔影响很大</b>：vLLM 在 0.2 req/s 时还达标、在 0.5 req/s 时已超标，中间没有测点，所以它真实的上限在 0.2 到 0.5 之间的某处；用 0.2 来算，倍数是 1.25 ÷ 0.2 = 6.25，如果 vLLM 的真实上限是 0.4，倍数就只有约 3。第二，<b>50% 来自 64k 这一组</b>（0.3 ÷ 0.2）。128k 这一组按测点只能说明 Mooncake 至少高约 17%，论文没有说明这一组如何计入“50%–525%”的范围。另外要记住，这组实验里的 vLLM 是逐个处理请求的，这相当于放弃了组批带来的吞吐；它避免了 decode 被打断，代价是自身吞吐大幅下降。</p>
+
+<h4 id="n-8-4">8.4 回放真实请求：“多处理 75% 的请求”指的是什么</h4>
+<p>这组实验用 10 台 prefill 加 10 台 decode（Mooncake-[10P+10D]），对比 20 个 vLLM 实例（vLLM-[20M]），双方都是 20 台机器、160 张 A800。按真实时间戳回放 23,000 条线上请求，SLO 用的是固定上限：TTFT 不超过 30 秒，TBT 不超过每 token 0.1 秒。</p>
+<div class="dia">
+  <div class="dia-title">简化重画：回放真实请求时，每个请求 TBT 的累积分布</div>
+  <svg class="dg" viewBox="0 0 660 290" role="img" aria-label="Mooncake 与 vLLM 在真实请求回放中的 TBT 累积分布" style="max-width:660px">
+    <line x1="60" y1="230" x2="610" y2="230" class="axis"/><line x1="60" y1="230" x2="60" y2="30" class="axis"/>
+    <line x1="60" y1="40" x2="610" y2="40" class="grid-ln"/><line x1="60" y1="135" x2="610" y2="135" class="grid-ln"/>
+    <text x="52" y="40" class="t-r t-xs">100%</text><text x="52" y="135" class="t-r t-xs">50%</text><text x="52" y="230" class="t-r t-xs">0</text>
+    <text x="60" y="246" class="t-c t-xs">0</text><text x="150" y="246" class="t-c t-xs">0.1</text><text x="240" y="246" class="t-c t-xs">0.2</text><text x="330" y="246" class="t-c t-xs">0.3</text><text x="420" y="246" class="t-c t-xs">0.4</text><text x="510" y="246" class="t-c t-xs">0.5</text><text x="600" y="246" class="t-c t-xs">0.6</text>
+    <text x="335" y="270" class="t-c t-xs">每个请求的 TBT（秒）</text>
+    <line x1="150" y1="30" x2="150" y2="230" style="stroke:var(--c-loss);stroke-width:1.5;stroke-dasharray:4 3"/>
+    <text x="156" y="222" class="t-xs" style="fill:var(--c-loss)">SLO：0.1 秒</text>
+    <polyline points="96,220.5 97.8,211 104.1,182.5 116.7,135 127.5,87.5 133.8,59 142.8,49.5 146.4,41.9 168,40 610,40" style="fill:none;stroke:var(--c-act);stroke-width:2.5"/>
+    <polyline points="90.6,220.5 94.2,211 141,182.5 141,135 150.9,121.7 195.9,87.5 310.2,59 544.2,49.5 610,48.6" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <circle cx="150" cy="121.7" r="4" style="fill:var(--c-pred)"/><text x="160" y="117" class="t-xs" style="fill:var(--c-pred)">vLLM：约 57% 达标</text>
+    <circle cx="150" cy="40" r="4" style="fill:var(--c-act)"/><text x="176" y="32" class="t-xs" style="fill:var(--c-act)">Mooncake：约 100% 达标</text>
+    <text x="604" y="64" class="t-r t-xs" style="fill:var(--c-pred)">vLLM 约 5% 的请求超过 0.5 秒，P99 约 2 秒</text>
+    <line x1="460" y1="200" x2="484" y2="200" style="stroke:var(--c-act);stroke-width:2.5"/><text x="490" y="200" class="t-xs">Mooncake-[10P+10D]</text>
+    <line x1="460" y1="216" x2="484" y2="216" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="490" y="216" class="t-xs">vLLM-[20M]</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>纵轴是累积比例：曲线在某个横坐标处的高度，就是 TBT 不超过这个值的请求占比。红色虚线是 0.1 秒的 SLO。绿线（Mooncake）在 0.1 秒之前就几乎到顶；橙线（vLLM）在 SLO 处只有约 57%，之后拖着很长的尾巴。曲线由本站从原图读出的分位数连线而成：Mooncake 的 P50 / P90 / P99 约为 0.063 / 0.082 / 0.096 秒，vLLM 约为 0.09 / 0.28 / 1.96 秒。对应 <a href="https://arxiv.org/html/2407.00079v5#S8.F13" target="_blank" rel="noopener">原文图 13 ↗</a>（原图左半是 TTFT 的分布）。</div>
+</div>
+<p>结果（原文图 13）：两者的 TTFT 分布几乎一样，几乎 100% 的请求都在 30 秒内拿到第一个 token（从图上读出，两者的 TTFT 中位数都约 1 秒）。差别在 TBT：Mooncake 几乎 100% 的请求满足 0.1 秒的要求，而 vLLM 只有 57%，部分请求的 TBT 极高。论文据此写道：在这个实验里，Mooncake 能在满足 SLO 的同时多处理约 75% 的请求。</p>
+<p>论文没有写这个 75% 是怎么算的。最自然的解读是：在同样的回放负载下，Mooncake 约 100% 的请求达标，vLLM 约 57% 达标，\(100\% \div 57\% \approx 1.75\)，即达标请求多约 75%（本站推算）。也就是说，这个数字是“同一负载下达标请求数之比”，而不是像 8.2、8.3 那样扫描请求速率、找出各自能扛的最大负载之后的比值。</p>
+
+<h4 id="n-8-5">8.5 过载场景：少拒绝约 10%–14% 的请求</h4>
+<p>这组实验用 8 台 prefill 加 8 台 decode，回放 23,000 条真实请求，并把回放速度加快到 2 倍来制造过载。对照的基线策略在两个阶段开始前分别按各自的负载做决定，于是会出现“prefill 做完后又被 decode 拒绝”的浪费。三种策略被拒的请求数如下（原文表 3）：</p>
+<div class="dia">
+  <div class="dia-title">原文表 3：2 倍速回放时被拒绝的请求数</div>
+  <div class="dia-row"><span class="lbl">基线</span><div class="dia-track"><span class="dia-seg frag" style="flex:4183">4,183</span><span class="dia-seg" style="flex:100"></span></div></div>
+  <div class="dia-row"><span class="lbl">提前拒绝</span><div class="dia-track"><span class="dia-seg res" style="flex:3771">3,771（−9.8%）</span><span class="dia-seg" style="flex:512"></span></div></div>
+  <div class="dia-row"><span class="lbl">基于预测的提前拒绝</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3589">3,589（−14.2%）</span><span class="dia-seg" style="flex:694"></span></div></div>
+  <div class="dia-note">括号里的降幅为本站推算。按约 23,000 条请求计，被拒比例从约 18.2% 降到约 16.4% 和约 15.6%（推算）。对应 <a href="https://arxiv.org/html/2407.00079v5#S8.T3" target="_blank" rel="noopener">原文表 3 ↗</a>。</div>
+</div>
+<p>作者的解读是：提前拒绝避免了不必要的 prefill 计算，提高了资源的有效利用；再加上对 decode 负载的预测，缓解了负载振荡，系统能接收的请求进一步增加。</p>
+<div class="note-warn"><b>这组实验只报告了被拒绝的请求数。</b>它没有给出被接收的请求是否都满足了 SLO、省下了多少 GPU 时间、预测的误差有多大。被拒请求数的下降可以理解为“同样的资源多服务了约 2%–3% 的总请求”（推算），这个改进是真实的，但幅度远小于前面几组实验的倍数。</div>
+
+<h4 id="n-8-6">8.6 结果的份量</h4>
+<p>把上面的实验放在一起，可以这样理解这些数字：</p>
+<ul>
+  <li><b>哪些是生产数据。</b>arXiv 版里来自线上的只有两样：公开的一小时请求 trace，以及图 9 中一个 20 台机器集群 20 分钟的负载曲线。其余所有数字都来自测试集群上的回放或模拟，用的是替身模型。摘要里“在真实负载下让 Kimi 多处理 75% 的请求”，指的是 8.4 节那次回放实验，而不是线上 A/B 测试。真正的生产统计只出现在会议版和期刊版：与此前基于 vLLM 的系统相比，Kimi 在 A800 和 H800 集群上分别多处理 115% 和 107% 的请求；这个数字被描述为“历史统计”，没有给出统计方法、时间段和比较条件。</li>
+  <li><b>模型。</b>全部实验用结构与 LLaMA2-70B 相同的替身模型（会议版换成 LLaMA3-70B 结构）。它的 KV 缓存每 token 约 320 KB（GQA，8 个 KV 头）。KV 缓存更大的模型，传输和存储的压力更大；KV 缓存更小的模型（例如用 MLA 压缩 KV 的 DeepSeek 系列），同样容量能缓存更多 token。所以缓存命中率、所需带宽这些结论都和模型结构挂钩。</li>
+  <li><b>硬件。</b>对比双方用的机器类型和数量相同（4 对 4、20 对 20），这一点是对齐的。但测试集群的节点间带宽高达 800 Gbps，属于高配网络。会议版的实验表明，总带宽低于 100 Gbps 时，Mooncake 的 TTFT 会明显变差（第 10 节）。在普通以太网的集群上，这些收益不能直接照搬。</li>
+  <li><b>基线。</b>arXiv 版的 vLLM 没有写版本，也没有说明是否开启前缀缓存和 chunked prefill；在模拟数据实验中，vLLM 还被设置成逐个处理请求。因此“比 vLLM 快”主要衡量的是“分离 + 全局缓存”相对于“耦合 + 无跨实例缓存”的差距，而不是相对于当时最强方案的差距。同期的 DistServe、Splitwise、Sarathi-Serve 和 SGLang 都没有出现在对比里。会议版补充了开启前缀缓存或 chunked prefill 的 vLLM v0.5.1 作为基线，结论方向不变。</li>
+  <li><b>指标。</b>8.2 和 8.3 用的是相对 SLO（最低负载时延迟的 10 倍和 5 倍）和 P90，并在稀疏的请求速率测点上比较，所以百分比有明显的“台阶”：525% 对应的是 1.25 req/s 对 0.2 req/s。8.4 用固定 SLO，报告的是同一负载下达标请求的比例之比。几组数字的定义不同，不能直接互相比较。</li>
+  <li><b>各个部件的贡献。</b>arXiv 版没有消融实验把 PD 分离、全局缓存、分块流水线并行、逐层 prefill 的贡献分开；只有图 8 单独比较了调度策略。会议版增加了“全局缓存 vs 本机缓存”的对比。</li>
+  <li><b>没有公开的。</b>Kimi 的模型和线上 SLO、集群规模（会议版只说“数千个节点”）、流水线组的节点数和分块大小、复制阈值、各个预测器的误差、成本和功耗。期刊版后来透露，线上的缓存命中率最高约 50%，后来在高峰期跌到 20% 以下；他们引入分层存储和按语义淘汰之后，离线分析显示命中率可以从 27% 提高到 52%（第 10 节）。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 相关工作、未来方向与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Mooncake 和同期的 PD 分离、前缀缓存、分层 KV 存储工作是什么关系？作者认为接下来还能沿着“分离”这条路走多远？</div>
+<p><b>相关工作。</b>作者把已有工作分成几类。一是生产级推理系统，如 FasterTransformer、TensorRT-LLM、DeepSpeed Inference，主要靠优化计算提高吞吐。二是调度与内存管理：Orca 提出迭代级调度，vLLM 提出动态的 KV 缓存管理，FlexGen、SARATHI、FastServe 则用调度和换出策略在有限硬件上分摊负载。作者特别致谢 vLLM 的开源社区，Mooncake 的设计在很大程度上建立在 vLLM 之上。</p>
+<p>三是 PD 分离。作者说，Splitwise 的 arXiv 版发表时，Mooncake 还处在早期开发阶段，这篇论文进一步推动了他们的工作；DistServe（为两个阶段分别优化资源分配和并行策略，最大化每张 GPU 的 goodput）和 TetriInfer（把 chunked prefill 与两阶段分离结合，并用预测式的两阶段调度）是同期的工作，结论互相印证。PD 分离的来龙去脉见 <a href="distserve.html">DistServe 精读</a> 和 <a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离拆解页</a>。</p>
+<p>四是前缀缓存。Prompt Cache 预先计算并存储常用文本的 KV 缓存；SGLang 的 RadixAttention 用基数树加 LRU 自动发现各种复用模式。与 Mooncake 最接近的是同期的 AttentionStore（后来以 CachedAttention 为名发表在 USENIX ATC 2024），它用更便宜的内存和存储介质为所有请求分层保存 KV 缓存，与 Mooncake 有很多相同的设计选择。作者强调的区别是：长上下文推理中 KV 缓存极大，需要大容量、高效传输，以及以 KV 缓存为中心的全局调度；Mooncake 不是一个独立的缓存服务，而是把节省内存的缓存存储和缓存感知的调度结合在一起。</p>
+<p>作者还提到，Preble 等工作开始研究“提示词的调度”，本质上也是以 KV 缓存为中心的调度，Mooncake 印证了其中的很多结论。但他们发现，线上 trace 里真实的可复用比例比开源基准测出来的小得多：即使假设存储容量和 TTFT 的 SLO 都是无限的，当前负载里最多也只有 55% 的 KV 缓存可以复用。这个比例高度依赖应用场景，在某些场景下（例如他们的论文对话服务 papers.cool）可以高达 90%。作者最后再次强调，需要的是受 SLO 约束、面向过载的调度，而不只是追求吞吐的调度。</p>
+
+<p><b>未来方向。</b>作者认为，把推理服务的不同部分拆到专门的资源池，是 Mooncake 资源利用率高的关键，并打算沿这条路继续走：</p>
+<ul>
+  <li><b>异构加速器。</b>旗舰 GPU 要在算力、显存带宽、显存容量之间兼顾，每一项都不是最优。如果只看“每美元的带宽”或“每瓦的带宽”，GDDR 甚至 LPDDR 方案可能比旗舰加速器好一个数量级。作者也看好存内计算（PIM）和混合键合（hybrid bonding）等技术做成的“高带宽、大容量”的存储型器件，它们正适合 decode 阶段那些受带宽限制的运算。</li>
+  <li><b>把注意力单独拆出去。</b>在同时有“算力型”和“带宽型”加速器的环境里，可以把 decode 阶段的注意力和其他线性层分开放（见下框）。作者引用了自己的初步模拟结果（attention offloading），认为这种架构能大幅提高总吞吐；他们也指出，DeepSeek-V2 提出的 MLA 直接提高了注意力的算术强度，是从另一个方向解决同一个问题。</li>
+  <li><b>缩小 KV 缓存。</b>压缩 KV、按重要性挑选 token、跨层共享 KV、用不需要 KV 缓存的混合架构等方法，都能同时帮到 Mooncake 的两个方面：批可以开得更大，缓存命中率也更高。</li>
+  <li><b>调度。</b>支持不同优先级、不同 TTFT/TBT SLO 的请求；针对部分命中和过期的缓存设计专门的复制、迁移和淘汰策略；动态平衡 prefill 和 decode 实例的数量；在负载低谷时用空闲资源跑批处理任务。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：为什么 decode 阶段的注意力“组批也救不了”。</b>
+<p>算术强度是“每从显存读 1 个字节做多少次浮点运算”。线性层的权重被批里所有请求共用：批越大，读一次权重能做的运算越多，算术强度随批大小增长。注意力不同：每个请求读的是<b>它自己的</b> KV 缓存，批里多一个请求，只是多读一份 KV、多做一份对应的运算，比值不变。在一份 KV 上能做多少运算，只取决于有几个 query 头共用同一个 KV 头，也就是“query 头数 ÷ KV 头数”。LLaMA2-70B 是 64 ÷ 8 = 8，量级上只有每字节几次运算，远低于 A800 的平衡点（约 312 TFLOPS ÷ 2 TB/s ≈ 150 次/字节，推算），所以注意力一定受带宽限制。MLA 让所有头共享同一份压缩后的潜在向量（见 <a href="deepseek-v3.html#n-2-1">DeepSeek-V3 精读 §2.1.1</a>），读一份数据可以服务全部头，算术强度因此大幅提高。</p>
+</div>
+<p><b>结论。</b>论文的总结很简短：Mooncake 是一个以 KV 缓存为中心的分离式推理服务架构，特别针对长上下文和过载场景；论文讨论了在“最大化有效吞吐”和“满足延迟 SLO”之间取得平衡所涉及的必要性、挑战和设计选择。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2407.00079v5#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a> · <a href="https://arxiv.org/html/2407.00079v5#S10" target="_blank" rel="noopener">§10 ↗</a> · <a href="https://arxiv.org/html/2407.00079v5#S11" target="_blank" rel="noopener">§11 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 会议版与期刊版：标题换了，内容多了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>同一个系统有三个公开版本：arXiv 技术报告、FAST 2025 会议论文、ACM Transactions on Storage 期刊论文。它们是什么关系？会议版和期刊版多讲了哪些 arXiv 版没讲的内容，为什么它们的数字和前面几节不一样？这一节按会议版和期刊版的原文整理，链接在每小节末尾。</div>
+
+<h4 id="n-10-1">10.1 三个版本的关系</h4>
+<div class="table-wrap"><table>
+<tr><th>版本</th><th>时间</th><th>标题</th><th>作者</th><th>主要内容</th></tr>
+<tr><td>arXiv v1</td><td>2024-06-24</td><td>Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving</td><td>7 人（页首所列）</td><td>技术报告首版；还没有“公开 trace”一节</td></tr>
+<tr><td>arXiv v3</td><td>2024-07-09</td><td>同上</td><td>同上</td><td>加入第 4 节公开 trace；本页 §1–§9 的内容与它相同</td></tr>
+<tr><td>FAST 2025</td><td>2025-02</td><td>Mooncake: Trading More Storage for Less Computation — A KVCache-centric Architecture for Serving LLM Chatbot</td><td>9 人：增加 Jialei Cui（月之暗面）、Feng Ren（清华）</td><td>最佳论文。大幅重写：增加“用存储换计算”的带宽分析、Mooncake Store 与传输引擎、全新的实验（替身 LLaMA3-70B、vLLM v0.5.1 基线）；去掉了过载调度一节</td></tr>
+<tr><td>ACM TOS</td><td>2025（DOI 10.1145/3773772）</td><td>与 arXiv 版同名</td><td>13 人：再增加 Heyi Tang（月之暗面）、Teng Ma 与 Shangming Cai（阿里云）、Yineng Zhang（独立研究者）</td><td>合并会议版与 arXiv 版的过载调度，新增生产中的经验教训与开源集成；以 CC BY 4.0 发布</td></tr>
+<tr><td>arXiv v4 / v5</td><td>2025-09 / 2026-10</td><td>与 arXiv 版同名</td><td>7 人</td><td>正文仍是 v3；v4 修正了一些错别字，v5 更正了 trace 的统计数字</td></tr>
+</table></div>
+<p>所以“Mooncake 论文”的数字要看出处：arXiv 版说 525% 和 75%，会议版和期刊版说 59%–498%、115% 和 107%。它们来自不同的替身模型、不同的 trace、不同的基线配置和不同的指标定义，不能混在一起比较。</p>
+
+<h4 id="n-10-2">10.2 “用存储换计算”的一笔账</h4>
+<p>会议版新增了一段分析，回答一个根本问题：从别处搬来 KV 缓存，到底什么时候比在本地重算更快？已有的前缀缓存方案大多只把缓存放在本机的显存和内存里，默认全局调度需要的传输带宽高得不现实。会议版的分析是这样的。设模型有 \(l\) 层、隐藏维度 \(d\)，输入长 \(n\)，prefill 的浮点运算量近似为</p>
+<div class="formula">$$\mathrm{flops}(n)=l\times\left(a\,n^{2}d+b\,n\,d^{2}\right)$$</div>
+<p>其中第一项是注意力（随 \(n^2\) 增长），第二项是线性层（随 \(n\) 增长），\(a\)、\(b\) 是常数（会议版取 4 和 22）。如果新请求长 \(n\) 的输入里，前 \(p\) 个 token 能命中缓存，就能省下约 \(l\times(a\,p^{2}d+b\,p\,d^{2})\) 次运算；代价是把这 \(p\) 个 token 的 KV 缓存搬进显存，共 \(p\times l\times(2d/gqa)\times s\) 字节，其中 \(gqa\) 是 query 头数与 KV 头数之比，\(s\) 是每个数的字节数。设 GPU 的平均计算速度为 \(G\)，KV 缓存的平均载入带宽为 \(B\)（取主机到显存带宽和网卡带宽二者中较小的那个），那么“搬比算快”的条件是：</p>
+<div class="formula">$$\frac{B}{G}>\frac{2\,d\,s}{gqa\times\left(a\,p\,d+b\,d^{2}\right)}$$</div>
+<p>会议版按 LLaMA3-70B（\(l=80\)、\(d=8192\)、\(gqa=8\)、BF16 即 \(s=2\)）和 8 卡 A800（\(G=8\times312\) TFLOPS）代入，取 \(p=8192\)，得到所需的最低带宽 \(B\) 约为 6 GB/s；换成 8 卡 H800，算力更强，要求提高到约 19 GB/s。本站按同样的参数验算：右边约为 \(2.35\times10^{-6}\)，乘以 \(G\approx2.5\times10^{15}\) 得约 5.9 GB/s；把 \(G\) 换成 \(8\times989\) TFLOPS（H800 的 BF16 稠密峰值）得约 18.6 GB/s，与原文一致（推算）。</p>
+<p>这个不等式说明了两件事。第一，\(d\) 越大（模型越大），右边越小，条件越容易满足，所以“用存储换计算”对大模型更划算。第二，前缀 \(p\) 越长，右边也越小，因为省下的注意力计算随 \(p^2\) 增长，而要搬的数据只随 \(p\) 线性增长。现实中传输不能和计算完美重叠，实际需要的带宽还要更高；会议版的结论是，每台 A800 服务器有一张被充分利用的 100 Gbps 网卡（约 12.5 GB/s）就足以满足。</p>
+
+<h4 id="n-10-3">10.3 Mooncake Store 与传输引擎</h4>
+<p>arXiv 版只用一句话提到的“分布式 KV 缓存池”，在会议版里有了名字：<b>Mooncake Store</b>。它的要点如下：</p>
+<ul>
+  <li><b>存储方式。</b>所有 KV 缓存都以分页块的形式存在分布式缓存池里。块的大小（每块多少 token）由模型大小和网络传输的最佳粒度决定，通常在 16 到 512 之间。每个块的哈希键同样包含前缀信息，用于去重；同一个键可以在不同节点上有多个副本，以降低热门缓存的访问延迟，副本数由 §6.2 的缓存均衡策略控制。缓存池满了，就用 LRU 淘汰一个块，除非它正被某个进行中的请求使用。</li>
+  <li><b>接口。</b>上层是面向对象的接口，如 put、get、change_replica，Conductor 可以借此调整每个块的副本数，以聚合更多带宽。下层是一组同步的批量传输接口：先登记要用的内存区域，再分配一个批次、提交一批传输请求、查询每个请求的状态，最后释放批次。显存和 CPU 内存都可以作为传输的源和目标；内存区域事先登记过时，会在合适的情况下直接用 GPUDirect RDMA。</li>
+  <li><b>为什么要自己写传输引擎。</b>测试用的是标准 HGX 服务器：每张 A800 配一张 100/200 Gbps 网卡，每张 H800 配一张 200/400 Gbps 网卡，总带宽已与内存带宽相当。作者说，除 NCCL 之外的现有库都跑不满这么高的带宽；而 NCCL 是为集合通信设计的，无法优雅地应对节点或网卡的增减，也不支持 CPU 内存到 CPU 内存的传输路径。</li>
+</ul>
+<p><b>传输引擎</b>有三个目标：把传输任务分散到多张 RDMA 网卡上；对上层隐藏 RDMA 连接管理的复杂性；妥善处理暂时的网络故障。对应的三项设计是：</p>
+<div class="dia">
+  <div class="dia-title">示意图：按拓扑选择网卡，再把一次传输切片分散到多张网卡上</div>
+  <svg class="dg" viewBox="0 0 960 310" role="img" aria-label="传输引擎的拓扑感知路径选择" style="--dg-min:720px">
+    <rect class="frame" x="10" y="20" width="470" height="210" rx="10"/>
+    <text x="22" y="38" class="t-sm t-b">本地节点</text>
+    <g class="reg"><rect class="box" x="30" y="50" width="200" height="40" rx="6"/></g>
+    <text x="130" y="64" class="t-c t-sm">CPU 0 + 内存</text><text x="130" y="80" class="t-c t-xs">buffer 0 在这里（cpu:0）</text>
+    <rect class="box" x="260" y="50" width="200" height="40" rx="6"/>
+    <text x="360" y="70" class="t-c t-sm">CPU 1 + 内存（cpu:1）</text>
+    <line x1="230" y1="70" x2="260" y2="70" style="stroke:var(--text-3);stroke-width:1.5;stroke-dasharray:4 3"/>
+    <text x="245" y="104" class="t-c t-xs">跨 CPU 互联</text>
+    <rect class="box" x="30" y="122" width="200" height="26" rx="5"/><text x="130" y="135" class="t-c t-xs">PCIe 交换机</text>
+    <rect class="box" x="260" y="122" width="200" height="26" rx="5"/><text x="360" y="135" class="t-c t-xs">PCIe 交换机</text>
+    <line x1="130" y1="90" x2="130" y2="122" class="edge no-head"/><line x1="360" y1="90" x2="360" y2="122" class="edge no-head"/>
+    <g class="act"><rect class="box" x="30" y="172" width="46" height="30" rx="4"/><rect class="box" x="80" y="172" width="46" height="30" rx="4"/></g>
+    <g class="enc"><rect class="box" x="134" y="172" width="46" height="30" rx="4"/><rect class="box" x="184" y="172" width="46" height="30" rx="4"/></g>
+    <rect class="box" x="260" y="172" width="46" height="30" rx="4"/><rect class="box" x="310" y="172" width="46" height="30" rx="4"/>
+    <g class="enc"><rect class="box" x="364" y="172" width="46" height="30" rx="4"/><rect class="box" x="414" y="172" width="46" height="30" rx="4"/></g>
+    <text x="53" y="187" class="t-c t-xs">mlx5_0</text><text x="103" y="187" class="t-c t-xs">mlx5_1</text><text x="157" y="187" class="t-c t-xs">cuda:0</text><text x="207" y="187" class="t-c t-xs">cuda:1</text>
+    <text x="283" y="187" class="t-c t-xs">mlx5_2</text><text x="333" y="187" class="t-c t-xs">mlx5_3</text><text x="387" y="187" class="t-c t-xs">cuda:2</text><text x="437" y="187" class="t-c t-xs">cuda:3</text>
+    <line x1="53" y1="148" x2="53" y2="172" class="edge no-head"/><line x1="103" y1="148" x2="103" y2="172" class="edge no-head"/><line x1="157" y1="148" x2="157" y2="172" class="edge no-head"/><line x1="207" y1="148" x2="207" y2="172" class="edge no-head"/>
+    <line x1="283" y1="148" x2="283" y2="172" class="edge no-head"/><line x1="333" y1="148" x2="333" y2="172" class="edge no-head"/><line x1="387" y1="148" x2="387" y2="172" class="edge no-head"/><line x1="437" y1="148" x2="437" y2="172" class="edge no-head"/>
+    <text x="245" y="220" class="t-c t-xs">绿色 = buffer 0 的首选网卡（与它同在 CPU 0 一侧）；其余网卡只在故障时备用</text>
+    <rect class="frame" x="520" y="20" width="430" height="210" rx="10"/>
+    <text x="532" y="38" class="t-sm t-b">远端节点</text>
+    <rect class="box" x="540" y="50" width="180" height="40" rx="6"/><text x="630" y="70" class="t-c t-sm">CPU 0 + 内存</text>
+    <g class="reg"><rect class="box" x="740" y="50" width="190" height="40" rx="6"/></g>
+    <text x="835" y="64" class="t-c t-sm">CPU 1 + 内存</text><text x="835" y="80" class="t-c t-xs">buffer 1 在这里（cpu:1）</text>
+    <rect class="box" x="740" y="122" width="190" height="26" rx="5"/><text x="835" y="135" class="t-c t-xs">PCIe 交换机</text>
+    <line x1="835" y1="90" x2="835" y2="122" class="edge no-head"/>
+    <g class="act"><rect class="box" x="740" y="172" width="44" height="30" rx="4"/><rect class="box" x="788" y="172" width="44" height="30" rx="4"/></g>
+    <g class="enc"><rect class="box" x="838" y="172" width="44" height="30" rx="4"/><rect class="box" x="886" y="172" width="44" height="30" rx="4"/></g>
+    <text x="762" y="187" class="t-c t-xs">mlx5_2</text><text x="810" y="187" class="t-c t-xs">mlx5_3</text><text x="860" y="187" class="t-c t-xs">cuda:2</text><text x="908" y="187" class="t-c t-xs">cuda:3</text>
+    <line x1="762" y1="148" x2="762" y2="172" class="edge no-head"/><line x1="810" y1="148" x2="810" y2="172" class="edge no-head"/><line x1="860" y1="148" x2="860" y2="172" class="edge no-head"/><line x1="908" y1="148" x2="908" y2="172" class="edge no-head"/>
+    <g class="reg"><rect class="box" x="10" y="250" width="940" height="44" rx="8"/></g>
+    <text x="480" y="266" class="t-c t-sm">RDMA 网络（RoCEv2）</text>
+    <text x="480" y="284" class="t-c t-xs">一次传输被切成 16 KB 的片，不同的片可以走不同的网卡对，让所有网卡一起工作</text>
+    <line x1="53" y1="202" x2="53" y2="248" class="edge act" style="stroke:var(--c-act);marker-end:url(#ah-act)"/>
+    <line x1="103" y1="202" x2="103" y2="248" class="edge act" style="stroke:var(--c-act);marker-end:url(#ah-act)"/>
+    <line x1="762" y1="248" x2="762" y2="204" class="edge act" style="stroke:var(--c-act);marker-end:url(#ah-act)"/>
+    <line x1="810" y1="248" x2="810" y2="204" class="edge act" style="stroke:var(--c-act);marker-end:url(#ah-act)"/>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>每台服务器有两个 CPU 插槽，各自挂着一个 PCIe 交换机，交换机下面是网卡（mlx5_x）和 GPU（cuda:x）。数据如果从 CPU 0 的内存出发、却走挂在 CPU 1 一侧的网卡，就要穿过跨 CPU 的互联和另一个 PCIe 交换机，带宽受限。传输引擎按“拓扑矩阵”为每块内存挑选同侧的首选网卡，两端各自挑好之后建立连接。本站示意图，对应会议版图 4。</div>
+</div>
+<ul>
+  <li><b>拓扑感知的路径选择。</b>一台推理服务器通常有多个 CPU 插槽、多块内存、多张 GPU 和多张 RDMA 网卡。从技术上说，任何一张网卡都能把本机任何一块内存的数据发出去，但如果路径要穿过跨 CPU 的互联（UPI）或别的 PCIe 交换机，就会被那里的带宽卡住。所以每台服务器在开始服务前生成一个拓扑矩阵并广播给整个集群：对每一类内存（例如 cpu:0、cuda:0），列出“首选”和“次选”网卡。正常情况下只用首选网卡，即同一个 NUMA 节点上的网卡，或者与 GPU 挂在同一个 PCIe 交换机下、可以做 GPUDirect RDMA 的网卡；出故障时才动用次选网卡。会议版的例子是：要把本地 cpu:0 上的 buffer 0 传到远端 cpu:1 上的 buffer 1，本地选 cpu:0 的首选网卡 mlx5_1，远端选 cpu:1 的首选网卡 mlx5_3，然后建立 mlx5_1 到 mlx5_3 的 RDMA 连接。为了进一步用满带宽，一次传输在内部被切成 16 KB 的片，不同的片可以走不同的路径。</li>
+  <li><b>连接管理。</b>一对“本地网卡、远端网卡”之间的连接用一对端点表示，每个端点包含一个或多个 RDMA 队列对。连接按需建立，第一次有请求时才配对。为了防止端点太多拖慢处理，传输引擎用端点池限制活跃连接的上限，并用 SIEVE 算法决定淘汰哪个端点。连接因链路错误失效时，两端都把它从池里移除，下次传输时再重建。</li>
+  <li><b>故障处理。</b>多网卡环境里常见的故障是某一张网卡暂时不可用，而两台机器之间还有别的路可走。传输引擎发现某条连接不可用时，会自动找另一条可达的路径，把请求重新提交到另一张网卡；它也能发现 RDMA 上下文、完成队列等资源的问题，在问题解决之前暂时避开它们。</li>
+</ul>
+<p><b>传输速度。</b>会议版用并发度 64、最小传输粒度 128 KB，把传输引擎和 PyTorch 的 torch.distributed（Gloo 后端）以及普通 TCP 传输比较。传输 40 GB 数据（相当于 LLaMA3-70B 一个 128k token 请求的 KV 缓存）时，传输引擎在 4 × 200 Gbps 和 8 × 400 Gbps 两种网络配置下分别达到 87 GB/s 和 190 GB/s，约为 TCP 的 2.4 倍和 4.6 倍。按网卡的标称总带宽（100 GB/s 和 400 GB/s）算，利用率分别约 87% 和 48%（推算）。作者说，这个传输引擎是一个独立的基础工具，月之暗面的检查点传输服务也在用它。</p>
+<p class="note-links"><a href="https://www.usenix.org/system/files/fast25-qin.pdf" target="_blank" rel="noopener">会议版 PDF（§2.2、§3.2）↗</a></p>
+
+<h4 id="n-10-4">10.4 会议版的新实验与新数字</h4>
+<p><b>设置。</b>每个节点 8 张 A800-SXM4-80GB，加 4 张 200 Gbps 的 RDMA 网卡；Mooncake Store 的块大小设为 256 token；替身模型换成 LLaMA3-70B 的结构。基线是 vLLM v0.5.1 的三种用法：普通、开启前缀缓存、开启 chunked prefill；每个系统都用 16 个节点。指标也换了：每个请求的 TBT 定义为它最长的 10% 个 token 间隔的平均值；TTFT 上限 30 秒，TBT 上限按场景取 100、200、300 毫秒（论文称阈值 I、II、III）；两项都达标的请求叫“有效请求”，有效请求占全部请求的比例叫“有效请求容量”。</p>
+<p><b>负载。</b>三份 trace 都已公开：</p>
+<div class="table-wrap"><table>
+<tr><th>负载</th><th class="num">平均输入</th><th class="num">平均输出</th><th class="num">前缀缓存比例</th><th>到达方式</th><th class="num">请求数</th></tr>
+<tr><td>对话（Conversation）：从线上推理集群采样的一小时多轮对话</td><td class="num">12,035</td><td class="num">343</td><td class="num">40%</td><td>按时间戳</td><td class="num">12,031</td></tr>
+<tr><td>工具与智能体（Tool&amp;Agent）：带很长的固定系统提示</td><td class="num">8,596</td><td class="num">182</td><td class="num">59%</td><td>按时间戳</td><td class="num">23,608</td></tr>
+<tr><td>合成（Synthetic）：ShareGPT、L-Eval、LooGLE 按 1:1:1 混合</td><td class="num">15,325</td><td class="num">149</td><td class="num">66%</td><td>泊松过程</td><td class="num">3,993</td></tr>
+</table></div>
+<p><b>主要结果。</b></p>
+<ul>
+  <li><b>对话负载</b>（会议版图 1）：按图中标注的位置，在三个 TBT 阈值处分别是 +498%（100 ms）、+157%（200 ms）、+59%（300 ms），正文没有逐一说明每个百分比相对的是哪条 vLLM 曲线；摘要据此写作“有效请求容量提高 59%–498%”。正文解释说，这类负载输入长短不一、输出较长，vLLM 的长 prefill 让 TBT 剧烈波动；chunked prefill 能减少干扰，但很难同时兼顾 prefill 的 MFU 和 decode 的 TBT。阈值越严，Mooncake 的优势越大。</li>
+  <li><b>工具与智能体负载</b>：前缀复用比例高、输出短，对 vLLM 相对有利。在 200 ms 阈值下，Mooncake 比开启前缀缓存的 vLLM 多 42%，靠的是全局缓存池更大的容量和跨节点的缓存迁移。</li>
+  <li><b>合成负载</b>：平均输入最长、缓存热点分散。Mooncake 处理的大多数请求 TBT 在 100 ms 以内，而 vLLM 约有 20% 的请求超过 300 ms；在 200 ms 阈值下，Mooncake 比 vLLM 多 40%。</li>
+  <li><b>prefill 的 GPU 时间</b>：与 vLLM 相比，Mooncake 在三种负载上分别减少 36%、53%、64%。开启前缀缓存的 vLLM（缓存只在本机显存）在对话和工具负载上的 prefill GPU 时间是 Mooncake 的 1.43 倍和 1.40 倍，在热点分散的合成负载上与普通 vLLM 几乎一样，是 Mooncake 的 2.59 倍；开启 chunked prefill 的 vLLM 牺牲了 prefill 效率，是 Mooncake 的 1.90、2.68、3.33 倍。</li>
+  <li><b>全局缓存 vs 本机缓存</b>：LLaMA3-70B 每 token 的 KV 缓存为 320 KB，即使每台机器留出约 1 TB 内存，也只能存约 300 万 token；在大多数负载下，这只能达到理论最高命中率的不到一半，而要接近理论上限需要约 5,000 万 token 的容量，相当于至少 20 个节点的内存。在 10 个 prefill 节点、所有请求只输出 1 个 token（排除 decode 的影响）的实验中，全局缓存的命中率最多是本机缓存的 2.36 倍，prefill 计算时间最多减少 48%。</li>
+  <li><b>带宽需求</b>：把网络带宽从 24 Gbps 模拟到 400 Gbps，总带宽超过 100 Gbps 时，合成负载的平均 TTFT 保持在 2 秒以下，远低于全部重算的基线；低于 100 Gbps 时，TTFT 急剧上升，实际传输时间明显偏离理论值，说明网络发生了拥塞。作者因此建议至少 100 Gbps。</li>
+  <li><b>延迟分解</b>：输入 128k、前缀缓存比例 95% 时，前缀缓存让 prefill 时间减少 92%；算上调度、传输、载入等额外开销，TTFT 仍减少 86%。</li>
+  <li><b>P/D 比例</b>：16 个节点、合成负载、TTFT 10 秒与 TBT 100 ms 的阈值下，prefill 与 decode 节点数约 1:1 时有效请求容量最高。会议版说线上流量的统计特征通常是稳定的，所以他们固定这个比例、持续监控，只在负载大幅波动时才切换节点的角色。</li>
+  <li><b>生产统计</b>：Mooncake 运行在数千个节点上，每天处理超过 1,000 亿 token；按历史统计，与此前基于 vLLM 的系统相比，Kimi 在 A800 和 H800 集群上分别能多处理 115% 和 107% 的请求。</li>
+</ul>
+<div class="note-warn"><b>读的时候要注意：</b>会议版的“有效请求容量”是在固定负载下的达标比例，和本页 8.2、8.3 讲的 arXiv 版“扫描请求速率找上限”的吞吐不是同一种量；+498% 这类大数字出现在最严的 TBT 阈值下，这时 vLLM 只有很少一部分请求达标，任何比例都会被放大。“115% / 107%”是生产历史统计，比较的“此前的系统”具体是什么配置、在什么时间段统计，论文都没有说明。</div>
+<p class="note-links"><a href="https://www.usenix.org/system/files/fast25-qin.pdf" target="_blank" rel="noopener">会议版 PDF（§4–§5）↗</a> · <a href="https://github.com/kvcache-ai/Mooncake/tree/main/FAST25-release" target="_blank" rel="noopener">三份 trace ↗</a></p>
+
+<h4 id="n-10-5">10.5 期刊版：生产中的教训与开源集成</h4>
+<p>期刊版保留了会议版的全部内容，把 arXiv 版的过载调度（提前拒绝与基于预测的提前拒绝）放回来，并新增了两部分：在生产中摸索出来的实现经验，以及开源后与主流推理框架的集成。过载实验的结果与 arXiv 版表 3 相同（4,183 / 3,771 / 3,589），期刊版写明这组实验用的是工具与智能体负载，这也印证了第 4 节的判断：arXiv 版公开的 trace 就是这份负载。</p>
+<p><b>动态 P/D 比例。</b>线上 prefill 和 decode 集群的相对负载有明显的周期：白天以长文档分析和检索增强的请求为主，压力在 prefill；晚上以手机上的短对话为主，瓶颈转到 decode。最初的固定比例造成了可预见的失衡；模型频繁升级，每个新版本的延迟和回答长度都不同，手工调比例既不准又费事。于是他们实现了一个自动控制器，定期采样两边的负载，计算失衡系数</p>
+<div class="formula">$$r=\frac{L_{\mathrm{decode}}+1}{L_{\mathrm{prefill}}+1}$$</div>
+<p>其中两个 \(L\) 是去掉最高和最低 10% 样本之后的平均负载。\(r\gg1\) 说明 decode 过载、应该加 decode 副本，\(r\ll1\) 则应该加 prefill 副本。由于线上流量偏斜得厉害，直接把 \(r\) 拉到 1 会引起振荡，所以控制器顺着机器资源的“潮汐”逐步调整：高峰期加机器时先加给更忙的一边，低谷期减机器时先从更闲的一边减，每次调整的幅度都有上限。</p>
+<p><b>灵活的 KV 缓存存储。</b>最初每个节点给缓存池划 1 TB 内存。一小时的离线回放显示，几乎所有共享前缀的请求都从全局共享中受益，线上命中率最高达到 50%；但随着时间推移，高峰期的命中率跌到 20% 以下。分析发现两个原因：一是推理优化让每个节点能服务的请求越来越多，一个时间窗口内需要保留的 KV 缓存超过了原来的内存预算，引发大规模淘汰；二是新功能让缓存需求变得不均匀，例如联网搜索取回的参考内容通常只用一次，而“上下文缓存”要求用户指定的内容在一段时间内一直可用，统一的 LRU 分不清两者，过早淘汰了高价值的缓存。对策是两条：按访问频率把 KV 缓存分层存放在显存、内存和 SSD 上（SSD 只在高峰期或存放长期的上下文缓存时使用，并根据请求队列提前预取）；把 LRU 换成按语义的淘汰策略，像联网搜索结果这样的一次性内容不进缓存池，上下文缓存则强保留，最坏情况下转存到 SSD 而不是删除。在约 70 万个用户会话的离线分析中，基线 LRU 的命中率是 27%；过滤掉标记为一次性的请求（约 62%）只带来小幅提升；再加上分层存储并保证上下文缓存（约 8% 的请求）不被淘汰，命中率升到 52%，相对提升 93%。</p>
+<p><b>无状态的 Conductor。</b>早期的 Conductor 在自己内存里保存整个集群的 KV 缓存元数据，一旦它故障或滚动重启，所有缓存信息都会丢失；滚动升级时，新启动的 Conductor 还会误以为所有块都空闲，覆盖掉正在 prefill 或 decode 中使用的块。后来的设计把元数据下放到各推理节点：由节点负责分配块、加锁防止并发修改、提交更新；Conductor 只保留一份“影子”副本用于缓存感知调度。一个请求的流程变成：Conductor 用影子元数据做前缀匹配并选定 prefill 节点，向它发出分配事务（TxAllocate），节点检查容量、分配并锁住相关的块；decode 节点返回第一个 token、说明 KV 已经传完时，Conductor 再发出提交事务（TxCommit）。这样新旧两个 Conductor 可以同时处理请求，安全地滚动升级；节点上的块锁保证两个 Conductor 不会同时修改同一个块，短暂的元数据不一致最多导致选到次优的节点。</p>
+<p><b>开源集成。</b>期刊版说，在集成 Mooncake 之前，vLLM 的多节点 PD 分离依赖 PyNCCL（NCCL 的 Python 绑定），性能差、故障域大，因为 NCCL 的集合通信模式不适合点对点传输；vLLM 和 SGLang 的前缀缓存也都只在本机显存里，无法跨实例共享。开源的 Mooncake 以传输引擎为核心，把 RDMA、NVLink、TCP、NVMe-oF 等协议统一在同一套传输接口之下（RDMA 一类还支持阿里云的 eRDMA），在它之上有用于点对点共享的 P2P Store 和面向推理的分布式缓存池 Mooncake Store。集成方式有两组选择：GPU 直接互传（GPUDirect RDMA，延迟低但占显存）或经 CPU 内存中转（容量大、更便宜但延迟高）；“KV 传输”（按需在设备之间搬）或“KV 存储”（放进集中管理的分布式缓存池）。期刊版给出的几组开源测试结果规模都较小：在 SGLang 中，两台 A10 上 1P1D 的 TBT 为 7.23 毫秒，比两台不分离的实例（10.30 毫秒）低约 30%，总吞吐相当；在 H20 上 4P2D 对比不分离的部署，每秒 8 个请求时 TTFT 从 9,629 毫秒降到 1,969 毫秒；在 vLLM 中用 Qwen2.5-7B 的量化版在 A10 上测试，以 Mooncake Store 替代 Redis 作为 KV 存储后端，TTFT 降低 17%–22%（TCP 传输）或 26%–33%（RDMA 传输）。</p>
+<p class="note-links"><a href="https://doi.org/10.1145/3773772" target="_blank" rel="noopener">期刊版（ACM TOS，CC BY 4.0）↗</a> · <a href="https://madsys.cs.tsinghua.edu.cn/publication/mooncake-a-kvcache-centric-disaggregated-architecture-for-llm-serving/" target="_blank" rel="noopener">MADSys 论文页（含期刊版 PDF）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>Mooncake 发表之后，影响主要体现在两条线上：一是 PD 分离从论文提议变成了大规模推理服务的常规做法，二是它开源的传输引擎和缓存池成了许多推理框架的公共组件。下面只列能查证的事实；标“据仓库记录”的条目来自 <a href="https://github.com/kvcache-ai/Mooncake" target="_blank" rel="noopener">Mooncake 仓库</a>的更新日志（项目方自述），其余条目核对过第三方的文档或博客。</p>
+<h4 id="n-impact-1">开源组件被主流框架采用</h4>
+<ul>
+  <li><b>公开 trace</b>：2024-07-09 以 JSONL 文件公开 arXiv 版的 trace；2025-02-21 公开会议版用的三份 trace（据仓库记录，文件均已在仓库中核对）。</li>
+  <li><b>传输引擎</b>：2024-11-28 开源，附带 P2P Store 和 vLLM 集成的演示；2024-12-16 vLLM 正式支持用它做分离式 prefill 的 KV 传输；2025-12，它作为 KV 连接器直接集成进 vLLM v1（以上据仓库记录）。vLLM 文档对 MooncakeConnector 的说明是：由 prefill 端把 KV 缓存发给 decode 端，默认走 RDMA（<a href="https://docs.vllm.ai/en/latest/features/mooncake_connector_usage/" target="_blank" rel="noopener">vLLM 文档</a>）。</li>
+  <li><b>SGLang</b>：据仓库记录，2025-04 起 SGLang 支持以 Mooncake 传输引擎做 PD 分离的 KV 传输；SGLang 文档写明目前支持的传输引擎是 Mooncake 和 NIXL（<a href="https://docs.sglang.io/advanced_features/pd_disaggregation.html" target="_blank" rel="noopener">SGLang 文档</a>）。2025-09，SGLang 的分层 KV 缓存（HiCache）把 Mooncake 列为存储后端之一，与 3FS、NIXL 和本地文件后端并列（<a href="https://lmsys.org/blog/2025-09-10-sglang-hicache/" target="_blank" rel="noopener">LMSYS 博客</a>）。</li>
+  <li><b>Mooncake Store</b>：2025-03-07 开源（据仓库记录）。2025-04，LMCache 增加了以 Mooncake Store 为远端后端的连接器，由腾讯的工程师与 LMCache 团队合作贡献（<a href="https://blog.lmcache.ai/2025-04-22-tencent/" target="_blank" rel="noopener">LMCache 博客</a>）。</li>
+  <li><b>NIXL</b>：NVIDIA 的推理传输库 NIXL 提供基于 Mooncake 传输引擎的后端插件，README 标注为预览版（<a href="https://github.com/ai-dynamo/nixl/blob/main/src/plugins/mooncake/README.md" target="_blank" rel="noopener">NIXL 仓库</a>）。</li>
+  <li><b>更多框架</b>（据仓库记录）：LMDeploy（2025-06 起支持 PD 分离后端）、vLLM-Ascend、TensorRT-LLM（2025-12）等相继接入；2026-02，Mooncake 加入 PyTorch 生态（<a href="https://pytorch.org/blog/mooncake-joins-pytorch-ecosystem/" target="_blank" rel="noopener">PyTorch 博客</a>）。用途也从 KV 缓存扩展到模型权重和强化学习中的数据搬运：P2P Store 的正式版以 checkpoint-engine 为名开源，仓库记录称它在约 20 秒内把 1 万亿参数的 Kimi K2 权重更新到数千张 GPU 上。</li>
+</ul>
+<h4 id="n-impact-2">大规模部署</h4>
+<ul>
+  <li>2025-07-20，Mooncake 团队在 LMSYS 博客上发布了用 SGLang 在 128 张 H200 上部署 Kimi K2（1 万亿总参数）的结果：4 个 prefill 节点、12 个 decode 节点，在输入 2,000、输出 100 个 token、decode 批大小 480 的测试下，prefill 吞吐 22.4 万 token/s，decode 吞吐 28.8 万 token/s（<a href="https://lmsys.org/blog/2025-07-20-k2-large-scale-ep/" target="_blank" rel="noopener">LMSYS 博客</a>）。</li>
+  <li>PD 分离本身已成为大规模推理的常规做法：DeepSeek-V3 的线上部署同样把 prefill 和 decode 分开（见 <a href="deepseek-v3.html#n-6">DeepSeek-V3 精读 §3.4</a>）；vLLM、SGLang、TensorRT-LLM、NVIDIA Dynamo 等都提供了分离式部署，整体脉络见 <a href="distserve.html#n-impact">DistServe 精读的“后来怎么样了”</a>。</li>
+</ul>
+<h4 id="n-impact-3">思路上的延续</h4>
+<ul>
+  <li><b>KV 缓存分层存储</b>：把 KV 缓存当作要分层管理的数据，存放在显存、内存、SSD 乃至远端，是 Mooncake 之后的一条主线，代表工作有 LMCache、SGLang HiCache、Strata 等，见 <a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储拆解页</a>。Mooncake 期刊版里“线上高峰期命中率跌到 20% 以下，离线分析中靠分层存储和按语义淘汰把命中率从 27% 提到 52%”的经历，正说明这件事难在“存什么、存多久”，而不只是“存得下”。</li>
+  <li><b>把注意力单独拆出去</b>：论文在未来工作里提出的“注意力与线性层分离”，后来也成了业界讨论的方向；DistServe 作者 2025 年的回顾博客同样把注意力与前馈层的分离列为下一步（见 <a href="distserve.html#n-impact">DistServe 精读</a>）。</li>
+  <li><b>仓库</b>：kvcache-ai/Mooncake 截至 2026-10-20 有 6,840 个 star、1,356 个 fork，Apache-2.0 许可，创建于 2024-06-25。</li>
+</ul>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv 版）。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Ruoyu Qin</b>（共同一作）<div class="aff">Moonshot AI；Tsinghua University</div>清华大学 MADSys 实验室博士生（实验室主页）；论文脚注说明其部分工作在 Moonshot AI 实习期间完成。</div>
+  <div class="author-card"><b>Zheming Li</b>（共同一作）<div class="aff">Moonshot AI</div></div>
+  <div class="author-card"><b>Weiran He</b><div class="aff">Moonshot AI</div></div>
+  <div class="author-card senior"><b>Mingxing Zhang</b>（通讯作者）<div class="aff">Tsinghua University</div>清华大学计算机系副教授（个人主页写作 tenure-track associate professor）；2017 年获清华大学博士学位；主页称他是开源项目 KVCache.AI（Mooncake 与 KTransformers）的发起人。</div>
+  <div class="author-card senior"><b>Yongwei Wu</b><div class="aff">Tsinghua University</div>清华大学计算机系教授，MADSys 实验室成员；2023 年当选 CCF Fellow（实验室主页）。</div>
+  <div class="author-card senior"><b>Weimin Zheng</b><div class="aff">Tsinghua University</div>清华大学计算机系教授，中国工程院院士；研究方向包括高性能计算体系结构、并行算法与系统、存储系统（清华大学计算机系页面）。</div>
+  <div class="author-card senior"><b>Xinran Xu</b>（通讯作者）<div class="aff">Moonshot AI</div></div>
+</div>
+<p class="w-note">会议版另有 Jialei Cui（Moonshot AI）与 Feng Ren（Tsinghua University）；期刊版再增加 Heyi Tang（Moonshot AI）、Teng Ma 与 Shangming Cai（Alibaba Cloud Computing）、Yineng Zhang（独立研究者）。arXiv v5 首页注明这是“Moonshot AI 与清华 MadSys 的预印本技术报告”。</p>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：会议版发表于 FAST 2025（USENIX 文件与存储技术会议），获最佳论文奖（<a href="https://www.usenix.org/conference/fast25/presentation/qin" target="_blank" rel="noopener">USENIX 会议页</a>）；期刊版发表于 ACM Transactions on Storage（2025，DOI 10.1145/3773772，CC BY 4.0）。</li>
+  <li><b>开源</b>：<a href="https://github.com/kvcache-ai/Mooncake" target="_blank" rel="noopener">kvcache-ai/Mooncake</a> 6,840 个 star、1,356 个 fork（截至 2026-10-20），Apache-2.0；包含传输引擎、Mooncake Store 和公开 trace。</li>
+  <li><b>采用</b>：SGLang 与 vLLM 的 PD 分离均支持以 Mooncake 做 KV 传输；LMCache、NIXL 等提供 Mooncake 后端；详见上面的“后来怎么样了”。</li>
+  <li><b>生产</b>：作者称 Mooncake 是 Kimi 的服务平台，运行在数千个节点上，每天处理超过 1,000 亿 token（会议版）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="sarathi-serve.html">Sarathi-Serve</a></li>
+  <li><a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离结构拆解</a>：DistServe、Splitwise、Mooncake 的对照表、KV 传输计算器和简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储</a>：LMCache、Strata 等把 KV 缓存放到 CPU 内存、SSD 和远端的工作。</li>
+  <li><a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca / Sarathi-Serve</a>：连续批处理与 chunked prefill，即“不拆分、在一组 GPU 上控制干扰”的路线。</li>
+  <li><a href="distserve.html">DistServe 精读</a>：PD 分离、TTFT / TPOT 与 goodput 的系统性分析。</li>
+  <li><a href="vllm.html">vLLM 精读</a>：KV 缓存、PagedAttention、连续批处理，本文的对照系统。</li>
+  <li><a href="sglang.html">SGLang 精读</a>：RadixAttention 与单机内的缓存感知调度。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MLA 如何压缩 KV 缓存，以及另一套 PD 分离的线上部署。</li>
+  <li><a href="megatron-lm.html">Megatron-LM 精读</a>：张量并行每层为什么要两次 all-reduce。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>：prefill、decode、KV 缓存的入门。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。按 arXiv 最新版 v5 讲解，并参考了 FAST 2025 会议版与 ACM TOS 期刊版。数字与结论以原文为准：<a href="https://arxiv.org/abs/2407.00079" target="_blank" rel="noopener">arXiv:2407.00079</a>（arXiv 非独占分发许可）、<a href="https://www.usenix.org/conference/fast25/presentation/qin" target="_blank" rel="noopener">FAST 2025 会议版</a>（USENIX 开放获取）、<a href="https://doi.org/10.1145/3773772" target="_blank" rel="noopener">ACM TOS 期刊版</a>（CC BY 4.0）。本页没有使用任何原图：所有图都是本站绘制的示意图，或按论文报告的数值、按原图矢量坐标读出的数值重画的简化图。trace 的统计与缓存命中率回放由本站基于 <a href="https://github.com/kvcache-ai/Mooncake/tree/main/FAST25-release" target="_blank" rel="noopener">公开 trace 文件</a>（Apache-2.0 仓库）计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>
