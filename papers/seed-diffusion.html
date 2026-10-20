@@ -1,0 +1,1048 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seed Diffusion 精读</title>
+<meta name="description" content="字节跳动 Seed 的 Seed Diffusion Preview 技术报告（arXiv 2508.02193）逐节精读：两阶段课程（掩码 + 编辑噪声）、受限顺序轨迹蒸馏、最小化步数的 on-policy 学习、块级半自回归推理，以及 2146 token/秒（H20）这个数字是在什么条件下得到的、能和什么比。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="seed-diffusion">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · 工业技术报告（2025-08）</div>
+  <h1>Seed Diffusion：一个推理很快的大规模扩散语言模型</h1>
+  <p class="en-title">Seed Diffusion: A Large-Scale Diffusion Language Model with High-Speed Inference</p>
+  <div class="paper-authors">Yuxuan Song<sup>1,2,3</sup>, Zheng Zhang<sup>1,3</sup>, Cheng Luo<sup>1</sup>, Pengyang Gao<sup>1</sup>, Fan Xia<sup>1</sup>, Hao Luo<sup>1</sup>, Zheng Li<sup>1</sup>, Yuehang Yang<sup>1</sup>, Hongli Yu<sup>1,2,3</sup>, Xingwei Qu<sup>1</sup>, Yuwei Fu<sup>1</sup>, Jing Su<sup>1</sup>, Ge Zhang<sup>1</sup>, Wenhao Huang<sup>1</sup>, Mingxuan Wang<sup>1,3</sup>, Lin Yan<sup>1</sup>, Xiaoying Jia<sup>1</sup>, Jingjing Liu<sup>2,3</sup>, Wei-Ying Ma<sup>2,3</sup>, Ya-Qin Zhang<sup>2,3</sup>, Yonghui Wu<sup>1</sup>, Hao Zhou<sup>2,3</sup></div>
+  <div class="paper-affil"><sup>1</sup>字节跳动 Seed（ByteDance Seed）　<sup>2</sup>清华大学智能产业研究院（AIR）　<sup>3</sup>清华 AIR 与字节跳动 Seed 联合实验室（SIA-Lab）　署名顺序与上标按报告末尾的贡献名单；项目负责人为 Yuxuan Song 与 Zheng Zhang（按字母序）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2508.02193" target="_blank" rel="noopener">arXiv 2508.02193 ↗</a>
+    <a class="pill" href="https://seed.bytedance.com/seed_diffusion" target="_blank" rel="noopener">技术报告（未经同行评审）· 项目页 ↗</a>
+    <a class="pill" href="https://studio.seed.ai/exp/seed_diffusion/" target="_blank" rel="noopener">在线 demo（无公开权重）↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/10-industrial.html#seed-diffusion">旧版结构拆解：工业 dLLM</a>
+  </div>
+  <div class="paper-stats" data-stats></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页引用的第三方网页均于 2026-10-20 查阅。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按报告的章节顺序，用本站自己的话把整份报告从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。标“推算”的数字是本站根据报告或公开规格算出来的，不是报告原话；标“读图约值”的数字是从原文图上读出来的近似值。报告以 CC BY 4.0 许可发布，所以页面上放了原文的图 1 与图 2，其余是本站画的示意图。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：一份“预览版”报告，三个训练想法和一个速度数字</h3>
+<p>我们平时用的大语言模型属于<b>自回归模型</b>（autoregressive，下文简称 AR）：它一次只写一个 token（大致是一个词或半个词），必须等前一个写完，才能写下一个。<b>扩散语言模型</b>换了一种写法：先摆出一段全是占位符 [MASK] 的“画布”，然后一轮一轮地把画布上的位置填成真正的 token，每一轮可以同时填好几个位置。如果每轮平均能填好很多个位置，生成同样长的回答所需的轮数就比 AR 少，单个用户等待的时间就可能更短。</p>
+<p>2025 年上半年，两家公司先后用产品证明了这条路在速度上的潜力：Inception Labs 的 <a href="mercury.html">Mercury Coder</a>（2 月上线，6 月发布技术报告），以及 Google DeepMind 的 Gemini Diffusion（5 月公布，只有演示和模型页）。2025 年 7 月 31 日，字节跳动 Seed 团队在官网发布了 <b>Seed Diffusion Preview</b>，一个只做代码生成的实验性扩散语言模型；8 月 4 日，团队把这份技术报告放上了 arXiv。报告最醒目的数字是：在 H20 GPU 上推理速度达到每秒 2,146 个 token，同时在一组代码基准上与同等规模的 AR 模型“表现相当”。项目页还多给了一句报告里没有的话：比同等规模的 AR 模型快 5.4 倍。</p>
+<p>报告正文很短，方法部分大约两页。它提出了三个训练上的想法和一个推理方案：</p>
+<ul>
+  <li><b>两阶段课程</b>：前 80% 的训练步用标准的掩码噪声，后 20% 再加入“编辑噪声”（随机插入、删除、替换少量 token），逼模型学会检查那些没被遮住、但可能是错的 token。</li>
+  <li><b>受限顺序训练</b>：掩码扩散模型在训练时要学会“按任意顺序”生成，作者认为其中很多顺序对代码是有害的。他们让模型自己生成大量候选的生成轨迹，按证据下界（ELBO）挑出最好的，再用这些轨迹微调模型。</li>
+  <li><b>on-policy 学习</b>：在模型自己采样出的轨迹上训练，直接以“减少去噪步数”为目标，同时用一个验证器保证答案仍然合理。</li>
+  <li><b>块级半自回归推理</b>：一块一块地生成，块内并行去噪，前面已完成的块用 KV 缓存；再加上一个专为扩散采样优化的内部推理框架。</li>
+</ul>
+<p>同样重要的是报告<b>没有写</b>的东西。模型有多大（表里的“Size”一栏写的是“-”）、训练用了多少 token、是否从某个 AR 模型的权重改造而来、采样器每步定下几个 token、块长取多少、2,146 是用几张 H20、多大的批、什么精度测出来的，报告都没有说。报告也没有任何消融实验，也就是说，三个训练想法各自贡献了多少，没有数据。模型权重没有公开，只有一个在线 demo。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：这份报告写明了什么，没有写什么</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box act">报告写明的<small>据 §3–§4 与项目页</small></span></div>
+      <div class="dia-flow"><span class="dia-box">只用代码与代码相关数据<small>沿用开源的 Seed-Coder 数据管线</small></span></div>
+      <div class="dia-flow"><span class="dia-box">标准的稠密 Transformer<small>这一版不做长思维链推理</small></span></div>
+      <div class="dia-flow"><span class="dia-box">训练目标的公式<small>掩码 ELBO + 编辑噪声去噪（式 5–6）；受限顺序蒸馏（式 9）；on-policy 目标（式 10–11）</small></span></div>
+      <div class="dia-flow"><span class="dia-box">推理方式<small>块级半自回归，前面的块用 KV 缓存，不做块专门训练</small></span></div>
+      <div class="dia-flow"><span class="dia-box">结果<small>图 1（4 项基准 + 速度）、表 1–3（编辑、多语言、真实用户问题）、图 2（训练加速曲线、块长与前向耗时）</small></span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box pred">报告没有写的<small>读结果时要记住这些空白</small></span></div>
+      <div class="dia-flow"><span class="dia-box">参数量、层数、上下文长度、训练 token 数</span></div>
+      <div class="dia-flow"><span class="dia-box">是否用 Seed-Coder 等 AR 模型的权重初始化</span></div>
+      <div class="dia-flow"><span class="dia-box">采样器：每步定下几个 token、块长、能否回头改</span></div>
+      <div class="dia-flow"><span class="dia-box">候选轨迹池多大、验证器是什么模型、各阶段训练多少步</span></div>
+      <div class="dia-flow"><span class="dia-box">测速条件：几张 H20、批大小、精度、输出长度、是否含预填充</span></div>
+      <div class="dia-flow"><span class="dia-box">任何消融实验；同硬件下的 AR 速度</span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站根据报告全文与项目页整理。</div>
+</div>
+
+<p>所以，读这份报告有两件事要做。第一件是弄懂三个训练想法各自针对什么问题，这些问题在扩散语言模型里都是真实存在的，本站其他精读页也从不同角度讨论过。第二件是判断它给出的数字值多少：哪些是厂商自测的，每个比较拿谁来比，比较双方在硬件、数据、规模上对齐了什么。第 7.5 节“结果的份量”专门回答第二件事。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>掩码扩散模型为什么会“盲目相信”没被遮住的 token？编辑噪声怎样纠正这个毛病？</li>
+  <li>“掩码扩散等价于任意顺序的自回归”是什么意思？为什么生成顺序对代码尤其重要？</li>
+  <li>on-policy 学习是什么？为什么“直接最小化步数”训练不稳定，编辑距离为什么能当它的替身？</li>
+  <li>块级半自回归加 KV 缓存，怎样把“步数少”变成“墙钟时间短”？块长该怎么选？</li>
+  <li>2,146 token/秒是在什么条件下测的？它和 Mercury 的 1,109、Gemini Diffusion 的 1,479 能直接比吗？H20 和 H100 有什么不同？</li>
+  <li>和用同一条数据管线训练的 AR 模型 Seed-Coder-8B-Instruct 相比，质量差多少，哪里更好？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="https://seed.bytedance.com/seed_diffusion" target="_blank" rel="noopener">项目页 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言与相关工作：扩散“理论上快、实际上慢”，卡在两件事上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告的引言说，离散扩散模型要真正用起来，还有两个障碍：一是“生成顺序”上的归纳偏置不对，二是推理效率低。要理解这两个障碍为什么真实存在，先得知道三件事：AR 模型给单个用户生成时，GPU 在忙什么、闲着什么；在大模型时代之前，人们已经怎样尝试过“并行生成”，又卡在哪里；离散扩散给这些尝试补上了什么。这一节把这些背景交代清楚，并给出一个贯穿全页的“速度记账公式”。</div>
+
+<div class="note-pre"><b>先补一点背景：为什么 AR 模型给单个用户生成时快不起来。</b>
+<p>AR 模型每生成一个 token，都要把整个网络从头到尾算一遍，这叫一次<b>前向计算</b>。网络的参数放在 GPU 的显存里，计算单元在芯片上，所以每做一次前向，全部参数都要从显存读一遍。以本页反复出现的对照模型 Seed-Coder-8B 为例，它有 82 亿个参数（Seed-Coder 报告 §2.3）；每个参数用 BF16 格式存储时占 2 字节，参数总共约 16.4 GB。H20 的显存带宽约为每秒 4.0 TB（第三方规格汇总，见 7.4），把 16.4 GB 读一遍至少要约 4.1 毫秒（推算）。所以只服务一个用户、不用任何技巧时，这个模型在一张 H20 上每秒最多生成约 244 个 token（推算，忽略了注意力和其他开销）。</p>
+<p>这 4.1 毫秒里，计算单元其实大部分时间在等数据：一次前向只为 1 个 token 做约 2 × 82 亿次运算，H20 的 BF16 算力约为每秒 148 万亿次，算完只要约 0.11 毫秒（推算）。既然读参数的时间远远多于计算的时间，那么在<b>同一次前向里多处理几个位置</b>，耗时几乎不变。扩散模型想利用的，正是这部分空闲的算力：如果一次前向能同时定下好几个 token，单个用户的生成速度就能成倍提高。本站 <a href="mercury.html#n-1-1">Mercury 精读 §1.1</a> 用 H100 把这笔账算得更细。</p>
+</div>
+
+<p>“并行生成”并不是扩散模型才有的想法。在机器翻译领域，2018 年前后就出现了<b>非自回归</b>（non-autoregressive，NAR）模型：它一次就把整句译文的所有位置同时预测出来。后来的 Mask-Predict（2019）改成多轮迭代：每轮把最没把握的位置重新遮住再预测。字节跳动 AI Lab 的研究者参与提出了 GLAT（ACL 2021）和 DA-Transformer（ICML 2022）等改进，本报告的资深作者 Hao Zhou 是这两篇论文的作者之一，报告在相关工作里引用了它们。</p>
+<div class="note-pre"><b>先补一点背景：并行生成的老难题——“多峰”。</b>
+<p>同一个输入往往有好几种都正确的输出。比如“谢谢”可以译成 “Thank you”，也可以译成 “Thanks a lot”。AR 模型一个词一个词地写，第一个词定成 “Thank”，第二个词自然就跟着选 “you”。并行模型却是对每个位置<b>各自独立</b>地预测：第一个位置在 “Thank” 和 “Thanks” 之间犹豫，第二个位置在 “you” 和 “a” 之间犹豫，如果两个位置各自选了不同答案里的词，就会拼出 “Thanks you” 这种两种说法都不是的东西。输出的分布有好几个“峰”，而独立预测会把不同的峰混在一起，这就是并行生成的<b>多峰问题</b>。NAR 翻译常用的解法是先用一个 AR 老师把训练数据重新翻一遍，让每个输入只对应老师给出的那一种说法，相当于把多余的峰“过滤”掉。第 5 节讲的 on-policy 学习，作者认为效果就和这种“模式过滤”相似。</p>
+</div>
+<p>报告认为，这些早期的 NAR 方法虽然在翻译等具体任务上表现不错，却缺少严格的“密度估计”基础：它们没有给出一个能算出“这句话的概率是多少”的概率模型，所以没法成为通用的语言模型。<b>离散扩散模型</b>（D3PM、SEDD、MDLM 等）补上了这一点：它们优化的是对数似然的一个下界，也就是证据下界（ELBO），因此是有完整概率解释的语言模型；<a href="llada.html">LLaDA</a> 又证明了这类模型可以扩展到 80 亿参数。Mercury 和 Gemini Diffusion 则从产品上表明，扩散模型可以在质量差距不大的前提下快很多。</p>
+
+<p>在这个背景下，报告提出了两个障碍。</p>
+<p><b>第一个障碍是生成顺序。</b>离散扩散模型可以按任意顺序生成 token，这在理论上很有吸引力；但自然语言绝大多数时候是按顺序处理的。如果训练信号是“所有顺序一视同仁”，那么模型要花大量力气去学那些不自然的顺序，学习效率会变低，甚至伤害语言建模的表现。第 4 节会详细解释这件事。</p>
+<p><b>第二个障碍是推理效率。</b>扩散模型虽然不是一个一个地生成，但它要迭代很多步去噪，而且质量对步数很敏感：步数一少，质量就掉。这样一来，它相对 AR 的主要优势（并行）在实践中就被抵消了。为了把这件事说清楚，本站用一个简化的记账公式来贯穿全页。</p>
+<div class="formula">$$\text{加速比}=\frac{\text{AR 生成 }N\text{ 个 token 的时间}}{\text{扩散生成 }N\text{ 个 token 的时间}}\approx\frac{N\cdot T(1)}{\dfrac{N}{m}\cdot T(b)}=m\cdot\frac{T(1)}{T(b)}$$</div>
+<p>这里 \(T(1)\) 是一次只处理 1 个新位置的前向耗时，也就是 AR 每生成一个 token 的耗时；\(T(b)\) 是一次处理 \(b\) 个位置（比如一整块画布）的前向耗时；\(m\) 是扩散模型平均每次前向能<b>定下</b>的 token 数，文献里常叫 TPF（tokens per forward）。公式说明，扩散要比 AR 快，必须同时做到两件事：\(m\) 要大，也就是每步多定几个 token；\(T(b)/T(1)\) 要小，也就是一次处理很多位置时，前向不能变得太贵。报告的三个训练想法主要在提高 \(m\)，推理方案和基础设施主要在压低 \(T(b)\)。</p>
+<div class="note-warn"><b>读的时候要注意两点：</b>
+<ul>
+  <li>这个公式是本站的简化记账：它忽略了处理提示词（预填充）的时间，也假设两种模型每次前向读的参数一样多、缓存条件一样好。真实系统里这些假设都可能不成立，第 6、7 节会具体讨论。</li>
+  <li>这里的“并行”指的是<b>同一个请求内部</b>的并行。服务端把很多用户的请求拼成一批一起算，是另一种利用空闲算力的办法（见 <a href="vllm.html#n-2-3">vLLM 精读 §2.3</a>）。批开得越大，留给扩散“同一请求内并行”的空闲算力就越少。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S2" target="_blank" rel="noopener">§2 ↗</a> · 相关：<a href="d3pm.html">D3PM</a>、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM</a> 精读</p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 模型的底子：只用代码数据的稠密 Transformer</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Seed Diffusion Preview 到底是一个什么样的模型？它用什么数据训练、用什么网络结构、有多大？报告的第 3 节开头只用三句话回答了这些问题。这一节把这三句话展开，补上报告引用的 Seed-Coder 项目的背景，并说明为什么后文要把 Seed-Coder-8B-Instruct 当作最重要的对照对象。</div>
+<p>报告说，作为 Seed Diffusion 系列的第一个实验模型，Preview 版专注于代码生成，所以直接采用了开源项目 <b>Seed-Coder</b> 的数据管线和处理方法，而且<b>只用代码和代码相关的数据</b>。网络是一个标准的<b>稠密 Transformer</b>，也就是每个 token 都经过全部参数，而不是像混合专家（MoE）模型那样只激活其中一部分。作者还说明，这个初始版本有意不做长思维链（LongCoT）推理这类复杂功能，先建立一个又强又快的基线。</p>
+<div class="note-pre"><b>先补一点背景：Seed-Coder 是什么。</b>
+<p>Seed-Coder 是字节跳动 Seed 在 2025 年 6 月开源的一组 8B 代码模型，包括基座、指令和推理三个版本（arXiv 2506.03524）。它的特点是数据管线以模型为中心：主要用大模型给代码数据打分、过滤，尽量减少人工规则，最终整理出约 6 万亿 token 的代码预训练语料。网络结构沿用 Llama 3：82 亿参数、36 层、隐藏维度 4096、使用分组查询注意力（GQA）。指令版本在基座上做了监督微调和偏好优化。Seed Diffusion 报告里的评测协议和主要对照数字，都取自 Seed-Coder 报告。</p>
+</div>
+<p>报告没有说明的是：Seed Diffusion 有多少参数（所有结果表里它的“Size”一栏都是“-”）、多少层、上下文多长、训练了多少 token，以及是否用 Seed-Coder 的权重初始化。最后这一点并不是细节。2025 年以来，很多扩散语言模型都是从现成的 AR 模型改造而来的，例如 <a href="dream.html">Dream</a> 从 Qwen2.5 出发，<a href="llada2.html">LLaDA2.0</a> 从 Ling 2.0 出发；后来字节跳动 Seed 参与的 Stable-DiffCoder（2026 年 1 月）也明确从 Seed-Coder-8B 的检查点出发。从 AR 权重出发和从零训练，需要的数据量和最终质量可能相差很大，而报告对此没有交代。</p>
+<p>正因为数据管线相同，<b>Seed-Coder-8B-Instruct 是理解 Seed Diffusion 结果时最重要的参照</b>：两者来自同一个公司、用同一条数据管线、用同一套评测协议，报告的图 1 也把它放在一起比较。但两者的参数量、训练 token 数、算力和后训练方法是否相同都不知道，所以它是“同源”的参照，不是“严格对照”的实验。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：Seed Diffusion Preview 的训练与推理流程（按报告 §3 与项目页整理）</div>
+  <div class="dia-row"><span class="lbl">扩散训练</span><div class="dia-track"><span class="dia-seg kv" style="flex:80">前 80% 训练步：只用掩码噪声（式 1–2、5）</span><span class="dia-seg cmp" style="flex:20">后 20%：掩码 + 编辑噪声（式 3–4、6）</span></div></div>
+  <div class="dia-out">数据：Seed-Coder 管线产出的代码与代码相关数据；总 token 数、总步数都没有公开。</div>
+  <div class="dia-flow"><span class="dia-box enc">两阶段课程（§3.1）<small>学会填空，再学会校对</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">受限顺序训练（§3.2）<small>模型自产轨迹，按 ELBO 挑选后蒸馏；项目页称这是“后训练”阶段</small></span><span class="dia-arrow">→</span><span class="dia-box pred">on-policy 学习（§3.3）<small>在自己的轨迹上训练，缩短步数，验证器把关</small></span><span class="dia-arrow">→</span><span class="dia-box act">块级推理（§3.4）<small>块间自回归 + KV 缓存，块内并行去噪，内部推理框架</small></span></div>
+  <div class="dia-note">本站示意图。各阶段的先后顺序按报告的叙述顺序排列；报告说受限顺序训练在“两阶段扩散学习之后”进行，但没有明确说 on-policy 学习在它之后还是与它交替进行，也没有提到指令微调。</div>
+</div>
+<div class="note-warn"><b>读的时候容易忽略的一点：</b>结果表里的模型名写的是 “Seed-Diffusion-Preview(0705)”。括号里的 0705 看起来像是检查点的日期（7 月 5 日），但报告没有解释。项目页和报告都把它称为“实验性”模型，并且说这是 Seed Diffusion 系列的第一个模型。截至 2026-10-20，本站没有找到这个系列的后续报告。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/abs/2506.03524" target="_blank" rel="noopener">Seed-Coder 报告 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 两阶段课程：先学“填空”，再学“校对”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散是目前最主流的离散扩散形式，Seed Diffusion 的前 80% 训练也用它。那为什么还要在最后 20% 的训练里加入“编辑噪声”？作者说纯掩码训练会让模型产生一种“伪相关”：盲目相信所有没被遮住的 token 都是对的。这种伪相关从哪来，为什么会让模型在推理时改不了错？编辑噪声具体怎么加，损失函数又怎么写？这一节先把掩码扩散的训练目标讲清楚，再看作者改了哪里。</div>
+
+<h4 id="n-3-1">3.1 掩码扩散：前向加掩码、反向猜回去、按噪声水平加权</h4>
+<div class="note-pre"><b>先补一点背景：掩码（吸收态）扩散模型怎么训练。</b>
+<p><b>前向过程</b>负责“加噪”：给定一段干净的序列 \(\mathbf x_0\) 和一个时间 \(t\in[0,1]\)，每个位置独立地以概率 \(\gamma_t\) 被换成特殊符号 [MASK]（记作 \(\mathbf m\)），以概率 \(1-\gamma_t\) 保持原样。\(\gamma_t\) 叫噪声调度，随 \(t\) 单调增加：\(t=0\) 时什么都没遮，\(t=1\) 时全部被遮住。报告的式 (1)(2) 写的就是这件事：</p>
+<div class="formula">$$q_{\text{mask}}(\mathbf x_t\mid\mathbf x_0)=\prod_{i=1}^{|\mathbf x_0|}q_{\text{mask}}(\mathbf x_t[i]\mid\mathbf x_0[i]),\qquad q(\mathbf x_t[i]=c\mid\mathbf x_0[i])=\begin{cases}1-\gamma_t, & c=\mathbf x_0[i]\\ \gamma_t, & c=\mathbf m\end{cases}$$</div>
+<p>[MASK] 一旦出现就不会再变回别的 token，所以这种扩散也叫<b>吸收态扩散</b>。<b>反向过程</b>由神经网络完成：它读入一段部分被遮住的序列，对每个被遮住的位置给出“原来是哪个 token”的概率分布。生成时从全是 [MASK] 的画布出发，一轮一轮地把一部分位置定下来。</p>
+<p>训练目标来自对数似然的证据下界（ELBO）。在连续时间下，它化简成“只在被遮住的位置上算交叉熵，再按噪声水平加权”。报告的式 (5) 是：</p>
+<div class="formula">$$\mathcal L_{\text{ELBO}}=\underbrace{-\log p_\theta(\mathbf x_0\mid\mathbf x_0)}_{\text{重建项}}\;-\;\mathbb E_{t,\;\mathbf x_t\sim q_{\text{mask}}}\Big[\frac{\gamma_t'}{\gamma_t}\sum_{i=1}^{|\mathbf x_0|}\mathbf 1[\mathbf x_t[i]=\mathbf m]\,\log p_\theta(\mathbf x_0[i]\mid\mathbf x_t)\Big]$$</div>
+<p>第二项里的 \(\mathbf 1[\cdot]\) 表示只统计被遮住的位置，\(\gamma_t'\) 是调度对时间的导数。最常见的线性调度 \(\gamma_t=t\) 下，权重就是 \(1/t\)，和 <a href="llada.html#n-2-1">LLaDA</a> 的损失一样。这个权重的作用可以用一个例子看出来：一块 256 个 token 的画布，\(t=0.1\) 时平均只有约 25.6 个位置被遮住，每个位置的权重是 10，合计约 256；\(t=0.8\) 时平均有约 204.8 个被遮住，每个位置的权重是 1.25，合计也约 256（推算）。也就是说，加权让每个噪声水平对总损失的贡献大致相当，遮得少的样本不会因为“题目少”而被忽视。第一项“重建项”对应 \(t\to 0\) 时几乎没遮的情形，下面马上会看到，Seed 正是在这一项上做了改动。完整推导见 <a href="mdlm.html#n-3">MDLM 精读 §3</a>。</p>
+</div>
+<p>报告还说明了一个实现细节：网络在任何位置都<b>不允许预测 [MASK]</b>，做法是把 [MASK] 对应的 logit 加上 \(-\infty\)。这和 MDLM 的做法一致，因为反向过程的目的就是把 [MASK] 变回真实 token，预测出 [MASK] 没有意义。</p>
+
+<h4 id="n-3-2">3.2 不把“没遮住的 token”直接抄到输出：伪相关从哪来</h4>
+<p>MDLM、MD4 等工作在上面那个细节之外，还有一个配套做法，报告称之为 <b>carry-over unmasking</b>（可以译作“未遮位置直接沿用”）：凡是输入里没被遮住的位置，模型的输出直接照抄输入，不需要也不允许改。这样一来，损失只在被遮住的位置上计算，重建项恒为零，训练目标的方差更小，困惑度也更好。</p>
+<p>Seed 选择<b>不</b>这样做（报告 Remark 3.1）。作者的理由是：纯掩码训练里，每个位置要么是正确答案，要么是 [MASK]，从来不会出现“看得见、但是错的”token。模型因此会学到一个在训练数据里永远成立、在推理时却不成立的规律：“看得见的 token 一定是对的”。这就是报告说的<b>伪相关</b>。推理时，画布上看得见的 token 有一部分是模型自己在前几步写下的，其中难免有错，尤其是一步同时定下好几个 token 的时候（第 5 节会解释为什么）。一个“盲目相信”可见 token 的模型，既不会去检查这些 token，也不会改正它们，错误就一直留在最终输出里。打个比方，一个只做过“在正确的课文上填空”的学生，从没见过错别字，自然也就学不会校对。</p>
+
+<h4 id="n-3-3">3.3 编辑噪声：插入、删除、替换</h4>
+<div class="note-pre"><b>先补一点背景：编辑距离（Levenshtein 距离）。</b>
+<p>两段序列之间的<b>编辑距离</b> \(d_{\text{Lev}}\)，是把一段改成另一段最少需要多少次“单个 token 的编辑”，编辑只有三种：插入一个 token、删除一个 token、把一个 token 替换成另一个。比如把 <code>return a + b</code> 改成 <code>return a - b</code> 只需替换一次，距离是 1；把 <code>f(a, b)</code> 改成 <code>f(b)</code> 要删掉 <code>a</code> 和 <code>,</code>，距离是 2。编辑距离衡量的是“两段文字差了多少处”，后面第 5 节还会用到它。</p>
+</div>
+<p>最后 20% 的训练步里，作者在掩码噪声之外增加了一种<b>基于编辑的前向过程</b> \(q_{\text{edit}}\)。它从干净序列出发，依次随机施加 \(k_t\) 次编辑操作（插入、删除、替换），得到加噪后的序列（式 3）：</p>
+<div class="formula">$$\mathbf z_0=\mathbf x_0,\qquad \mathbf z_j=o_j(\mathbf z_{j-1})\ \ (j=1,\dots,k_t,\ o_j\in\mathcal O),\qquad \mathbf x_t=\mathbf z_{k_t}$$</div>
+<p>编辑次数按序列长度的一个比例来定（式 4）：\(k_t=\lfloor|\mathbf x_0|\cdot\alpha_t\rfloor\)，其中 \(\alpha_t\) 是调度，被限制在 \([0,\,0.1]\) 之间。也就是说，最多只改动 10% 的 token：一段 512 个 token 的代码最多被编辑 51 次（推算）。作者说限制得这么小，是为了保留掩码前向过程的“密度估计能力”，即编辑噪声只是辅助，主体仍然是有似然解释的掩码扩散。施加 \(k_t\) 次编辑并不保证编辑距离恰好是 \(k_t\)，比如先插入再删除同一个位置就互相抵消了；作者认为这只是近似地控制了“信噪比”，但简单、可扩展。（报告原文在这里把 Levenshtein 误写成了 “langevin distance”。）</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同一行代码在两种噪声下的样子</div>
+  <svg class="dg" viewBox="0 0 960 330" style="--dg-min:760px" role="img" aria-label="同一段代码在掩码噪声与编辑噪声下的样子">
+<text x="20" y="54" class="t-b">干净序列 x₀</text>
+<g class="data"><rect class="box" x="170" y="40" width="58" height="28" rx="4"/></g>
+<text x="199.0" y="54" class="t-c t-mono">def</text>
+<g class="data"><rect class="box" x="233" y="40" width="58" height="28" rx="4"/></g>
+<text x="262.0" y="54" class="t-c t-mono">add</text>
+<g class="data"><rect class="box" x="296" y="40" width="58" height="28" rx="4"/></g>
+<text x="325.0" y="54" class="t-c t-mono">(</text>
+<g class="data"><rect class="box" x="359" y="40" width="58" height="28" rx="4"/></g>
+<text x="388.0" y="54" class="t-c t-mono">a</text>
+<g class="data"><rect class="box" x="422" y="40" width="58" height="28" rx="4"/></g>
+<text x="451.0" y="54" class="t-c t-mono">,</text>
+<g class="data"><rect class="box" x="485" y="40" width="58" height="28" rx="4"/></g>
+<text x="514.0" y="54" class="t-c t-mono">b</text>
+<g class="data"><rect class="box" x="548" y="40" width="58" height="28" rx="4"/></g>
+<text x="577.0" y="54" class="t-c t-mono">)</text>
+<g class="data"><rect class="box" x="611" y="40" width="58" height="28" rx="4"/></g>
+<text x="640.0" y="54" class="t-c t-mono">:</text>
+<g class="data"><rect class="box" x="674" y="40" width="58" height="28" rx="4"/></g>
+<text x="703.0" y="54" class="t-c t-mono">return</text>
+<g class="data"><rect class="box" x="737" y="40" width="58" height="28" rx="4"/></g>
+<text x="766.0" y="54" class="t-c t-mono">a</text>
+<g class="data"><rect class="box" x="800" y="40" width="58" height="28" rx="4"/></g>
+<text x="829.0" y="54" class="t-c t-mono">+</text>
+<g class="data"><rect class="box" x="863" y="40" width="58" height="28" rx="4"/></g>
+<text x="892.0" y="54" class="t-c t-mono">b</text>
+<text x="20" y="114" class="t-b">掩码噪声</text><text x="20" y="130" class="t-xs">遮住 4 个，位置可见</text>
+<g class="data"><rect class="box" x="170" y="100" width="58" height="28" rx="4"/></g>
+<text x="199.0" y="114" class="t-c t-mono">def</text>
+<rect class="tk mask" x="233" y="100" width="58" height="28" rx="4"/>
+<text x="262.0" y="114" class="t-c t-mono">[M]</text>
+<g class="data"><rect class="box" x="296" y="100" width="58" height="28" rx="4"/></g>
+<text x="325.0" y="114" class="t-c t-mono">(</text>
+<g class="data"><rect class="box" x="359" y="100" width="58" height="28" rx="4"/></g>
+<text x="388.0" y="114" class="t-c t-mono">a</text>
+<rect class="tk mask" x="422" y="100" width="58" height="28" rx="4"/>
+<text x="451.0" y="114" class="t-c t-mono">[M]</text>
+<g class="data"><rect class="box" x="485" y="100" width="58" height="28" rx="4"/></g>
+<text x="514.0" y="114" class="t-c t-mono">b</text>
+<g class="data"><rect class="box" x="548" y="100" width="58" height="28" rx="4"/></g>
+<text x="577.0" y="114" class="t-c t-mono">)</text>
+<rect class="tk mask" x="611" y="100" width="58" height="28" rx="4"/>
+<text x="640.0" y="114" class="t-c t-mono">[M]</text>
+<g class="data"><rect class="box" x="674" y="100" width="58" height="28" rx="4"/></g>
+<text x="703.0" y="114" class="t-c t-mono">return</text>
+<rect class="tk mask" x="737" y="100" width="58" height="28" rx="4"/>
+<text x="766.0" y="114" class="t-c t-mono">[M]</text>
+<g class="data"><rect class="box" x="800" y="100" width="58" height="28" rx="4"/></g>
+<text x="829.0" y="114" class="t-c t-mono">+</text>
+<g class="data"><rect class="box" x="863" y="100" width="58" height="28" rx="4"/></g>
+<text x="892.0" y="114" class="t-c t-mono">b</text>
+<text x="20" y="194" class="t-b">编辑噪声</text><text x="20" y="210" class="t-xs">没有任何标记</text>
+<g class="data"><rect class="box" x="170" y="180" width="58" height="28" rx="4"/></g>
+<text x="199.0" y="194" class="t-c t-mono">def</text>
+<g class="data"><rect class="box" x="233" y="180" width="58" height="28" rx="4"/></g>
+<text x="262.0" y="194" class="t-c t-mono">add</text>
+<g class="data"><rect class="box" x="296" y="180" width="58" height="28" rx="4"/></g>
+<text x="325.0" y="194" class="t-c t-mono">(</text>
+<g class="data"><rect class="box" x="359" y="180" width="58" height="28" rx="4"/></g>
+<text x="388.0" y="194" class="t-c t-mono">a</text>
+<g class="data"><rect class="box" x="422" y="180" width="58" height="28" rx="4"/></g>
+<text x="451.0" y="194" class="t-c t-mono">b</text>
+<g class="data"><rect class="box" x="485" y="180" width="58" height="28" rx="4"/></g>
+<text x="514.0" y="194" class="t-c t-mono">)</text>
+<g class="data"><rect class="box" x="548" y="180" width="58" height="28" rx="4"/></g>
+<text x="577.0" y="194" class="t-c t-mono">:</text>
+<g class="data"><rect class="box" x="611" y="180" width="58" height="28" rx="4"/></g>
+<text x="640.0" y="194" class="t-c t-mono">return</text>
+<g class="act"><rect class="box" x="674" y="180" width="58" height="28" rx="4"/></g>
+<text x="703.0" y="194" class="t-c t-mono">self</text>
+<g class="data"><rect class="box" x="737" y="180" width="58" height="28" rx="4"/></g>
+<text x="766.0" y="194" class="t-c t-mono">a</text>
+<g class="pred"><rect class="box" x="800" y="180" width="58" height="28" rx="4"/></g>
+<text x="829.0" y="194" class="t-c t-mono">*</text>
+<g class="data"><rect class="box" x="863" y="180" width="58" height="28" rx="4"/></g>
+<text x="892.0" y="194" class="t-c t-mono">b</text>
+<line x1="419.5" y1="176" x2="419.5" y2="212" style="stroke:var(--c-loss);stroke-width:2.5"/>
+<text x="419.5" y="230" class="t-c t-xs" style="fill:var(--c-loss)">删去“,”</text>
+<text x="703" y="230" class="t-c t-xs" style="fill:var(--c-act)">插入</text>
+<text x="829" y="230" class="t-c t-xs" style="fill:var(--c-pred)">“+”换成“*”</text>
+<text x="20" y="262" class="t-sm">掩码行：模型知道哪 4 个位置要猜；纯掩码训练里，没被遮住的位置永远是对的。</text>
+<text x="20" y="282" class="t-sm">编辑行：三处编辑（删除、插入、替换），编辑距离为 3；模型看不出哪里被改过，只能逐个位置检查，把整句恢复成 x₀。</text>
+<text x="20" y="306" class="t-xs">示意中为了看清楚放大了编辑数。按式 (4)，k_t = ⌊|x₀|·α_t⌋ 且 α_t ≤ 0.1，这 12 个 token 最多只会被改 1 处。</text>
+</svg>
+  <div class="dia-note">本站示意图。<b>怎么看：</b>掩码噪声告诉模型“哪里需要填”；编辑噪声不告诉模型任何位置信息，模型必须把每个 token 都当作可能有错来检查。这正是作者想让模型学会的能力。</div>
+</div>
+
+<p>有了两种前向过程，总的训练目标（式 6）就是把式 (5) 里的重建项换成编辑噪声下的去噪损失：</p>
+<div class="formula">$$\mathcal L_{\text{diff}}(\theta)=-\,\mathbb E_{t,\;\mathbf x_t\sim q_{\text{edit}}}\log p_\theta(\mathbf x_0\mid\mathbf x_t)\;-\;\mathbb E_{t,\;\mathbf x_t\sim q_{\text{mask}}}\Big[\frac{\gamma_t'}{\gamma_t}\sum_{i=1}^{|\mathbf x_0|}\mathbf 1[\mathbf x_t[i]=\mathbf m]\,\log p_\theta(\mathbf x_0[i]\mid\mathbf x_t)\Big]$$</div>
+<p>第一项要求模型从一段“几乎干净、但有少量看不出来的错误”的序列出发，恢复出整段原文；第二项就是原来的掩码损失。把编辑损失放在重建项的位置上很自然：重建项本来对应的就是“几乎没加噪”的输入，而编辑噪声最多只改 10%，正好也是“几乎干净”的输入，只是其中藏着错误。因为不再沿用未遮位置，所有位置都要输出预测，模型在训练中就被迫重新评估每一个可见的 token。作者还说，这种增广改善了模型的<b>校准</b>（模型说有九成把握时，确实九成是对的），并消除了采样中的一些异常行为，例如<b>重复</b>同一段内容。</p>
+<p>为什么是“先掩码、后编辑”的课程，而不是从一开始就混着用？报告的说法是：纯掩码目标方差低（每个位置要么是正确答案、要么是 [MASK]），而且有清楚的似然解释，适合作为大规模训练的主体；编辑噪声是用来纠正它带来的偏差的“增广”，放在最后一段训练里就够了。项目页把这两个阶段概括为“从模式填充到逻辑编辑”。</p>
+
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li><b>没有消融。</b>报告没有给出“只做掩码训练、不加编辑阶段”的模型，所以编辑噪声到底带来了多少提升，报告里没有数据。项目页说“引入编辑阶段后”，模型在代码编辑基准 CanItEdit 上比 AR 模型高 4.8%（54.3 对 50.5）。这句话有两个问题：一是 54.3 − 50.5 = 3.8 个百分点，相对提升约 7.5%（推算），两种算法都得不到 4.8；二是 50.5 是另一个模型（Seed-Coder-8B-Instruct）的分数，不是“去掉编辑阶段的 Seed Diffusion”的分数，所以这个差距不能归功于编辑阶段。</li>
+  <li><b>长度变了怎么办，没有说。</b>插入和删除会改变序列长度，而网络是对每个位置分别输出一个分布。加噪序列和原文长度不同、位置对不上时，\(\log p_\theta(\mathbf x_0\mid\mathbf x_t)\) 具体怎么算，报告没有交代。插入的 token 和替换成的 token 从什么分布里抽，报告也没有说。</li>
+  <li><b>推理时怎么“改错”，也没有说。</b>训练让模型具备了评估可见 token 的能力，但采样器会不会、在什么条件下把已经写下的 token 改掉，报告没有描述。后来公开了细节的模型，例如 LLaDA2.1 的“token 到 token”编辑，就明确给出了改写已写 token 的阈值规则（见本页“后来怎么样了”）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · 相关：<a href="mdlm.html">MDLM 精读</a>（carry-over 与 SUBS 参数化）· <a href="llada.html">LLaDA 精读</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 受限顺序：不让模型平均地学会所有生成顺序</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告第 3.2 节的出发点是一个已知的等价关系：掩码扩散模型其实就是一个“任意顺序的自回归模型”。这句话是什么意思？它为什么会让扩散模型在代码这样的数据上学得比 AR 模型差？作者提出的“受限顺序训练”怎样只保留好的顺序，又有哪些地方报告没有写清楚？</div>
+
+<h4 id="n-4-1">4.1 掩码扩散等价于“任意顺序的自回归”</h4>
+<div class="note-pre"><b>先补一点背景：一条去噪轨迹就是一种生成顺序。</b>
+<p>先看最简单的情形：从全是 [MASK] 的画布出发，每一步只揭开一个位置。对一段长度为 \(d\) 的序列，揭开的先后次序就是 \(d\) 个位置的一个排列 \(\pi\)：先揭开 \(\pi(1)\)，再揭开 \(\pi(2)\)……每一步，模型都是在“已揭开的那些 token”的条件下，预测下一个要揭开的位置。这和 AR 模型一模一样，只不过 AR 的顺序固定是从左到右，而这里的顺序可以是任意排列。</p>
+<p>Hoogeboom 等人 2021 年提出的自回归扩散模型（ARDM）指出了这层关系，后来的 RADD 等工作又严格证明了：掩码扩散的 ELBO 恰好等于“对所有顺序取平均”的任意顺序自回归目标（报告式 7）：</p>
+<div class="formula">$$\mathcal J(\theta)=-\,\mathbb E_{\pi\sim U(S_d)}\Big[\sum_{r=1}^{d=|\mathbf x|}\log p_\theta\big(\mathbf x_{\pi(r)}\mid\mathbf x_{\pi(&lt;r)}\big)\Big]$$</div>
+<p>这里 \(S_d\) 是 \(d\) 个位置的全部排列，\(U(S_d)\) 表示从中均匀地抽一个；\(\mathbf x_{\pi(&lt;r)}\) 是在这个顺序里排在第 \(r\) 个之前、已经揭开的 token。3 个 token 有 6 种顺序；一块 256 个 token 的画布有 256! 种，约为 \(10^{507}\)（推算）。训练时随机遮住一部分位置，相当于随机抽了一个顺序的某一步来练习，所以在期望上，所有顺序被同等对待。</p>
+<p>报告的式 (8) 给出了从时间 \(s\) 到更晚的时间 \(t\) 的转移概率：没被遮的位置以 \(\frac{1-\gamma_t}{1-\gamma_s}\) 的概率继续保持、以 \(\frac{\gamma_t-\gamma_s}{1-\gamma_s}\) 的概率被遮住，已经是 [MASK] 的位置保持不变。换句话说，每个 token 在一个随机时刻被遮住，之后一直是 [MASK]。把这个过程反过来看，从全遮到全开的一条轨迹 \(\tau=\{\mathbf x_K\to\cdots\to\mathbf x_0\}\) 就记录了一种揭开顺序；一步揭开多个位置时，它对应的是“一次定下一组”的顺序。</p>
+</div>
+
+<h4 id="n-4-2">4.2 为什么顺序对代码很重要</h4>
+<p>作者认为，从左到右的 AR 训练只需要学一种顺序，而扩散训练必须学所有顺序，其中很多顺序是多余的、有害的，或者与语言本身的结构不符。项目页举的例子是：代码虽然不是严格从左到右的，但有很强的因果依赖，比如<b>变量要先声明后使用</b>。下面这个两行代码的例子说明了为什么某些顺序难学。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一段代码的两种揭开顺序</div>
+  <svg class="dg" viewBox="0 0 960 300" style="--dg-min:760px" role="img" aria-label="同一段代码的两种生成顺序">
+<text x="254" y="22" class="t-c t-sm">第 1 行：x = 3</text>
+<text x="544" y="22" class="t-c t-sm">第 2 行：y = x * 2</text>
+<line x1="345" y1="40" x2="345" y2="240" class="grid-ln"/>
+<text x="20" y="95" class="t-b">顺序 A</text>
+<text x="20" y="113" class="t-xs">从左到右</text>
+<g class="data"><rect class="box" x="170" y="81" width="48" height="28" rx="4"/></g>
+<text x="194" y="95" class="t-c t-mono">x</text>
+<circle cx="194" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="194" y="65" class="t-c t-xs">1</text>
+<g class="data"><rect class="box" x="230" y="81" width="48" height="28" rx="4"/></g>
+<text x="254" y="95" class="t-c t-mono">=</text>
+<circle cx="254" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="254" y="65" class="t-c t-xs">2</text>
+<g class="data"><rect class="box" x="290" y="81" width="48" height="28" rx="4"/></g>
+<text x="314" y="95" class="t-c t-mono">3</text>
+<circle cx="314" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="314" y="65" class="t-c t-xs">3</text>
+<g class="data"><rect class="box" x="400" y="81" width="48" height="28" rx="4"/></g>
+<text x="424" y="95" class="t-c t-mono">y</text>
+<circle cx="424" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="424" y="65" class="t-c t-xs">4</text>
+<g class="data"><rect class="box" x="460" y="81" width="48" height="28" rx="4"/></g>
+<text x="484" y="95" class="t-c t-mono">=</text>
+<circle cx="484" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="484" y="65" class="t-c t-xs">5</text>
+<g class="act"><rect class="box" x="520" y="81" width="48" height="28" rx="4"/></g>
+<text x="544" y="95" class="t-c t-mono">x</text>
+<circle cx="544" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="544" y="65" class="t-c t-xs">6</text>
+<g class="data"><rect class="box" x="580" y="81" width="48" height="28" rx="4"/></g>
+<text x="604" y="95" class="t-c t-mono">*</text>
+<circle cx="604" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="604" y="65" class="t-c t-xs">7</text>
+<g class="data"><rect class="box" x="640" y="81" width="48" height="28" rx="4"/></g>
+<text x="664" y="95" class="t-c t-mono">2</text>
+<circle cx="664" cy="65" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="664" y="65" class="t-c t-xs">8</text>
+<text x="712" y="87" class="t-sm" style="fill:var(--c-act)">第 6 步写第 2 行的 x 时，</text>
+<text x="712" y="105" class="t-sm" style="fill:var(--c-act)">第 1 行已有 x，照抄即可</text>
+<text x="20" y="195" class="t-b">顺序 B</text>
+<text x="20" y="213" class="t-xs">先写用到 x 的那一行</text>
+<g class="data"><rect class="box" x="170" y="181" width="48" height="28" rx="4"/></g>
+<text x="194" y="195" class="t-c t-mono">x</text>
+<circle cx="194" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="194" y="165" class="t-c t-xs">6</text>
+<g class="data"><rect class="box" x="230" y="181" width="48" height="28" rx="4"/></g>
+<text x="254" y="195" class="t-c t-mono">=</text>
+<circle cx="254" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="254" y="165" class="t-c t-xs">7</text>
+<g class="data"><rect class="box" x="290" y="181" width="48" height="28" rx="4"/></g>
+<text x="314" y="195" class="t-c t-mono">3</text>
+<circle cx="314" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="314" y="165" class="t-c t-xs">8</text>
+<g class="data"><rect class="box" x="400" y="181" width="48" height="28" rx="4"/></g>
+<text x="424" y="195" class="t-c t-mono">y</text>
+<circle cx="424" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="424" y="165" class="t-c t-xs">2</text>
+<g class="data"><rect class="box" x="460" y="181" width="48" height="28" rx="4"/></g>
+<text x="484" y="195" class="t-c t-mono">=</text>
+<circle cx="484" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="484" y="165" class="t-c t-xs">3</text>
+<g class="pred"><rect class="box" x="520" y="181" width="48" height="28" rx="4"/></g>
+<text x="544" y="195" class="t-c t-mono">x</text>
+<circle cx="544" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="544" y="165" class="t-c t-xs">1</text>
+<g class="data"><rect class="box" x="580" y="181" width="48" height="28" rx="4"/></g>
+<text x="604" y="195" class="t-c t-mono">*</text>
+<circle cx="604" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="604" y="165" class="t-c t-xs">4</text>
+<g class="data"><rect class="box" x="640" y="181" width="48" height="28" rx="4"/></g>
+<text x="664" y="195" class="t-c t-mono">2</text>
+<circle cx="664" cy="165" r="10" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="664" y="165" class="t-c t-xs">5</text>
+<text x="712" y="187" class="t-sm" style="fill:var(--c-pred)">第 1 步就要写第 2 行的 x：</text>
+<text x="712" y="205" class="t-sm" style="fill:var(--c-pred)">前面全是 [M]，变量名只能猜</text>
+<text x="20" y="262" class="t-sm">圆圈里的数字 = 这个 token 在第几步被揭开。两行共 8 个 token，有 8! = 40,320 种揭开顺序；掩码扩散的训练目标把它们一视同仁地平均（式 7）。</text>
+<text x="20" y="284" class="t-sm">顺序 B 里，第 6 步写第 1 行的 x 又变成了“照抄”，但它必须和第 1 步猜的名字一致，猜错的代价被推迟到了后面。</text>
+</svg>
+  <div class="dia-note">本站示意图。<b>怎么看：</b>绿色和橙色标出的是同一个 token（第 2 行的 <code>x</code>）。在顺序 A 里它几乎没有不确定性；在顺序 B 里它变成了一道“没有线索的猜谜”。任意顺序的训练目标要求模型把这两种情形都学好，而后一种情形在真实生成时很少有用。</div>
+</div>
+<p>这类“没有线索的条件预测”在理论上已经被仔细分析过。本站 <a href="token-ordering.html">Train for the Worst, Plan for the Best 精读</a>讲到，掩码扩散模型在训练时会遇到一些计算上非常难的子问题，这些子问题占用了模型的容量，而模型训练好之后，它在不同顺序上的误差也很不均衡；那篇论文的对策是在<b>推理时</b>自适应地挑选顺序。Seed 的对策则是在<b>训练时</b>就不再平均地对待所有顺序。报告还提出了一个观察：即使在代码这种“从左到右偏好不强”的数据上，扩散训练的模型仍然明显落后于 AR 模型。对代码生成顺序的定量分析，可以参看同期的 <a href="diffucoder.html">DiffuCoder 精读</a>。</p>
+
+<h4 id="n-4-3">4.3 Seed 的做法：让模型自己产出轨迹，挑最好的，再蒸馏回去</h4>
+<p>受限顺序训练在两阶段扩散学习之后进行，项目页称之为“后训练”阶段。按报告的描述，它分三步：</p>
+<ol>
+  <li><b>生成候选。</b>对每一个样本，用预训练好的扩散模型大规模地生成一个候选轨迹池，每条轨迹对应一种揭开（生成）顺序。</li>
+  <li><b>按 ELBO 挑选。</b>对每条候选轨迹计算 ELBO，保留 ELBO 最大的那些。直观地说，一条轨迹的 ELBO 是“沿着这个顺序，每一步揭开的 token 在模型看来有多大概率”的对数之和，它是这段序列对数似然的一个下界。ELBO 越高，说明模型觉得按这个顺序生成越顺手，这个顺序越“自然”。</li>
+  <li><b>蒸馏。</b>把挑出来的高质量轨迹集合记作 \(\mathrm T\)，用式 (9) 微调模型：</li>
+</ol>
+<div class="formula">$$L_{\text{c}}(\theta)=\mathbb E_{\tau\sim U(\mathrm T),\;(\mathbf x_i,\mathbf x_0)\in\tau}\Big[-\lambda(\mathbf x_i)\,\log p_\theta\big(\mathbf x_0\mid f(\mathbf x_i)\big)\Big]$$</div>
+<p>式中 \((\mathbf x_i,\mathbf x_0)\) 是从某条挑中的轨迹上取出的一个中间状态和它的终点，\(\lambda(\mathbf x_i)\) 是平衡不同噪声水平的权重（作用类似 3.1 里的 \(\gamma_t'/\gamma_t\)），\(f\) 是一个类似 \(q_{\text{edit}}\) 的增广函数，也就是在中间状态上再加一点编辑噪声。和普通掩码训练相比，区别在于训练输入的来源：普通训练的中间状态是随机遮出来的，覆盖所有可能的位置组合；这里的中间状态只来自“好轨迹”上真正会出现的那些状态。模型的容量因此集中在它推理时实际会走的那些顺序上。报告在 §3.4 还把块级推理时 KV 缓存的稳健性归功于这一步（见第 6 节）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：受限顺序训练的流程（按报告 §3.2 与项目页整理）</div>
+  <div class="dia-flow"><span class="dia-box">一个训练样本<small>代码数据</small></span><span class="dia-arrow">→</span><span class="dia-box enc">预训练扩散模型<small>两阶段课程之后的检查点</small></span><span class="dia-arrow">→</span><span class="dia-box">大量候选轨迹<small>同一个样本，许多种揭开顺序</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">按 ELBO 打分<small>保留模型觉得最“顺”的轨迹</small></span><span class="dia-arrow">→</span><span class="dia-box pred">轨迹上的 (x<sub>i</sub>, x<sub>0</sub>)<small>再加编辑式增广 f</small></span><span class="dia-arrow">→</span><span class="dia-box act">用式 (9) 微调<small>学会按“好顺序”去噪</small></span></div>
+  <div class="dia-note">本站示意图。候选池有多大、每个样本保留几条、挑选是取最大值还是取阈值、微调用了多少数据，报告都没有给出。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li><b>“样本”指什么不清楚。</b>报告说“对任意给定的样本”生成候选轨迹。一种理解是：对数据里的一段真实代码 \(\mathbf x_0\)，让模型探索不同的揭开顺序，并计算每种顺序下的 ELBO；另一种理解是：对一个提示，让模型自己生成完整回答，连同轨迹一起筛选。项目页说的是“基于模型感知，合成并筛选符合偏好的生成轨迹”。两种理解对训练数据的含义很不一样，报告没有给出足够的信息来区分。</li>
+  <li><b>同样没有消融。</b>受限顺序训练前后模型的质量或速度变化，报告没有给出任何数字。</li>
+  <li><b>可能的代价没有评估。</b>把模型的“顺序偏好”收窄，可能会削弱扩散模型按任意顺序生成的能力，例如在中间填空（FIM）这类必须先看后文的任务上。报告没有测填空任务，所以无从判断。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · 相关：<a href="token-ordering.html">Train for the Worst, Plan for the Best 精读</a> · <a href="../legacy/tracks/dllm/02-sedd.html#radd">旧版 RADD 条目</a> · <a href="../legacy/tracks/dllm/16-order-limits.html">旧版：任意顺序的利与弊</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 On-policy 学习：直接把“走几步”当成训练目标</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>就算模型本身训练得很好，生成时走多少步、每步定下几个 token，仍然由采样过程决定；步数一少，质量就掉。报告第 3.3 节的办法是让模型在<b>自己</b>采样出的轨迹上训练，直接以“步数少”为目标，同时用一个验证器保证答案仍然合理。这一节依次回答：为什么少走几步会掉质量；on-policy 是什么意思；目标函数怎么写、为什么直接优化步数会不稳定；编辑距离为什么能当步数的替身；训练曲线（原文图 2a）说明了什么，又没说明什么。</div>
+
+<h4 id="n-5-1">5.1 为什么少走几步会掉质量</h4>
+<p>报告开门见山：扩散模型理论上能并行解码，实践中却很难兑现。原因有两面。一面是一次并行的去噪步本身很贵，必须一次定下足够多的 token 才能摊薄这个开销，这就是第 1 节公式里的 \(m\) 和 \(T(b)/T(1)\)。另一面是减少总步数（也就是每步多定几个）会让质量严重下降，掩码扩散尤其如此，报告在这里引用了 LLaDA 的观察。</p>
+<div class="note-pre"><b>先补一点背景：同一步定下的几个 token 为什么会“打架”。</b>
+<p>网络对画布上每个位置给出的分布是<b>各自独立</b>的：它告诉你“这个位置最可能是什么”，但不告诉你“这个位置和那个位置怎样搭配”。如果同一步里定下的两个位置互相强相关，就可能各自选了一个合理的值，拼在一起却不合理，这和第 1 节讲的“多峰问题”是同一回事。步数越少，每步要同时定下的位置越多，这种冲突就越频繁。所以一个好的采样器只会在模型很有把握的位置上并行，没把握的位置留到后面的步里，等相关的位置定下来之后再决定。本站 <a href="fast-dllm.html#n-2-3">Fast-dLLM 精读 §2.3</a> 有更完整的讨论。</p>
+<p>下面这个交互图把这件事放在一个订机票的小例子里：出发城市和到达城市各由两个词组成，两个词必须配对。把步数调少、或者把块调大，“New Diego” 这种不存在的城市出现的概率就会上升。</p>
+</div>
+<div data-widget="dllm-decode" data-focus="block"></div>
+<p>从这个例子可以看出 on-policy 学习想做的事：如果能让模型在更多位置上“很有把握”，同时又不在相关的位置上犯错，采样器就能在每一步定下更多的 token，步数自然就少了。</p>
+
+<h4 id="n-5-2">5.2 目标：步数减去验证器的分数</h4>
+<div class="note-pre"><b>先补一点背景：on-policy 与 off-policy。</b>
+<p>前面几节的训练，输入都来自数据：要么是对真实代码随机加噪，要么是事先生成、筛选好的轨迹。这叫 <b>off-policy</b>，训练数据和模型此刻的行为无关。<b>On-policy</b> 则是指训练数据由模型<b>当前</b>的参数自己采样出来：先让模型按自己的采样方式生成一遍，再根据生成的结果调整参数，然后用新的参数再生成、再调整。强化学习里的策略梯度方法就是 on-policy 的。它的好处是训练时看到的状态，正好是模型推理时真正会遇到的状态，不会出现“训练时只见过干净的输入，推理时却要面对自己犯过错的输入”这种不匹配。打个比方，off-policy 像看别人开车的录像学驾驶，on-policy 像自己上路开，教练根据你开出来的结果纠正你。</p>
+</div>
+<p>报告的 on-policy 目标是（式 10）：</p>
+<div class="formula">$$\min_\theta\;\mathbb E_{\text{prompt}\sim p_{\text{data}},\;\tau\sim p_\theta(\cdot\mid\text{prompt})}\Big[\,|\tau|-V(\tau[0])\,\Big]$$</div>
+<p>这里 \(\tau=\{\tau[K],\dots,\tau[i],\dots,\tau[0]\}\) 是从全是 [MASK] 的 \(\tau[K]\) 出发、按某种“策略性的采样方式”生成到最终答案 \(\tau[0]\) 的一条轨迹，\(|\tau|\) 是它走了多少步，\(V(\cdot)\) 是一个<b>基于模型的验证器</b>，给最终答案打分，保证采样“总能收敛到一个合理或正确的结果”。目标的意思很直白：步数越少越好，但答案的得分不能掉。</p>
+<p>这里有一个隐含的前提值得说清楚。如果采样器每次都走固定的步数，\(|\tau|\) 就是常数，训练无从改变它。所以这个目标要有意义，采样器必须是<b>自适应</b>的，例如像 <a href="fast-dllm.html#n-4-1">Fast-dLLM</a> 那样，只要某个位置的置信度超过阈值就把它定下来。在这种采样器下，模型越有把握，每步定下的位置越多，轨迹就越短。报告只说用了“策略性的采样方式”，没有说明具体规则，上面的推断是本站根据目标函数的形式做出的。</p>
+<div class="note-pre"><b>先补一点背景：对数导数技巧（log-derivative trick）。</b>
+<p>验证器的分数 \(V(\tau[0])\) 是对采样出来的离散结果打的分，没法直接对模型参数求导。对数导数技巧（强化学习里叫 REINFORCE）绕开了这个问题：</p>
+<div class="formula">$$\nabla_\theta\,\mathbb E_{\tau\sim p_\theta}\big[V(\tau[0])\big]=\mathbb E_{\tau\sim p_\theta}\big[V(\tau[0])\,\nabla_\theta\log p_\theta(\tau)\big]$$</div>
+<p>右边的意思是：采样一批轨迹，得分高的轨迹，就提高模型生成它的概率；得分低的，就降低。它只需要能算出“模型生成这条轨迹的对数概率”的梯度，而不需要验证器本身可导。报告说式 (10) 中与验证器有关的那一项就用这个技巧优化。</p>
+</div>
+
+<h4 id="n-5-3">5.3 编辑距离做替身：步数越少，相邻状态差得越多</h4>
+<p>报告说，<b>直接最小化轨迹长度</b>会让训练动态不稳定。一个可以理解的原因是：\(|\tau|\) 是一个整数，模型参数的微小变化通常不会改变它，偶尔改变时又是一下跳一整步，用它当训练信号既稀疏又粗糙。于是作者改为优化一个“渐进的”替代损失，依据是下面这个关系（式 11）：</p>
+<div class="formula">$$|\tau|\;\propto\;\mathbb E_{i,j\in\{0,\dots,K\}}\,\frac{1}{d_{\text{Lev}}\big(\tau[i],\tau[j]\big)}$$</div>
+<p>直观地说：从全遮到写完，画布总共要发生的变化是固定的（每个位置都要从 [MASK] 变成一个 token）。如果步数少，平均每一步就要改动更多的位置，轨迹上任意两个状态之间的编辑距离就更大，它的倒数就更小。所以“让轨迹上的状态彼此差得多一些”和“让步数少一些”是同一个方向，而前者是一个更平滑、更细粒度的量。下面用 8 个 token 的一块画布算一遍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样写完 8 个 token，步数越少，相邻状态之间的编辑距离越大</div>
+  <svg class="dg" viewBox="0 0 960 330" style="--dg-min:760px" role="img" aria-label="步数越少，相邻状态之间的编辑距离越大">
+<text x="235" y="20" class="t-c t-b">轨迹 A：4 步，每步定下 2 个</text>
+<text x="715" y="20" class="t-c t-b">轨迹 B：2 步，每步定下 4 个</text>
+<line x1="480" y1="34" x2="480" y2="262" class="grid-ln"/>
+<rect class="tk mask" x="120" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="146" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="172" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="198" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="224" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="250" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="276" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="302" y="44" width="22" height="22" rx="3"/>
+<text x="100" y="55" class="t-r t-xs">τ[4]</text>
+<rect class="tk act" x="120" y="92" width="22" height="22" rx="3"/>
+<rect class="tk act" x="146" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="172" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="198" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="224" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="250" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="276" y="92" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="302" y="92" width="22" height="22" rx="3"/>
+<text x="100" y="103" class="t-r t-xs">τ[3]</text>
+<text x="345" y="79" class="t-xs">d_Lev = 2</text>
+<path class="edge no-head" d="M330,68 L330,90" style="stroke:var(--text-3)"/>
+<rect class="tk enc" x="120" y="140" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="146" y="140" width="22" height="22" rx="3"/>
+<rect class="tk act" x="172" y="140" width="22" height="22" rx="3"/>
+<rect class="tk act" x="198" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="224" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="250" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="276" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="302" y="140" width="22" height="22" rx="3"/>
+<text x="100" y="151" class="t-r t-xs">τ[2]</text>
+<text x="345" y="127" class="t-xs">d_Lev = 2</text>
+<path class="edge no-head" d="M330,116 L330,138" style="stroke:var(--text-3)"/>
+<rect class="tk enc" x="120" y="188" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="146" y="188" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="172" y="188" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="198" y="188" width="22" height="22" rx="3"/>
+<rect class="tk act" x="224" y="188" width="22" height="22" rx="3"/>
+<rect class="tk act" x="250" y="188" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="276" y="188" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="302" y="188" width="22" height="22" rx="3"/>
+<text x="100" y="199" class="t-r t-xs">τ[1]</text>
+<text x="345" y="175" class="t-xs">d_Lev = 2</text>
+<path class="edge no-head" d="M330,164 L330,186" style="stroke:var(--text-3)"/>
+<rect class="tk enc" x="120" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="146" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="172" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="198" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="224" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="250" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="276" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="302" y="236" width="22" height="22" rx="3"/>
+<text x="100" y="247" class="t-r t-xs">τ[0]</text>
+<text x="345" y="223" class="t-xs">d_Lev = 2</text>
+<path class="edge no-head" d="M330,212 L330,234" style="stroke:var(--text-3)"/>
+<rect class="tk mask" x="600" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="626" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="652" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="678" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="704" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="730" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="756" y="44" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="782" y="44" width="22" height="22" rx="3"/>
+<text x="580" y="55" class="t-r t-xs">τ[2]</text>
+<rect class="tk act" x="600" y="140" width="22" height="22" rx="3"/>
+<rect class="tk act" x="626" y="140" width="22" height="22" rx="3"/>
+<rect class="tk act" x="652" y="140" width="22" height="22" rx="3"/>
+<rect class="tk act" x="678" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="704" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="730" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="756" y="140" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="782" y="140" width="22" height="22" rx="3"/>
+<text x="580" y="151" class="t-r t-xs">τ[1]</text>
+<text x="825" y="103" class="t-xs">d_Lev = 4</text>
+<path class="edge no-head" d="M810,68 L810,138" style="stroke:var(--text-3)"/>
+<rect class="tk enc" x="600" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="626" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="652" y="236" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="678" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="704" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="730" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="756" y="236" width="22" height="22" rx="3"/>
+<rect class="tk act" x="782" y="236" width="22" height="22" rx="3"/>
+<text x="580" y="247" class="t-r t-xs">τ[0]</text>
+<text x="825" y="199" class="t-xs">d_Lev = 4</text>
+<path class="edge no-head" d="M810,164 L810,234" style="stroke:var(--text-3)"/>
+<text x="235" y="282" class="t-c t-sm">|τ| = 4；相邻状态的 1/d_Lev 平均为 0.5</text>
+<text x="715" y="282" class="t-c t-sm">|τ| = 2；相邻状态的 1/d_Lev 平均为 0.25</text>
+<rect class="tk mask" x="250" y="302" width="14" height="14" rx="2"/><text x="270" y="309" class="t-xs">[MASK]</text>
+<rect class="tk act" x="350" y="302" width="14" height="14" rx="2"/><text x="370" y="309" class="t-xs">这一步刚定下</text>
+<rect class="tk enc" x="480" y="302" width="14" height="14" rx="2"/><text x="500" y="309" class="t-xs">之前已定下</text>
+<text x="620" y="309" class="t-xs">步数减半 → 相邻状态差得多一倍 → 1/d 减半</text>
+</svg>
+  <div class="dia-note">本站示意图与推算。这里只比较相邻状态；式 (11) 是对轨迹上所有状态对取平均，那样算出来轨迹 A 约为 0.32、轨迹 B 约为 0.21（推算），方向一致，但不严格成比例。所以式中的“∝”应理解为“同增同减”，不是精确的正比。</div>
+</div>
+<p>报告没有说明这个替代损失具体怎么计算梯度（编辑距离本身也是对离散状态算的，不可导），也没有解释“渐进”是指什么，例如是否随训练逐步收紧目标。项目页只补充了一句：这个损失“鼓励模型以更高效的方式收敛”。</p>
+
+<h4 id="n-5-4">5.4 训练曲线（原文图 2a）与“模式过滤”</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="seed-diffusion/fig/speedup_training_step.svg" alt="原文图 2(a)：on-policy 训练中加速比的变化" loading="lazy"></div>
+<figcaption><b>原文图 2(a)。怎么看：</b>横轴是 on-policy 训练的步数（0 到约 3.4 万步），纵轴是“加速比”，以训练开始时为 +0%。图注说，加速比是用某个固定块长 \(b\) 采样估计出来的。七个点依次是 +0%、+202%、+253%、+308%、+343%、+400%、+423%，大约每 5,600 步一个点（横坐标为读图约值）。+423% 的意思是速度变成了训练开始时的 5.23 倍（推算）。曲线在头 5,600 步里涨得最快（一下就到 3 倍），之后变缓，到最后仍在缓慢上升。</figcaption></figure>
+<p>这张图是报告里唯一能看出 on-policy 学习效果的证据。它说明这一步训练确实大幅减少了达到同样结果所需的步数。但图上只有速度，没有质量：训练过程中验证器的得分、或者任何基准分数是怎样变化的，报告没有给出。所以“速度提高 5 倍而质量不掉”这一点，只能从最终模型的基准成绩间接推断，不能从这张图里读出来。</p>
+<p>作者还指出，这个过程的效果类似于 NAR 文献中的<b>模式过滤</b>。结合第 1 节讲的多峰问题，可以这样理解：on-policy 训练会奖励那些“能很快收敛、又能通过验证器”的轨迹，压低那些犹豫不决、在几种写法之间摇摆的轨迹。久而久之，模型对同一个提示的输出分布会收窄到少数几种写法上，在每个位置上都更“笃定”，并行定下的 token 之间也就更少冲突。项目页的说法是，训练“隐式地修剪掉”了低质量或低效率的生成路径。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li><b>图 2(a) 的 +423% 和项目页的 5.4 倍不是同一个比较。</b>前者是同一个扩散模型在 on-policy 训练前后的速度之比；后者是项目页说的“相对同等规模 AR 模型”的速度之比。两者数值接近，但基线完全不同，不能互相印证。</li>
+  <li><b>关键设置都没有公开：</b>测量用的块长 \(b\)、验证器是什么模型、它用什么标准打分（代码任务本来可以用单元测试，报告却说是“基于模型的”验证器）、on-policy 训练用了哪些提示。</li>
+  <li><b>收窄输出分布是有代价的。</b>模式过滤让模型更笃定，同时也可能降低输出的多样性，例如多次采样时“至少有一次答对”的比例（pass@k）可能下降。报告只报告了单次采样的 pass@1，没有测多样性。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a> · 相关：<a href="fast-dllm.html">Fast-dLLM 精读</a>（置信度阈值采样）· <a href="d1.html">d1 精读</a>（扩散模型上的策略梯度）· <a href="../legacy/tracks/dllm/15-learned-parallel.html">旧版：学出来的并行</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 推理与基础设施：一块一块地生成，前面的块走 KV 缓存</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>第 3–5 节都在提高“每步定下的 token 数” \(m\)。但第 1 节的公式还有另一半：一次前向的代价 \(T(b)\)。报告第 3.4 节用块级半自回归解码加 KV 缓存来压低这一半，并用原文图 2(b) 说明块长怎么选。这一节先解释为什么双向注意力的扩散模型本来用不上 KV 缓存、块级解码怎样绕开它，再读图 2(b)，最后用 H20 的硬件参数推算这张图为什么长成这个样子。</div>
+
+<h4 id="n-6-1">6.1 块级半自回归，以及“不做块专门训练”</h4>
+<div class="note-pre"><b>先补一点背景：KV 缓存，以及扩散模型为什么用不上它。</b>
+<p>Transformer 的每一层里，每个 token 都会算出一个 key 向量和一个 value 向量，供其他 token 做注意力时读取。AR 模型用的是<b>因果注意力</b>：每个 token 只看它前面的 token。所以一个 token 的 key 和 value 一旦算出来就不会再变，可以存下来反复使用，这就是 <b>KV 缓存</b>（见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。有了它，AR 模型每生成一个新 token，只需要为这一个 token 做计算。</p>
+<p>标准的扩散语言模型用的是<b>双向注意力</b>：画布上每个位置都能看到所有其他位置，包括后面的位置。每一步去噪之后画布变了，所有位置的 key 和 value 也都跟着变，所以严格来说每一步都要把提示词和整张画布重新算一遍，一次前向要处理成百上千个 token，\(T(b)\) 就很大。</p>
+<p>学术界有两条缓解的路。一条是<b>块扩散</b>：把序列切成固定长度的块，块与块之间按从左到右的顺序生成（像 AR），块内部用扩散并行生成；训练时就用“块因果”的注意力（块内双向、块间只看前面），这样前面的块完成后，它们的 key/value 不再变化，可以精确地缓存。代表是 <a href="block-diffusion.html">BD3-LM（Block Diffusion）</a>，报告引用的 ACDiT 也属于这一类。另一条是<b>近似缓存</b>：模型仍按双向注意力训练，推理时假装前面内容的 key/value 不变，直接复用，代表是 <a href="fast-dllm.html#n-3-2">Fast-dLLM</a>。<a href="llada.html">LLaDA</a> 的“半自回归”采样也是分块生成，但不使用缓存。</p>
+</div>
+<p>Seed Diffusion 的推理采用块级并行扩散采样，块与块之间保持因果顺序。生成第 \(n\) 块时，反向过程写作 \(p_\theta(\mathbf x_t\mid\mathbf x_s,\ \mathbf x^{B_0,\dots,B_n})\)，其中 \(\mathbf x^{B_0,\dots,B_n}\) 表示之前已经生成的块（\(\mathbf x^{B_0}\) 为空）。前面的块用 KV 缓存提供条件。报告认为这种“半自回归”是在质量和效率之间取得平衡的成熟技术。</p>
+<p>与 BD3-LM 不同的是，Seed <b>没有做针对块的专门训练</b>，理由是保留灵活性：推理时可以任意划分块的大小和位置。由此推断（报告没有明说注意力的具体形式），模型是按普通的扩散方式训练的，推理时缓存的前文表示和训练时并不完全一致，这就是报告承认的“可能引入偏差”。作者说他们在经验上没有观察到生成质量的明显下降，并推测这要归功于第 4 节的受限顺序蒸馏。一种可能的解释是：受限顺序训练让模型习惯了“大体从前往后”的生成轨迹，前文在后文出现之前就基本定型，用缓存近似带来的误差因此较小。这只是本站的理解，报告没有给出证据。</p>
+<div class="dia">
+  <div class="dia-title">示意图：块级半自回归解码与 KV 缓存</div>
+  <svg class="dg" viewBox="0 0 960 330" style="--dg-min:760px" role="img" aria-label="块级半自回归解码与 KV 缓存">
+<rect x="34" y="54" width="376" height="196" rx="8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-dasharray:5 4"/>
+<text x="221.0" y="40" class="t-c t-sm" style="fill:var(--c-enc)">KV 缓存：提示词和已完成的块只算一次，之后每步直接读</text>
+<text x="518" y="40" class="t-c t-sm" style="fill:var(--c-act)">当前块：块内双向，每步并行定下若干个</text>
+<text x="732" y="40" class="t-c t-sm">后面的块：还没开始</text>
+<text x="113" y="70" class="t-c t-xs">提示词</text>
+<text x="302" y="70" class="t-c t-xs">块 1（已完成）</text>
+<text x="516" y="70" class="t-c t-xs">块 2（正在去噪）</text>
+<text x="730" y="70" class="t-c t-xs">块 3</text>
+<rect class="tk data" x="40" y="96" width="22" height="22" rx="3"/>
+<rect class="tk data" x="65" y="96" width="22" height="22" rx="3"/>
+<rect class="tk data" x="90" y="96" width="22" height="22" rx="3"/>
+<rect class="tk data" x="115" y="96" width="22" height="22" rx="3"/>
+<rect class="tk data" x="140" y="96" width="22" height="22" rx="3"/>
+<rect class="tk data" x="165" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="204" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="229" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="254" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="279" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="304" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="329" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="354" y="96" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="379" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="418" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="443" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="468" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="493" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="518" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="543" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="568" y="96" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="593" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="632" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="657" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="682" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="707" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="732" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="757" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="782" y="96" width="22" height="22" rx="3"/>
+<rect class="tk off" x="807" y="96" width="22" height="22" rx="3"/>
+<text x="842" y="107" class="t-xs">第 1 步</text>
+<rect class="tk data" x="40" y="136" width="22" height="22" rx="3"/>
+<rect class="tk data" x="65" y="136" width="22" height="22" rx="3"/>
+<rect class="tk data" x="90" y="136" width="22" height="22" rx="3"/>
+<rect class="tk data" x="115" y="136" width="22" height="22" rx="3"/>
+<rect class="tk data" x="140" y="136" width="22" height="22" rx="3"/>
+<rect class="tk data" x="165" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="204" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="229" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="254" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="279" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="304" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="329" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="354" y="136" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="379" y="136" width="22" height="22" rx="3"/>
+<rect class="tk act" x="418" y="136" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="443" y="136" width="22" height="22" rx="3"/>
+<rect class="tk act" x="468" y="136" width="22" height="22" rx="3"/>
+<rect class="tk act" x="493" y="136" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="518" y="136" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="543" y="136" width="22" height="22" rx="3"/>
+<rect class="tk act" x="568" y="136" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="593" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="632" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="657" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="682" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="707" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="732" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="757" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="782" y="136" width="22" height="22" rx="3"/>
+<rect class="tk off" x="807" y="136" width="22" height="22" rx="3"/>
+<text x="842" y="147" class="t-xs">第 2 步</text>
+<rect class="tk data" x="40" y="176" width="22" height="22" rx="3"/>
+<rect class="tk data" x="65" y="176" width="22" height="22" rx="3"/>
+<rect class="tk data" x="90" y="176" width="22" height="22" rx="3"/>
+<rect class="tk data" x="115" y="176" width="22" height="22" rx="3"/>
+<rect class="tk data" x="140" y="176" width="22" height="22" rx="3"/>
+<rect class="tk data" x="165" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="204" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="229" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="254" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="279" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="304" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="329" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="354" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="379" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="418" y="176" width="22" height="22" rx="3"/>
+<rect class="tk act" x="443" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="468" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="493" y="176" width="22" height="22" rx="3"/>
+<rect class="tk act" x="518" y="176" width="22" height="22" rx="3"/>
+<rect class="tk act" x="543" y="176" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="568" y="176" width="22" height="22" rx="3"/>
+<rect class="tk mask" x="593" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="632" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="657" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="682" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="707" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="732" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="757" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="782" y="176" width="22" height="22" rx="3"/>
+<rect class="tk off" x="807" y="176" width="22" height="22" rx="3"/>
+<text x="842" y="187" class="t-xs">第 3 步</text>
+<rect class="tk data" x="40" y="216" width="22" height="22" rx="3"/>
+<rect class="tk data" x="65" y="216" width="22" height="22" rx="3"/>
+<rect class="tk data" x="90" y="216" width="22" height="22" rx="3"/>
+<rect class="tk data" x="115" y="216" width="22" height="22" rx="3"/>
+<rect class="tk data" x="140" y="216" width="22" height="22" rx="3"/>
+<rect class="tk data" x="165" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="204" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="229" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="254" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="279" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="304" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="329" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="354" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="379" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="418" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="443" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="468" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="493" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="518" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="543" y="216" width="22" height="22" rx="3"/>
+<rect class="tk enc" x="568" y="216" width="22" height="22" rx="3"/>
+<rect class="tk act" x="593" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="632" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="657" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="682" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="707" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="732" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="757" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="782" y="216" width="22" height="22" rx="3"/>
+<rect class="tk off" x="807" y="216" width="22" height="22" rx="3"/>
+<text x="842" y="227" class="t-xs">第 4 步</text>
+<path class="edge enc" d="M430,240 C430,258 390,258 390,243"/>
+<text x="448" y="253" class="t-xs" style="fill:var(--c-enc)">当前块每一步都读缓存里的 key/value</text>
+<text x="40" y="276" class="t-sm">推理：块与块之间从左到右（半自回归），块内是扩散；一块定完，它的 key/value 写进缓存，下一块开始。</text>
+<text x="40" y="296" class="t-sm" style="fill:var(--c-pred)">隐患：不做块专门训练时，训练里前面的 token 也能“看到”后面的内容；推理时缓存里的前文表示是在后文还不存在时算出来的。</text>
+<text x="40" y="316" class="t-xs">本站示意。块长、每块步数与每步定下的个数都只是举例，报告没有给出实际取值。</text>
+</svg>
+  <div class="dia-note">本站示意图。<b>怎么看：</b>每一行是一次前向。蓝色区域（提示词与块 1）只在写进缓存时算一次，之后每步只读；真正要算的只有当前块的 8 个位置。块 3 在块 2 完成之前完全不参与计算。这正是第 1 节公式里把 \(T(b)\) 压低的办法：一次前向要处理的新位置数从“提示词 + 整张画布”降到了“一个块”。</div>
+</div>
+
+<h4 id="n-6-2">6.2 块长怎么选（原文图 2b）</h4>
+<p>算法之外，报告说他们还做了“整体性的系统优化”：使用内部的基础设施框架，其中有专门针对扩散采样的优化。这个框架是什么、做了哪些优化，报告没有说。报告只给出了一张图，说明块长对单次前向耗时的影响，并说块长是根据“单次前向的延迟”和“对应的 token 生成速率”之间的权衡来选的。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="seed-diffusion/fig/speedup_block_size.svg" alt="原文图 2(b)：不同块长下单次前向的相对耗时" loading="lazy"></div>
+<figcaption><b>原文图 2(b)。怎么看：</b>横轴是块长 \(b\)（1 到 128），纵轴是一次前向的耗时相对于 \(b=1\) 时的倍数 \(T(b)/T(1)\)。曲线整体缓慢上升：\(b=16\) 时约 1.15 倍，\(b=32\) 约 1.22 倍，\(b=64\) 约 1.45 倍，\(b=128\) 约 1.9 倍（读图约值）。曲线不是平滑的，而是大约每过 16 的整数倍就跳一个台阶。项目页给这张图的标题是“优化后不同块大小对应的推理时间”。结论：一次处理 128 个位置，只比处理 1 个位置贵不到一倍，所以只要每步能定下足够多的 token，大块是划算的。</figcaption></figure>
+<p>把这张图代回第 1 节的公式：速度正比于 \(m(b)/T(b)\)。块越大，每步可供挑选的候选位置越多，\(m\) 有机会更大；但 \(T(b)\) 也随之增加，而且块太大时，同一步定下的位置之间更容易冲突，质量会受影响。最优块长取决于 \(m\) 随 \(b\) 怎样增长，而报告<b>既没有给出 \(m(b)\)，也没有说最终选了多大的块</b>。</p>
+<p>下面做一个思想实验，帮助感受数量级。假设项目页说的“5.4 倍”是在和一个每生成一个 token 就花 \(T(1)\) 的 AR 模型比（这是一个很强的假设，见 7.4），那么由公式 \(m=5.4\times T(b)/T(1)\) 可以反推每次前向平均要定下多少个 token：块长 16 时约 6.2 个，32 时约 6.6 个，64 时约 7.8 个，128 时约 10.3 个（推算）。也就是说，即使在最有利的假设下，Seed Diffusion 每次前向也需要稳定地定下 6 到 10 个 token，这正是 on-policy 学习要达到的效果。</p>
+
+<div class="note-pre"><b>先补一点背景：为什么一次前向处理的位置越多越慢，以及 H20 的特别之处。</b>
+<p>第 1 节说过，一次前向的耗时由两部分中较大的那个决定：从显存读参数的时间，和真正做计算的时间。对一个用 BF16 存储的稠密模型，每个参数读 2 字节；一次前向处理 \(b\) 个位置，每个参数参与约 \(2b\) 次运算。所以“每读 1 字节做几次运算”（算术强度）大约就等于 \(b\)。当 \(b\) 小于 GPU 的<b>脊点</b>（算力 ÷ 带宽）时，耗时由读参数决定，基本不随 \(b\) 变化；超过脊点后，耗时开始随 \(b\) 线性增长。</p>
+<p>H20 是 NVIDIA 面向中国市场的 Hopper 架构 GPU。按第三方规格汇总，它的显存带宽约 4.0 TB/s，比 H100 SXM 的 3.35 TB/s 还高约 19%；但 BF16 稠密算力只有约 148 TFLOPS，约为 H100（989 TFLOPS）的 1/6.7（推算比例）。所以 H20 的脊点约为 148 ÷ 4.0 ≈ 37，而 H100 约为 989 ÷ 3.35 ≈ 295（推算）。换句话说，在 H20 上“一次前向多处理几个位置几乎不加时间”的空间，只有三四十个位置；在 H100 上则有近三百个。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：单次前向的相对耗时——理想屋顶线推算 vs 原文图 2(b)</div>
+  <svg class="dg" viewBox="0 0 960 360" style="--dg-min:760px" role="img" aria-label="单次前向的相对耗时随块长变化：理想屋顶线与原文图 2b">
+<line x1="90" y1="300" x2="910" y2="300" class="axis"/><line x1="90" y1="300" x2="90" y2="50" class="axis"/>
+<line x1="90" y1="300" x2="910" y2="300" class="grid-ln"/><text x="82" y="300" class="t-r t-xs">1×</text>
+<line x1="90" y1="220" x2="910" y2="220" class="grid-ln"/><text x="82" y="220" class="t-r t-xs">2×</text>
+<line x1="90" y1="140" x2="910" y2="140" class="grid-ln"/><text x="82" y="140" class="t-r t-xs">3×</text>
+<line x1="90" y1="60" x2="910" y2="60" class="grid-ln"/><text x="82" y="60" class="t-r t-xs">4×</text>
+<text x="90.0" y="316" class="t-c t-xs">1</text>
+<text x="180.0" y="316" class="t-c t-xs">2</text>
+<text x="270.0" y="316" class="t-c t-xs">4</text>
+<text x="360.0" y="316" class="t-c t-xs">8</text>
+<text x="450.0" y="316" class="t-c t-xs">16</text>
+<text x="540.0" y="316" class="t-c t-xs">32</text>
+<text x="630.0" y="316" class="t-c t-xs">64</text>
+<text x="720.0" y="316" class="t-c t-xs">128</text>
+<text x="810.0" y="316" class="t-c t-xs">256</text>
+<text x="900.0" y="316" class="t-c t-xs">512</text>
+<text x="500" y="340" class="t-c t-sm">一次前向要处理的位置数（块长 b，对数刻度）→</text>
+<text x="30" y="175" class="t-c t-sm" transform="rotate(-90 30 175)">相对耗时 T(b) / T(1) →</text>
+<path d="M90.0,300.0 L558.9,300.0 L581.3,284.9 L603.0,267.6 L630.0,241.6 L652.3,215.7 L674.3,185.4 L695.5,150.8 L720.0,103.2 L738.9,60.0" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:7 4"/>
+<line x1="558.9" y1="300" x2="558.9" y2="66" style="stroke:var(--c-pred);stroke-dasharray:2 4"/>
+<text x="558.9" y="58" class="t-c t-xs" style="fill:var(--c-pred)">H20 脊点 ≈ 37</text>
+<text x="736.0" y="103.2" class="t-sm" style="fill:var(--c-pred)">H20 理想屋顶线：b=128 时约 3.5×</text>
+<path d="M90.0,300.0 L828.4,300.0 L861.3,276.9 L900.0,241.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.2;stroke-dasharray:3 4"/>
+<line x1="828.4" y1="300" x2="828.4" y2="66" style="stroke:var(--c-enc);stroke-dasharray:2 4"/>
+<text x="828.4" y="58" class="t-c t-xs" style="fill:var(--c-enc)">H100 脊点 ≈ 295</text>
+<text x="896.0" y="226.8" class="t-r t-sm" style="fill:var(--c-enc)">H100 理想屋顶线</text>
+<path d="M90.0,300.0 L360.0,295.2 L450.0,288.0 L540.0,282.4 L592.6,270.4 L630.0,264.0 L659.0,253.6 L682.6,245.6 L702.7,235.2 L720.0,228.0" style="fill:none;stroke:var(--c-act);stroke-width:2.6"/>
+<circle cx="90.0" cy="300.0" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="360.0" cy="295.2" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="450.0" cy="288.0" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="540.0" cy="282.4" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="592.6" cy="270.4" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="630.0" cy="264.0" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="659.0" cy="253.6" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="682.6" cy="245.6" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="702.7" cy="235.2" r="3.5" style="fill:var(--c-act)"/>
+<circle cx="720.0" cy="228.0" r="3.5" style="fill:var(--c-act)"/>
+<text x="300" y="240" class="t-sm" style="fill:var(--c-act)">实线：原文图 2(b)（读图约值），b=128 时约 1.9×</text>
+</svg>
+  <div class="dia-note">本站推算与重画。虚线是理想屋顶线：假设一个 BF16 稠密模型，只计读参数与矩阵乘法，耗时 = max(读参数时间, 计算时间)，硬件效率 100%；H20 与 H100 的规格见 7.4。实线是原文图 2(b) 的读图约值，原图没有说明是在什么 GPU、多大的模型、什么精度下测的。<b>怎么看：</b>如果图 2(b) 是在 H20 上测的，那么理想情况下块长超过 37 之后耗时应快速上升，\(b=128\) 时约 3.5 倍；实测只有约 1.9 倍，而且在小块长时就已经缓慢上升。这说明 \(b=1\) 的那次前向里本来就有不少与块长无关的固定开销（读 KV 缓存、注意力、内核启动、采样等），它们把比值“稀释”了；也可能测量条件与本站的假设不同。台阶大约每 16 出现一次，可能与 GPU 矩阵乘法按 16 的倍数分块计算有关，这是本站的推测。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li>图 2(b) 只给出了相对耗时，没有绝对值，也没有说明硬件、模型大小、精度和批大小；块长最终选了多少、每步平均定下几个 token，报告都没有给出。所以无法用这张图复算 2,146 这个数字。</li>
+  <li>“KV 缓存引入的偏差没有造成明显的质量下降”只是一句定性的话，报告没有给出“用缓存 vs 不用缓存”的对比数字。</li>
+  <li>H20 的带宽比 H100 高、算力比 H100 低，这对 AR 和扩散的影响方向相反：AR 单请求解码主要吃带宽，在 H20 上不吃亏；扩散靠“空闲算力”并行，在 H20 上可用的空闲算力反而更少。第 7.4 节会再用到这一点。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S3.SS4" target="_blank" rel="noopener">英文原文 §3.4 ↗</a> · 相关：<a href="block-diffusion.html">Block Diffusion 精读</a> · <a href="fast-dllm.html">Fast-dLLM 精读</a> · <a href="../legacy/tracks/dllm/14-kv-cache.html">旧版：扩散模型的 KV 缓存</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 实验：八个代码基准、一张速度图，以及这些数字的份量</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告用哪些基准评测 Seed Diffusion，拿谁来比？在质量上它处在什么位置，哪里比同源的 AR 模型好，哪里差？2,146 token/秒是怎么报告的，它和 Mercury、Gemini Diffusion 的速度数字能不能放在一起比？最后，把所有数字放在一起，哪些可以放心引用，哪些只能当作厂商的说法？</div>
+
+<h4 id="n-7-1">7.1 评测设置：八个基准各测什么</h4>
+<p>报告说评测协议和主要的对照模型都改编自 Seed-Coder 报告，另外加入了当时最有代表性的两个扩散语言模型 Mercury 和 Gemini Diffusion 作对照。</p>
+<div class="note-pre"><b>先补一点背景：代码基准怎么打分。</b>
+<p>代码基准通常这样打分：给模型一道题（往往附带函数签名），让它写出代码，再用事先准备好的单元测试去跑，全部通过才算对。<b>pass@1</b> 指每道题只生成一次，通过的题目占多少比例。这种打分不需要人工判断，但对提示词格式、代码怎么从回答里抽出来、是否允许看到报错后重试，都很敏感。所以同一个模型在不同的评测脚本下，分数可能差好几分。</p>
+</div>
+<ul>
+  <li><b>HumanEval 与 MBPP</b>：最常用的两个 Python 基础题库，前者 164 道函数题，后者是约一千道入门级编程题，报告用它们评测“基本编码能力”。</li>
+  <li><b>BigCodeBench</b>：1,140 道 Python 任务，覆盖 7 个领域，需要调用 139 个不同的库；平均每题 5.6 个测试用例、分支覆盖率 99%，强调组合多个工具完成真实任务。</li>
+  <li><b>LiveCodeBench</b>：持续从 LeetCode、AtCoder、CodeForces 收集新的竞赛题，并给每道题标上发布日期，这样就可以只用模型训练截止之后发布的题来评测，避免“考过原题”。报告说会给出全部 v1–v6 版本（共 1,055 题）和最新的 v6 切片（2025-02-01 至 2025-05-01）的结果，但正文里只出现了 v1–v6 的数字。</li>
+  <li><b>MBXP</b>：把 MBPP 的题目和测试翻译成十多种编程语言，报告的表 2 列出 13 种。</li>
+  <li><b>NaturalCodeBench（NCB）</b>：402 道来自真实用户提问的 Python 与 Java 题，覆盖 6 个领域，测试输入更复杂（包括各种文件类型和数据结构），分中文提问和英文提问两部分。</li>
+  <li><b>Aider</b>：133 道来自 Exercism 的练习，要求模型<b>修改</b>已有代码，而且修改结果必须按规定格式输出，能被程序自动应用，不允许人工干预。报告用的是 “whole” 格式（输出修改后的整个文件），“tries=2” 表示模型第一次没通过时，可以看到测试报错再改一次。</li>
+  <li><b>CanItEdit</b>：105 道人工编写的“按指令改代码”题，指令分为写得很明确的（descriptive）和写得很含糊的（lazy）两类。</li>
+</ul>
+<p>本站核对了 Seed-Coder 报告的表 8、表 9、表 13：Seed Diffusion 报告表 1–3 里所有 AR 对照模型的数字，与 Seed-Coder 报告逐项相同。也就是说，这些对照数字不是重新跑的，而是沿用了同一个团队、同一套协议下的结果；报告只是把 StarCoder2-15B 和 Qwen2.5-Coder-14B 从 Seed-Coder 报告的“13B 以上”组挪到了“15B 以下”组。这样做的好处是协议一致，Seed Diffusion 的分数与 AR 对照的分数是可比的；但 Seed Diffusion 自己的分数仍然是团队自测，没有第三方复现。</p>
+
+<h4 id="n-7-2">7.2 原文图 1：四项基准与速度</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="seed-diffusion/fig/main_result.png" alt="原文图 1：Seed Diffusion 与 Gemini Diffusion、Mercury Coder、Seed-Coder 在四项基准上的分数与速度" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左边四组柱子是四项基准的分数（左纵轴，0–100%），每组从左到右依次是 Seed Diffusion Preview、Gemini Diffusion、Mercury Coder Small、Mercury Coder Mini、Seed-Coder-8B-Instruct；最右边一组是速度（右纵轴，token/秒），只有三个扩散模型有柱子。读数：LiveCodeBench* 依次为 33.7、30.8、25.0、17.0、34.8；BigCodeBench 为 53.2、45.4、45.5、42.0、53.3；MBPP 为 79.4、76.0、76.6、77.1、85.2；HumanEval 为 82.8、89.6、90.0、88.0、84.8；速度为 2,146、1,489、737、1,109。图注说明：Seed Diffusion 的速度是在 H20 上、在八个公开代码基准上测的；Mercury 是在自有数据集和 H100 上测的；Gemini Diffusion 是在混合任务上取平均、硬件未知；这些基准上的速度可能受益于“限制输出格式的系统提示词”；LiveCodeBench 用的是 v1–v6 全部 1,055 题，因为不知道对照模型用的是什么协议。</figcaption></figure>
+<p>这张图要表达的是：Seed Diffusion 最快，而分数和其他模型在同一档。逐项看，可以读出几件事。</p>
+<p><b>和同源的 AR 模型比，四项全部略低。</b>与 Seed-Coder-8B-Instruct 相比，HumanEval 低 2.0 分，MBPP 低 5.8 分，BigCodeBench 低 0.1 分，LiveCodeBench 低 1.1 分。图上没有给 Seed-Coder 画速度柱，所以这张图本身并不能说明 Seed Diffusion 比它快多少。</p>
+<p><b>和另外两个扩散模型比，互有胜负。</b>Seed Diffusion 在 BigCodeBench、MBPP、LiveCodeBench 上高于 Gemini Diffusion 和两个 Mercury，在 HumanEval 上却是五个模型里最低的（82.8，比 Mercury Small 低 7.2 分）。</p>
+<p><b>对照数字的来源不一样。</b>Mercury 的四个分数与它自己报告表 1 一致，其中 HumanEval 和 LiveCodeBench 由第三方 Artificial Analysis（下称 AA）测得（见 <a href="mercury.html#n-4-3">Mercury 精读 §4.3</a>）；Gemini Diffusion 的分数来自 Google 的模型页。三方用的提示词、评测脚本都不同。LiveCodeBench 一项尤其不可比：Seed Diffusion 和 Seed-Coder 用的是 v1–v6 全部 1,055 题，Google 模型页标注的是 v6（30.9%），Mercury 用的是 AA 的题集。图注自己也承认“不知道对照模型的协议”。另外，Google 模型页（2026-10-20 查阅）写的 Gemini Diffusion 速度是每秒 1,479 个 token、LiveCodeBench v6 为 30.9%，图 1 里却是 1,489 和 30.8，两处都有出入。</p>
+
+<h4 id="n-7-3">7.3 原文表 1–3：编辑、多语言与真实用户问题</h4>
+<p>下表把三张表里的总分放在一起（省略了 CodeLlama-7B、CodeQwen1.5-7B、StarCoder2-15B 等较弱或缺项的模型，以及只出现在表 2 的两个大模型）。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>模型</th><th>规模</th><th class="num">Aider（tries=2）</th><th class="num">CanItEdit</th><th class="num">MBXP 平均</th><th class="num">NCB 总分</th></tr></thead>
+  <tbody>
+    <tr><td>DeepSeek-Coder-6.7B-Instruct</td><td>6.7B</td><td class="num">44.4</td><td class="num">36.9</td><td class="num">53.4</td><td class="num">33.9</td></tr>
+    <tr><td>Qwen2.5-Coder-7B-Instruct</td><td>7B</td><td class="num">57.9</td><td class="num">49.5</td><td class="num">72.9</td><td class="num">35.4</td></tr>
+    <tr><td>Llama-3.1-8B-Instruct</td><td>8B</td><td class="num">33.1</td><td class="num">39.5</td><td class="num">56.8</td><td class="num">24.3</td></tr>
+    <tr><td>OpenCoder-8B-Instruct</td><td>8B</td><td class="num">30.8</td><td class="num">39.0</td><td class="num">68.8</td><td class="num">32.5</td></tr>
+    <tr><td>Qwen3-8B</td><td>8B</td><td class="num">55.6</td><td class="num">45.7</td><td class="num">69.3</td><td class="num">35.7</td></tr>
+    <tr><td>Seed-Coder-8B-Instruct</td><td>8B</td><td class="num">57.1</td><td class="num">50.5</td><td class="num">75.3</td><td class="num">49.6</td></tr>
+    <tr><td>Yi-Coder-9B-Chat</td><td>9B</td><td class="num">54.1</td><td class="num">50.5</td><td class="num">71.8</td><td class="num">42.5</td></tr>
+    <tr><td>Qwen2.5-Coder-14B-Instruct</td><td>14B</td><td class="num">69.2</td><td class="num">52.9</td><td class="num">79.4</td><td class="num">46.4</td></tr>
+    <tr><td>DeepSeek-Coder-V2-Lite-Instruct</td><td>总 16B / 激活 2.4B</td><td class="num">52.6</td><td class="num">45.2</td><td class="num">72.6</td><td class="num">41.8</td></tr>
+    <tr><td>Codestral-22B</td><td>22B</td><td class="num">51.1</td><td class="num">52.4</td><td class="num">72.1</td><td class="num">42.9</td></tr>
+    <tr><td>DeepSeek-Coder-33B-Instruct</td><td>33B</td><td class="num">54.5</td><td class="num">46.2</td><td class="num">72.6</td><td class="num">43.0</td></tr>
+    <tr class="hl"><td>Seed-Diffusion-Preview（0705）</td><td>未公开</td><td class="num">44.4</td><td class="num">54.3</td><td class="num">72.6</td><td class="num">42.2</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">数据来自原文表 1（Aider、CanItEdit）、表 2（MBXP）、表 3（NCB），单位 %。所有 AR 对照的数字与 Seed-Coder 报告相同。</p>
+<p><b>代码编辑：一项最好，一项明显落后。</b>CanItEdit 上，Seed Diffusion 的 54.3 是表里所有模型中最高的，比 Seed-Coder-8B 高 3.8 分，也略高于 22B 的 Codestral（52.4）和 14B 的 Qwen2.5-Coder（52.9）。这是报告和项目页最强调的结果，作者把它归因于扩散模型“需要全局规划”的天然优势和编辑噪声训练。但同样是编辑任务，Aider 上 Seed Diffusion 只有 44.4，比 Seed-Coder-8B 低 12.7 分，与 DeepSeek-Coder-6.7B 持平，低于 Qwen2.5-Coder-7B（57.9）、Qwen3-8B（55.6）和 Yi-Coder-9B（54.1），只高于 Llama-3.1-8B、OpenCoder-8B 等较弱的模型。两个基准的差别在于：CanItEdit 是按一句指令改一小段代码，Aider 要求按严格格式输出整个修改后的文件，并且允许根据测试报错再试一次。报告没有讨论为什么两者差这么多，项目页只提了 CanItEdit。</p>
+<p><b>多语言（MBXP）：平均 72.6，比 Seed-Coder-8B 低 2.7 分</b>，与 Qwen2.5-Coder-7B（72.9）接近。逐语言看，13 种语言里只有 TypeScript（73.0 对 72.8）略高于 Seed-Coder-8B，PHP（74.7）和 Swift（54.2）持平，其余 10 种都更低，差距最大的是 Python（79.4 对 85.2）和 Ruby（72.5 对 78.0）。</p>
+<p><b>真实用户问题（NCB）：总分 42.2，比 Seed-Coder-8B 低 7.4 分</b>，但明显高于 Qwen2.5-Coder-7B（35.4）和 Qwen3-8B（35.7），与 Codestral-22B（42.9）相近。它的中文 Python 子项（52.9）表现不错，英文部分偏弱。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Seed Diffusion 与 Seed-Coder-8B-Instruct 在八个基准上的分数</div>
+  <svg class="dg" viewBox="0 0 960 380" style="--dg-min:760px" role="img" aria-label="Seed Diffusion 与 Seed-Coder-8B-Instruct 在八个基准上的分数">
+<rect x="260" y="10" width="12" height="12" rx="6" style="fill:var(--c-pred)"/><text x="278" y="16" class="t-sm">Seed Diffusion Preview（0705）</text>
+<rect x="520" y="10" width="12" height="12" rx="6" style="fill:var(--c-tgt)"/><text x="538" y="16" class="t-sm">Seed-Coder-8B-Instruct（同一数据管线的自回归模型）</text>
+<line x1="220.0" y1="38" x2="220.0" y2="324" class="grid-ln"/>
+<text x="220.0" y="336" class="t-c t-xs">30</text>
+<line x1="315.0" y1="38" x2="315.0" y2="324" class="grid-ln"/>
+<text x="315.0" y="336" class="t-c t-xs">40</text>
+<line x1="410.0" y1="38" x2="410.0" y2="324" class="grid-ln"/>
+<text x="410.0" y="336" class="t-c t-xs">50</text>
+<line x1="505.0" y1="38" x2="505.0" y2="324" class="grid-ln"/>
+<text x="505.0" y="336" class="t-c t-xs">60</text>
+<line x1="600.0" y1="38" x2="600.0" y2="324" class="grid-ln"/>
+<text x="600.0" y="336" class="t-c t-xs">70</text>
+<line x1="695.0" y1="38" x2="695.0" y2="324" class="grid-ln"/>
+<text x="695.0" y="336" class="t-c t-xs">80</text>
+<line x1="790.0" y1="38" x2="790.0" y2="324" class="grid-ln"/>
+<text x="790.0" y="336" class="t-c t-xs">90</text>
+<text x="214" y="52" class="t-r t-sm">HumanEval</text>
+<line x1="721.6" y1="52" x2="740.6" y2="52" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="740.6" cy="52" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="721.6" cy="52" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="52" class="t-sm" style="fill:var(--text-2)">82.8 vs 84.8（-2.0）</text>
+<text x="214" y="88" class="t-r t-sm">MBPP</text>
+<line x1="689.3" y1="88" x2="744.4" y2="88" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="744.4" cy="88" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="689.3" cy="88" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="88" class="t-sm" style="fill:var(--text-2)">79.4 vs 85.2（-5.8）</text>
+<text x="214" y="124" class="t-r t-sm">BigCodeBench</text>
+<line x1="440.4" y1="124" x2="441.3" y2="124" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="441.3" cy="124" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="440.4" cy="124" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="124" class="t-sm" style="fill:var(--text-2)">53.2 vs 53.3（-0.1）</text>
+<text x="214" y="160" class="t-r t-sm">LiveCodeBench v1–v6</text>
+<line x1="255.2" y1="160" x2="265.6" y2="160" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="265.6" cy="160" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="255.2" cy="160" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="160" class="t-sm" style="fill:var(--text-2)">33.7 vs 34.8（-1.1）</text>
+<text x="214" y="196" class="t-r t-sm">MBXP（13 种语言平均）</text>
+<line x1="624.7" y1="196" x2="650.3" y2="196" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="650.3" cy="196" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="624.7" cy="196" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="196" class="t-sm" style="fill:var(--text-2)">72.6 vs 75.3（-2.7）</text>
+<text x="214" y="232" class="t-r t-sm">NaturalCodeBench 总分</text>
+<line x1="335.9" y1="232" x2="406.2" y2="232" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="406.2" cy="232" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="335.9" cy="232" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="232" class="t-sm" style="fill:var(--text-2)">42.2 vs 49.6（-7.4）</text>
+<text x="214" y="268" class="t-r t-sm">Aider（tries=2）</text>
+<line x1="356.8" y1="268" x2="477.4" y2="268" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="477.4" cy="268" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="356.8" cy="268" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="268" class="t-sm" style="fill:var(--text-2)">44.4 vs 57.1（-12.7）</text>
+<text x="214" y="304" class="t-r t-sm">CanItEdit</text>
+<line x1="414.8" y1="304" x2="450.8" y2="304" style="stroke:var(--border-strong);stroke-width:3"/>
+<circle cx="414.8" cy="304" r="7" style="fill:var(--c-tgt)"/>
+<circle cx="450.8" cy="304" r="7" style="fill:var(--c-pred)"/>
+<text x="815" y="304" class="t-sm" style="fill:var(--c-act)">54.3 vs 50.5（+3.8）</text>
+<text x="505" y="358" class="t-c t-sm">pass@1 或通过率（%）→</text>
+</svg>
+  <div class="dia-note">本站根据原文图 1 与表 1–3 的数字重画。<b>怎么看：</b>每一行连着两个点，橙色是 Seed Diffusion，紫色是同一数据管线的 AR 模型 Seed-Coder-8B-Instruct；右边是两者的分数和差值。八项里只有 CanItEdit 一项是扩散模型更高；BigCodeBench 和 LiveCodeBench 几乎持平；MBPP、NCB、Aider 差距明显。注意：两个模型的参数量、训练量和后训练方法是否相同，报告没有说明。</div>
+</div>
+<div class="note-warn"><b>表 3 里有一处算不通的数字：</b>NCB 的“总分”是中文、英文两部分的平均，每部分又是 Python 与 Java 的平均。本站逐行核对，其他模型都能对上，例如 Seed-Coder-8B 的英文部分 (50.0 + 47.1) / 2 ≈ 48.6。Seed Diffusion 一行的英文部分写着 Python 45.7、Java 38.6、合计 38.6，可 (45.7 + 38.6) / 2 ≈ 42.2，不是 38.6；而最后的总分 42.2 恰好等于 (45.8 + 38.6) / 2。所以要么英文 Python 的 45.7 写错了，要么英文合计和总分都偏低了约 3.6 和 1.8 分（推算）。按后一种情况，总分应约为 44.0。报告没有给出勘误。</div>
+
+<h4 id="n-7-4">7.4 速度：2,146 是怎么报告的，和谁能比</h4>
+<div class="note-pre"><b>先补一点背景：“每秒多少 token”至少有两种意思。</b>
+<p>第一种是<b>单个请求看到的生成速度</b>：一个用户发出请求后，回答以每秒多少个 token 的速度出现。它决定用户等多久。第二种是<b>系统吞吐量</b>：一台机器在满负载时，所有请求加在一起每秒生成多少个 token。它决定服务成本。两者可以差很多倍：批开得越大，系统吞吐量越高，但每个请求分到的速度可能越低。对扩散模型来说，这个区别尤其重要，因为它的优势来自“单个请求时 GPU 算力有富余”（第 1 节），而服务器一旦把很多请求拼成大批，这部分富余就被批处理用掉了。所以一个速度数字要能解读，至少要说明：什么硬件、几张卡、批大小或并发数、精度、输入输出多长、是否包含处理提示词的时间，以及 AR 对照在同样条件下是多少。</p>
+</div>
+<p>按这个标准看，三个扩散模型的速度数字是这样报告的：</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>数字</th><th>谁测的</th><th>硬件</th><th>负载</th><th>批 / 并发</th><th>是否含固定开销</th><th>同条件 AR 对照</th></tr></thead>
+  <tbody>
+    <tr class="hl"><td>Seed Diffusion：2,146 tok/s</td><td>字节跳动自测</td><td>H20（几张、什么精度未写）</td><td>八个公开代码基准（推测就是本报告的八个）</td><td>未写</td><td>未写</td><td>报告里没有；项目页称“比同等规模 AR 快 5.4 倍”，条件未写</td></tr>
+    <tr><td>Gemini Diffusion：1,479 tok/s（图 1 写作 1,489）</td><td>Google 自报</td><td>未公开</td><td>模型页所列各项评测的平均</td><td>未写</td><td>不含，另有 0.84 秒开销</td><td>没有</td></tr>
+    <tr><td>Mercury Coder Mini / Small：1,109 / 737 tok/s</td><td>第三方 AA</td><td>H100（卡数未披露）</td><td>AA 自有代码提示，约 1k 输入 / 1k 输出</td><td>一次一个请求</td><td>不含首 token 等待时间</td><td>各云服务商 API 的中位数，硬件各异</td></tr>
+    <tr><td>参照：DiffusionGemma（2026）约 1,479 TPS</td><td>Google DeepMind 自报</td><td>1 × H100，FP8</td><td>7 个基准平均</td><td>batch 1</td><td>不含预填充</td><td>同一张 H100 上的 Gemma 4 AR（204）与带 MTP 投机解码的 Gemma 4（303）</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">Gemini Diffusion 的数字来自 Google 模型页；Mercury 来自其报告 §3.2.1 与本站 <a href="mercury.html#n-4-3">Mercury 精读</a>的核对；DiffusionGemma 一行据其技术报告 §6 与表 3（另见本站 <a href="../legacy/tracks/dllm/10-industrial.html#results">旧版工业 dLLM 页</a>），它与 Gemini Diffusion 的 1,479 只是数值巧合相同。</p>
+<p>这张表说明了报告自己在图注里承认的事：三个数字的测量者、硬件和负载都不同，不能直接比大小。报告摘要却写着 Seed Diffusion “明显快于”同期的 Mercury 和 Gemini Diffusion，这句话与图注的保留态度是矛盾的。下面再算两笔账，说明为什么不能简单相比。</p>
+<p><b>第一笔账：“不含开销”影响有多大。</b>Gemini Diffusion 的 1,479 不含 0.84 秒的固定开销。如果要生成 1,000 个 token，总时间约为 0.84 + 1000 ÷ 1479 ≈ 1.52 秒，折合每秒约 660 个 token（推算），不到标称值的一半。Seed Diffusion 的 2,146 是否包含处理提示词等固定开销，报告没有说，所以甚至无法判断它应该和 1,479 比，还是和 660 比。</p>
+<p><b>第二笔账：H20 并不是一张“更弱”的卡。</b>很多读者会觉得“在 H20 上都能跑这么快，在 H100 上应该更快”。实际情况取决于工作负载。</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>规格</th><th class="num">H20</th><th class="num">H100 SXM</th></tr></thead>
+  <tbody>
+    <tr><td>显存</td><td class="num">96 GB</td><td class="num">80 GB</td></tr>
+    <tr><td>显存带宽</td><td class="num">4.0 TB/s</td><td class="num">3.35 TB/s</td></tr>
+    <tr><td>BF16 稠密算力</td><td class="num">148 TFLOPS</td><td class="num">989 TFLOPS</td></tr>
+    <tr><td>FP8 稠密算力</td><td class="num">296 TFLOPS</td><td class="num">1,979 TFLOPS</td></tr>
+    <tr><td>脊点（BF16，算力 ÷ 带宽）</td><td class="num">≈ 37</td><td class="num">≈ 295</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">H100 SXM 的数字来自 NVIDIA 官方规格。H20 没有找到 NVIDIA 面向公众的规格页，这里的数字来自第三方规格汇总站点（flopper.io 等，2026-10-20 查阅），多个站点一致，但<span class="unverified">未能与官方文档核对</span>。脊点为推算。</p>
+<p>AR 模型单请求解码主要受显存带宽限制，所以在 H20 上并不吃亏，甚至比在 H100 上略快：一个 82 亿参数的 BF16 模型，单张 H20 上每秒最多约 244 个 token，单张 H100 上约 204 个（推算，只计读参数）。扩散模型靠的是“一次前向里多处理一些位置几乎不加时间”，而 H20 的算力只有 H100 的约 1/6.7，这个“几乎不加时间”的范围也小得多（第 6 节）。所以，“2,146 on H20”和“1,109 on H100”之间，硬件差异对两个模型的影响方向并不确定，不能简单换算。</p>
+<p>由于 Seed Diffusion 的大小没有公开，还可以像 <a href="mercury.html#n-5-6">Mercury 精读 §5.6</a> 那样做一个思想实验：假设它是不同大小的稠密模型，在单张 H20 上用 BF16、一次只服务一个请求，要达到每秒 2,146 个 token，每次前向至少要定下几个 token？</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>假设的模型大小</th><th class="num">BF16 参数大小</th><th class="num">单张 H20 每秒最多前向次数</th><th class="num">单张 H100 每秒最多前向次数</th><th class="num">达到 2,146 tok/s，每次前向至少定下</th></tr></thead>
+  <tbody>
+    <tr><td>1B</td><td class="num">2 GB</td><td class="num">约 2,000</td><td class="num">约 1,675</td><td class="num">约 1.1 个</td></tr>
+    <tr><td>3B</td><td class="num">6 GB</td><td class="num">约 667</td><td class="num">约 558</td><td class="num">约 3.2 个</td></tr>
+    <tr><td>8.2B（Seed-Coder 的大小）</td><td class="num">16.4 GB</td><td class="num">约 244</td><td class="num">约 204</td><td class="num">约 8.8 个</td></tr>
+    <tr><td>14B</td><td class="num">28 GB</td><td class="num">约 143</td><td class="num">约 120</td><td class="num">约 15 个</td></tr>
+    <tr><td>32B</td><td class="num">64 GB</td><td class="num">约 63</td><td class="num">约 52</td><td class="num">约 34 个</td></tr>
+  </tbody>
+</table></div>
+<p class="w-note">推算，只是思想实验：只计读参数的时间，是理想上限。用 FP8 时参数大小减半、前向次数上限约翻倍；报告说的是 “H20 GPUs”（复数），如果一个模型副本用 n 张卡做张量并行，带宽约为 n 倍（扣除通信开销）。32B 一行需要的 34 个已接近 H20 的脊点 37，那时前向耗时会开始上升，实际要求更高。</p>
+<p>这张表的用意和 Mercury 页相同：同样是 2,146 token/秒，如果模型只有 1B 左右，一个普通的 AR 小模型也可能做到；如果它和 Seed-Coder 一样是 8B 级，那就意味着每次前向要稳定定下 9 个左右的 token，扩散的并行确实在起大作用。不知道大小、卡数和精度，就无法区分这两种情况。项目页的“5.4 倍”反推出的 AR 基线约为每秒 397 个 token（2146 ÷ 5.4，推算），高于上表中 8.2B AR 模型在单张 H20 上 BF16 的理论上限 244，说明那个 AR 基线要么用了 FP8 或多卡，要么模型更小，要么用了投机解码等加速手段。这些条件项目页都没有交代。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：几个“每秒输出 token 数”及其测量条件</div>
+  <div class="dia-row"><span class="lbl">Seed Diffusion</span><div class="dia-track"><span class="dia-seg cmp" style="flex:2146">2,146 · 自测 · H20（卡数、批、精度未写）</span><span class="dia-seg" style="flex:154"></span></div></div>
+  <div class="dia-row"><span class="lbl">Gemini Diffusion</span><div class="dia-track"><span class="dia-seg kv" style="flex:1479">1,479 · Google 自报 · 不含 0.84 s 开销 · 硬件未公开</span><span class="dia-seg" style="flex:821"></span></div></div>
+  <div class="dia-row"><span class="lbl">Mercury Coder Mini</span><div class="dia-track"><span class="dia-seg w" style="flex:1109">1,109 · AA 测 · H100 · 单请求</span><span class="dia-seg" style="flex:1191"></span></div></div>
+  <div class="dia-row"><span class="lbl">Mercury Coder Small</span><div class="dia-track"><span class="dia-seg w" style="flex:737">737 · AA 测</span><span class="dia-seg" style="flex:1563"></span></div></div>
+  <div class="dia-row"><span class="lbl">Gemini 含开销</span><div class="dia-track"><span class="dia-seg res" style="flex:660"></span><span class="dia-seg" style="flex:1640;justify-content:flex-start">≈660 · 推算：生成 1,000 个 token 时计入 0.84 s 开销</span></div></div>
+  <div class="dia-row"><span class="lbl">“5.4 倍”的 AR 基线</span><div class="dia-track"><span class="dia-seg res" style="flex:397"></span><span class="dia-seg" style="flex:1903;justify-content:flex-start">≈397 · 推算：2,146 ÷ 5.4，条件未公开</span></div></div>
+  <div class="dia-row"><span class="lbl">8.2B AR · 单张 H20</span><div class="dia-track"><span class="dia-seg res" style="flex:244"></span><span class="dia-seg" style="flex:2056;justify-content:flex-start">≈244 · 推算上限：BF16、一次一个请求、无投机解码</span></div></div>
+  <div class="dia-row"><span class="lbl">8.2B AR · 单张 H100</span><div class="dia-track"><span class="dia-seg res" style="flex:204"></span><span class="dia-seg" style="flex:2096;justify-content:flex-start">≈204 · 推算上限：同上</span></div></div>
+  <div class="dia-note">条长按每秒 token 数（满刻度 2,300）。绿色 = Seed Diffusion；蓝色 = Gemini Diffusion；紫色 = Mercury；斜纹 = 本站推算。同一张图里的数字测量者、硬件和负载都不同，只能看数量级，不能直接比大小。</div>
+</div>
+
+<h4 id="n-7-5">7.5 结果的份量</h4>
+<p>把前面的内容放在一起，逐条回答“这些数字值多少”。</p>
+<p><b>第一，没有任何一个关于 Seed Diffusion 的数字是第三方测的。</b>速度和全部八项基准分都是字节跳动自测，本站也没有找到第三方对它的独立测速或复现（2026-10-20 检索）。这与 Mercury 不同：Mercury 的速度和两项基准由 AA 测得，并有 Copilot Arena 的用户投票。模型权重没有公开，外界也无法自行复现。</p>
+<p><b>第二，质量对比里，对齐了什么、没对齐什么。</b>与 AR 对照比，评测协议是对齐的：对照数字取自 Seed-Coder 报告，同一团队、同一套脚本。最有意义的对照是同一数据管线的 Seed-Coder-8B-Instruct。和它相比，Seed Diffusion 在八项里有七项更低（差 0.1 到 12.7 分），只有 CanItEdit 高 3.8 分。没有对齐的是：参数量（Seed Diffusion 未公开）、训练 token 数（Seed-Coder 的预训练语料约 6 万亿 token，Seed Diffusion 未公开）、算力，以及后训练（Seed-Coder 做了监督微调和偏好优化，Seed Diffusion 报告没有提指令微调）。报告和项目页反复说“与同等规模的 AR 模型相当”，但在规模没有公开的情况下，“同等规模”这一点无法核实。与 Mercury、Gemini Diffusion 比，数字来自各自的发布方，提示词、脚本和 LiveCodeBench 题集都不同，只能当作大致的参照。</p>
+<p><b>第三，速度数字缺少解读所需的条件。</b>2,146 只交代了“H20 GPU”和“八个代码基准”。卡数、批大小、精度、块长、每步定下的 token 数、输出长度、是否包含提示词处理时间，以及“限制输出格式的系统提示词”具体用了哪些、提速多少，都没有写。报告正文没有任何 AR 模型的速度；项目页的“快 5.4 倍”没有说明对照模型和条件。报告也没有给出多个请求同时到达时的系统吞吐量，而这恰恰是扩散模型优势最容易消失的地方（见“后来怎么样了”中 DiffusionGemma 的实测）。</p>
+<p><b>第四，方法上的说法都没有消融支持。</b>编辑噪声带来多少提升、受限顺序训练带来多少提升、KV 缓存是否降低质量，报告都只有定性的描述。唯一的定量证据是图 2(a)：on-policy 训练让速度变成原来的约 5.2 倍，但图上没有质量曲线。项目页把 CanItEdit 上的优势归功于编辑阶段，可报告里并没有“不加编辑阶段”的对照模型。</p>
+<p><b>第五，报告与项目页里的不一致之处。</b>集中列出来：</p>
+<ul>
+  <li>NCB 表中 Seed Diffusion 一行的英文合计与 Python、Java 两个子项对不上（见 7.3）。</li>
+  <li>项目页称 CanItEdit 上“提升了 4.8%”（英文博客写作 4.8 个百分点），按 54.3 对 50.5 实为 3.8 个百分点。</li>
+  <li>图 1 里 Gemini Diffusion 的速度 1,489、LiveCodeBench 30.8，与 Google 模型页的 1,479、30.9 不同。项目页的汇总表里 Gemini Diffusion 的 BigCodeBench 写成了 42，而图 1 是 45.4（42.0 是 Mercury Mini 的分数）；同一张汇总表的 “Mercury Coder” 一列混用了 Small（BigCodeBench 45.5、HumanEval 90）和 Mini（MBPP 77.1、速度 1,109）的数字。</li>
+  <li>报告说会给出 LiveCodeBench v6 切片的结果，正文里没有。</li>
+  <li>摘要说“明显快于 Mercury 和 Gemini Diffusion”，图注却说“难以直接比较”。</li>
+</ul>
+<p><b>最后，可以放心得出的结论。</b>2025 年 7 月，字节跳动 Seed 训练出一个只用代码数据的扩散语言模型，自报在 H20 上每秒生成 2,146 个 token。在与它同源的 AR 模型 Seed-Coder-8B-Instruct 相同的评测协议下，它在多数代码基准上略低（BigCodeBench、LiveCodeBench 几乎持平，MBPP、NCB、Aider 差距明显），在 CanItEdit 上更高。报告提出的三个训练想法（编辑噪声、受限顺序蒸馏、最小化步数的 on-policy 学习）各自针对扩散语言模型真实存在的问题，思路清楚，但报告没有给出它们各自效果的证据。所有速度比较，包括与 Mercury、Gemini Diffusion 和 AR 模型的比较，都只能当作厂商在未公开条件下的说法。</p>
+<div class="note-warn"><b>引用这篇报告时最容易犯的错误：</b>把“2,146 token/秒”和 Mercury 的“1,109 token/秒”直接相除，说“Seed Diffusion 比 Mercury 快近一倍”；或者把项目页的“5.4 倍”当作扩散相对 AR 的算法加速比。前者比较的是不同测量者、不同硬件、不同负载下的两个数；后者没有公开对照模型和测量条件。要讨论“扩散能比 AR 快多少”，应该看在同一硬件、同一批大小下做了对照的工作，例如本页“后来怎么样了”提到的 DiffusionGemma，以及本站 <a href="fast-dllm.html#n-5-5">Fast-dLLM</a>、<a href="block-diffusion.html">Block Diffusion</a> 的精读。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S4.T1" target="_blank" rel="noopener">表 1 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S4.T2" target="_blank" rel="noopener">表 2 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#S4.T3" target="_blank" rel="noopener">表 3 ↗</a> · 相关：<a href="../legacy/tracks/dllm/10-industrial.html#q20">旧版简答题 Q20：三个速度数字能否直接比较</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 讨论与结论：作者认为“快”只是第一步</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告最后一节很短，作者怎样定位这项工作？他们认为离散扩散真正的价值在哪里，下一步要做什么？</div>
+<p>作者把这份报告定位为 Seed Diffusion 项目中一个实验模型的关键技术介绍，它展示了离散扩散在大规模语言模型上大幅加速推理的潜力。但作者认为，更快的推理只是离散扩散<b>最直接</b>的好处。他们更看重的是：探索“从左到右”之外的生成顺序本身就是一个有价值的研究方向，因为“从左到右”是机器学习里一个普遍存在、以人为中心的假设，离开它可能带来新的能力。要完全释放离散扩散的能力，还需要整个社区投入大量工作，尤其是研究它的<b>规模扩展规律</b>，以及它在<b>复杂推理任务</b>上的应用。项目页的结尾也说，Seed Diffusion 项目会继续研究扩展规律和复杂推理。</p>
+<p>报告末尾的贡献名单把 22 位作者分成四组：项目负责人 Yuxuan Song 与 Zheng Zhang（按字母序）；核心贡献者 Yuxuan Song、Zheng Zhang、Cheng Luo；另有 11 位贡献者；指导者 8 位，包括字节跳动 Seed 的 Mingxuan Wang、Lin Yan、Xiaoying Jia、Yonghui Wu，以及清华 AIR 的 Jingjing Liu、Wei-Ying Ma、Ya-Qin Zhang、Hao Zhou。致谢部分感谢了 Seed-Coder 团队在数据管线上的帮助。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“探索非从左到右的顺序”这个愿景，与第 4 节的受限顺序训练在方向上有些张力：后者恰恰是把模型的生成顺序往“自然的”、更接近从前到后的顺序上收。两者并不矛盾（作者要的是“好的顺序”，而不是“任意顺序”），但它提示我们：在这份报告里，速度和质量的改进很可能更多来自<b>约束</b>扩散模型的生成自由度，而不是放开它。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2508.02193v1#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2508.02193v1#Sx1" target="_blank" rel="noopener">贡献名单 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">9 后来怎么样了</h3>
+<p>截至 2026-10-20，Seed Diffusion Preview 只有这一份 arXiv v1，没有公开权重；在线 demo 的链接仍然可以打开，本站没有用它测速。Semantic Scholar 的快照（2026-10-19）显示这份报告被引用约 185 次；后续论文常把它与 Mercury、Gemini Diffusion 并列，作为大厂级扩散语言模型的例子，例如 DiffusionGemma 报告的引言。本站没有找到 Seed Diffusion 系列的后续技术报告。下面的时间线只列出能在 arXiv、公司页面或本站其他页面上核实日期的事件。</p>
+<div class="dia">
+  <div class="dia-title">时间线：Seed Diffusion 前后的相关工作</div>
+  <div class="dia-row"><span class="lbl">2025-02-26</span><span class="dia-box">Mercury Coder 上线（Inception Labs）<small>6 月 17 日发布技术报告；速度由第三方 AA 测得</small></span></div>
+  <div class="dia-row"><span class="lbl">2025-05-20</span><span class="dia-box">Gemini Diffusion 公布（Google DeepMind）<small>只有模型页与演示；1,479 tok/s，不含 0.84 s 开销，硬件未公开</small></span></div>
+  <div class="dia-row"><span class="lbl">2025-06</span><span class="dia-box">Edit Flows（Meta FAIR，arXiv 2506.09018）<small>把插入、删除、替换直接作为生成过程，支持变长序列</small></span></div>
+  <div class="dia-row"><span class="lbl">2025-07-31</span><span class="dia-box pred">Seed Diffusion Preview 项目页与官方博客</span></div>
+  <div class="dia-row"><span class="lbl">2025-08-04</span><span class="dia-box pred">本报告 arXiv v1</span></div>
+  <div class="dia-row"><span class="lbl">2025-09 起</span><span class="dia-box tgt">“学出来的并行”系列<small>dParallel（2025-09）、CDLM（2025-11）、d3LLM（2026-01）等，用蒸馏或自蒸馏减少步数</small></span></div>
+  <div class="dia-row"><span class="lbl">2026-01</span><span class="dia-box act">Stable-DiffCoder（华中科技大学 + 字节跳动 Seed，arXiv 2601.15892）<small>从 Seed-Coder-8B 的检查点出发做块扩散持续预训练；开放权重</small></span></div>
+  <div class="dia-row"><span class="lbl">2026-02</span><span class="dia-box tgt">LLaDA2.1（arXiv 2602.08676）<small>在 [MASK]→token 之外加入 token→token 编辑，可以改写已写下的 token</small></span></div>
+  <div class="dia-row"><span class="lbl">2026-06</span><span class="dia-box act">iLLaDA（中国人民大学 + 字节跳动 Seed，arXiv 2606.25331）<small>把 LLaDA 的掩码扩散目标扩展到 12T token</small></span></div>
+  <div class="dia-row"><span class="lbl">2026-07-31</span><span class="dia-box tgt">DiffusionGemma 技术报告（Google DeepMind，arXiv 2608.00146）<small>开放权重；在同一张 H100 上对比扩散与自回归，并测了不同并发数</small></span></div>
+  <div class="dia-note">橙色 = 本报告；绿色 = 字节跳动 Seed 参与的后续开放工作；紫色 = 与本报告某个想法直接相关的其他工作。日期来源：arXiv 提交记录、公司页面，以及本站 <a href="mercury.html#n-impact">Mercury 精读</a>与旧版扩散 LLM 路线页。</div>
+</div>
+<p><b>编辑噪声这条线：让已写下的 token 可以被改。</b>Seed Diffusion 的两阶段课程想解决的问题是“掩码扩散写下的 token 改不了”。之后公开了更完整方法的工作，从不同方向处理了同一个问题。Meta 的 <a href="../legacy/tracks/dllm/04-discrete-flow.html#edit-flows">Edit Flows</a> 走得最远，它把插入、删除、替换本身定义为生成过程，序列长度可以变化，而不只是把编辑当作训练时的数据增广。蚂蚁集团等机构的 <a href="../legacy/tracks/dllm/09-llada2.html#llada21">LLaDA2.1</a> 在推理时加入“token 到 token”的改写，并用两个阈值控制速度与质量。Google DeepMind 的 DiffusionGemma 干脆不用掩码噪声，改用均匀噪声，让任何 token 都可以转移到任何 token（见 <a href="../legacy/tracks/dllm/10-industrial.html#c-noise">旧版工业 dLLM 页 §3.2</a>）。这些工作给出了可复现的配方和数字，可以用来检验 Seed 报告里“编辑噪声有助于自我纠错”的说法。</p>
+<p><b>少步化这条线：把“走几步”变成训练目标。</b>Seed 的 on-policy 学习属于一大类“训练模型，让它每步能定下更多 token”的方法。后来的 dParallel、CDLM、d3LLM 等工作（见 <a href="../legacy/tracks/dllm/15-learned-parallel.html">旧版：学出来的并行</a>）用各种蒸馏办法做同一件事，并且大多公开了代码，报告了“每次前向定下几个 token”这样可以直接比较的指标。DiffusionGemma 的 SD·RL 把采样器蒸馏和强化学习合在一次梯度更新里，思路与 Seed 的“步数减验证器分数”相近。</p>
+<p><b>速度怎么比：同一硬件、不同并发。</b>Seed Diffusion 的速度数字缺少批大小和同条件的 AR 对照，这个缺口后来由 DiffusionGemma 的技术报告补上了一部分。它在同一张 H100（FP8）上测得：单请求时，扩散模型平均每秒约 1,456 个 token，分别是 Gemma 4 AR（204）的 7.1 倍、带 MTP 投机解码版本（303）的 4.8 倍；但当并发请求增加到约 32 个时，AR 模型的总吞吐量开始反超（DiffusionGemma 报告 §6、图 12）。该报告也说明，这些多并发结果没有针对大批次做专门优化。这正好印证了 7.4 的提醒：一个不写批大小的速度数字，只能说明低并发时的情况。第三方的 <a href="../legacy/tracks/dllm/16-order-limits.html#parallelbench">ParallelBench</a> 则从质量一侧说明，商用扩散模型在一步定下多个 token 时会在特定任务上出错。</p>
+<p><b>字节跳动 Seed 自己的后续。</b>Seed Diffusion 没有再出新版报告，但 Seed 参与了两项公开权重或公开配方的扩散工作。<a href="../legacy/tracks/dllm/18-code.html#stable-diffcoder">Stable-DiffCoder</a>（2026-01）从 Seed-Coder-8B 退火前的检查点出发，用块大小为 4 的块扩散目标持续预训练 1.3 万亿 token，再复用 Seed-Coder 的指令微调数据，权重和代码都已公开；它在相同骨架和数据来源上比较扩散与 AR，回答了 Seed Diffusion 报告没有回答的“同源对照”问题，尽管本站旧版页指出那个对照也没有控制住所有变量。<a href="../legacy/tracks/dllm/06-llada.html#illada">iLLaDA</a>（2026-06）则是与中国人民大学合作、把掩码扩散预训练扩展到 12 万亿 token 的工作。</p>
+<p>回头看，Seed Diffusion Preview 的历史位置主要在两点。第一，它是 2025 年继 Mercury、Gemini Diffusion 之后又一个大厂级的代码扩散模型，并且第一次把“编辑噪声”“受限顺序蒸馏”“最小化步数的 on-policy 学习”这几个想法放在一起，以公式的形式公开出来。第二，它和 Mercury 一样，几乎没有公开可以核实速度与质量的条件，所以它最可信的贡献是方法上的思路，而不是那个 2,146 的数字。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按报告贡献名单的署名。背景只列可公开查证的信息：机构主页、实验室页面与可靠的新闻报道。其余作者的背景本站没有找到可靠的公开来源，故不列出。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Yuxuan Song</b>（项目负责人、核心贡献者）<div class="aff">字节跳动 Seed、清华 AIR、SIA-Lab（论文署名）</div>AIhub 作者页称其为清华大学计算机科学博士生。</div>
+  <div class="author-card"><b>Zheng Zhang</b>（项目负责人、核心贡献者）<div class="aff">字节跳动 Seed、SIA-Lab（论文署名）</div></div>
+  <div class="author-card"><b>Cheng Luo</b>（核心贡献者）<div class="aff">字节跳动 Seed（论文署名）</div></div>
+  <div class="author-card"><b>Pengyang Gao、Fan Xia、Hao Luo、Zheng Li、Yuehang Yang、Hongli Yu、Xingwei Qu、Yuwei Fu、Jing Su、Ge Zhang、Wenhao Huang</b>（贡献者）<div class="aff">字节跳动 Seed；Hongli Yu 另署清华 AIR 与 SIA-Lab（论文署名）</div>报告没有说明各人的分工。</div>
+  <div class="author-card senior"><b>Hao Zhou</b>（指导）<div class="aff">清华 AIR 副研究员 / 副教授（2022 年起，AIR 个人页）</div>2017–2022 年在字节跳动 AI Lab 任研究科学家与经理，带领文本生成和 AI 药物设计团队；南京大学博士。AIR 个人页列出 ACL 2021 最佳论文（通讯作者）。他是非自回归翻译工作 GLAT（ACL 2021）与 DA-Transformer（ICML 2022）的作者之一，本报告在相关工作和“模式过滤”处引用了这两篇。</div>
+  <div class="author-card senior"><b>Mingxuan Wang</b>（指导）<div class="aff">字节跳动 Seed、SIA-Lab（论文署名）</div>本报告参考文献中的 GLAT 与 Diffusion Glancing Transformer（NAACL 2024）的作者名单里都有这个名字。</div>
+  <div class="author-card senior"><b>Yonghui Wu</b>（指导）<div class="aff">字节跳动 Seed 基础研究负责人（2025 年 2 月起，据 SCMP、TechNode 报道）</div>此前在 Google 工作约 17 年，2023 年成为 Google Fellow，离职前为 Google DeepMind 研究副总裁（同上报道）。</div>
+  <div class="author-card senior"><b>Wei-Ying Ma</b>（指导）<div class="aff">清华 AIR 首席科学家，Huiyan Chair Professor（AIR 官网英文页）</div>2020 年与 Ya-Qin Zhang 共同创办清华 AIR；此前在微软亚洲研究院任 Assistant Managing Director，2017 年创办字节跳动 AI Lab（AIR 个人页）。</div>
+  <div class="author-card senior"><b>Ya-Qin Zhang</b>（指导）<div class="aff">清华 AIR 创院院长、智能科学讲席教授（AIR 官网）</div>中国工程院外籍院士、澳大利亚技术科学与工程院外籍院士、美国艺术与科学院院士（AIR 官网）。</div>
+  <div class="author-card senior"><b>Jingjing Liu</b>（指导）<div class="aff">清华 AIR 首席研究员（Principal Investigator）、GDS Professor（AIR 官网英文页）</div>研究方向为多模态大模型（AIR 官网）。</div>
+  <div class="author-card senior"><b>Lin Yan、Xiaoying Jia</b>（指导）<div class="aff">字节跳动 Seed（论文署名）</div></div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：arXiv 技术报告，只有 v1（2025-08-04 提交，PDF 首页日期为 2025-08-05），未经同行评审；本站在 OpenReview 与网页检索中没有找到会议或期刊版本（2026-10-20）。</li>
+  <li><b>开放程度</b>：没有公开权重和代码；只有项目页与在线 demo（studio.seed.ai，2026-10-20 仍可打开）。Hugging Face 上 ByteDance-Seed 组织下有 Seed-Coder 与 Stable-DiffCoder 的权重，没有 Seed Diffusion（2026-10-20 查询）。</li>
+  <li><b>后续影响</b>：常与 Mercury、Gemini Diffusion 一起被后续论文列为商用级扩散语言模型的代表，例如 DiffusionGemma 报告的引言；它的编辑噪声与少步化思路在 LLaDA2.1、DiffusionGemma 等公开了配方的工作中都有对应。字节跳动 Seed 之后参与了开放权重的 Stable-DiffCoder。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="mercury.html">Mercury 精读</a>：另一份工业扩散模型报告，速度由第三方测得，可与本页对照阅读。</li>
+  <li><a href="mdlm.html">MDLM 精读</a>、<a href="llada.html">LLaDA 精读</a>：掩码扩散的训练目标与半自回归采样。</li>
+  <li><a href="token-ordering.html">Train for the Worst, Plan for the Best 精读</a>：为什么任意顺序的训练会遇到难题。</li>
+  <li><a href="block-diffusion.html">Block Diffusion 精读</a>、<a href="fast-dllm.html">Fast-dLLM 精读</a>：块扩散、KV 缓存与置信度并行解码。</li>
+  <li><a href="diffucoder.html">DiffuCoder 精读</a>：代码扩散模型的生成顺序分析。</li>
+  <li><a href="d1.html">d1 精读</a>：扩散模型上的强化学习，与本页的 on-policy 学习对照。</li>
+  <li><a href="vllm.html">vLLM 精读</a>：KV 缓存、批处理与服务吞吐量。</li>
+  <li><a href="../legacy/tracks/dllm/10-industrial.html">旧版：工业 dLLM（DiffusionGemma / Mercury / Seed Diffusion）</a> · <a href="../legacy/tracks/dllm/18-code.html">旧版：代码扩散模型</a> · <a href="../legacy/tracks/dllm/index.html">旧版：扩散 LLM 路线总览</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对报告的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2508.02193" target="_blank" rel="noopener">arXiv:2508.02193</a>（本页依据 v1）。原文图 1、图 2(a)、图 2(b) 取自 arXiv HTML 版，报告以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布，© Song, Zhang, Luo 等，图片未做修改（图 1 中其他模型的图标为原图所有）。其余示意图为本站绘制，代码例子与推算为本站构造。其他来源：Seed Diffusion 项目页与 Seed 官方博客（2025-07-31），Seed-Coder 报告（arXiv 2506.03524）及其 Hugging Face 模型卡，Google DeepMind 的 Gemini Diffusion 模型页，DiffusionGemma 技术报告（arXiv 2608.00146）§6 与图 12，H20 规格汇总（flopper.io），清华 AIR 官网人员页，SCMP 与 TechNode 关于 Yonghui Wu 的报道；均于 2026-10-20 查阅。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

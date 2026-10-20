@@ -1,0 +1,1371 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fast-dLLM v2 精读</title>
+<meta name="description" content="Fast-dLLM v2（ICLR 2026）逐节精读：怎样只用约 1B–3B token 的 SFT 把 Qwen2.5-Instruct 改造成块扩散模型（块对齐填充、互补掩码、token shift、双流注意力掩码），推理时块级缓存、子块与子块缓存怎么配合置信度并行解码，以及质量与 2.5 倍速度是在什么条件下测出来的，并与 SDAR 对照。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/dllmdecode.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="fast-dllm-v2">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ICLR 2026</div>
+  <h1>Fast-dLLM v2：用约十亿 token 把自回归模型改造成块扩散模型</h1>
+  <p class="en-title">Fast-dLLM v2: Efficient Block-Diffusion LLM</p>
+  <div class="paper-authors">Chengyue Wu<sup>1,2</sup>, Hao Zhang<sup>2</sup>, Shuchen Xue<sup>2</sup>, Shizhe Diao<sup>2</sup>, Yonggan Fu<sup>2</sup>, Zhijian Liu<sup>2</sup>, Pavlo Molchanov<sup>2</sup>, Ping Luo<sup>1</sup>, Song Han<sup>2,3</sup>, Enze Xie<sup>2</sup></div>
+  <div class="paper-affil"><sup>1</sup>香港大学　<sup>2</sup>NVIDIA　<sup>3</sup>MIT（按论文署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2509.26328" target="_blank" rel="noopener">arXiv 2509.26328 ↗</a>
+    <a class="pill" href="https://proceedings.iclr.cc/paper_files/paper/2026/hash/d0865cbe51d35ec322f9af9db7806fc7-Abstract-Conference.html" target="_blank" rel="noopener">ICLR 2026 ↗</a>
+    <a class="pill" href="https://nvlabs.github.io/Fast-dLLM/v2/" target="_blank" rel="noopener">项目主页 ↗</a>
+    <a class="pill" href="https://github.com/NVlabs/Fast-dLLM/tree/main/v2" target="_blank" rel="noopener">Code: NVlabs/Fast-dLLM（v2/）↗</a>
+    <a class="pill" href="https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B" target="_blank" rel="noopener">权重：Fast_dLLM_v2_7B ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2">旧版结构拆解：AR → 块扩散（与 SDAR、WeDLM 对照）</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>1,106</b><span>GitHub star（NVlabs/Fast-dLLM，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照（该仓库同时收录前作 Fast-dLLM 的代码）。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。标“推算”的数字是本站根据论文数据算出来的，标“读自原图”的数字是从原文图中读出的约值，标“据官方代码”的细节来自 NVlabs/Fast-dLLM 仓库和 Hugging Face 上随权重发布的模型代码，这些都不是论文原话。本页依据 arXiv v1（2025-09-30，也是 arXiv 上唯一的版本），ICLR 2026 正式版新增的内容在第 11 节单独说明。原文以 CC BY-NC-ND 4.0 许可发布，不允许改编转载，所以本页的图都是本站自己画的示意图，或用论文报告的数字重画的简图，旁边附原图链接。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>今天的大语言模型几乎都是自回归（autoregressive，AR）模型：从左到右一次写一个 token，每写一个就要把整个模型算一遍。这种写法质量好、工程上也成熟，但一次只出一个 token，意味着回答越长越慢，而且一次只服务一个用户时，GPU 的算力大部分时间在等数据。扩散语言模型（diffusion LLM，下文简称 dLLM）提供了另一种写法：先在答案的位置放一排 [MASK]，再反复让模型去猜，每一轮可以同时定下好几个位置。理论上它能比自回归快，可开源的 LLaDA、Dream 实际跑起来往往更慢：它们用双向注意力，没法像自回归模型那样把算过的 key/value 存起来复用；而从零训练这样一个模型又非常贵，LLaDA 8B 用了 2.3T token。</p>
+<p>Fast-dLLM v2 走的是一条折中的路。它不从零训练，也不像 Dream 那样用 5800 亿 token 把自回归模型改成全注意力的扩散模型，而是把现成的 Qwen2.5-Instruct 改造成<b>块扩散</b>模型：把输出切成每块 32 个 token，块与块之间仍然从左到右，所以写完的块可以像自回归一样被精确地缓存；块内部用掩码扩散，所以一块里可以一步定下好几个 token。因为这种结构离原来的自回归模型很近，改造只需要一段很短的监督微调（SFT）。摘要说约 10 亿（1B）token；附录给出的精确数字是 7B 模型约 13.1 亿、1.5B 模型约 31.5 亿。训练上有三个要点：把每条样本补齐到块长的整数倍、互补掩码、token shift。推理上，作者把块级精确缓存、块内置信度阈值并行解码和“子块缓存”叠在一起，后者是把前作 <a href="fast-dllm.html">Fast-dLLM</a> 的 DualCache 搬进了块内。</p>
+<p>主要结果有两组。质量上，7B 模型在 9 列基准上平均 60.3 分，与“同样的数据、同样的步数、做普通自回归微调”的 Qwen2.5-7B（59.6）相当。速度上，在 A100、一次一条请求、GSM8K 上，它每秒约生成 100 个 token，约是 Qwen2.5-7B-Instruct 的 2.5 倍；批大小增加到 64 时，倍数降到 A100 上 1.5、H100 上 1.8。读这些数字要记住三件事，第 10 节会展开：质量表是在“每步只定稿 1 个 token”（阈值 1，不并行）下测的，2.5 倍的速度则来自阈值 0.9；平均分里代码题占了 9 列中的 4 列，而 Fast-dLLM v2 恰好在代码上领先、在 MATH 和 IFEval 上明显落后；速度对手用的是什么推理实现，论文没有说明。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么把一个自回归模型改造成块扩散模型，比从头训练一个扩散模型便宜得多？“约 1B token”是怎么来的，和 Dream 的 580B 可比吗？</li>
+  <li>块对齐填充、互补掩码、token shift 各自解决什么问题？为什么训练损失里没有掩码扩散常见的 \(1/t\)？</li>
+  <li>训练时为什么要把加噪序列和干净序列拼成两倍长？那张 \(2L\times 2L\) 的注意力掩码怎么读？</li>
+  <li>推理时“块级缓存 + 子块 + 子块缓存”具体怎么一步步走？平均每个 token 要几次前向？</li>
+  <li>2.5 倍是在什么硬件、什么批大小、和谁比出来的？批变大时倍数为什么下降？</li>
+  <li>它和同期的 SDAR（另一种 AR → 块扩散的改造）有什么不同？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2509.26328" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="../legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2">本站旧版结构拆解</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：自回归太慢，扩散模型又用不上缓存，块扩散能不能两头都占</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>自回归模型一次只能写一个 token，速度天生受限；扩散语言模型号称能并行，实际却常常更慢，还很难灵活地决定写多长。作者认为块扩散能同时缓解这两边的问题，但此前的块扩散只在小模型上验证过。这一节交代：两种写法各自卡在哪里，块扩散为什么能兼得，Fast-dLLM v2 打算怎样把它做到 7B 规模，而且训练很便宜。</div>
+
+<div class="note-pre"><b>先补一点背景：自回归模型为什么慢，KV 缓存又是什么。</b>
+<p>自回归模型写第 \(i\) 个 token 时，要用注意力去看前面所有 token 在每一层的 key 和 value 向量。因为它的注意力是因果的（每个位置只看左边），前面 token 的 key/value 一旦算出来就不会再变，推理系统于是把它们存起来，这份存储叫 <b>KV 缓存</b>。有了它，每写一个新 token 只需要为这一个位置做计算。可是每一步仍然要把全部参数从显存读一遍，只为算出一个 token；一次只服务一个用户时，GPU 的大部分时间花在搬数据上，算力闲着。所以自回归的瓶颈在于“一步只出一个”。KV 缓存的来龙去脉见本站 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>。</p>
+</div>
+<div class="note-pre"><b>再补一点背景：掩码扩散语言模型怎么写字，为什么用不上 KV 缓存。</b>
+<p>掩码扩散模型（LLaDA、Dream 等）先在答案的位置放一排 [MASK]，每一轮让模型对所有 [MASK] 位置同时给出预测，把其中有把握的几个定下来，剩下的下一轮再猜。它用<b>双向</b>注意力：每个位置既看左边也看右边。这带来一个麻烦：每定下一个 token，其他所有位置的中间结果都会跟着变，所以前一轮算出的 key/value 下一轮就过时了，不能像自回归那样精确地复用，每一轮都得把提示和整段答案重算一遍。前作 Fast-dLLM 利用“相邻几轮的 key/value 变化很小”这一观察做近似，强行复用缓存（见 <a href="fast-dllm.html#n-3-1">Fast-dLLM 精读 §3</a>）；但近似毕竟和原来的计算不等价，这正是本文想从根上解决的地方。</p>
+</div>
+<div class="note-pre"><b>再补一点背景：块扩散。</b>
+<p>块扩散（BD3-LM）把序列切成长度为 \(D\) 的块（本文 \(D=32\)），整句话的概率写成各块条件概率的乘积：</p>
+<div class="formula">$$p_\theta(x)=\prod_{b=1}^{B}p_\theta\big(x^{b}\mid x^{&lt;b}\big)$$</div>
+<p>其中 \(x^{b}\) 是第 \(b\) 块，\(x^{&lt;b}\) 是它前面的所有块，\(B\) 是块的个数。块与块之间按顺序生成，像自回归；每一块内部则用掩码扩散去噪。这样一来，注意力在块与块之间是因果的：写第 \(b\) 块时，前面的块已经定稿，它们的 key/value 不会再变，可以精确缓存；块内部是双向的，可以一步定稿多个位置。块长 \(D=1\) 时它退化成自回归，\(D\) 等于整个序列时就是全序列扩散，所以块长是在两者之间调节的旋钮。详见本站 <a href="block-diffusion.html">BD3-LM 精读</a>。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：三种写法，每一格里的数字是“这个位置在第几次前向时定稿”</div>
+  <div class="dia-row"><span class="lbl">自回归</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell a">5</span><span class="cell a">6</span><span class="cell a">7</span><span class="cell a">8</span></div></div>
+  <div class="dia-out">8 个 token 要 8 次前向；前面的 KV 永远不变，可以精确缓存。</div>
+  <div class="dia-row"><span class="lbl">全序列掩码扩散</span><div class="cells"><span class="cell c">2</span><span class="cell c">1</span><span class="cell c">3</span><span class="cell c">1</span><span class="cell c">2</span><span class="cell c">4</span><span class="cell c">3</span><span class="cell c">4</span></div></div>
+  <div class="dia-out">任意顺序、一次可定多个，这里只要 4 次前向；但每定稿一次，所有位置的中间结果都会变，没有精确的 KV 缓存，每次都要整段重算。</div>
+  <div class="dia-row"><span class="lbl">块扩散（块长 4）</span><div class="cells"><span class="cell a">1</span><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">1</span><span class="cell b">3</span><span class="cell b">4</span><span class="cell b">3</span><span class="cell b">3</span></div></div>
+  <div class="dia-out">块内并行、块间从左到右，这里也是 4 次前向；写第二块时第一块已定稿，它的 KV 是精确的缓存。</div>
+  <div class="dia-note">本站示意图，数字是虚构的例子。蓝色 = 可以精确缓存（或已经进入缓存）的部分；橙色 = 每一步都要重算的部分；绿色 = 正在写的块。实际的块扩散在写完一块后还要多做一次前向，把这一块写进缓存（第 5 节）。</div>
+</div>
+
+<p>论文的引言先把两边的问题摆出来。自回归模型一次只能出一个 token，没法利用并行。扩散语言模型理论上可以一次预测、修改很多个 token，但实际有三个毛病：因为双向注意力，往往用不好 KV 缓存；推理延迟常常比自回归还高；很多模型还要事先固定生成长度，不够灵活。Fast-dLLM 的 DualCache 这类近似缓存能省掉不少重复计算，但作者指出，近似缓存与原来的计算并不等价，并没有从根上解决“双向模型与 KV 缓存不兼容”的问题。</p>
+<p>块扩散正好同时缓解这几点：块间因果带来精确的块级 KV 缓存；一块写完再写下一块，写到结束符就可以停，不必事先固定长度。问题是 BD3-LM 只在小模型、只用困惑度这类传统语言建模指标验证过，放到今天的大模型和真实任务上能不能保住生成质量、能不能扩展，此前并不清楚。</p>
+<p>Fast-dLLM v2 的回答是：不从零训练，而是把预训练好的自回归模型直接改造成块扩散模型。作者强调它的数据效率：Dream 这类全注意力扩散模型需要五千亿量级的 token 来改造，而 Fast-dLLM v2 只用约 1B token 的微调，就能做到“无损”改造。作者给出的原因是：块状的注意力结构比 Dream 的全注意力更接近原来的自回归模型，所以改造天然更顺、更省数据。训练配方上，它把块扩散与互补掩码结合；推理上，它设计了两级缓存：块级缓存保存已完成块的上下文，子块缓存（沿用 Fast-dLLM 的 DualCache）让未完成的块内部也能高效地并行解码。论文列出的三条贡献依次是：一种只需微调的 AR → 块扩散改造方法（约 1B token，对比 Dream 约 500B）；分层缓存加块内并行解码的推理策略；在最大 7B 的模型和多种任务上的实验，速度最高是标准自回归解码的 2.5 倍，质量相当。</p>
+<div class="note-warn"><b>读的时候要注意的几个数字：</b>
+<ul>
+  <li>“约 1B token”指的是 7B 模型。附录 A.1 写明：上下文 2048、批 256，每步 524,288 个 token；7B 训练 2,500 步，约 1.31B token；1.5B 训练 6,000 步，约 3.15B token。这里数的是打包后的全部位置，包括提示和补齐用的填充，真正算损失的 token 更少（本站推断）。</li>
+  <li>“比 Dream 少 500 倍”：摘要写 Dream 用了 580B token，580 ÷ 1.31 ≈ 443（推算）。更重要的是两者不在同一个阶段：Dream 是在基座模型上做大规模继续预训练，Fast-dLLM v2 是在已经做完后训练的 Instruct 模型上只做 SFT，而且改造的目标（块长 32 的块扩散）离自回归近得多。第 2 节会讲为什么这个差别很关键。</li>
+  <li>“最高 2.5 倍”是 A100、批大小 1、GSM8K 上和 Qwen2.5-7B-Instruct 比的结果；批大小 64 时降到 1.5 倍（A100）和 1.8 倍（H100），见第 8 节。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 相关工作：三条工作线，以及“改造为什么便宜”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Fast-dLLM v2 站在哪几条工作线的交汇处？同期还有谁在做“把自回归模型改成块扩散”？已有的扩散模型加速方法分哪两类，本文用了其中哪些？另外有一个论文没有展开、但读懂全文必须先想清楚的问题：为什么改造一个现成的自回归模型，会比从零训练一个扩散模型便宜几个数量级？</div>
+<h4 id="n-2-1">2.1 三条工作线</h4>
+<p><b>掩码扩散语言模型。</b>离散数据上的扩散最早由 Sohl-Dickstein 等人和 Hoogeboom 等人提出；D3PM 用一般的转移矩阵定义离散的加噪过程，CTMC 把它推广到连续时间，SEDD 改为估计两个序列的概率之比。其中最常用的一支是掩码扩散（也叫吸收态扩散）：训练时按比例 \(t\) 随机把 token 换成 [MASK]，\(t=0\) 是原文，\(t=1\) 是整句全遮。它已经做到了 7B 规模：LLaDA 从零开始训练，Dream 则从 Qwen2.5-7B 改造而来。本站有 <a href="d3pm.html">D3PM</a>、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>、<a href="dream.html">Dream</a> 的精读页。</p>
+<p><b>介于自回归和扩散之间的方法。</b>SSD-LM 最早把高斯扩散做成按块生成；AR-Diffusion 在它的基础上加了从左到右的噪声调度；对掩码扩散，BD3-LM 用“块内扩散、块间从左到右”在两者之间插值。与本文同期，SDAR 也从预训练的自回归模型微调出了块扩散模型（本站 <a href="sdar.html">SDAR 精读</a>，两者的区别见第 12 节）；D2F 借鉴 Diffusion Forcing 和 CausVid，把一个大的扩散模型蒸馏成更高效的块扩散模型（<a href="d2f.html">D2F 精读</a>）；Set Block Decoding 把下一个 token 预测和掩码 token 预测放进同一个网络，一次生成多个 token。作者认为自己与这些同期工作的区别在于数据效率：只需约 1B token 的微调。</p>
+<p><b>扩散语言模型的加速。</b>一类是缓存：Fast-dLLM 的 DualCache 同时缓存前缀和后缀 [MASK] 的 KV；dKV-Cache 等一个 token 定稿之后才缓存它（<a href="dkv-cache.html">dKV-Cache 精读</a>）；dLLM-Cache 缓存提示，并自适应地决定每一步回答部分重算多少；Sparse-dLLM 按注意力分数丢掉不重要的缓存项；DPad 只让注意力看最近一小段后缀。另一类是解码策略：Fast-dLLM 的置信度阈值并行解码；EB-Sampler 按熵的上界决定一步揭开几个；Dimple 动态调整每步的 token 数；WINO 先激进地起草、再用双向上下文把可疑的位置重新遮住；SlowFast Sampling 在探索和加速两种阶段之间切换；LaViDa 试了时间步偏移；Temporal Self-Consistency Voting 汇总多个去噪步的预测；Prophet 判断何时可以把剩下的位置一步全部定稿。本文在推理时直接沿用了 Fast-dLLM 的两件工具：DualCache 和阈值并行解码。</p>
+<p>ICLR 2026 正式版在这一节末尾加了一段：块扩散也能和自回归模型的加速技术（比如投机解码）结合。DiffuSpec 用 Dream-7B 这样的扩散模型给 Qwen2.5-32B 当草稿模型，得到 3.1 倍加速；作者说 Fast-dLLM v2-7B 比 Dream-7B 快近 10 倍（依据图 1a），拿它当草稿模型是一个值得做的方向。后来的 <a href="dflash.html">DFlash</a> 正是用块扩散模型来做投机解码的草稿器。</p>
+
+<h4 id="n-2-2">2.2 为什么改造一个自回归模型，比从零训练扩散模型便宜几个数量级</h4>
+<div class="note-pre"><b>先想清楚：训练到底在“教”模型什么。</b>
+<p>一个语言模型的能力，绝大部分来自预训练：在海量文本上学到的词汇、语法、事实和推理模式，都存在权重里。Qwen2.5 的预训练用了 18T token。从零训练一个扩散模型，就要把这些全部重新学一遍，所以 LLaDA 8B 用了 2.3T token，LLaDA 论文的结论是它与同规模的 LLaMA3 8B 大致相当。</p>
+<p>如果从一个训练好的自回归模型出发，知识已经在权重里了，要教的只是“换一种用法”。这种改造要花多少数据，取决于新用法离旧用法有多远：</p>
+<ul>
+  <li><b>改成全注意力扩散（Dream）：距离远。</b>自回归模型第 \(i\) 个位置的表示只依赖左边的内容，所有层都是这样训练出来的。改成全注意力之后，每个位置突然能看到右边，而右边大部分是 [MASK]；模型还要学会在任意位置、任意遮挡比例下补全。几乎每一层的内部表示都得重新适应，所以 Dream 用了 580B token 的继续预训练。</li>
+  <li><b>改成块长 32 的块扩散（本文）：距离近。</b>块与块之间仍然是因果的，和原模型完全一样；只有每 32 个 token 的小窗口内部变成双向，而且窗口里有一部分是 [MASK]。再加上 token shift（第 4 节）保留了“每个位置的输出预测下一个 token”这一约定，输出头也不用重新学。新任务只是旧任务的一个小扩展。</li>
+  <li><b>起点是 Instruct 模型。</b>Fast-dLLM v2 从 Qwen2.5-Instruct 出发，这个模型已经做过监督微调和强化学习（Dream 论文引用的数字是约 100 万条 SFT 数据加 15 万条 RL 数据，见 <a href="dream.html#n-5-3">Dream 精读 §5.3</a>）。所以本文的 SFT 主要是教它“按块填空”这一新格式，而不是从头教它听指令、做数学。</li>
+</ul>
+<p>这三点合起来，解释了为什么 SFT 规模的数据就够了。代价是：块长被固定在 32 附近，模型只学会了“小窗口里的并行”，得不到全序列扩散那种任意顺序生成、全局修改的能力。本站 <a href="llada2.html">LLaDA2.0 精读</a> 讲了另一种折中：从块长 1 开始逐级放大到全序列再缩回 32，在 100B 规模上完成改造。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">图表：训练或改造一个扩散语言模型各用了多少 token</div>
+  <svg class="dg" viewBox="0 0 960 308" role="img" aria-label="各模型训练或改造所用 token 数的对数刻度对比" style="--dg-min:720px">
+<text x="240.0" y="58.0" class="t-r">Fast-dLLM v2 · 7B</text>
+<g class="enc"><rect class="box" x="250" y="46" width="19.3" height="24" rx="3"/></g>
+<text x="277.3" y="58.0" class="t-sm">1.31B：只做 SFT（附录 A.1）</text>
+<text x="240.0" y="98.0" class="t-r">Fast-dLLM v2 · 1.5B</text>
+<g class="enc"><rect class="box" x="250" y="86" width="82.2" height="24" rx="3"/></g>
+<text x="340.2" y="98.0" class="t-sm">3.15B：只做 SFT（附录 A.1）</text>
+<text x="240.0" y="138.0" class="t-r">SDAR · Qwen3 底座</text>
+<g class="act"><rect class="box" x="250" y="126" width="285.8" height="24" rx="3"/></g>
+<text x="543.8" y="138.0" class="t-sm">50B 继续预训练 + 4B SFT</text>
+<text x="240.0" y="178.0" class="t-r">Dream 7B</text>
+<g class="tgt"><rect class="box" x="250" y="166" width="456.0" height="24" rx="3"/></g>
+<text x="714.0" y="178.0" class="t-sm">580B：从 Qwen2.5-7B 继续预训练</text>
+<text x="240.0" y="218.0" class="t-r">LLaDA 8B</text>
+<g class="pred"><rect class="box" x="250" y="206" width="554.7" height="24" rx="3"/></g>
+<text x="812.7" y="218.0" class="t-sm">2.3T：从零预训练</text>
+<line class="axis" x1="250" y1="252" x2="910.0" y2="252"/>
+<line class="grid-ln" x1="250.0" y1="40" x2="250.0" y2="252"/>
+<text x="250.0" y="268.0" class="t-c t-sm">1B</text>
+<line class="grid-ln" x1="415.0" y1="40" x2="415.0" y2="252"/>
+<text x="415.0" y="268.0" class="t-c t-sm">10B</text>
+<line class="grid-ln" x1="580.0" y1="40" x2="580.0" y2="252"/>
+<text x="580.0" y="268.0" class="t-c t-sm">100B</text>
+<line class="grid-ln" x1="745.0" y1="40" x2="745.0" y2="252"/>
+<text x="745.0" y="268.0" class="t-c t-sm">1T</text>
+<line class="grid-ln" x1="910.0" y1="40" x2="910.0" y2="252"/>
+<text x="910.0" y="268.0" class="t-c t-sm">10T</text>
+<text x="20.0" y="292.0" class="t-xs">横轴是对数刻度：相邻两条竖线差 10 倍。只计这一步改造或训练用的 token，不含底座模型原有的预训练（Qwen2.5 为 18T）。</text>
+</svg>
+  <div class="dia-note">本站根据各论文报告的数字绘制：Fast-dLLM v2 见本文附录 A.1；SDAR、Dream、LLaDA 见各自的论文（本站有对应的精读页）。<b>怎么看：</b>横轴每一格是 10 倍，条的长度差一格就是十倍的数据差。Fast-dLLM v2 的两条最短，但它们只是 SFT，而 Dream、SDAR 是继续预训练加 SFT，LLaDA 是从零预训练，四者改造的“距离”和得到的能力都不同，不能只看长度比高低。</div>
+</div>
+<div class="note-warn"><b>容易误解的地方：</b>“数据少 500 倍”并不等于“做同一件事只花 1/500 的代价”。Dream 得到的是一个能全序列、任意顺序生成的扩散模型，Fast-dLLM v2 得到的是一个块长固定为 32、块间仍然从左到右的模型。另外，Fast-dLLM v2 的 7B 和 1.5B 用的 token 数并不相同（1.31B 对 3.15B），小模型反而训练得更久，论文没有解释原因。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3.1 预备知识：自回归与掩码扩散各自在优化什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>自回归模型和掩码扩散模型的训练目标分别是什么？掩码扩散损失里的 \(1/t\) 是什么意思？这两个式子是理解 Fast-dLLM v2 训练目标的起点：它的损失介于两者之间，而且去掉了 \(1/t\)。</div>
+<p>记一段 token 序列为 \(x=\{x^1,\dots,x^L\}\)。自回归模型按顺序建模条件分布 \(P_\theta(x^i\mid x^{&lt;i})\)，训练时最小化交叉熵：</p>
+<div class="formula">$$\mathcal L_{\text{AR}}(\theta)=-\sum_{i=1}^{L}\log P_\theta\big(x^{i}\mid x^{&lt;i}\big)$$</div>
+<p>每个 token 恰好贡献一项损失，这一点后面会用到。</p>
+<p>掩码扩散模型先定义一个前向的加噪过程：取一个时间 \(t\in(0,1)\)，把原文 \(x_0\) 的每个 token 独立地以概率 \(t\) 换成 [MASK]，得到 \(x_t\)。反向模型 \(p_\theta(x_0\mid x_t)\) 看着被遮的句子，猜回原来的 token。训练目标是：</p>
+<div class="formula">$$\mathcal L(\theta)=-\,\mathbb E_{t,\,x_0,\,x_t}\Big[\frac{1}{t}\sum_{i=1}^{L}\mathbf 1\big[x_t^{i}=\texttt{[MASK]}\big]\log p_\theta\big(x_0^{i}\mid x_t\big)\Big],\qquad t\sim\mathrm{Uniform}(0,1)$$</div>
+<p>损失只在被遮住的位置上算。\(1/t\) 的作用可以这样理解：遮挡比例为 \(t\) 时，平均只有 \(tL\) 个位置被遮，求和里只有这么多项；乘上 \(1/t\) 之后，每种遮挡比例下的损失在量级上都相当于 \(L\) 个 token。例如 \(L=10\)、\(t=0.3\)，平均 3 个位置被遮，乘上 \(1/0.3\approx 3.3\) 后相当于 10 个位置（推算）。更重要的是，MDLM 等工作证明了带 \(1/t\) 的这个式子是负对数似然的一个上界，所以训练它就是在做最大似然；推导见 <a href="mdlm.html">MDLM 精读</a>。</p>
+<div class="note-warn"><b>记住两点，后面要用：</b>第一，LLaDA 这类掩码扩散模型在位置 \(i\) 上预测的是位置 \(i\) 自己的 token，自回归模型在位置 \(i\) 上输出的却是对下一个 token 的预测，两者“输出对准哪个位置”的约定不同，这就是 4.4 节 token shift 要处理的问题。第二，Fast-dLLM v2 的训练目标去掉了 \(1/t\)，所以它不再是这个似然上界，作者给的理由在 4.5 节。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">3.2 改造训练：块对齐、互补掩码、token shift 与双流注意力</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>拿一个 Qwen2.5-Instruct 模型，具体怎样把它训练成块扩散模型？数据怎么切块、怎么打包？每个块遮哪些位置、损失算在哪里？为什么要准备两个互补的遮挡视图？被遮的位置用哪个位置的输出来预测？一次前向怎么同时处理所有块？这一节是全文的核心。论文正文写得比较简略，本站结合附录 A 和官方代码把每一步讲清楚。</div>
+
+<h4 id="n-4-1">4.1 起点、数据与预算</h4>
+<p>起点是 Qwen2.5-1.5B-Instruct 和 Qwen2.5-7B-Instruct，网络结构不变，不加任何新参数。训练方式是监督微调：数据取自 LLaMA-Nemotron 后训练数据集的一个子集，附录说它由覆盖多个领域的高质量指令数据组成。每个训练批都按块扩散的方式构造。具体配置如下：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>项目</th><th class="num">1.5B</th><th class="num">7B</th></tr></thead>
+<tbody>
+<tr><td>学习率（AdamW，前 500 步线性预热）</td><td class="num">\(2\times10^{-5}\)</td><td class="num">\(1\times10^{-5}\)</td></tr>
+<tr><td>训练步数</td><td class="num">6,000</td><td class="num">2,500</td></tr>
+<tr><td>每步 token 数（批 256 × 上下文 2048）</td><td class="num">524,288</td><td class="num">524,288</td></tr>
+<tr><td>总 token 数</td><td class="num">≈ 3.15B</td><td class="num">≈ 1.31B</td></tr>
+<tr><td>硬件与时长</td><td class="num">64 张 A100，约 8 小时</td><td class="num">64 张 A100，约 12 小时</td></tr>
+<tr><td>折合 GPU 时（推算）</td><td class="num">约 512 A100·时</td><td class="num">约 768 A100·时</td></tr>
+</tbody></table></div>
+<p class="w-note">数字来自原文 §4.1 与附录 A.1；块长 \(D=32\) 在所有实验中固定；分布式训练用 DeepSpeed ZeRO-3。</p>
+<p>官方代码里还有两个论文正文没写的细节（据官方代码）。第一，SFT 时只有回答部分会被遮，提示部分始终保持原样，这和 LLaDA、Dream 做 SFT 的方式一致。第二，遮挡比例按块抽取：每个 32-token 的块各自抽一个 \(t\)（在一个很小的下限和 1 之间均匀分布），块里每个 token 再以概率 \(t\) 独立地被遮。</p>
+
+<h4 id="n-4-2">4.2 块对齐的打包：别让一块横跨两条样本</h4>
+<div class="note-pre"><b>先补一点背景：序列打包。</b>
+<p>SFT 数据里的样本长短不一。如果每条样本单独占一行、用填充补到上下文长度，会浪费大量计算。常见的做法是<b>打包</b>：把很多条样本首尾相接拼成一条长流，再按固定长度（这里 \(L=2048\)）切成训练序列。对自回归模型来说这样做问题不大，因为因果注意力只看左边，最多是后一条样本的开头能看到前一条样本的末尾（很多实现还会额外加文档掩码把它挡住）。</p>
+</div>
+<p>块扩散的块内是双向注意力，打包就会出问题：如果一条样本的结束符 &lt;EOS&gt; 和下一条样本的开始符 &lt;BOS&gt; 落在同一块里，两条毫不相干的样本就会在这一块里互相“看见”，前一条样本的结尾能看到后一条样本的开头，作者称之为跨样本泄漏。Fast-dLLM v2 的做法很简单：打包之前，先在每条样本末尾补 [MASK]，把它的长度补到块长 32 的整数倍。这些填充位置不算损失、不产生梯度。补齐之后再打包、切成长 2048 的序列，每条序列自然分成 \(L/D=64\) 个块（推算），块边界一定和样本边界对齐。</p>
+<div class="dia">
+  <div class="dia-title">示意图：不补齐时，一块可能横跨两条样本（块长示意为 4）</div>
+  <div class="dia-row"><span class="lbl">直接打包</span><div class="cells"><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span></div></div>
+  <div class="dia-out">第 2 块是“A A B B”：块内的双向注意力让样本 A 的结尾和样本 B 的开头互相看见。</div>
+  <div class="dia-row"><span class="lbl">先补齐再打包</span><div class="cells"><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell a">A</span><span class="cell">M</span><span class="cell">M</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span><span class="cell b">B</span></div></div>
+  <div class="dia-out">样本 A 补两个不算损失的 [MASK]，样本 B 从新的一块开始，块边界与样本边界对齐。</div>
+  <div class="dia-note">本站示意图。块长 32 时，每条样本平均要补约 15.5 个填充位置（推算：假设样本长度除以 32 的余数大致均匀分布），对动辄几百上千 token 的 SFT 样本来说开销不大。</div>
+</div>
+<p>第 9 节的消融显示，单加这一步，1.5B 模型的平均分从 41.3 提到 42.2。</p>
+
+<h4 id="n-4-3">4.3 互补掩码：让每个 token 都被监督到</h4>
+<p>对每一块，随机抽一个 0/1 向量 \(m\in\{0,1\}^{D}\)，\(m_j=1\) 表示第 \(j\) 个位置换成一个可学习的 [MASK] 嵌入。如果只用这一个视图训练，一条样本里只有被遮住的那部分位置会产生损失，没被遮住的位置这一次什么也没学到；遮挡比例在 0 到 1 之间均匀抽取时，平均只有一半的 token 得到监督（推算）。</p>
+<p><b>互补掩码</b>的做法是：把每条训练样本复制成两份，一份用掩码 \(m\)，另一份用它的“反面” \(\bar m=1-m\)，两份放进同一个批里一起训练。这样，在这一对视图里，每个位置恰好被遮一次（产生一项损失），也恰好被看见一次（给别的位置当上下文）。这个技巧来自多模态扩散模型 LaViDa（本站 <a href="lavida.html">LaViDa 精读</a>）。直观地说，它把“遮哪些位置”的随机性用到了极致：同一条样本的两半互相当答案、互相当提示，既不浪费数据，也减小了梯度的随机波动（和蒙特卡洛方法里的对偶采样是同一种思路）。</p>
+<p>它的代价是计算量：每条样本要过两遍网络。在数据少的场景里，这笔交易很划算；数据很多时就未必。<a href="llada2.html#n-7">LLaDA2.0 的报告</a>在脚注里提到，他们在继续预训练中也试过互补掩码，发现只在语料少于 100B token 时有效。Fast-dLLM v2 只用 1–3B token，正好落在有效的范围里。</p>
+
+<h4 id="n-4-4">4.4 token shift：被遮的位置，用前一个位置的输出去预测</h4>
+<div class="note-pre"><b>先补一点背景：输出“对准”哪个位置。</b>
+<p>自回归模型在位置 \(i-1\) 的最后一层隐状态，经过输出头之后给出的是对第 \(i\) 个 token 的预测，这个约定贯穿了它全部的预训练。LLaDA 这类从零训练的掩码扩散模型则约定：位置 \(i\) 的输出预测位置 \(i\) 自己。如果把自回归模型改成后一种约定，所有层、尤其是靠近输出的几层，都要重新学习“对准”另一个位置。Dream 的实验表明，保留原来的约定（Dream 称之为 shift）对用自回归模型初始化至关重要，见 <a href="dream.html#n-4-1">Dream 精读 §4.1</a>。</p>
+</div>
+<p>Fast-dLLM v2 也保留了这个约定，论文称为 <b>token shift</b>：如果位置 \(i\) 被遮住，就用位置 \(i-1\) 的隐状态（经输出头得到的 logit）来预测 \(x_i\)。这和因果语言模型的下一个 token 预测完全一致，作者认为这能让改造后的模型保留自回归式的表示，同时支持块内扩散。据官方代码，这一点是直接复用 Hugging Face 因果语言模型的损失函数实现的：那个函数本来就会把标签向左挪一位，再与每个位置的输出对齐。</p>
+<p>这个约定有两个不太直观的推论。第一，被遮住的位置自己的输出，预测的是它<b>后面</b>那个位置的 token；如果后面那个位置也被遮了，这个 [MASK] 位置的输出就负责猜它。第二，每一块的第一个 token 要靠<b>上一块最后一个位置</b>的输出来预测。推理时这一点正好变得很方便：上一块定稿后写缓存的那次前向，最后一个位置的输出直接给出下一块的第一个 token（第 5 节）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一块 8 个 token 的两个互补视图，以及 token shift 的预测方向</div>
+  <svg class="dg" viewBox="0 0 960 352" role="img" aria-label="互补掩码与 token shift 示意：两个视图里每个位置恰好被遮一次，被遮位置由前一位置的输出来预测" style="--dg-min:720px">
+<text x="150.0" y="42.0" class="t-r t-b">原文 x₀</text>
+<g class="enc"><rect class="box" x="170" y="25" width="80" height="34" rx="4"/></g>
+<text x="210.0" y="42.0" class="t-c">今天</text>
+<text x="210.0" y="14.0" class="t-c t-xs">位置 1</text>
+<g class="enc"><rect class="box" x="260" y="25" width="80" height="34" rx="4"/></g>
+<text x="300.0" y="42.0" class="t-c">我们</text>
+<text x="300.0" y="14.0" class="t-c t-xs">位置 2</text>
+<g class="enc"><rect class="box" x="350" y="25" width="80" height="34" rx="4"/></g>
+<text x="390.0" y="42.0" class="t-c">用</text>
+<text x="390.0" y="14.0" class="t-c t-xs">位置 3</text>
+<g class="enc"><rect class="box" x="440" y="25" width="80" height="34" rx="4"/></g>
+<text x="480.0" y="42.0" class="t-c">块</text>
+<text x="480.0" y="14.0" class="t-c t-xs">位置 4</text>
+<g class="enc"><rect class="box" x="530" y="25" width="80" height="34" rx="4"/></g>
+<text x="570.0" y="42.0" class="t-c">扩散</text>
+<text x="570.0" y="14.0" class="t-c t-xs">位置 5</text>
+<g class="enc"><rect class="box" x="620" y="25" width="80" height="34" rx="4"/></g>
+<text x="660.0" y="42.0" class="t-c">并行</text>
+<text x="660.0" y="14.0" class="t-c t-xs">位置 6</text>
+<g class="enc"><rect class="box" x="710" y="25" width="80" height="34" rx="4"/></g>
+<text x="750.0" y="42.0" class="t-c">生成</text>
+<text x="750.0" y="14.0" class="t-c t-xs">位置 7</text>
+<g class="enc"><rect class="box" x="800" y="25" width="80" height="34" rx="4"/></g>
+<text x="840.0" y="42.0" class="t-c">文字</text>
+<text x="840.0" y="14.0" class="t-c t-xs">位置 8</text>
+<text x="150.0" y="112.0" class="t-r t-b">视图 A</text>
+<text x="150.0" y="128.0" class="t-r t-xs">掩码 m</text>
+<g class="data"><rect class="box" x="170" y="100" width="80" height="34" rx="4"/></g>
+<text x="210.0" y="117.0" class="t-c">今天</text>
+<rect class="tk mask" x="260" y="100" width="80" height="34" rx="4"/>
+<text x="300.0" y="117.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="350" y="100" width="80" height="34" rx="4"/></g>
+<text x="390.0" y="117.0" class="t-c">用</text>
+<rect class="tk mask" x="440" y="100" width="80" height="34" rx="4"/>
+<text x="480.0" y="117.0" class="t-c t-b">[M]</text>
+<rect class="tk mask" x="530" y="100" width="80" height="34" rx="4"/>
+<text x="570.0" y="117.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="620" y="100" width="80" height="34" rx="4"/></g>
+<text x="660.0" y="117.0" class="t-c">并行</text>
+<rect class="tk mask" x="710" y="100" width="80" height="34" rx="4"/>
+<text x="750.0" y="117.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="800" y="100" width="80" height="34" rx="4"/></g>
+<text x="840.0" y="117.0" class="t-c">文字</text>
+<path class="edge loss" d="M210,136 Q255.0,168 300,139"/>
+<text x="300.0" y="178.0" class="t-c t-xs">→我们</text>
+<path class="edge loss" d="M390,136 Q435.0,168 480,139"/>
+<text x="480.0" y="178.0" class="t-c t-xs">→块</text>
+<path class="edge loss" d="M480,136 Q525.0,168 570,139"/>
+<text x="570.0" y="178.0" class="t-c t-xs">→扩散</text>
+<path class="edge loss" d="M660,136 Q705.0,168 750,139"/>
+<text x="750.0" y="178.0" class="t-c t-xs">→生成</text>
+<text x="150.0" y="227.0" class="t-r t-b">视图 B</text>
+<text x="150.0" y="243.0" class="t-r t-xs">掩码 1−m</text>
+<rect class="tk mask" x="170" y="215" width="80" height="34" rx="4"/>
+<text x="210.0" y="232.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="260" y="215" width="80" height="34" rx="4"/></g>
+<text x="300.0" y="232.0" class="t-c">我们</text>
+<rect class="tk mask" x="350" y="215" width="80" height="34" rx="4"/>
+<text x="390.0" y="232.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="440" y="215" width="80" height="34" rx="4"/></g>
+<text x="480.0" y="232.0" class="t-c">块</text>
+<g class="data"><rect class="box" x="530" y="215" width="80" height="34" rx="4"/></g>
+<text x="570.0" y="232.0" class="t-c">扩散</text>
+<rect class="tk mask" x="620" y="215" width="80" height="34" rx="4"/>
+<text x="660.0" y="232.0" class="t-c t-b">[M]</text>
+<g class="data"><rect class="box" x="710" y="215" width="80" height="34" rx="4"/></g>
+<text x="750.0" y="232.0" class="t-c">生成</text>
+<rect class="tk mask" x="800" y="215" width="80" height="34" rx="4"/>
+<text x="840.0" y="232.0" class="t-c t-b">[M]</text>
+<text x="108.0" y="279.0" class="t-c t-xs">上一块</text>
+<text x="108.0" y="292.0" class="t-c t-xs">末位输出</text>
+<path class="edge loss" d="M150,251 Q180.0,283 210,254"/>
+<text x="210.0" y="293.0" class="t-c t-xs">→今天</text>
+<path class="edge loss" d="M300,251 Q345.0,283 390,254"/>
+<text x="390.0" y="293.0" class="t-c t-xs">→用</text>
+<path class="edge loss" d="M570,251 Q615.0,283 660,254"/>
+<text x="660.0" y="293.0" class="t-c t-xs">→并行</text>
+<path class="edge loss" d="M750,251 Q795.0,283 840,254"/>
+<text x="840.0" y="293.0" class="t-c t-xs">→文字</text>
+<rect class="tk mask" x="170" y="326" width="22" height="18" rx="3"/>
+<text x="200.0" y="335.0" class="t-sm">被遮住，算损失</text>
+<g class="data"><rect class="box" x="330" y="326" width="22" height="18" rx="3"/></g>
+<text x="360.0" y="335.0" class="t-sm">可见，当上下文</text>
+<path class="edge loss" d="M490,339 Q512,323 534,337"/>
+<text x="544.0" y="335.0" class="t-sm">位置 i−1 的输出去预测位置 i 的词（token shift）</text>
+</svg>
+  <div class="dia-note">本站示意图（例句和遮挡位置是虚构的），表达的内容对应 <a href="https://arxiv.org/html/2509.26328v1#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。<b>怎么看：</b>最上面一行是原文。视图 A 遮住位置 2、4、5、7，视图 B 遮住剩下的 1、3、6、8，两个视图合起来，每个位置恰好被遮一次。红色弧线从位置 \(i-1\) 指向位置 \(i\)，下面写着它要预测的词：位置 \(i\) 的答案由前一个位置的输出给出。视图 A 里位置 4、5 都被遮，所以位置 4 的 [MASK] 要负责预测位置 5 的“扩散”。视图 B 里位置 1 是这一块的第一个位置，它的答案由上一块最后一个位置的输出来预测。</div>
+</div>
+
+<h4 id="n-4-5">4.5 训练目标：只在被遮的位置算交叉熵，而且没有 \(1/t\)</h4>
+<p>论文的训练目标是：</p>
+<div class="formula">$$\mathcal L_{\text{block}}(\theta)=-\,\mathbb E_{x,\,m}\Big[\sum_{i=1}^{L}\mathbf 1\big[x_t^{i}=\texttt{[MASK]}\big]\log p_\theta\big(x_0^{i}\mid x_{&lt;i},\,x_{\text{block}(i)}\big)\Big]$$</div>
+<p>这里 \(x_{\text{block}(i)}\) 是位置 \(i\) 所在块的全部 token（包括被遮的和没被遮的），\(x_{&lt;i}\) 是前面各块的<b>干净</b> token。也就是说：预测某一块里被遮的位置时，模型能看到前面所有块的原文，加上本块被部分遮住的样子。</p>
+<p>和 3.1 节的掩码扩散损失相比，这里没有 \(1/t\)。附录 A.3 承认这看起来少了一个系数，并解释说这是有意为之，理由是互补掩码：每条样本总是成对出现，一个视图用 \(m\)（相当于遮挡比例 \(t\)），另一个用 \(1-m\)（相当于 \(1-t\)），两个视图的损失加起来</p>
+<div class="formula">$$-\Big[\sum_{i=1}^{L}\mathbf 1\big[x_t^{i}=\texttt{[MASK]}\big]\log p_\theta(\cdot)\Big]-\Big[\sum_{i=1}^{L}\mathbf 1\big[x_{1-t}^{i}=\texttt{[MASK]}\big]\log p_\theta(\cdot)\Big]$$</div>
+<p>恰好包含 \(L\) 项，每个位置一项，不管 \(t\) 抽到多少。这样每对样本的损失量级是固定的，不需要再用 \(1/t\) 去拉平。</p>
+<p>本站补充两点理解。第一，这个目标在形式上很像自回归的交叉熵：每个 token 恰好贡献一项，只是条件从“左边所有 token”换成了“前面各块的原文，加上本块里另一半没被遮的 token”。这和作者“保留 AR 训练目标”的说法是一致的。第二，去掉 \(1/t\) 之后，它就不再是 3.1 节那个负对数似然的上界了，严格来说已经不是最大似然目标；不过本文只关心生成质量、不报告困惑度，这一点不影响结论。据官方代码，实际的损失是对两个视图里所有被监督的 token 取平均，和论文的式子只差一个归一化常数。</p>
+
+<h4 id="n-4-6">4.6 一次前向训练所有块：加噪流、干净流与那张 \(2L\times2L\) 的掩码</h4>
+<div class="note-pre"><b>先补一点背景：为什么要把干净序列也送进网络。</b>
+<p>按上面的目标，预测第 \(b\) 块时，模型要看到前面各块的<b>原文</b>和第 \(b\) 块的<b>加噪版本</b>。最笨的做法是对每一块单独做一次前向，一条序列有 64 块就要 64 次，太慢。BD3-LM 的做法是把加噪序列 \(x_t\) 和干净序列 \(x_0\) 拼在一起，变成长 \(2L\) 的输入，再用一张特制的注意力掩码规定“谁能看谁”，一次前向就让每一块都以干净的前文为条件去噪（详见 <a href="block-diffusion.html#n-4-2">BD3-LM 精读 §4.2</a>）。Fast-dLLM v2 直接沿用了这个设计。</p>
+</div>
+<p>附录 A.2 把这张 \(2L\times 2L\) 的掩码写成四块：</p>
+<div class="formula">$$\mathcal M_{\text{full}}=\begin{bmatrix}\mathcal M_{BD}&amp;\mathcal M_{OBC}\\ 0&amp;\mathcal M_{BC}\end{bmatrix}$$</div>
+<ul>
+  <li><b>块对角 \(\mathcal M_{BD}\)</b>（左上，加噪流看加噪流）：同一块里的加噪 token 互相可见，块内双向。块内去噪就发生在这里。</li>
+  <li><b>错位块因果 \(\mathcal M_{OBC}\)</b>（右上，加噪流看干净流）：加噪的第 \(b\) 块可以看干净流里第 1 到第 \(b-1\) 块，也就是前文的原文。“错位”指不包括自己这一块，否则它就直接看到了自己的答案。</li>
+  <li><b>块因果 \(\mathcal M_{BC}\)</b>（右下，干净流看干净流）：干净流里的每个 token 看自己这一块和前面所有块。它的作用是给加噪流准备“前文”的键和值，就像推理时逐块写 KV 缓存那样。</li>
+  <li><b>左下全零</b>：干净流看不到任何加噪 token，保证前文的表示不被噪声污染。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：双流训练的注意力掩码（序列长 6、块长 2）</div>
+  <svg class="dg" viewBox="0 0 960 380" role="img" aria-label="双流训练的注意力掩码示意：块对角、错位块因果与块因果三部分" style="--dg-min:720px">
+<rect x="150" y="76" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="174" y="76" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="198" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="318" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="342" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="76" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="100" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="174" y="100" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="198" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="318" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="342" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="100" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="124" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="222" y="124" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="246" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="124" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="318" y="124" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="342" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="124" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="148" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="222" y="148" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="246" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="148" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="318" y="148" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="342" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="148" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="172" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="270" y="172" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="294" y="172" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="318" y="172" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="342" y="172" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="366" y="172" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="390" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="172" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="196" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="270" y="196" width="22" height="22" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<rect x="294" y="196" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="318" y="196" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="342" y="196" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="366" y="196" width="22" height="22" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<rect x="390" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="196" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="220" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="220" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="220" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="244" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="244" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="366" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="390" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="244" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="268" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="268" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="268" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="366" y="268" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="390" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="268" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="292" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="292" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="292" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="366" y="292" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="390" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="414" y="292" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="150" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="316" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="366" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="390" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="414" y="316" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="150" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="174" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="198" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="222" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="246" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="270" y="340" width="22" height="22" rx="2" style="fill:var(--surface-2);stroke:var(--border);stroke-width:.6"/>
+<rect x="294" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="318" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="342" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="366" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="390" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<rect x="414" y="340" width="22" height="22" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<text x="144.0" y="87.0" class="t-r t-xs">噪1</text>
+<text x="161.0" y="68.0" class="t-c t-xs">噪1</text>
+<text x="144.0" y="111.0" class="t-r t-xs">噪2</text>
+<text x="185.0" y="68.0" class="t-c t-xs">噪2</text>
+<text x="144.0" y="135.0" class="t-r t-xs">噪3</text>
+<text x="209.0" y="68.0" class="t-c t-xs">噪3</text>
+<text x="144.0" y="159.0" class="t-r t-xs">噪4</text>
+<text x="233.0" y="68.0" class="t-c t-xs">噪4</text>
+<text x="144.0" y="183.0" class="t-r t-xs">噪5</text>
+<text x="257.0" y="68.0" class="t-c t-xs">噪5</text>
+<text x="144.0" y="207.0" class="t-r t-xs">噪6</text>
+<text x="281.0" y="68.0" class="t-c t-xs">噪6</text>
+<text x="144.0" y="231.0" class="t-r t-xs">净1</text>
+<text x="305.0" y="68.0" class="t-c t-xs">净1</text>
+<text x="144.0" y="255.0" class="t-r t-xs">净2</text>
+<text x="329.0" y="68.0" class="t-c t-xs">净2</text>
+<text x="144.0" y="279.0" class="t-r t-xs">净3</text>
+<text x="353.0" y="68.0" class="t-c t-xs">净3</text>
+<text x="144.0" y="303.0" class="t-r t-xs">净4</text>
+<text x="377.0" y="68.0" class="t-c t-xs">净4</text>
+<text x="144.0" y="327.0" class="t-r t-xs">净5</text>
+<text x="401.0" y="68.0" class="t-c t-xs">净5</text>
+<text x="144.0" y="351.0" class="t-r t-xs">净6</text>
+<text x="425.0" y="68.0" class="t-c t-xs">净6</text>
+<line x1="293" y1="72" x2="293" y2="364" style="stroke:var(--text-2);stroke-width:1.5"/>
+<line x1="146" y1="219" x2="438" y2="219" style="stroke:var(--text-2);stroke-width:1.5"/>
+<text x="222.0" y="46.0" class="t-c t-sm">键 / 值：加噪流 xₜ</text>
+<text x="366.0" y="46.0" class="t-c t-sm">键 / 值：干净流 x₀</text>
+<text x="60.0" y="148.0" class="t-c t-sm" transform="rotate(-90 60 148.0)">查询：加噪流</text>
+<text x="60.0" y="292.0" class="t-c t-sm" transform="rotate(-90 60 292.0)">查询：干净流</text>
+<rect x="480" y="61" width="18" height="18" rx="2" style="fill:var(--c-pred);opacity:.85"/>
+<text x="508.0" y="70.0" class="t-b">块对角 M_BD</text>
+<text x="508.0" y="88.0" class="t-sm">加噪块内部互相看（块内双向）</text>
+<rect x="480" y="109" width="18" height="18" rx="2" style="fill:var(--c-enc);opacity:.85"/>
+<text x="508.0" y="118.0" class="t-b">错位块因果 M_OBC</text>
+<text x="508.0" y="136.0" class="t-sm">加噪块看前面各块的干净版本</text>
+<rect x="480" y="157" width="18" height="18" rx="2" style="fill:var(--c-tgt);opacity:.85"/>
+<text x="508.0" y="166.0" class="t-b">块因果 M_BC</text>
+<text x="508.0" y="184.0" class="t-sm">干净流按块从左到右，块内双向</text>
+<rect x="480" y="205" width="18" height="18" rx="2" style="fill:var(--surface-2);stroke:var(--border)"/>
+<text x="508.0" y="214.0" class="t-b">全零（左下）</text>
+<text x="508.0" y="232.0" class="t-sm">干净流看不到任何加噪 token</text>
+<text x="480.0" y="266.0" class="t-sm">示意：序列长 L = 6，块长 D = 2，共 3 块；拼起来长 2L = 12。</text>
+<text x="480.0" y="285.0" class="t-sm">论文实际是 L = 2048、D = 32，掩码是 4096 × 4096。</text>
+<text x="480.0" y="304.0" class="t-sm">损失只在加噪流里被遮住的位置上算；干净流只提供键和值。</text>
+<text x="480.0" y="323.0" class="t-sm">两条流用同一套位置编号（据官方代码）。</text>
+<text x="480.0" y="342.0" class="t-sm">推理时没有加噪流的副本：当前块只看自己和</text>
+<text x="480.0" y="361.0" class="t-sm">前面各块的 KV 缓存，相当于右下角的块因果模式。</text>
+</svg>
+  <div class="dia-note">本站按附录 A.2 的定义画出，对应 <a href="https://arxiv.org/html/2509.26328v1#A1.F7" target="_blank" rel="noopener">原文图 7 ↗</a>。<b>怎么看：</b>每一行是一个查询位置，每一列是一个键/值位置，有颜色的格子表示“这一行可以看这一列”。前 6 行、前 6 列是加噪流，后 6 行、后 6 列是干净流。看第 3 行（加噪流第 2 块的第一个位置“噪3”）：它能看到“噪3、噪4”（自己这一块）和“净1、净2”（前一块的原文），看不到“净3、净4”（自己这一块的答案）。</div>
+</div>
+<p>据官方代码，还有三个细节：两条流用同一套位置编号（旋转位置编码对两半分别施加，位置都从 0 开始）；只有加噪流那一半的输出会被拿去算损失，干净流只负责提供键和值；掩码用 PyTorch 的 FlexAttention 实现，它能跳过整块为零的区域，所以稀疏的掩码不会按完整的 \(2L\times 2L\) 去算。</p>
+<p>再算一下训练开销（推算）。同样一条长 \(L\) 的样本，自回归 SFT 只过一次长 \(L\) 的前向；Fast-dLLM v2 要过两个互补视图，每个视图都是长 \(2L\) 的双流输入，所以送进网络的 token 数是自回归的 4 倍。注意力因为掩码稀疏省了一些，但前馈层这类逐 token 的计算基本按 4 倍增长。第 7 节“同样的数据、同样的步数”的对照，要放在这个背景下看。</p>
+<div class="note-warn"><b>名称上容易混淆的地方：</b>摘要和引言把方法写成“块扩散机制 + complementary attention mask（互补注意力掩码）”，但从 §3.2、附录和代码看，“互补”的是 token 的遮挡向量 \(m\) 与 \(1-m\)；注意力掩码只有上面这一张块因果的双流掩码，并没有“互补”的版本。另外，本文用 \(B\) 表示块的个数、\(D\) 表示块长，而 BD3-LM 等文献常用 \(B\) 表示块长，对照阅读时要留意。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#A1" target="_blank" rel="noopener">附录 A ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">3.3 推理：块级缓存、块内并行、子块与子块缓存</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>训练好的模型怎样生成文字？块与块之间的缓存为什么是精确的？块内怎么决定一步定稿几个 token？论文说的“分层缓存”和“子块”具体是什么，各省掉了哪部分计算？最后算一笔账：平均每个 token 要几次前向，这决定了速度的上限。论文正文对推理只写了几段话，本站结合附录 A.2 和官方生成代码把流程走一遍。</div>
+
+<h4 id="n-5-1">5.1 块与块之间：和自回归一样精确的块级缓存</h4>
+<p>生成一块一块地进行。推理时的注意力掩码是：当前块内部双向，对前面的块因果，这和训练时干净流的块因果模式一致。所以一块写完以后，它的 key/value 不会再因为后面的内容而改变，可以作为只读的上下文缓存起来，供后面所有块使用。这就是<b>块级缓存</b>。和前作 Fast-dLLM 不同，这份缓存是<b>精确</b>的：它和不用缓存、每次整段重算得到的结果完全一样，因为模型本来就是按块因果训练的。</p>
+<p>据官方代码，一块的流程是这样的。提示先做一次预填充（取块长的整数倍部分），写入缓存。每当当前块的所有位置都定稿，就把这一块再送进网络算一次，把它的 key/value 追加进缓存；这次前向最后一个位置的输出，按 token shift 的约定正好是对下一个 token 的预测，代码直接取其中概率最大的词作为下一块的第一个 token。所以每一块的第一个 token 实际上是“自回归式”写出来的，剩下的 31 个位置从 [MASK] 开始去噪。</p>
+
+<h4 id="n-5-2">5.2 块内：置信度阈值并行解码</h4>
+<p>块内的去噪沿用 Fast-dLLM 的<b>置信度感知并行解码</b>：每一步，模型对当前允许范围内所有还是 [MASK] 的位置给出预测；每个位置的置信度是它预测分布里最大的那个概率；置信度超过阈值 \(\tau\) 的位置全部定稿，其余的留到下一步；如果一个都没超过，就只定稿置信度最高的那一个，保证每步至少前进一个 token。为什么只定稿“有把握”的位置，以及背后的定理，见 <a href="fast-dllm.html#n-4-1">Fast-dLLM 精读 §4</a>。</p>
+<p>两个取值要特别记住。\(\tau=1\) 时，没有哪个位置的概率会严格超过 1，所以每步恰好定稿 1 个，也就是完全不并行，按置信度的顺序一个一个填；论文的质量表（表 1）用的就是这个设置。\(\tau=0.9\) 是论文测速度时选的设置。论文 §4.2 说阈值设为 1 时“恢复为标准的非并行解码”，后半句又说所有 token 走完全部去噪步、只在最后定稿，这个说法容易误读：按官方代码，阈值 1 时每一步仍会定稿置信度最高的那 1 个位置，块内要走 31 步才填满。</p>
+<p>下面的小演示可以直观地感受块长和阈值的作用。画布是一句订机票的话，出发地和目的地是两个词组成的城市名，同一个城市名的前后两半必须配对。演示默认是“固定步数”采样器，可以切换成“置信度阈值 τ”采样器；把块长调小，生成更接近从左到右；把阈值调低，每步定稿的位置更多、步数更少，但同一个城市名的两半被同一步分别定稿、拼出错误组合的概率也会上升。</p>
+<div data-widget="dllm-decode" data-focus="block"></div>
+
+<h4 id="n-5-3">5.3 子块：在 32 个位置里再分段推进</h4>
+<p>论文默认的推理设置是块长 32、<b>子块</b>大小 8。子块的意思是：当前块的 32 个位置被分成 4 段，每段 8 个；先只在第一段里按上面的规则定稿，第一段全部填满后再进入第二段，依此类推。后面几段在这期间仍然是 [MASK]，但它们<b>仍然留在块里、参与注意力</b>，块的形状和训练时完全一样，变的只是“这一步允许在哪些位置里挑”。</p>
+<p>为什么不干脆把块长改成 8？因为模型是在块长 32 下训练的。直接改块长会改变注意力的模式：每个位置只能看到块内的 8 个邻居，前面已定稿的部分也变成每 8 个一块，这是模型训练时没见过的情形。第 9 节的消融会显示，这样做会明显掉点，而子块不会。</p>
+
+<h4 id="n-5-4">5.4 子块缓存：把 DualCache 搬进块内</h4>
+<div class="note-pre"><b>先补一点背景：Fast-dLLM 的 DualCache。</b>
+<p>在全注意力的扩散模型里，Fast-dLLM 写某一块的那几步，把块外所有位置（前面已定稿的部分和后面的 [MASK]）的 key/value 当作不变，直接从缓存里读，只重算当前块；这一块写完再整段重算一次，刷新缓存。它同时缓存了前缀和后缀，所以叫 DualCache。它是近似的：当前块里每定稿一个 token，块外位置的表示本来都该跟着变一点，只是变化很小。详见 <a href="fast-dllm.html#n-3-4">Fast-dLLM 精读 §3.4</a>。</p>
+</div>
+<p>在 Fast-dLLM v2 里，块外的前缀已经有了精确的块级缓存，DualCache 被用到了更小的尺度上：一个 32-token 块的内部。据官方代码，在一个子块里，只要它的第一个位置还是 [MASK]，每一步都把整块 32 个位置送进网络，同时存下块内所有位置的 key/value；一旦这个子块的第一个位置定稿，之后的迭代就只把这个子块的 8 个位置送进网络，块内其他 24 个位置（已定稿的前几段和还是 [MASK] 的后几段）的 key/value 直接读刚才存下的缓存。第一个子块的第一个位置总是由上一块的收尾前向直接给出，所以它只需要整块算一次。前缀缓存（精确）和块内缓存（近似）合在一起，就是论文说的<b>分层缓存</b>。</p>
+<p>这里的近似只发生在一个 32-token 的块内部，范围比 Fast-dLLM 在整段答案上的近似小得多；论文的实验（图 6a）也显示它对准确率几乎没有影响。它省下的是计算量：子块内的迭代只算 8 个位置而不是 32 个。一次只服务一条请求时，GPU 的时间主要花在读参数上，算 8 个还是 32 个位置差别不大，所以几乎不加速；批很大、GPU 的算力被占满时，少算四分之三的位置就能明显提速（第 9 节）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：解码一个块时的逐次前向（块长示意为 8、子块 4）</div>
+  <svg class="dg" viewBox="0 0 960 396" role="img" aria-label="Fast-dLLM v2 解码一个块的逐次前向示意：块级缓存、子块与子块缓存" style="--dg-min:720px">
+<text x="215.0" y="22.0" class="t-c t-sm">已定稿的前缀</text>
+<text x="215.0" y="37.0" class="t-c t-xs">（精确 KV 缓存）</text>
+<text x="387.0" y="22.0" class="t-c t-sm">子块 A：位置 1–4</text>
+<text x="587.0" y="22.0" class="t-c t-sm">子块 B：位置 5–8</text>
+<path d="M290,40 V34 H484 V40" style="fill:none;stroke:var(--text-3);stroke-width:1.2"/>
+<path d="M490,40 V34 H684 V40" style="fill:none;stroke:var(--text-3);stroke-width:1.2"/>
+<text x="24.0" y="68.0" class="t-b">F0</text>
+<text x="24.0" y="84.0" class="t-xs">上一块收尾</text>
+<g class="tgt"><rect class="box" x="160" y="56" width="110" height="36" rx="4" style="stroke:var(--c-enc);stroke-width:2.6"/></g>
+<text x="215.0" y="74.0" class="t-c t-sm">上一块（送入）</text>
+<g class="act"><rect class="box" x="290" y="56" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="74.0" class="t-c t-b">新</text>
+<rect class="tk mask" x="340" y="56" width="44" height="36" rx="4"/>
+<text x="362.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="390" y="56" width="44" height="36" rx="4"/>
+<text x="412.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="440" y="56" width="44" height="36" rx="4"/>
+<text x="462.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="490" y="56" width="44" height="36" rx="4"/>
+<text x="512.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="540" y="56" width="44" height="36" rx="4"/>
+<text x="562.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="590" y="56" width="44" height="36" rx="4"/>
+<text x="612.0" y="74.0" class="t-c">M</text>
+<rect class="tk mask" x="640" y="56" width="44" height="36" rx="4"/>
+<text x="662.0" y="74.0" class="t-c">M</text>
+<text x="706.0" y="66.0" class="t-sm">上一块定稿后再算一遍，写入它的 KV；</text>
+<text x="706.0" y="83.0" class="t-sm">最后一位的输出直接给出位置 1</text>
+<text x="24.0" y="118.0" class="t-b">F1</text>
+<text x="24.0" y="134.0" class="t-xs">进入子块 A</text>
+<g class="tgt"><rect class="box" x="160" y="106" width="110" height="36" rx="4" style=""/></g>
+<text x="215.0" y="124.0" class="t-c t-sm">前缀</text>
+<g class="data"><rect class="box" x="290" y="106" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="124.0" class="t-c">✓</text>
+<rect x="288" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="340" y="106" width="44" height="36" rx="4"/></g>
+<text x="362.0" y="124.0" class="t-c t-b">新</text>
+<rect x="338" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="390" y="106" width="44" height="36" rx="4"/></g>
+<text x="412.0" y="124.0" class="t-c t-b">新</text>
+<rect x="388" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="440" y="106" width="44" height="36" rx="4"/>
+<text x="462.0" y="124.0" class="t-c">M</text>
+<rect x="438" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="490" y="106" width="44" height="36" rx="4"/>
+<text x="512.0" y="124.0" class="t-c">M</text>
+<rect x="488" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="540" y="106" width="44" height="36" rx="4"/>
+<text x="562.0" y="124.0" class="t-c">M</text>
+<rect x="538" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="590" y="106" width="44" height="36" rx="4"/>
+<text x="612.0" y="124.0" class="t-c">M</text>
+<rect x="588" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="640" y="106" width="44" height="36" rx="4"/>
+<text x="662.0" y="124.0" class="t-c">M</text>
+<rect x="638" y="104" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="706.0" y="116.0" class="t-sm">整块 8 个位置一起算，存下块内 K/V；</text>
+<text x="706.0" y="133.0" class="t-sm">子块 A 中 2、3 过阈值，定稿</text>
+<text x="24.0" y="168.0" class="t-b">F2</text>
+<text x="24.0" y="184.0" class="t-xs">子块 A 内</text>
+<g class="tgt"><rect class="box" x="160" y="156" width="110" height="36" rx="4" style=""/></g>
+<text x="215.0" y="174.0" class="t-c t-sm">前缀</text>
+<g class="data"><rect class="box" x="290" y="156" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="174.0" class="t-c">✓</text>
+<rect x="288" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="340" y="156" width="44" height="36" rx="4"/></g>
+<text x="362.0" y="174.0" class="t-c">✓</text>
+<rect x="338" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="390" y="156" width="44" height="36" rx="4"/></g>
+<text x="412.0" y="174.0" class="t-c">✓</text>
+<rect x="388" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="440" y="156" width="44" height="36" rx="4"/></g>
+<text x="462.0" y="174.0" class="t-c t-b">新</text>
+<rect x="438" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="490" y="156" width="44" height="36" rx="4"/>
+<text x="512.0" y="174.0" class="t-c">M</text>
+<rect x="488" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<rect class="tk mask" x="540" y="156" width="44" height="36" rx="4"/>
+<text x="562.0" y="174.0" class="t-c">M</text>
+<rect x="538" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<rect class="tk mask" x="590" y="156" width="44" height="36" rx="4"/>
+<text x="612.0" y="174.0" class="t-c">M</text>
+<rect x="588" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<rect class="tk mask" x="640" y="156" width="44" height="36" rx="4"/>
+<text x="662.0" y="174.0" class="t-c">M</text>
+<rect x="638" y="154" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<text x="706.0" y="166.0" class="t-sm">只送子块 A 的 4 个位置，5–8 的 K/V</text>
+<text x="706.0" y="183.0" class="t-sm">读块内缓存；4 定稿，子块 A 完成</text>
+<text x="24.0" y="218.0" class="t-b">F3</text>
+<text x="24.0" y="234.0" class="t-xs">进入子块 B</text>
+<g class="tgt"><rect class="box" x="160" y="206" width="110" height="36" rx="4" style=""/></g>
+<text x="215.0" y="224.0" class="t-c t-sm">前缀</text>
+<g class="data"><rect class="box" x="290" y="206" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="224.0" class="t-c">✓</text>
+<rect x="288" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="340" y="206" width="44" height="36" rx="4"/></g>
+<text x="362.0" y="224.0" class="t-c">✓</text>
+<rect x="338" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="390" y="206" width="44" height="36" rx="4"/></g>
+<text x="412.0" y="224.0" class="t-c">✓</text>
+<rect x="388" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="440" y="206" width="44" height="36" rx="4"/></g>
+<text x="462.0" y="224.0" class="t-c">✓</text>
+<rect x="438" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="490" y="206" width="44" height="36" rx="4"/></g>
+<text x="512.0" y="224.0" class="t-c t-b">新</text>
+<rect x="488" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="540" y="206" width="44" height="36" rx="4"/></g>
+<text x="562.0" y="224.0" class="t-c t-b">新</text>
+<rect x="538" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="590" y="206" width="44" height="36" rx="4"/>
+<text x="612.0" y="224.0" class="t-c">M</text>
+<rect x="588" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<rect class="tk mask" x="640" y="206" width="44" height="36" rx="4"/>
+<text x="662.0" y="224.0" class="t-c">M</text>
+<rect x="638" y="204" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="706.0" y="216.0" class="t-sm">整块重算一次，刷新块内缓存；</text>
+<text x="706.0" y="233.0" class="t-sm">子块 B 中 5、6 过阈值，定稿</text>
+<text x="24.0" y="268.0" class="t-b">F4</text>
+<text x="24.0" y="284.0" class="t-xs">子块 B 内</text>
+<g class="tgt"><rect class="box" x="160" y="256" width="110" height="36" rx="4" style=""/></g>
+<text x="215.0" y="274.0" class="t-c t-sm">前缀</text>
+<g class="data"><rect class="box" x="290" y="256" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="274.0" class="t-c">✓</text>
+<rect x="288" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<g class="data"><rect class="box" x="340" y="256" width="44" height="36" rx="4"/></g>
+<text x="362.0" y="274.0" class="t-c">✓</text>
+<rect x="338" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<g class="data"><rect class="box" x="390" y="256" width="44" height="36" rx="4"/></g>
+<text x="412.0" y="274.0" class="t-c">✓</text>
+<rect x="388" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<g class="data"><rect class="box" x="440" y="256" width="44" height="36" rx="4"/></g>
+<text x="462.0" y="274.0" class="t-c">✓</text>
+<rect x="438" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<g class="data"><rect class="box" x="490" y="256" width="44" height="36" rx="4"/></g>
+<text x="512.0" y="274.0" class="t-c">✓</text>
+<rect x="488" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="540" y="256" width="44" height="36" rx="4"/></g>
+<text x="562.0" y="274.0" class="t-c">✓</text>
+<rect x="538" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="590" y="256" width="44" height="36" rx="4"/></g>
+<text x="612.0" y="274.0" class="t-c t-b">新</text>
+<rect x="588" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="act"><rect class="box" x="640" y="256" width="44" height="36" rx="4"/></g>
+<text x="662.0" y="274.0" class="t-c t-b">新</text>
+<rect x="638" y="254" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="706.0" y="266.0" class="t-sm">只送子块 B；7、8 同一步过阈值，</text>
+<text x="706.0" y="283.0" class="t-sm">一起定稿，整块填满</text>
+<text x="24.0" y="318.0" class="t-b">F5</text>
+<text x="24.0" y="334.0" class="t-xs">本块收尾</text>
+<g class="tgt"><rect class="box" x="160" y="306" width="110" height="36" rx="4" style=""/></g>
+<text x="215.0" y="324.0" class="t-c t-sm">前缀 + 本块</text>
+<g class="data"><rect class="box" x="290" y="306" width="44" height="36" rx="4"/></g>
+<text x="312.0" y="324.0" class="t-c">✓</text>
+<rect x="288" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="340" y="306" width="44" height="36" rx="4"/></g>
+<text x="362.0" y="324.0" class="t-c">✓</text>
+<rect x="338" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="390" y="306" width="44" height="36" rx="4"/></g>
+<text x="412.0" y="324.0" class="t-c">✓</text>
+<rect x="388" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="440" y="306" width="44" height="36" rx="4"/></g>
+<text x="462.0" y="324.0" class="t-c">✓</text>
+<rect x="438" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="490" y="306" width="44" height="36" rx="4"/></g>
+<text x="512.0" y="324.0" class="t-c">✓</text>
+<rect x="488" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="540" y="306" width="44" height="36" rx="4"/></g>
+<text x="562.0" y="324.0" class="t-c">✓</text>
+<rect x="538" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="590" y="306" width="44" height="36" rx="4"/></g>
+<text x="612.0" y="324.0" class="t-c">✓</text>
+<rect x="588" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<g class="data"><rect class="box" x="640" y="306" width="44" height="36" rx="4"/></g>
+<text x="662.0" y="324.0" class="t-c">✓</text>
+<rect x="638" y="304" width="48" height="40" rx="5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="706.0" y="316.0" class="t-sm">整块再算一遍写入精确 KV（并入前缀），</text>
+<text x="706.0" y="333.0" class="t-sm">最后一位给出下一块的位置 1</text>
+<rect x="24" y="352" width="22" height="16" rx="3" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="54.0" y="360.0" class="t-sm">本次送进网络计算</text>
+<rect x="190" y="352" width="22" height="16" rx="3" style="fill:none;stroke:var(--text-3);stroke-width:1.4;stroke-dasharray:4 3"/>
+<text x="220.0" y="360.0" class="t-sm">K/V 从块内缓存读（近似）</text>
+<rect class="tk mask" x="400" y="352" width="22" height="16" rx="3"/>
+<text x="430.0" y="360.0" class="t-sm">[MASK]</text>
+<text x="510.0" y="360.0" class="t-sm">✓ 先前已定稿　　新 = 这一步定稿</text>
+<text x="24.0" y="384.0" class="t-xs">示意：块长 8、子块 4、阈值 τ &lt; 1。论文实际是块长 32、子块 8。这一块 8 个位置用了 F1–F5 共 5 次前向；若 τ = 1（每步只定稿 1 个），要 8 次，和自回归一样多。</text>
+</svg>
+  <div class="dia-note">本站根据附录 A.2 与官方代码 <code>v2/generation_functions.py</code> 画出的流程示意，对应 <a href="https://arxiv.org/html/2509.26328v1#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>。<b>怎么看：</b>每一行是一次前向。蓝色粗框是这次真正送进网络计算的位置；灰色虚线框表示这些位置的 key/value 从块内缓存里读，没有重算。F0 和 F5 分别是上一块和本块的“收尾”前向：把定稿的块写入精确缓存，同时给出下一块的第一个 token。哪些位置在哪一步过阈值，是虚构的例子。</div>
+</div>
+
+<h4 id="n-5-5">5.5 批量解码与一笔账：每个 token 要几次前向</h4>
+<p><b>批量解码。</b>为了一次处理多条长短不同的请求，每条序列在右边补 [MASK]，补到块长的整数倍，然后所有序列一起逐块解码：每一步，批里每条序列都在写自己的下一块，不管它还剩多少真正的 token。据官方代码，一条序列写出结束符后，会在本块结束时被移出批，它的缓存也随之删除。</p>
+<p><b>一笔账（推算）。</b>以块长 32 为例。阈值为 1 时，块的第一个 token 来自上一块的收尾前向，剩下 31 个位置每步定稿 1 个，需要 31 次前向，再加 1 次收尾前向，一共 32 次前向产出 32 个 token，和自回归一样是“一次前向一个 token”。阈值为 0.9 时，图 4 标注每步平均定稿约 2.64 个 token，31 个位置大约需要 12 步，加上收尾约 13 次前向产出 32 个 token，平均每次前向约 2.5 个 token。</p>
+<p>这笔账直接决定了加速的上限。一次只服务一条请求时，一次前向的耗时主要由读参数决定，处理 32 个位置和处理 1 个位置相差不多，所以块扩散的速度大约是自回归的“每次前向 token 数”倍。论文的数字正好吻合：阈值 1 时吞吐 39.1 token/秒（图 4），与 Qwen2.5-7B-Instruct 在 A100、批大小 1 时的 39.5（图 1b）几乎相同；阈值 0.9 时每步约 2.64 个，吞吐提高到 2.6 倍。反过来，当批很大、GPU 已经算力受限时，块扩散每次前向要处理的位置数是自回归的 32 倍（用子块缓存时是 8 倍），多出来的计算不再免费，优势就会缩小。第 8 节的批大小实验正好体现了这个规律。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://github.com/NVlabs/Fast-dLLM/blob/main/v2/generation_functions.py" target="_blank" rel="noopener">官方生成代码 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">4.1 实验设置：考哪些题、和谁比、怎么解码</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>论文用哪些基准衡量改造后的模型？对照组是谁，哪一个才是最公平的对照？评测时用什么解码设置？读后面的表之前，这几件事要先弄清楚。</div>
+<p><b>基准。</b>代码生成用 HumanEval 和 MBPP，各有 Base 和 Plus 两种判分（Plus 是 EvalPlus 补充了更多测试用例的严格版本），用 EvalPlus 框架评测；数学用 GSM8K 和 MATH；知识类用 MMLU 和 GPQA；指令遵循用 IFEval。除代码外都用 LM-Eval 框架。附录 A.4 说：所有评测都用贪心解码；除 GPQA 用 5-shot 外，其余都是零样本；推理设置为块长 32、子块 8、阈值 1（不并行）。</p>
+<p><b>对照组。</b>分两类。第一类是同规模的公开模型：1B 档的 LLaMA-3.2（1.2B）、SmolLM2（1.7B），7B 档的 LLaDA、LLaDA-1.5、LLaDA-MoE、Dream。第二类是本文自己训练的、最关键的对照：拿同一个 Qwen2.5 模型，用<b>同样的数据、同样的步数</b>做普通的下一个 token 预测（NTP）微调，记作 Qwen2.5-1.5B-Nemo-FT 和 Qwen2.5-7B-Nemo-FT。另外还列了不做这次微调的 Qwen2.5 原模型（论文写作 Qwen2.5-1.5B / 7B；从上下文看就是改造起点的 Instruct 模型，论文没有明说）。要判断“改造成块扩散到底损失了多少”，应该和 Nemo-FT 比：它与 Fast-dLLM v2 的区别只在训练目标和注意力结构。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（评测脚本）</span>
+官方仓库的 <code>v2/eval.py</code> 在评测 GSM8K 和 MATH 时，把提示里的 “Answer:”/“Solution:” 换成一句要求“逐步推理、把最终答案写进 <code>\boxed{}</code>”的指令；默认最多生成 2048 个 token。<code>v2/eval_script.sh</code> 里 MMLU 用的是 5-shot，而附录 A.4 说除 GPQA 外都是零样本。论文没有说明这些设置是否也用在了 Qwen2.5 等自回归对照组上。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S4.SS1" target="_blank" rel="noopener">英文原文 §4.1 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#A1.SS4" target="_blank" rel="noopener">附录 A.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">4.2 主结果一：改造之后，质量丢了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>改造成块扩散之后，模型的能力和同数据、同步数的自回归微调相比怎么样？和 Dream、LLaDA 这些扩散模型相比呢？平均分接近，是不是意味着每一项都接近？</div>
+<p>原文表 1 中与本文最相关的几行如下（完整的表还有 LLaMA-3.2、SmolLM2、LLaDA-1.5、LLaDA-MoE）：</p>
+<div class="table-wrap"><table>
+<thead><tr><th>模型</th><th class="num">HumanEval<br>Base / Plus</th><th class="num">MBPP<br>Base / Plus</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">IFEval</th><th class="num">MMLU</th><th class="num">GPQA</th><th class="num">平均</th></tr></thead>
+<tbody>
+<tr><td>Qwen2.5-1.5B</td><td class="num">42.1 / 37.2</td><td class="num">48.1 / 41.3</td><td class="num">57.0</td><td class="num">46.8</td><td class="num">41.2</td><td class="num">54.6</td><td class="num">30.6</td><td class="num">44.3</td></tr>
+<tr><td>Qwen2.5-1.5B-Nemo-FT</td><td class="num">37.2 / 33.5</td><td class="num">53.4 / 44.4</td><td class="num">58.5</td><td class="num">43.5</td><td class="num">39.4</td><td class="num">58.1</td><td class="num">31.0</td><td class="num">44.3</td></tr>
+<tr class="hl"><td>Fast-dLLM v2 1.5B</td><td class="num">43.9 / 40.2</td><td class="num">50.0 / 41.3</td><td class="num">62.0</td><td class="num">38.1</td><td class="num">47.0</td><td class="num">55.1</td><td class="num">27.7</td><td class="num">45.0</td></tr>
+<tr><td>LLaDA 8B</td><td class="num">35.4 / 31.7</td><td class="num">31.5 / 28.6</td><td class="num">78.6</td><td class="num">26.6</td><td class="num">59.9</td><td class="num">65.5</td><td class="num">31.8</td><td class="num">43.3</td></tr>
+<tr><td>Dream 7B</td><td class="num">57.9 / 53.7</td><td class="num">68.3 / 56.1</td><td class="num">81.0</td><td class="num">39.2</td><td class="num">62.5</td><td class="num">67.0</td><td class="num">33.0</td><td class="num">57.6</td></tr>
+<tr><td>Qwen2.5-7B</td><td class="num">51.2 / 47.6</td><td class="num">57.7 / 49.5</td><td class="num">71.4</td><td class="num">73.3</td><td class="num">70.8</td><td class="num">68.7</td><td class="num">33.5</td><td class="num">58.2</td></tr>
+<tr><td>Qwen2.5-7B-Nemo-FT</td><td class="num">52.4 / 48.2</td><td class="num">57.1 / 50.0</td><td class="num">84.1</td><td class="num">72.0</td><td class="num">69.5</td><td class="num">68.6</td><td class="num">34.2</td><td class="num">59.6</td></tr>
+<tr class="hl"><td>Fast-dLLM v2 7B</td><td class="num">63.4 / 58.5</td><td class="num">63.0 / 52.3</td><td class="num">83.7</td><td class="num">61.6</td><td class="num">61.4</td><td class="num">66.6</td><td class="num">31.9</td><td class="num">60.3</td></tr>
+</tbody></table></div>
+<p class="w-note">数字来自原文表 1。Fast-dLLM v2 的数字是在阈值 1（每步定稿 1 个 token，不并行）、块长 32、子块 8 下测的。“平均”是 9 列的算术平均，代码题的 Base 和 Plus 各算一列。</p>
+<p>作者的结论是：1.5B 模型平均 45.0，高于 Qwen2.5-1.5B 和 Nemo-FT（都是 44.3），在 1B 档的扩散模型和自回归模型里最好；7B 模型平均 60.3，高于包括 Nemo-FT（59.6）和 Dream（57.6）在内的所有对照。两个规模都与“同数据、同步数的 NTP 微调”相当或更好。</p>
+<p>平均分接近，逐项看却差别很大。下面把 Fast-dLLM v2 减去 Nemo-FT 的差值逐列画出来：</p>
+<div class="dia">
+  <div class="dia-title">图表：Fast-dLLM v2 相对“同数据、同步数的自回归微调”的逐项差值（百分点）</div>
+  <svg class="dg" viewBox="0 0 960 412" role="img" aria-label="表 1 中 Fast-dLLM v2 与同数据同步数的自回归微调模型逐项差值" style="--dg-min:720px">
+<rect x="60" y="58" width="860" height="120" rx="6" style="fill:var(--surface-2)"/>
+<text x="70.0" y="116.0" class="t-sm t-b">代码题</text>
+<text x="70.0" y="132.0" class="t-xs">（9 列平均里占 4 列）</text>
+<text x="548.0" y="36.0" class="t-r t-sm">← Fast-dLLM v2 更差</text>
+<text x="572.0" y="36.0" class="t-sm">Fast-dLLM v2 更好 →</text>
+<text x="270.0" y="74.0" class="t-r t-sm">HumanEval</text>
+<g class="enc"><rect class="box" x="560.0" y="63" width="242.0" height="11" rx="2"/></g>
+<text x="807.0" y="69.0" class="t-xs">+11.0</text>
+<g class="act"><rect class="box" x="560.0" y="75" width="147.4" height="11" rx="2"/></g>
+<text x="712.4" y="81.0" class="t-xs">+6.7</text>
+<text x="270.0" y="104.0" class="t-r t-sm">HumanEval+</text>
+<g class="enc"><rect class="box" x="560.0" y="93" width="226.6" height="11" rx="2"/></g>
+<text x="791.6" y="99.0" class="t-xs">+10.3</text>
+<g class="act"><rect class="box" x="560.0" y="105" width="147.4" height="11" rx="2"/></g>
+<text x="712.4" y="111.0" class="t-xs">+6.7</text>
+<text x="270.0" y="134.0" class="t-r t-sm">MBPP</text>
+<g class="enc"><rect class="box" x="560.0" y="123" width="129.8" height="11" rx="2"/></g>
+<text x="694.8" y="129.0" class="t-xs">+5.9</text>
+<g class="act"><rect class="box" x="485.2" y="135" width="74.8" height="11" rx="2"/></g>
+<text x="480.2" y="141.0" class="t-r t-xs">-3.4</text>
+<text x="270.0" y="164.0" class="t-r t-sm">MBPP+</text>
+<g class="enc"><rect class="box" x="560.0" y="153" width="50.6" height="11" rx="2"/></g>
+<text x="615.6" y="159.0" class="t-xs">+2.3</text>
+<g class="act"><rect class="box" x="491.8" y="165" width="68.2" height="11" rx="2"/></g>
+<text x="486.8" y="171.0" class="t-r t-xs">-3.1</text>
+<text x="270.0" y="194.0" class="t-r t-sm">GSM8K</text>
+<g class="enc"><rect class="box" x="551.2" y="183" width="8.8" height="11" rx="2"/></g>
+<text x="546.2" y="189.0" class="t-r t-xs">-0.4</text>
+<g class="act"><rect class="box" x="560.0" y="195" width="77.0" height="11" rx="2"/></g>
+<text x="642.0" y="201.0" class="t-xs">+3.5</text>
+<text x="270.0" y="224.0" class="t-r t-sm">MATH</text>
+<g class="enc"><rect class="box" x="331.2" y="213" width="228.8" height="11" rx="2"/></g>
+<text x="326.2" y="219.0" class="t-r t-xs">-10.4</text>
+<g class="act"><rect class="box" x="441.2" y="225" width="118.8" height="11" rx="2"/></g>
+<text x="436.2" y="231.0" class="t-r t-xs">-5.4</text>
+<text x="270.0" y="254.0" class="t-r t-sm">IFEval</text>
+<g class="enc"><rect class="box" x="381.8" y="243" width="178.2" height="11" rx="2"/></g>
+<text x="376.8" y="249.0" class="t-r t-xs">-8.1</text>
+<g class="act"><rect class="box" x="560.0" y="255" width="167.2" height="11" rx="2"/></g>
+<text x="732.2" y="261.0" class="t-xs">+7.6</text>
+<text x="270.0" y="284.0" class="t-r t-sm">MMLU</text>
+<g class="enc"><rect class="box" x="516.0" y="273" width="44.0" height="11" rx="2"/></g>
+<text x="511.0" y="279.0" class="t-r t-xs">-2.0</text>
+<g class="act"><rect class="box" x="494.0" y="285" width="66.0" height="11" rx="2"/></g>
+<text x="489.0" y="291.0" class="t-r t-xs">-3.0</text>
+<text x="270.0" y="314.0" class="t-r t-sm">GPQA</text>
+<g class="enc"><rect class="box" x="509.4" y="303" width="50.6" height="11" rx="2"/></g>
+<text x="504.4" y="309.0" class="t-r t-xs">-2.3</text>
+<g class="act"><rect class="box" x="487.4" y="315" width="72.6" height="11" rx="2"/></g>
+<text x="482.4" y="321.0" class="t-r t-xs">-3.3</text>
+<line x1="560" y1="54" x2="560" y2="336" style="stroke:var(--text-2);stroke-width:1.4"/>
+<line class="axis" x1="296.0" y1="336" x2="824.0" y2="336"/>
+<line class="axis" x1="340.0" y1="336" x2="340.0" y2="341"/>
+<text x="340.0" y="353.0" class="t-c t-xs">-10</text>
+<line class="axis" x1="450.0" y1="336" x2="450.0" y2="341"/>
+<text x="450.0" y="353.0" class="t-c t-xs">-5</text>
+<line class="axis" x1="560.0" y1="336" x2="560.0" y2="341"/>
+<text x="560.0" y="353.0" class="t-c t-xs">0</text>
+<line class="axis" x1="670.0" y1="336" x2="670.0" y2="341"/>
+<text x="670.0" y="353.0" class="t-c t-xs">+5</text>
+<line class="axis" x1="780.0" y1="336" x2="780.0" y2="341"/>
+<text x="780.0" y="353.0" class="t-c t-xs">+10</text>
+<g class="enc"><rect class="box" x="300" y="369" width="20" height="12" rx="2"/></g>
+<text x="328.0" y="376.0" class="t-sm">7B：Fast-dLLM v2 − Qwen2.5-7B-Nemo-FT（平均 60.3 对 59.6）</text>
+<g class="act"><rect class="box" x="300" y="389" width="20" height="12" rx="2"/></g>
+<text x="328.0" y="396.0" class="t-sm">1.5B：Fast-dLLM v2 − Qwen2.5-1.5B-Nemo-FT（平均 45.0 对 44.3）</text>
+</svg>
+  <div class="dia-note">本站根据原文表 1 计算并绘制（推算）。<b>怎么看：</b>每一行是一列基准，蓝条是 7B、绿条是 1.5B；向右表示 Fast-dLLM v2 更好，向左表示更差。灰底的四行是代码题。</div>
+</div>
+<p>7B 上的格局很清楚：代码题全面领先（HumanEval +11.0、HumanEval+ +10.3），GSM8K 基本持平（−0.4），但 MATH 落后 10.4 分、IFEval 落后 8.1 分，MMLU、GPQA 各落后约 2 分。平均分领先 0.7，主要靠代码题撑起来，而 9 列里有 4 列是代码。如果先把每个代码基准的 Base 和 Plus 合成一个数、再对 7 个基准求平均，7B 上 Fast-dLLM v2 约 60.5、Nemo-FT 约 61.8，次序就反过来了；1.5B 上分别约 45.4 和 45.0，Fast-dLLM v2 仍略高（均为推算）。1.5B 的格局也不同于 7B：它在 HumanEval、GSM8K、IFEval 上领先，在 MBPP、MATH、MMLU、GPQA 上落后。</p>
+<p>和改造的起点 Qwen2.5-7B 原模型比，结论类似：代码和 GSM8K 涨了，MATH 从 73.3 掉到 61.6，IFEval 从 70.8 掉到 61.4。值得注意的是，GSM8K 上 Nemo-FT 也从 71.4 涨到了 84.1，说明 GSM8K 的提升主要来自 Nemotron 数据本身（以及它带来的答题格式），而不是来自块扩散。所以摘要里“保住了原模型的性能”只在平均的意义上成立，在数学竞赛题和指令遵循上并不成立。</p>
+<p>和其他扩散模型比，7B 的 Fast-dLLM v2 平均 60.3，高于 Dream（57.6）和 LLaDA（43.3），MATH 61.6 远高于 Dream 的 39.2 和 LLaDA 的 26.6。不过这几行的来源需要留意：LLaDA 一行的 GSM8K 78.6、MATH 26.6、GPQA 31.8，Dream 一行的 GSM8K 81.0、MATH 39.2、GPQA 33.0、IFEval 62.5，都和它们各自论文里指令模型的数字一致，说明是引用的，不是在本文的协议下重测的；而 Dream 一行的 HumanEval 57.9 并不是 Dream 指令模型的 55.5，恰好等于 Dream 基座模型的数字（见本站 <a href="dream.html#n-5-3">Dream 精读 §5.3</a>）。论文没有说明表 1 各行数字的来源和评测设置。</p>
+<div class="note-warn"><b>读这张表时容易误解的地方：</b>
+<ul>
+  <li>Fast-dLLM v2 的这些分数是在<b>不并行</b>（阈值 1）时测的，对应的速度和自回归差不多（约 39 token/秒）。2.5 倍速度下（阈值 0.9）的质量，论文只报告了 GSM8K 一项（第 8 节）。</li>
+  <li>Qwen2.5-7B 一行比 Qwen 官方报告的 Qwen2.5-7B-Instruct 低很多：官方数字是 GSM8K 91.6、MATH 75.5、HumanEval 84.8、MBPP 79.2（经 Dream 论文转引），这里分别是 71.4、73.3、51.2、57.7。差别来自评测协议（零样本、答案提取方式、提示格式等），所以表 1 的数字只能在表内比较，不能和其他论文的数字混着比。</li>
+  <li>GPQA 是四选一的选择题，随机猜就有 25%；表里各模型在 24 到 37 之间，彼此的差距接近噪声。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S4.SS2" target="_blank" rel="noopener">英文原文 §4.2 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#S4.T1" target="_blank" rel="noopener">原文表 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">4.2 主结果二：快了多少，在什么条件下</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>并行解码的阈值怎样在速度和准确率之间取舍？“2.5 倍”在批大小变大、换成 H100 时还剩多少？论文首页图 1 的那几个点，各是在什么条件下测的？</div>
+<h4 id="n-8-1">8.1 阈值：用多少准确率换多少速度</h4>
+<p>论文在 GSM8K 上扫了 0.5 到 1.0 的阈值（原文图 4）。阈值越低，每一步越多的位置能过阈值、被提前定稿，需要的步数越少，吞吐越高；代价是更多没把握的位置被一起定稿，准确率下降。作者选了 0.9：吞吐从 39.1 提高到 101.7 token/秒，即 2.6 倍，准确率只略有下降。</p>
+<div class="dia">
+  <div class="dia-title">图表：阈值 τ 对 GSM8K 准确率与吞吐的影响</div>
+  <svg class="dg" viewBox="0 0 960 356" role="img" aria-label="阈值对 GSM8K 准确率与吞吐的影响（按原文图 4 重画）" style="--dg-min:720px">
+<line class="grid-ln" x1="90" y1="300.0" x2="610" y2="300.0"/>
+<text x="84.0" y="300.0" class="t-r t-xs">60</text>
+<line class="grid-ln" x1="90" y1="248.0" x2="610" y2="248.0"/>
+<text x="84.0" y="248.0" class="t-r t-xs">65</text>
+<line class="grid-ln" x1="90" y1="196.0" x2="610" y2="196.0"/>
+<text x="84.0" y="196.0" class="t-r t-xs">70</text>
+<line class="grid-ln" x1="90" y1="144.0" x2="610" y2="144.0"/>
+<text x="84.0" y="144.0" class="t-r t-xs">75</text>
+<line class="grid-ln" x1="90" y1="92.0" x2="610" y2="92.0"/>
+<text x="84.0" y="92.0" class="t-r t-xs">80</text>
+<line class="grid-ln" x1="90" y1="40.0" x2="610" y2="40.0"/>
+<text x="84.0" y="40.0" class="t-r t-xs">85</text>
+<text x="616.0" y="300.0" class="t-xs">0</text>
+<text x="616.0" y="235.0" class="t-xs">40</text>
+<text x="616.0" y="170.0" class="t-xs">80</text>
+<text x="616.0" y="105.0" class="t-xs">120</text>
+<text x="616.0" y="40.0" class="t-xs">160</text>
+<text x="30.0" y="170.0" class="t-c t-sm" transform="rotate(-90 30 170)" style="fill:var(--c-pred)">GSM8K 准确率（%）</text>
+<text x="668.0" y="170.0" class="t-c t-sm" transform="rotate(90 668 170)" style="fill:var(--c-enc)">吞吐（token/秒）</text>
+<line x1="494" y1="40" x2="494" y2="300" style="stroke:var(--text-3);stroke-dasharray:4 4"/>
+<text x="494.0" y="32.0" class="t-c t-xs">论文选用 τ = 0.9</text>
+<polyline points="110.0,245.9 206.0,184.6 302.0,138.8 398.0,112.8 494.0,85.8 590.0,79.5" style="fill:none;stroke:var(--c-pred);stroke-width:2.4"/>
+<polyline points="110.0,51.7 206.0,75.4 302.0,93.3 398.0,113.6 494.0,134.7 590.0,236.5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+<circle cx="110.0" cy="245.9" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="105.5" y="47.2" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="110.0" y="39.7" class="t-c t-xs">152.8</text>
+<text x="110.0" y="261.9" class="t-c t-xs">≈65.2</text>
+<text x="110.0" y="318.0" class="t-c t-sm">0.5</text>
+<text x="110.0" y="340.0" class="t-c t-xs">4.06</text>
+<circle cx="206.0" cy="184.6" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="201.5" y="70.9" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="206.0" y="63.4" class="t-c t-xs">138.2</text>
+<text x="206.0" y="200.6" class="t-c t-xs">≈71.1</text>
+<text x="206.0" y="318.0" class="t-c t-sm">0.6</text>
+<text x="206.0" y="340.0" class="t-c t-xs">3.66</text>
+<circle cx="302.0" cy="138.8" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="297.5" y="88.8" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="302.0" y="81.3" class="t-c t-xs">127.2</text>
+<text x="302.0" y="154.8" class="t-c t-xs">≈75.5</text>
+<text x="302.0" y="318.0" class="t-c t-sm">0.7</text>
+<text x="302.0" y="340.0" class="t-c t-xs">3.36</text>
+<circle cx="398.0" cy="112.8" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="393.5" y="109.1" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="398.0" y="129.6" class="t-c t-xs">114.7</text>
+<text x="398.0" y="100.8" class="t-c t-xs">≈78.0</text>
+<text x="398.0" y="318.0" class="t-c t-sm">0.8</text>
+<text x="398.0" y="340.0" class="t-c t-xs">3.00</text>
+<circle cx="494.0" cy="85.8" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="489.5" y="130.2" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="494.0" y="150.7" class="t-c t-xs">101.7</text>
+<text x="494.0" y="73.8" class="t-c t-xs">≈80.6</text>
+<text x="494.0" y="318.0" class="t-c t-sm">0.9</text>
+<text x="494.0" y="340.0" class="t-c t-xs">2.64</text>
+<circle cx="590.0" cy="79.5" r="4.5" style="fill:var(--c-pred)"/>
+<rect x="585.5" y="232.0" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="590.0" y="252.5" class="t-c t-xs">39.1</text>
+<text x="590.0" y="67.5" class="t-c t-xs">≈81.2</text>
+<text x="590.0" y="318.0" class="t-c t-sm">1.0</text>
+<text x="590.0" y="340.0" class="t-c t-xs">1.00</text>
+<text x="70.0" y="318.0" class="t-r t-sm">阈值 τ</text>
+<text x="70.0" y="340.0" class="t-r t-xs">每步定稿数</text>
+<circle cx="706" cy="56" r="4.5" style="fill:var(--c-pred)"/>
+<text x="718.0" y="56.0" class="t-sm">准确率（读自原图，约值）</text>
+<rect x="701.5" y="71.5" width="9" height="9" style="fill:var(--c-enc)"/>
+<text x="718.0" y="76.0" class="t-sm">吞吐（原图标注值）</text>
+<text x="700.0" y="110.0" class="t-sm">τ = 1：每步只定稿 1 个，</text>
+<text x="700.0" y="129.0" class="t-sm">39.1 token/秒，和 AR 基线相当。</text>
+<text x="700.0" y="167.0" class="t-sm">τ = 0.9：每步约 2.64 个，</text>
+<text x="700.0" y="186.0" class="t-sm">101.7 token/秒（2.6 倍），</text>
+<text x="700.0" y="205.0" class="t-sm">准确率约降 0.6 个点。</text>
+<text x="700.0" y="243.0" class="t-sm">τ = 0.5：每步约 4.06 个，</text>
+<text x="700.0" y="262.0" class="t-sm">152.8 token/秒（3.9 倍，推算），</text>
+<text x="700.0" y="281.0" class="t-sm">准确率约降 16 个点。</text>
+</svg>
+  <div class="dia-note">本站按 <a href="https://arxiv.org/html/2509.26328v1#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a> 重画：吞吐与“每步定稿数”是原图标注的数值，准确率是从原图读出的约值（读自原图，误差约 ±0.3）。“每步定稿数”在原图里标在准确率曲线的点旁，没有写单位；它在阈值 1 时为 1.00，且与吞吐的倍数基本一致，本站据此理解为每步平均定稿的 token 数。<b>怎么看：</b>蓝线（右轴）是吞吐，橙线（左轴）是准确率。从右往左看，阈值从 1 降到 0.9，吞吐跳了一大截而准确率几乎不变；再往下降，吞吐增长变缓，准确率却越掉越快。</div>
+</div>
+<p>这张图说明，阈值并行的收益集中在“最容易的那部分”：从 1 降到 0.9，大量本来就很有把握的位置（比如算式里确定的数字、固定的套话）被一次放行，几乎不出错；阈值再往下降，被放行的开始包括真正不确定的位置，错误就多起来。图中没有写模型和硬件；从吞吐数值看，应是 7B 模型在 A100、批大小 1 下测的（本站推断）。另外，图中阈值 1 时的准确率约 81.2%，比表 1 里 7B 模型的 GSM8K（83.7）低约 2.5 个点，论文没有说明两者的设置差在哪里。</p>
+
+<h4 id="n-8-2">8.2 批大小与 GPU：倍数随批变大而下降</h4>
+<p>原文图 5 在 A100 和 H100 上比较了 Fast-dLLM v2（7B，阈值 0.9，开子块缓存）和 Qwen2.5-7B-Instruct 在不同批大小下的 GSM8K 吞吐。作者的表述是：所有设置下扩散生成都胜过自回归，而且随批大小增加展现出更好的可扩展性；批大小 64 时，A100 上快 1.5 倍，H100 上快 1.8 倍，作者认为较新的硬件更能发挥扩散解码的并行性。</p>
+<div class="dia">
+  <div class="dia-title">图表：不同批大小下的吞吐与倍数（GSM8K，7B）</div>
+  <svg class="dg" viewBox="0 0 960 392" role="img" aria-label="不同批大小下 Fast-dLLM v2 与 Qwen2.5-7B-Instruct 的吞吐（按原文图 5 读数重画）" style="--dg-min:720px">
+<line class="grid-ln" x1="90" y1="320.0" x2="640" y2="320.0"/>
+<text x="84.0" y="320.0" class="t-r t-xs">0</text>
+<line class="grid-ln" x1="90" y1="270.0" x2="640" y2="270.0"/>
+<text x="84.0" y="270.0" class="t-r t-xs">200</text>
+<line class="grid-ln" x1="90" y1="220.0" x2="640" y2="220.0"/>
+<text x="84.0" y="220.0" class="t-r t-xs">400</text>
+<line class="grid-ln" x1="90" y1="170.0" x2="640" y2="170.0"/>
+<text x="84.0" y="170.0" class="t-r t-xs">600</text>
+<line class="grid-ln" x1="90" y1="120.0" x2="640" y2="120.0"/>
+<text x="84.0" y="120.0" class="t-r t-xs">800</text>
+<line class="grid-ln" x1="90" y1="70.0" x2="640" y2="70.0"/>
+<text x="84.0" y="70.0" class="t-r t-xs">1000</text>
+<text x="30.0" y="180.0" class="t-c t-sm" transform="rotate(-90 30 180)">吞吐（token/秒）</text>
+<polyline points="110.0,309.5 196.0,304.0 282.0,291.2 368.0,274.8 454.0,258.8 540.0,248.2 626.0,240.5" style="fill:none;stroke:var(--c-enc);stroke-width:2.2;stroke-dasharray:6 4"/>
+<circle cx="110.0" cy="309.5" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="196.0" cy="304.0" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="282.0" cy="291.2" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="368.0" cy="274.8" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="454.0" cy="258.8" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="540.0" cy="248.2" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<circle cx="626.0" cy="240.5" r="4" style="fill:var(--surface);stroke:var(--c-enc);stroke-width:2"/>
+<polyline points="110.0,294.0 196.0,283.0 282.0,265.2 368.0,240.0 454.0,210.5 540.0,202.2 626.0,198.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+<rect x="106.0" y="290.0" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="192.0" y="279.0" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="278.0" y="261.2" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="364.0" y="236.0" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="450.0" y="206.5" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="536.0" y="198.2" width="8" height="8" style="fill:var(--c-enc)"/>
+<rect x="622.0" y="194.2" width="8" height="8" style="fill:var(--c-enc)"/>
+<polyline points="110.0,303.0 196.0,294.8 282.0,277.8 368.0,249.5 454.0,220.0 540.0,195.2 626.0,169.5" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:6 4"/>
+<circle cx="110.0" cy="303.0" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="196.0" cy="294.8" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="282.0" cy="277.8" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="368.0" cy="249.5" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="454.0" cy="220.0" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="540.0" cy="195.2" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<circle cx="626.0" cy="169.5" r="4" style="fill:var(--surface);stroke:var(--c-pred);stroke-width:2"/>
+<polyline points="110.0,278.8 196.0,261.2 282.0,230.0 368.0,180.5 454.0,118.2 540.0,72.2 626.0,44.8" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+<rect x="106.0" y="274.8" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="192.0" y="257.2" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="278.0" y="226.0" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="364.0" y="176.5" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="450.0" y="114.2" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="536.0" y="68.2" width="8" height="8" style="fill:var(--c-pred)"/>
+<rect x="622.0" y="40.8" width="8" height="8" style="fill:var(--c-pred)"/>
+<text x="110.0" y="338.0" class="t-c t-sm">1</text>
+<text x="110.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">2.5×</text>
+<text x="110.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.4×</text>
+<text x="196.0" y="338.0" class="t-c t-sm">2</text>
+<text x="196.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">2.3×</text>
+<text x="196.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.3×</text>
+<text x="282.0" y="338.0" class="t-c t-sm">4</text>
+<text x="282.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">1.9×</text>
+<text x="282.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.1×</text>
+<text x="368.0" y="338.0" class="t-c t-sm">8</text>
+<text x="368.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">1.8×</text>
+<text x="368.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.0×</text>
+<text x="454.0" y="338.0" class="t-c t-sm">16</text>
+<text x="454.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">1.8×</text>
+<text x="454.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.0×</text>
+<text x="540.0" y="338.0" class="t-c t-sm">32</text>
+<text x="540.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">1.6×</text>
+<text x="540.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">2.0×</text>
+<text x="626.0" y="338.0" class="t-c t-sm">64</text>
+<text x="626.0" y="362.0" class="t-c t-xs" style="fill:var(--c-enc)">1.5×</text>
+<text x="626.0" y="380.0" class="t-c t-xs" style="fill:var(--c-pred)">1.8×</text>
+<text x="76.0" y="338.0" class="t-r t-sm">批大小</text>
+<text x="76.0" y="362.0" class="t-r t-xs">A100 倍数</text>
+<text x="76.0" y="380.0" class="t-r t-xs">H100 倍数</text>
+<line x1="676" y1="52" x2="706" y2="52" style="stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="714.0" y="52.0" class="t-sm">A100 · Fast-dLLM v2</text>
+<line x1="676" y1="74" x2="706" y2="74" style="stroke:var(--c-enc);stroke-width:2.4;stroke-dasharray:6 4"/>
+<text x="714.0" y="74.0" class="t-sm">A100 · Qwen2.5-7B-Instruct</text>
+<line x1="676" y1="96" x2="706" y2="96" style="stroke:var(--c-pred);stroke-width:2.4"/>
+<text x="714.0" y="96.0" class="t-sm">H100 · Fast-dLLM v2</text>
+<line x1="676" y1="118" x2="706" y2="118" style="stroke:var(--c-pred);stroke-width:2.4;stroke-dasharray:6 4"/>
+<text x="714.0" y="118.0" class="t-sm">H100 · Qwen2.5-7B-Instruct</text>
+<text x="676.0" y="150.0" class="t-sm">数值读自原文图 5，是约值；</text>
+<text x="676.0" y="169.0" class="t-sm">倍数 = 同批大小下两者之比（推算）。</text>
+<text x="676.0" y="207.0" class="t-sm">批大小从 1 涨到 64：</text>
+<text x="676.0" y="226.0" class="t-sm">A100 上倍数从约 2.5 降到 1.5，</text>
+<text x="676.0" y="245.0" class="t-sm">H100 上从约 2.4 降到 1.8。</text>
+<text x="676.0" y="264.0" class="t-sm">扩散一侧在 A100 上 batch 16 之后</text>
+<text x="676.0" y="283.0" class="t-sm">几乎不再增长。</text>
+</svg>
+  <div class="dia-note">本站按 <a href="https://arxiv.org/html/2509.26328v1#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a> 读数重画（读自原图，约值）；下面两行倍数是本站用读数相除得到的（推算）。<b>怎么看：</b>实线是 Fast-dLLM v2，虚线是 Qwen2.5-7B-Instruct；蓝色是 A100，橙色是 H100。看同一种颜色的实线和虚线之间的距离：绝对差距一直存在，但两者之比随批变大而变小。</div>
+</div>
+<p>读数表明，“随批大小增加更具可扩展性”这个说法只对绝对吞吐成立，两者的比值其实在下降：A100 上从批大小 1 的约 2.5 倍降到 64 的 1.5 倍，H100 上从约 2.4 倍降到 1.8 倍（推算）。原因正是 5.5 节的那笔账：批小时 GPU 在等数据，块扩散一次前向多算的几十个位置几乎是免费的；批变大以后，一次前向要处理的位置数（批大小乘以每块要算的位置数）很快把算力占满，多算的部分不再免费。A100 上 Fast-dLLM v2 在批大小 16 之后几乎不再增长（约 440 → 490 token/秒），就是撞上了算力上限；H100 算力更强，撞墙更晚，这也解释了为什么 H100 上的倍数更高。</p>
+<p>这组实验还有几个条件论文没有交代：生成长度的上限、自回归一侧用的是什么推理实现，以及吞吐是否把结束符之后的填充也算在内（见第 10 节）。</p>
+
+<h4 id="n-8-3">8.3 首页图 1：几个点分别来自哪里</h4>
+<p>原文图 1 有两部分。图 1(a) 把多个模型放在“GSM8K 准确率 × 吞吐”的平面上，标注 Fast-dLLM v2（7B）比 Qwen2.5-7B-Instruct 快 2.54 倍、准确率相当，比 Fast-dLLM 加速后的 LLaDA 高 5.2 个点。读图约为：Qwen2.5-7B-Instruct 约 40 token/秒、84.1%；Fast-dLLM v2 约 101.7 token/秒、83.7%；LLaDA 约 7 token/秒、79.3%；Fast-dLLM-LLaDA 约 78 token/秒、78.5%；Dream 约 9 token/秒、75.0%；Fast-dLLM-Dream 约 55 token/秒、74.8%；LLaMA-3-8B 约 37 token/秒、77.9%（均读自原图）。图 1(b) 是 A100 上批大小 1 和 4 的吞吐柱状图，标注值依次为：Qwen2.5-7B-Instruct 39.5 / 113.2，Fast-dLLM-Dream 48.2 / 30.2，Fast-dLLM-LLaDA 54.4 / 34.1，Fast-dLLM v2 102.5 / 217.5（批大小 1 / 4）。</p>
+<p>仔细对照，这两张小图里有几处对不上，论文没有解释：</p>
+<ul>
+  <li>Fast-dLLM v2 在图 1(a) 里的点，横坐标（约 101.7）与图 4 中阈值 0.9 的吞吐一致，纵坐标（83.7%）却与表 1 中阈值 1 的 GSM8K 一致；而图 4 里阈值 0.9 对应的准确率约 80.6%。也就是说，这个点很可能把两个不同设置的结果画在了一起。</li>
+  <li>Qwen2.5-7B-Instruct 的点约 84.1%，与表 1 里 Qwen2.5-7B-Nemo-FT 的 84.1 相同，而表 1 里 Qwen2.5-7B 一行是 71.4。</li>
+  <li>LLaDA、Dream 及其 Fast-dLLM 加速版的准确率，与 Fast-dLLM 前作表 1、表 2 的数字一致，前作的设置是 GSM8K 5-shot、生成长度 256（见本站 <a href="fast-dllm.html#n-5-2">Fast-dLLM 精读 §5.2</a>），而本文自己的评测是零样本。同一个 Fast-dLLM-LLaDA，吞吐在图 1(a) 里约 78（图注没有写批大小），在图 1(b) 批大小 1 时却是 54.4（与前作表 1 一致）。</li>
+  <li>图 1(b) 里两个前作方法在批大小 4 时反而比批大小 1 更慢（Dream 48.2 → 30.2，LLaDA 54.4 → 34.1），说明前作的实现不擅长批处理；所以批大小 4 时“超过所有基线”，真正有意义的对照只有 Qwen2.5-7B-Instruct：217.5 对 113.2，约 1.9 倍（推算）。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S4.SS2" target="_blank" rel="noopener">英文原文 §4.2 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">4.3 消融：哪些设计真的有用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>块对齐填充和互补掩码各贡献多少？推理时为什么用“子块”而不是直接把块改小？子块缓存省了多少时间、伤不伤准确率？所有消融都在 1.5B 模型上做。</div>
+<h4 id="n-9-1">9.1 填充与互补掩码（原文表 2）</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>训练配方（1.5B）</th><th class="num">HumanEval<br>Base / Plus</th><th class="num">MBPP<br>Base / Plus</th><th class="num">GSM8K</th><th class="num">MATH</th><th class="num">IFEval</th><th class="num">MMLU</th><th class="num">GPQA</th><th class="num">平均</th></tr></thead>
+<tbody>
+<tr><td>朴素做法（naive token shift）</td><td class="num">38.4 / 32.9</td><td class="num">44.4 / 38.6</td><td class="num">59.0</td><td class="num">37.3</td><td class="num">39.9</td><td class="num">52.9</td><td class="num">27.9</td><td class="num">41.3</td></tr>
+<tr><td>+ 块对齐填充</td><td class="num">38.4 / 34.1</td><td class="num">45.2 / 38.4</td><td class="num">60.1</td><td class="num">37.0</td><td class="num">45.8</td><td class="num">53.5</td><td class="num">27.7</td><td class="num">42.2</td></tr>
+<tr class="hl"><td>+ 块对齐填充 + 互补掩码</td><td class="num">43.9 / 40.2</td><td class="num">50.0 / 41.3</td><td class="num">62.0</td><td class="num">38.1</td><td class="num">47.0</td><td class="num">55.1</td><td class="num">27.7</td><td class="num">45.0</td></tr>
+</tbody></table></div>
+<p>“朴素做法”是：每个训练块随机遮一部分 token，被遮的位置用前一个位置的输出来预测（也就是已经带了 token shift），但不补齐、不用互补掩码。加上块对齐填充后，平均从 41.3 到 42.2，提升主要在 IFEval（39.9 → 45.8）。再加互补掩码，平均到 45.0，比朴素做法高 3.7 分，几乎每一列都涨了，代码题涨得最多。作者的总结是：训练时的输入构造，要和模型的注意力结构、遮挡目标对齐。</p>
+<div class="note-warn"><b>这组消融没有回答的问题：</b>
+<ul>
+  <li>表的标题叫“不同的 token shift 策略”，但三行都用了 token shift，<b>没有一行去掉 token shift</b>，所以表 2 不能说明 token shift 本身起了多大作用（Dream 的论文里倒是有这样的消融，见 <a href="dream.html#n-4-1">Dream 精读 §4.1</a>）。</li>
+  <li>加了互补掩码以后，每条样本过两遍网络，同样步数下的计算量和被监督的 token 数都约翻一倍（推算）。表 2 没有把“多算一遍”和“互补”这两个因素分开，比如对照一个“同样计算量、但用两个独立随机掩码”的版本。</li>
+  <li>每个配置只训练、评测了一次。HumanEval 只有 164 题，1 题约等于 0.6 分，表里 1–2 分的差别只相当于两三道题。</li>
+</ul></div>
+
+<h4 id="n-9-2">9.2 子块大小 vs 直接改块长（原文表 3、表 4）</h4>
+<p>表 3 固定块长 32，只改推理时的子块大小；表 4 则直接把推理时的块长改成 2 到 32，不再与训练时的 32 一致。两张表都在阈值 1 下测：</p>
+<div class="dia">
+  <div class="dia-title">图表：只改子块（实线）与直接改块长（虚线）</div>
+  <svg class="dg" viewBox="0 0 960 378" role="img" aria-label="子块大小与直接修改块长对 GSM8K 和 HumanEval 的影响（原文表 3、表 4）" style="--dg-min:720px">
+<text x="270.0" y="30.0" class="t-c t-b">GSM8K（1.5B，阈值 1）</text>
+<line class="grid-ln" x1="70" y1="300.0" x2="470" y2="300.0"/>
+<text x="64.0" y="300.0" class="t-r t-xs">52</text>
+<line class="grid-ln" x1="70" y1="260.0" x2="470" y2="260.0"/>
+<text x="64.0" y="260.0" class="t-r t-xs">54</text>
+<line class="grid-ln" x1="70" y1="220.0" x2="470" y2="220.0"/>
+<text x="64.0" y="220.0" class="t-r t-xs">56</text>
+<line class="grid-ln" x1="70" y1="180.0" x2="470" y2="180.0"/>
+<text x="64.0" y="180.0" class="t-r t-xs">58</text>
+<line class="grid-ln" x1="70" y1="140.0" x2="470" y2="140.0"/>
+<text x="64.0" y="140.0" class="t-r t-xs">60</text>
+<line class="grid-ln" x1="70" y1="100.0" x2="470" y2="100.0"/>
+<text x="64.0" y="100.0" class="t-r t-xs">62</text>
+<line class="grid-ln" x1="70" y1="60.0" x2="470" y2="60.0"/>
+<text x="64.0" y="60.0" class="t-r t-xs">64</text>
+<polyline points="100.0,84.0 185.0,104.0 270.0,100.0 355.0,114.0 440.0,136.0" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+<circle cx="100.0" cy="84.0" r="4" style="fill:var(--c-enc)"/>
+<text x="100.0" y="73.0" class="t-c t-xs" style="fill:var(--c-enc)">62.8</text>
+<circle cx="185.0" cy="104.0" r="4" style="fill:var(--c-enc)"/>
+<text x="185.0" y="93.0" class="t-c t-xs" style="fill:var(--c-enc)">61.8</text>
+<circle cx="270.0" cy="100.0" r="4" style="fill:var(--c-enc)"/>
+<text x="270.0" y="89.0" class="t-c t-xs" style="fill:var(--c-enc)">62.0</text>
+<circle cx="355.0" cy="114.0" r="4" style="fill:var(--c-enc)"/>
+<text x="355.0" y="103.0" class="t-c t-xs" style="fill:var(--c-enc)">61.3</text>
+<circle cx="440.0" cy="136.0" r="4" style="fill:var(--c-enc)"/>
+<text x="440.0" y="125.0" class="t-c t-xs" style="fill:var(--c-enc)">60.2</text>
+<polyline points="100.0,276.0 185.0,204.0 270.0,170.0 355.0,146.0 440.0,136.0" style="fill:none;stroke:var(--c-loss);stroke-width:2.2;stroke-dasharray:6 4"/>
+<circle cx="100.0" cy="276.0" r="4" style="fill:var(--c-loss)"/>
+<text x="100.0" y="291.0" class="t-c t-xs" style="fill:var(--c-loss)">53.2</text>
+<circle cx="185.0" cy="204.0" r="4" style="fill:var(--c-loss)"/>
+<text x="185.0" y="219.0" class="t-c t-xs" style="fill:var(--c-loss)">56.8</text>
+<circle cx="270.0" cy="170.0" r="4" style="fill:var(--c-loss)"/>
+<text x="270.0" y="185.0" class="t-c t-xs" style="fill:var(--c-loss)">58.5</text>
+<circle cx="355.0" cy="146.0" r="4" style="fill:var(--c-loss)"/>
+<text x="355.0" y="161.0" class="t-c t-xs" style="fill:var(--c-loss)">59.7</text>
+<circle cx="440.0" cy="136.0" r="4" style="fill:var(--c-loss)"/>
+<text x="440.0" y="151.0" class="t-c t-xs" style="fill:var(--c-loss)">60.2</text>
+<text x="100.0" y="318.0" class="t-c t-sm">2</text>
+<text x="185.0" y="318.0" class="t-c t-sm">4</text>
+<text x="270.0" y="318.0" class="t-c t-sm">8</text>
+<text x="355.0" y="318.0" class="t-c t-sm">16</text>
+<text x="440.0" y="318.0" class="t-c t-sm">32</text>
+<text x="730.0" y="30.0" class="t-c t-b">HumanEval（1.5B，阈值 1）</text>
+<line class="grid-ln" x1="530" y1="300.0" x2="930" y2="300.0"/>
+<text x="524.0" y="300.0" class="t-r t-xs">36</text>
+<line class="grid-ln" x1="530" y1="252.0" x2="930" y2="252.0"/>
+<text x="524.0" y="252.0" class="t-r t-xs">38</text>
+<line class="grid-ln" x1="530" y1="204.0" x2="930" y2="204.0"/>
+<text x="524.0" y="204.0" class="t-r t-xs">40</text>
+<line class="grid-ln" x1="530" y1="156.0" x2="930" y2="156.0"/>
+<text x="524.0" y="156.0" class="t-r t-xs">42</text>
+<line class="grid-ln" x1="530" y1="108.0" x2="930" y2="108.0"/>
+<text x="524.0" y="108.0" class="t-r t-xs">44</text>
+<line class="grid-ln" x1="530" y1="60.0" x2="930" y2="60.0"/>
+<text x="524.0" y="60.0" class="t-r t-xs">46</text>
+<polyline points="560.0,139.2 645.0,124.8 730.0,110.4 815.0,213.6 900.0,242.4" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+<circle cx="560.0" cy="139.2" r="4" style="fill:var(--c-enc)"/>
+<text x="560.0" y="128.2" class="t-c t-xs" style="fill:var(--c-enc)">42.7</text>
+<circle cx="645.0" cy="124.8" r="4" style="fill:var(--c-enc)"/>
+<text x="645.0" y="113.8" class="t-c t-xs" style="fill:var(--c-enc)">43.3</text>
+<circle cx="730.0" cy="110.4" r="4" style="fill:var(--c-enc)"/>
+<text x="730.0" y="99.4" class="t-c t-xs" style="fill:var(--c-enc)">43.9</text>
+<circle cx="815.0" cy="213.6" r="4" style="fill:var(--c-enc)"/>
+<text x="815.0" y="202.6" class="t-c t-xs" style="fill:var(--c-enc)">39.6</text>
+<circle cx="900.0" cy="242.4" r="4" style="fill:var(--c-enc)"/>
+<text x="900.0" y="231.4" class="t-c t-xs" style="fill:var(--c-enc)">38.4</text>
+<polyline points="560.0,256.8 645.0,124.8 730.0,124.8 815.0,242.4 900.0,242.4" style="fill:none;stroke:var(--c-loss);stroke-width:2.2;stroke-dasharray:6 4"/>
+<circle cx="560.0" cy="256.8" r="4" style="fill:var(--c-loss)"/>
+<text x="560.0" y="271.8" class="t-c t-xs" style="fill:var(--c-loss)">37.8</text>
+<circle cx="645.0" cy="124.8" r="4" style="fill:var(--c-loss)"/>
+<text x="645.0" y="139.8" class="t-c t-xs" style="fill:var(--c-loss)">43.3</text>
+<circle cx="730.0" cy="124.8" r="4" style="fill:var(--c-loss)"/>
+<text x="730.0" y="139.8" class="t-c t-xs" style="fill:var(--c-loss)">43.3</text>
+<circle cx="815.0" cy="242.4" r="4" style="fill:var(--c-loss)"/>
+<text x="815.0" y="257.4" class="t-c t-xs" style="fill:var(--c-loss)">38.4</text>
+<circle cx="900.0" cy="242.4" r="4" style="fill:var(--c-loss)"/>
+<text x="900.0" y="257.4" class="t-c t-xs" style="fill:var(--c-loss)">38.4</text>
+<text x="560.0" y="318.0" class="t-c t-sm">2</text>
+<text x="645.0" y="318.0" class="t-c t-sm">4</text>
+<text x="730.0" y="318.0" class="t-c t-sm">8</text>
+<text x="815.0" y="318.0" class="t-c t-sm">16</text>
+<text x="900.0" y="318.0" class="t-c t-sm">32</text>
+<text x="480.0" y="340.0" class="t-c t-sm">横轴：推理时的子块大小（实线）或块长（虚线）；32 时两者是同一个设置</text>
+<line x1="250" y1="362" x2="280" y2="362" style="stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="288.0" y="362.0" class="t-sm">块长保持 32，只改子块大小（表 3）</text>
+<line x1="540" y1="362" x2="570" y2="362" style="stroke:var(--c-loss);stroke-width:2.4;stroke-dasharray:6 4"/>
+<text x="578.0" y="362.0" class="t-sm">直接把块长改小（表 4）</text>
+</svg>
+  <div class="dia-note">本站根据 <a href="https://arxiv.org/html/2509.26328v1#S4.T4" target="_blank" rel="noopener">原文表 3、表 4 ↗</a> 的数字绘制。<b>怎么看：</b>两条线在 32 处重合，因为“子块 32”和“块长 32”都等于不分子块的原始设置（GSM8K 60.2）。往左看，实线基本平稳甚至略升，虚线一路下滑。</div>
+</div>
+<p>两张表给出了一致的信息。<b>子块变小，GSM8K 略升</b>：从 32 的 60.2 升到 2 的 62.8；HumanEval 在子块 8 时最好（43.9），继续变小又回落。作者据此选 8 作为默认值，并指出最优的子块大小因任务而异。<b>块长变小，全面下降</b>：块长 8 时 GSM8K 只有 58.5（同样大小的子块是 62.0），块长 2 时只有 53.2。原因在 5.3 节说过：子块不改变注意力的形状，只限制“这一步在哪几个位置里挑”；改块长则让模型面对训练时从没见过的注意力模式。</p>
+<p>本站补充一个理解：阈值为 1 时每步只定稿一个位置，子块越小，“挑哪个位置”的范围越窄，解码顺序越接近从左到右。GSM8K 在子块小时更好，说明对这类逐步推导的数学题，更接近自回归的顺序反而有利；这和 LLaDA 的指令模型需要分块、半自回归地解码这一观察是一致的（见 <a href="llada.html#n-3-3-2">LLaDA 精读 §3.3</a>）。不过这里的差别也不大：GSM8K 测试集有 1,319 题，子块 2 与子块 8 之间 0.8 分的差距约等于 10 道题（推算）。</p>
+
+<h4 id="n-9-3">9.3 子块大小与子块缓存（原文图 6）</h4>
+<p>图 6 同时比较了子块大小（4、8、16）、批大小（1、32）和是否开子块缓存。准确率方面（图 6a），子块越大，准确率略降，和表 3 一致；开不开缓存，准确率的差别在 1 个点以内（读自原图），作者说缓存对准确率“没有可观察到的影响”。吞吐方面（图 6b）如下：</p>
+<div class="dia">
+  <div class="dia-title">图表：子块缓存在什么时候有用</div>
+  <svg class="dg" viewBox="0 0 960 334" role="img" aria-label="子块大小与子块缓存对吞吐的影响（按原文图 6b 读数重画）" style="--dg-min:720px">
+<line class="grid-ln" x1="80" y1="300.0" x2="640" y2="300.0"/>
+<text x="74.0" y="300.0" class="t-r t-xs">0</text>
+<line class="grid-ln" x1="80" y1="244.0" x2="640" y2="244.0"/>
+<text x="74.0" y="244.0" class="t-r t-xs">100</text>
+<line class="grid-ln" x1="80" y1="188.0" x2="640" y2="188.0"/>
+<text x="74.0" y="188.0" class="t-r t-xs">200</text>
+<line class="grid-ln" x1="80" y1="132.0" x2="640" y2="132.0"/>
+<text x="74.0" y="132.0" class="t-r t-xs">300</text>
+<line class="grid-ln" x1="80" y1="76.0" x2="640" y2="76.0"/>
+<text x="74.0" y="76.0" class="t-r t-xs">400</text>
+<text x="28.0" y="180.0" class="t-c t-sm" transform="rotate(-90 28 180)">吞吐（token/秒）</text>
+<rect x="120" y="261.9" width="28" height="38.1" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<text x="134.0" y="253.9" class="t-c t-xs">68</text>
+<rect x="154" y="261.9" width="28" height="38.1" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<rect x="154" y="261.9" width="28" height="38.1" style="fill:url(#hatch);opacity:.55"/>
+<text x="168.0" y="253.9" class="t-c t-xs">68</text>
+<rect x="188" y="123.0" width="28" height="177.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<text x="202.0" y="115.0" class="t-c t-xs">316</text>
+<rect x="222" y="107.9" width="28" height="192.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<rect x="222" y="107.9" width="28" height="192.1" style="fill:url(#hatch);opacity:.55"/>
+<text x="236.0" y="99.9" class="t-c t-xs">343</text>
+<text x="184.0" y="318.0" class="t-c t-sm">子块 4</text>
+<rect x="300" y="256.9" width="28" height="43.1" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<text x="314.0" y="248.9" class="t-c t-xs">77</text>
+<rect x="334" y="257.4" width="28" height="42.6" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<rect x="334" y="257.4" width="28" height="42.6" style="fill:url(#hatch);opacity:.55"/>
+<text x="348.0" y="249.4" class="t-c t-xs">76</text>
+<rect x="368" y="102.3" width="28" height="197.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<text x="382.0" y="94.3" class="t-c t-xs">353</text>
+<rect x="402" y="81.6" width="28" height="218.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<rect x="402" y="81.6" width="28" height="218.4" style="fill:url(#hatch);opacity:.55"/>
+<text x="416.0" y="73.6" class="t-c t-xs">390</text>
+<text x="364.0" y="318.0" class="t-c t-sm">子块 8</text>
+<rect x="480" y="253.0" width="28" height="47.0" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<text x="494.0" y="245.0" class="t-c t-xs">84</text>
+<rect x="514" y="253.0" width="28" height="47.0" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt);stroke-width:1.5"/>
+<rect x="514" y="253.0" width="28" height="47.0" style="fill:url(#hatch);opacity:.55"/>
+<text x="528.0" y="245.0" class="t-c t-xs">84</text>
+<rect x="548" y="86.1" width="28" height="213.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<text x="562.0" y="78.1" class="t-c t-xs">382</text>
+<rect x="582" y="57.0" width="28" height="243.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+<rect x="582" y="57.0" width="28" height="243.0" style="fill:url(#hatch);opacity:.55"/>
+<text x="596.0" y="49.0" class="t-c t-xs">434</text>
+<text x="544.0" y="318.0" class="t-c t-sm">子块 16</text>
+<rect x="680" y="48" width="18" height="16" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<text x="706.0" y="56.0" class="t-sm">batch 1，不用子块缓存</text>
+<rect x="680" y="72" width="18" height="16" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="680" y="72" width="18" height="16" style="fill:url(#hatch);opacity:.55"/>
+<text x="706.0" y="80.0" class="t-sm">batch 1，用子块缓存</text>
+<rect x="680" y="96" width="18" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="706.0" y="104.0" class="t-sm">batch 32，不用子块缓存</text>
+<rect x="680" y="120" width="18" height="16" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="680" y="120" width="18" height="16" style="fill:url(#hatch);opacity:.55"/>
+<text x="706.0" y="128.0" class="t-sm">batch 32，用子块缓存</text>
+<text x="680.0" y="160.0" class="t-sm">数值读自原文图 6(b)，是约值。</text>
+<text x="680.0" y="198.0" class="t-sm">batch 1：有没有缓存几乎一样。</text>
+<text x="680.0" y="217.0" class="t-sm">batch 32：缓存带来约 9%、10%、</text>
+<text x="680.0" y="236.0" class="t-sm">14% 的提升（推算）。</text>
+<text x="680.0" y="274.0" class="t-sm">子块越大，每步可并行的位置越多，</text>
+<text x="680.0" y="293.0" class="t-sm">吞吐越高；准确率略降（图 6a）。</text>
+</svg>
+  <div class="dia-note">本站按 <a href="https://arxiv.org/html/2509.26328v1#S4.F6" target="_blank" rel="noopener">原文图 6 ↗</a> 读数重画（读自原图，约值）。原图没有写明用的是哪个基准和阈值；准确率的量级（约 57%–63%）与 1.5B 模型的 GSM8K 相近（本站推测）。<b>怎么看：</b>斜纹柱是开了子块缓存的版本。每组左边两根（批大小 1）几乎一样高；右边两根（批大小 32）里，斜纹的那根更高。</div>
+</div>
+<p>批大小为 1 时，GPU 主要在等数据，少算几个位置省不了时间，缓存几乎没有收益；批大小为 32 时，GPU 已经接近算力上限，子块内的迭代只算 8 个位置而不是 32 个，吞吐提高约 9%–14%（推算）。作者原文说缓存在算力受限时带来“显著”的加速，按读数看是一成左右。子块变大也会提高吞吐，因为每步可以从更多位置里挑出过阈值的 token，步数更少。作者的建议是：在实际的批大小下，较大的子块配合缓存，能取得较好的速度与质量平衡。</p>
+<p>图 6a 里还有一个容易忽略的现象：同样的模型和设置，只是批大小从 1 换成 32，准确率就差 1–2 个点（例如子块 4、不开缓存时约 61.0 对 62.7，读自原图）。这说明批量解码时的填充和对齐方式本身会影响结果（本站推测与官方代码按批内最短的提示对齐预填充有关），也提醒我们：表中 1 个点左右的差距不宜过度解读。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S4.SS3" target="_blank" rel="noopener">英文原文 §4.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">4.4 结果的份量：这些数字说明了什么、没说明什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这一部分是本站补充的，不打分，只把每个结论背后“和谁比、在什么条件下比、哪些条件对齐了”说清楚。</div>
+<p><b>和自回归模型比，对齐了什么。</b>最有价值的对照是 Nemo-FT：同一个 Qwen2.5 起点模型、同样的 Nemotron 数据、同样的训练步数、同样的评测协议，只换训练目标和注意力结构。参数量和数据量两边完全相同，这个设计是公平的，也是本文最站得住的证据：在这种对齐下，块扩散改造的平均分与自回归微调相当。但有两处没有对齐。其一是计算量：Fast-dLLM v2 每条样本要过两个互补视图，每个视图是两倍长的双流输入，同样步数下送进网络的 token 约是自回归的 4 倍（推算）。其二是解码：Fast-dLLM v2 的分数是在阈值 1、即不并行时测的，那时它的速度和自回归差不多；2.5 倍速度对应的阈值 0.9 下，只报告了 GSM8K 一项。至于和 LLaDA、Dream 的比较，就不再对齐了：那几行数字来自各自的论文、各自的协议。</p>
+<p><b>平均分是怎么算的。</b>9 列平均里，HumanEval 和 MBPP 的 Base、Plus 各算一列，代码题占了 4/9 的权重。Fast-dLLM v2 恰好在代码上领先、在 MATH（−10.4）和 IFEval（−8.1）上明显落后。换成按 7 个基准平均，7B 上的次序就反过来了（约 60.5 对 61.8，推算）。所以更准确的说法是：改造后的 7B 模型在代码上更好，在数学竞赛题和指令遵循上更差，平均下来大致持平。</p>
+<p><b>“约 1B token”与“500 倍”。</b>7B 约 1.31B token、1.5B 约 3.15B token（附录 A.1），数的是打包后的全部位置。拿它和 Dream 的 580B 比，是 SFT 对继续预训练、块长 32 的块扩散对全序列扩散，两边做的不是同一件事。比较有意义的结论是：如果只需要一个块长固定、块间从左到右的扩散模型，从一个已经后训练好的 Instruct 模型出发，SFT 规模的数据就够了。</p>
+<p><b>速度：硬件、批大小、对手。</b>2.5 倍是 A100、批大小 1、GSM8K、阈值 0.9 下和 Qwen2.5-7B-Instruct 比的；批大小 64 时是 1.5 倍（A100）和 1.8 倍（H100）。论文没有说明自回归一侧用的是什么推理实现，也没有给出生成长度上限。有一个线索：Qwen2.5-7B 的 BF16 参数约 15 GB，A100 的显存带宽约 1.5–2 TB/s，单条请求的理论上限约为每秒 100–130 个 token（推算）；图里的自回归基线只有约 40 token/秒，约为上限的三分之一，说明基线是没有专门优化过的实现（比如 Hugging Face 的 generate）。这不代表比较不公平，Fast-dLLM v2 自己的官方代码也是基于 Hugging Face Transformers 的 PyTorch 实现；但它意味着在 vLLM、SGLang 这类做了 CUDA Graph、连续批处理等优化的推理引擎里，自回归的数字会高得多，结论需要在那样的环境里重新测。官方仓库 README 的待办清单里，“vLLM 支持”仍标为进行中（2026-10-20 查看）。</p>
+<p><b>吞吐怎么数 token。</b>官方评测代码 <code>v2/eval.py</code> 统计吞吐时，把生成部分里所有不是 [MASK] 的位置都算作生成的 token；而按 <code>generation_functions.py</code>，一条序列写出结束符后，同一块里剩下的位置会被替换成填充符（不是 [MASK]），因此也会被计入。每条序列最多多算约 31 个位置；相对于 GSM8K 几百 token 的回答，这可能让吞吐偏高几个到十几个百分点（本站读代码所见并推算；论文的图是否用这段代码统计，论文没有说明，自回归一侧怎么数也没有说明）。</p>
+<p><b>图 1 的几处出入。</b>见 8.3 节：Fast-dLLM v2 的点很可能把阈值 0.9 的速度和阈值 1 的准确率画在了一起；Qwen 的点与表 1 的 Nemo-FT 数字相同；LLaDA、Dream 的点沿用前作 5-shot 的设置。首页这张图适合当作直观印象，不适合当作定量证据。</p>
+<p><b>基准的性质。</b>七个基准都是标准的代码、数学、知识和指令遵循题，没有填空、反向生成、数独这类最能体现“非从左到右”优势的任务。这和本文的定位一致：块长 32 的块扩散在宏观上仍是从左到右写的，它要证明的是“能在不丢质量的前提下更快”，而不是“能做自回归做不了的事”。</p>
+<p><b>样本量与随机性。</b>所有评测都用贪心解码，结果基本是确定的，但论文没有报告多次训练的波动。HumanEval 164 题，1 题约 0.6 分；GPQA 是四选一，随机水平 25%，表里各模型在 24 到 37 之间。9.3 节还显示，仅仅改变批大小，准确率就能变 1–2 个点。综合来看，小于 1–2 个点的差距都应视为持平。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">5 结论与附录：作者的总结、案例与正式版的补充</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者最后怎样概括自己的贡献？附录里的案例和 ICLR 正式版新增的实验补充了什么？</div>
+<p>作者的结论是：Fast-dLLM v2 是一个可扩展的块扩散语言模型框架，能把预训练好的自回归模型改造成高效的扩散式解码器；块扩散机制配合互补掩码，让模型在块内获得双向上下文，同时保留原自回归模型的预测能力；分层缓存（块级缓存复用块间上下文，基于 DualCache 的子块缓存加速块内迭代）配合并行解码，在 Qwen2.5-Instruct 1.5B 和 7B 上做到最高 2.5 倍于标准自回归解码的速度，质量与强自回归基线相当，效率超过以往的扩散方法。作者认为这说明块扩散是部署高质量、低延迟大模型的一条实用路线。</p>
+<p><b>附录 B 的案例。</b>作者给了 7B 模型的几段对话：单轮的有一道求有理函数垂直渐近线条数的数学题（分解分母、求零点，答 2 条）和一段用递归解汉诺塔的 Python 代码；多轮的有一段关于 NVIDIA 成立年份和周年计算的问答，以及一道分两轮问的运货趟数与总耗时的应用题。这些例子说明模型能保持多轮上下文、给出格式规范的分步推理，但它们是挑选出来的展示，不构成定量证据。</p>
+<p><b>ICLR 2026 正式版的补充。</b>正式版的正文表格和图中标注的数字与 arXiv v1 一致，另外新增了三处：一是第 2 节末尾关于投机解码的那一段（见 2.1 节）；二是附录 C.1，在单张 A100 80GB 上把上下文长度从 1K 扫到 8K、每次生成 32 个 token，比较分层缓存、只用块级缓存和自回归的 KV 缓存，作者称分层缓存在长上下文下始终优于只用块级缓存，延迟和吞吐与自回归的 KV 缓存相当，再加上并行解码就能比强自回归基线快 2–3 倍；三是附录 D 的声明：写作时大语言模型只用于润色文字。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2509.26328v1#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2509.26328v1#A2" target="_blank" rel="noopener">附录 B ↗</a> · <a href="https://proceedings.iclr.cc/paper_files/paper/2026/hash/d0865cbe51d35ec322f9af9db7806fc7-Abstract-Conference.html" target="_blank" rel="noopener">ICLR 2026 正式版 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">与 SDAR 对照：两种“AR → 块扩散”改造有什么不同</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>同一时期，SDAR 也把预训练好的自回归模型改造成了块扩散模型。两者的基本结构相同（块内双向、块间因果、BD3-LM 式的双流训练），那么在起点、数据、目标、解码和测速上各有什么不同？这一节是本站补充的对照，SDAR 的细节见本站 <a href="sdar.html">SDAR 精读</a>。</div>
+<div class="table-wrap"><table>
+<thead><tr><th></th><th>Fast-dLLM v2</th><th>SDAR</th></tr></thead>
+<tbody>
+<tr><td>起点模型</td><td>Qwen2.5-1.5B / 7B-Instruct（已做过后训练）</td><td>Qwen3-1.7B / 4B / 8B / 30B-A3B 的 Base 模型</td></tr>
+<tr><td>改造用的数据</td><td>只做 SFT：7B 约 1.31B、1.5B 约 3.15B token</td><td>先用 50B token 继续预训练，再用 4B token 做 SFT</td></tr>
+<tr><td>训练目标</td><td>被遮位置的交叉熵，不乘 \(1/t\)；互补掩码，每对视图里每个 token 被监督一次</td><td>块条件的 NELBO（乘 \(1/t\)），单一的随机掩码</td></tr>
+<tr><td>输出约定</td><td>保留 token shift（位置 \(i-1\) 预测位置 \(i\)）</td><td>不做 logits shift，也不做注意力掩码退火</td></tr>
+<tr><td>块长</td><td>固定 32；推理时再分成 8 个一组的子块</td><td>训练了 4 到 64 多种块长；主表用块长 4</td></tr>
+<tr><td>质量主表的解码</td><td>阈值 1：每步定稿 1 个</td><td>静态解码，块长 4、4 步：同样是每步 1 个</td></tr>
+<tr><td>自回归对照</td><td>同数据、同步数的 NTP 微调（Nemo-FT）</td><td>走完全相同的继续预训练 + SFT 流程的 AR-Chat</td></tr>
+<tr><td>速度怎么测</td><td>A100 / H100，批大小 1–64，GSM8K，阈值 0.9；官方推理代码基于 Hugging Face Transformers</td><td>LMDeploy 推理引擎，单张 H200，批大小 4–512，Math-500，阈值 0.9</td></tr>
+</tbody></table></div>
+<p class="w-note">SDAR 一列依据 SDAR 论文（arXiv 2510.06303）§3–§5；Fast-dLLM v2 一列依据本文 §3–§4 与附录 A。</p>
+<p>两者的出发点不同。Fast-dLLM v2 关心的是“最便宜地拿到一个能用的快模型”：从已经后训练好的 Instruct 模型出发，只做 SFT，用互补掩码把有限的数据用足，用 token shift 尽量不打扰原模型，再在推理上叠加缓存技巧。SDAR 关心的是“这条路线能不能规模化”：从 Base 模型出发，做几百亿 token 的继续预训练，在 1.7B 到 30B 的多种规模和多种块长上系统地研究质量与并行度的关系，并在生产级的推理引擎上测吞吐。</p>
+<p>它们的结论有共同之处：在对齐的自回归对照下，平均质量都能大致保住，但并非每项都保住；加速都依赖“每步定稿多个 token”，也都在大批量时缩水。它们的取舍有一处正好相反：Fast-dLLM v2 认为 token shift 能保留自回归的表示，SDAR 则明确不做 logits shift。两篇论文都没有在同等条件下直接比较，所以哪种约定更好，目前还没有定论。</p>
+<p class="note-links"><a href="https://arxiv.org/abs/2510.06303" target="_blank" rel="noopener">SDAR 原文 ↗</a> · <a href="../legacy/tracks/dllm/12-ar-to-block.html">旧版：AR → 块扩散三种做法的对照（SDAR / Fast-dLLM v2 / WeDLM）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>Fast-dLLM v2 于 2025-09-30 上传 arXiv，官方仓库在 2025-10-08 宣布开源代码与模型，2026 年 1 月与前作 Fast-dLLM 一起被 ICLR 2026 接收。截至 2026-10-19 的 Semantic Scholar 快照，它被引用 148 次。它代表的“从自回归模型出发、改成块扩散”这条路线，之后成了扩散语言模型的主流做法之一：</p>
+<ul>
+  <li><b>同一团队的后续。</b>官方仓库后来加入了 Fast-dVLM（arXiv 2604.06832），把同样的思路直接用在视觉语言模型 Qwen2.5-VL 上，README 称最高比自回归基线快 6.18 倍；以及面向自动驾驶的 Fast-dDrive（arXiv 2605.23163）。这两项的数字都是作者自述。</li>
+  <li><b>更大规模的改造。</b><a href="llada2.html">LLaDA2.0</a> 在 16B 和 100B 的 MoE 模型上做 AR → 块扩散改造，最终块长同样是 32，SFT 阶段也用了互补掩码；它的报告指出互补掩码只在数据少于 100B token 时有用，正好解释了它为什么适合 Fast-dLLM v2 这种小数据的场景。</li>
+  <li><b>同期的其他改造。</b><a href="sdar.html">SDAR</a> 走“继续预训练 + SFT”的路线并扩展到 30B MoE，其开源模型后来成为强化学习工作 TraDo 的底座（见旧版 <a href="../legacy/tracks/dllm/17-rl.html#tracerl">TraceRL / TraDo</a>）；<a href="d2f.html">D2F</a> 用蒸馏得到块因果的扩散模型，并让多个块流水线式地同时解码。</li>
+  <li><b>把块扩散当草稿器。</b>ICLR 版提到的“用块扩散模型给自回归模型起草”这条思路，后来由 <a href="dflash.html">DFlash</a> 做成了投机解码的草稿器，并进入了 vLLM、SGLang 等推理引擎。</li>
+</ul>
+<p>想看 SDAR、Fast-dLLM v2、WeDLM 三种做法放在一张架构图里的对照和配套简答题，见<a href="../legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2">旧版结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v1）。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Chengyue Wu</b>（第一作者）<div class="aff">香港大学；NVIDIA（论文署名）</div>据个人主页：香港大学计算机系博士生，导师 Ping Luo 与 Wenping Wang。也是前作 Fast-dLLM 和后续 Fast-dVLM 的第一作者。</div>
+  <div class="author-card"><b>Hao Zhang</b><div class="aff">NVIDIA（论文署名）</div>前作 Fast-dLLM 的共同一作。</div>
+  <div class="author-card"><b>Shuchen Xue</b><div class="aff">NVIDIA（论文署名）</div>前作 Fast-dLLM 的作者之一。</div>
+  <div class="author-card"><b>Shizhe Diao</b><div class="aff">NVIDIA（论文署名）</div>据个人主页：曾任 NVIDIA Research 高级研究科学家，现于 Thinking Machines Lab；研究大模型后训练与强化学习。</div>
+  <div class="author-card"><b>Yonggan Fu</b><div class="aff">NVIDIA（论文署名）</div>据 NVIDIA Research 个人页：NVIDIA 研究科学家，2025 年 5 月获佐治亚理工学院博士学位（导师 Yingyan (Celine) Lin），研究能在日常设备上运行的高效基础模型。</div>
+  <div class="author-card"><b>Zhijian Liu</b><div class="aff">NVIDIA（论文署名）</div>据个人主页：UC San Diego 助理教授并兼任 NVIDIA 研究科学家，MIT 博士（导师 Song Han），研究高效 AI；也是块扩散草稿器 <a href="dflash.html">DFlash</a> 的作者之一。</div>
+  <div class="author-card senior"><b>Pavlo Molchanov</b><div class="aff">NVIDIA Research（论文署名）</div>NVIDIA Research 页面列出的工作包括卷积网络剪枝（ICLR 2017）、Minitron 剪枝与蒸馏、DoRA、Hymba 等模型压缩与高效架构研究。</div>
+  <div class="author-card senior"><b>Ping Luo</b><div class="aff">香港大学计算机系副教授</div>个人主页列出的工作涵盖图像与视频生成（如 PixArt-α、GenTron）和大模型量化（OmniQuant）等。</div>
+  <div class="author-card senior"><b>Song Han</b><div class="aff">MIT EECS 副教授；NVIDIA（论文署名）</div>斯坦福大学博士（导师 Bill Dally）。提出 Deep Compression（剪枝、量化）和 EIE 推理引擎；近年的 SmoothQuant、AWQ、StreamingLLM 等大模型量化与加速工作被 NVIDIA TensorRT-LLM 采用（据 MIT HAN Lab 主页）。</div>
+  <div class="author-card senior"><b>Enze Xie</b><div class="aff">NVIDIA Research 资深研究科学家（Staff Research Scientist）</div>据个人主页：与 Song Han 合作，并为 MIT HAN Lab 访问研究员；2022 年获香港大学博士学位（导师 Ping Luo）；代表作包括 SegFormer、PVT、BEVFormer。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/NVlabs/Fast-dLLM" target="_blank" rel="noopener">NVlabs/Fast-dLLM</a> 仓库 1,106 个 star、145 个 fork（截至 2026-10-20），Apache-2.0 许可；v2 的训练脚本（基于 LMFlow）、推理与评测代码、Gradio 演示在仓库的 <code>v2/</code> 目录下。权重 <a href="https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B" target="_blank" rel="noopener">Fast_dLLM_v2_7B</a> 与 <a href="https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_1.5B" target="_blank" rel="noopener">Fast_dLLM_v2_1.5B</a> 发布在 Hugging Face，训练时的互补掩码、双流注意力掩码与推理时的子块缓存都写在随权重发布的模型代码里。</li>
+  <li><b>采用</b>：同一团队把这套做法推广到视觉语言模型（Fast-dVLM）和自动驾驶（Fast-dDrive）；在 Hugging Face 上按名称搜索，还能找到多个以它为起点继续微调的社区模型（2026-10-20 查看）。</li>
+  <li><b>发表</b>：ICLR 2026（ICLR 会议论文集收录；官方仓库 2026-01-26 公告与前作 Fast-dLLM 一同被接收）。arXiv 首版 2025-09-30，本页依据该版本。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2">旧版结构拆解：AR → 块扩散</a>（SDAR、Fast-dLLM v2、WeDLM 放在一张架构图里对照，含简答题）</li>
+  <li><a href="sdar.html">SDAR 精读</a>：同期的另一种 AR → 块扩散改造</li>
+  <li><a href="fast-dllm.html">Fast-dLLM 精读</a>：前作，近似 KV 缓存、DualCache 与置信度阈值并行解码</li>
+  <li><a href="block-diffusion.html">BD3-LM（块扩散）精读</a>：块扩散的似然分解、双流训练与精确的块级缓存</li>
+  <li><a href="dream.html">Dream 精读</a> · <a href="llada2.html">LLaDA2.0 精读</a>：用自回归模型初始化扩散模型的另外两种做法</li>
+  <li><a href="llada.html">LLaDA 精读</a> · <a href="mdlm.html">MDLM 精读</a>：从零训练的掩码扩散模型与它的训练目标</li>
+  <li><a href="lavida.html">LaViDa 精读</a>：互补掩码的出处 · <a href="d2f.html">D2F 精读</a> · <a href="dkv-cache.html">dKV-Cache 精读</a>：其他让扩散模型用上缓存的办法</li>
+  <li><a href="dflash.html">DFlash 精读</a>：把块扩散模型当投机解码的草稿器 · <a href="vllm.html">vLLM 精读</a>：KV 缓存与批处理</li>
+  <li><a href="../legacy/tracks/dllm/14-kv-cache.html">旧版：扩散模型的 KV 缓存与并行解码</a> · <a href="../legacy/tracks/dllm/index.html">扩散 LLM 路线总览</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。原文以 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a> 许可发布，本页没有使用原文图片：所有图都是本站绘制的示意图，或依据论文表格与图中读出的数值重画的简图（读图数值为约值，已注明）。标“据官方代码”的细节来自 <a href="https://github.com/NVlabs/Fast-dLLM" target="_blank" rel="noopener">NVlabs/Fast-dLLM</a>（2026-10-20 查看）与 Hugging Face 上随权重发布的 <code>modeling.py</code>。数字与结论以原文为准：<a href="https://arxiv.org/abs/2509.26328" target="_blank" rel="noopener">arXiv:2509.26328</a>（本页依据 v1，2025-09-30）。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

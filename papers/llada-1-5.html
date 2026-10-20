@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLaDA 1.5 / VRPO 精读</title>
+<meta name="description" content="LLaDA 1.5（ACL 2026）逐节精读：从 Bradley–Terry 与 DPO 讲起，解释掩码扩散模型为什么只能用 ELBO 的蒙特卡洛估计代替似然，这个估计的方差怎样同时给 DPO 损失和梯度带来偏差与方差，VRPO 的三个降方差办法（加大预算、全部分给时间步、对偶采样），以及 350K 偏好对训练出的提升该怎么读。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="llada-15">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ACL 2026</div>
+  <h1>LLaDA 1.5：给扩散语言模型的偏好优化降方差</h1>
+  <p class="en-title">LLaDA 1.5: Variance-Reduced Preference Optimization for Large Language Diffusion Models</p>
+  <div class="paper-authors">Fengqi Zhu<sup>1,2,3,∗,¶</sup>, Rongzhen Wang<sup>1,2,3,∗</sup>, Shen Nie<sup>1,2,3</sup>, Xiaolu Zhang<sup>5</sup>, Chunwei Wu<sup>5</sup>, Jun Hu<sup>5</sup>, Jun Zhou<sup>5</sup>, Jianfei Chen<sup>4</sup>, Yankai Lin<sup>1,2,3,†</sup>, Ji-Rong Wen<sup>1,2,3</sup>, Chongxuan Li<sup>1,2,3,†,‡</sup></div>
+  <div class="paper-affil"><sup>1</sup>Gaoling School of AI, Renmin University of China　<sup>2</sup>Beijing Key Laboratory of Research on Large Models and Intelligent Governance　<sup>3</sup>Engineering Research Center of Next-Generation Intelligent Search and Recommendation, MOE　<sup>4</sup>Tsinghua University　<sup>5</sup>Ant Group　<sup>∗</sup>共同一作　<sup>¶</sup>在蚂蚁集团实习期间完成　<sup>†</sup>项目负责人　<sup>‡</sup>通讯作者（按 arXiv v2 署名）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2505.19223" target="_blank" rel="noopener">arXiv 2505.19223 ↗</a>
+    <a class="pill" href="https://aclanthology.org/2026.acl-long.524/" target="_blank" rel="noopener">ACL 2026 ↗</a>
+    <a class="pill" href="https://huggingface.co/GSAI-ML/LLaDA-1.5" target="_blank" rel="noopener">Weights: GSAI-ML/LLaDA-1.5 ↗</a>
+    <a class="pill" href="https://github.com/ML-GSAI/LLaDA-1.5" target="_blank" rel="noopener">Repo: ML-GSAI/LLaDA-1.5 ↗</a>
+    <a class="pill" href="https://ml-gsai.github.io/LLaDA-1.5-Demo/" target="_blank" rel="noopener">项目页 ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/17-rl.html#llada-15">结构拆解：d1、LLaDA 1.5 与 TraceRL</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>54</b><span>GitHub star（ML-GSAI/LLaDA-1.5，截至 2026-10-20）</span></div><div><b>41</b><span>Hugging Face 点赞（GSAI-ML/LLaDA-1.5，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页依据 arXiv v2（2025-10-12）与 ACL 2026 正式版。正式版的署名是 9 人（没有 Jun Hu 和 Jianfei Chen，单位也只剩人大的三个和蚂蚁集团），并多了“局限”一节和几组附录实验；本页引用这些内容时注明“ACL 版”。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 CC BY 4.0 发布，所以原图直接放在讲到它的地方，并说明怎么看；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据算出来的，标“读图估计”的是从原图坐标读出的近似值，都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>给大语言模型做“对齐”，最常见的一步是<b>偏好优化</b>：拿同一个问题下的两个回答，一个人类更喜欢（记作 \(y_w\)），一个不那么喜欢（记作 \(y_l\)），训练模型以后更倾向于写出前一种。2023 年提出的 <b>DPO</b>（直接偏好优化）把这件事做得特别简单，不用另外训练奖励模型，也不用在线采样，只要能算出“模型生成这整个回答的对数概率”就行。对于从左到右逐词生成的自回归（AR）模型，这个对数概率做一次前向计算就能精确得到，所以 DPO 很快成了开源模型后训练的标配。</p>
+<p>掩码扩散语言模型（如 LLaDA）卡在了这一步。它生成一段话要经过很多轮“填空”，而且不按固定顺序，所以一整个回答的精确对数概率算不出来。能算的只有它的一个下界，叫 <b>ELBO</b>（证据下界）；而 ELBO 本身也是一个双重期望（先随机挑一个遮盖程度，再随机挑遮哪些词），只能用少量随机样本去估。把这样一个“带噪声的估计”塞进 DPO，问题就来了：DPO 的损失是对估计值做了一次非线性变换（\(-\log\sigma\)），于是估计里的随机误差不仅让损失和梯度忽高忽低（方差），还会让它们<b>系统性地</b>偏离真正的目标（偏差）。</p>
+<p>这篇论文的贡献可以概括成一句话：<b>偏差和方差都由同一个量控制，就是“偏好分数估计值”的方差，所以只要把它压下去就行。</b>围绕这个结论，作者给出三个不引入偏差的降方差办法，合称 <b>VRPO</b>（方差缩减的偏好优化）：① 多采几个样本（每个 ELBO 用 8 个遮盖样本）；② 同样多的样本，全部用来换不同的遮盖程度，每个遮盖程度只采一种遮法；③ <b>对偶采样</b>，让当前模型和参考模型对同一个回答使用完全相同的遮法，这样两者的随机误差大部分相互抵消。后两个办法不增加任何计算。</p>
+<p>作者用 VRPO 在 LLaDA 8B Instruct 上训练了一轮（350K 个内部偏好对，约 405 个 H100 GPU 小时），得到 <b>LLaDA 1.5</b>。相对只做过 SFT 的 LLaDA，它在数学（GSM8K +4.7）、代码（HumanEval +3.0、MBPP +1.8）和对齐类评测（IFEval +4.0、Arena-Hard +4.3）上都更好；而不做任何降方差处理的“朴素 DPO”只在部分任务上有提升，在 Math、HumanEval、IFEval、MT-Bench 上反而略降。这些数字有多少来自算法、多少来自数据和采样设置，§4.5 会专门讲。</p>
+<figure class="paper-fig"><div class="imgs"><img src="llada-1-5/fig/llada_dpo.svg" alt="原文图 1 左" loading="lazy"><img src="llada-1-5/fig/compare_d1_dream.svg" alt="原文图 1 右" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左图是雷达图，每条轴是一个基准（数学与科学类：GSM8K、Math、GPQA；代码类：HumanEval、MBPP；对齐类：IFEval、Arena-Hard、AlignBench、MT-Bench），内圈是只做过 SFT 的 LLaDA，外圈是 LLaDA 1.5。从原图的刻度文字看，各条轴的刻度范围是分别设定的，所以两个多边形面积差看上去比实际提升大，具体数字要看表 1（§4.2）。右图把 LLaDA 1.5 和几个同规模模型在 GSM8K、Math 上并排比较，柱子上的数字从原图文字层读出（按柱子顺序对应）：GSM8K 依次是 DeepSeek 7B 63.0、Dream 7B 77.2、LLaMA 3 8B 78.0、LLaDA 78.6、d1-LLaDA 82.1、LLaDA 1.5 83.3；Math 依次是 15.8、39.6、29.5、42.2、40.2、42.6。括号里的数字是 few-shot 示例个数，例如 LLaDA 1.5 的 GSM8K 是 4-shot，d1-LLaDA 是 0-shot，所以这张图里的模型并不是在同一个评测口径下比较的（§4.5 详谈）。</figcaption></figure>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>DPO 的损失是怎么从“奖励模型 + 强化学习”推出来的？为什么它需要整条回答的对数似然比？</li>
+  <li>掩码扩散模型的 ELBO 是什么样的双重期望？用蒙特卡洛去估它，误差来自哪两层随机性？</li>
+  <li>估计值本身是无偏的，为什么代入 DPO 之后损失和梯度却是有偏的？</li>
+  <li>定理 1 说“偏差和方差都受分数估计的方差控制”，这句话具体是什么意思？它有多紧？</li>
+  <li>VRPO 的三个办法各自降低的是哪一部分方差？为什么“全部分给时间步”是最优分配？为什么对偶采样几乎是免费的？</li>
+  <li>表 1、表 2 里的提升是在什么对照下测出来的，哪些地方要打折扣？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2505.19223" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S2.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：扩散语言模型的对齐卡在哪里</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散语言模型在预训练和指令微调上已经能和同规模的自回归模型相比，那么它们能不能也像自回归模型一样，用人类偏好数据做对齐？已有的尝试缺了什么？作者为什么选 DPO 作为切入点，又认为真正的难点在哪里？</div>
+
+<div class="note-pre"><b>先补一点背景：SFT 之后为什么还要做偏好对齐。</b>
+<p>监督微调（SFT）是“照着标准答案学”：给模型一个问题和一个写好的回答，让它逐字复现。它能教会模型对话的格式和基本能力，但有两个局限。第一，它只告诉模型“什么是好的”，从不告诉它“什么是不好的”，所以模型学不会避开那些看起来通顺、其实答错或者没按要求做的回答。第二，很多要求很难写成唯一的标准答案，例如“回复里不要用逗号”“至少用三个占位符”，人很容易判断两个回答哪个更符合，却很难写出完美的那一个。</p>
+<p><b>偏好对齐</b>就是利用这种“比较”信号：对同一个问题收集一对回答，标注哪个更好，然后训练模型提高好回答的概率、压低差回答的概率。ChatGPT 一代的做法是先训练一个打分的奖励模型、再用强化学习（PPO）优化；DPO 把这两步合成了一步。§2.1 会把两者的关系推导一遍。</p>
+</div>
+
+<p>论文的出发点是一个空白。掩码扩散模型（MDM）在小规模上已经能在困惑度上追平甚至超过 AR 模型；放大之后，LLaDA 8B 在多数基准上和 LLaMA 3 8B 相当。与此同时，AR 模型的对齐方法（PPO、DPO、GRPO 等）已经非常成熟。已经有一些工作开始给扩散模型做对齐，但作者指出它们有两个共同的不足：一是大多直接套用现成的对齐框架，再配上某种似然近似，却没有分析这种近似会给优化带来什么影响；二是大多只针对数学推理、代码生成这类可以自动判对错的专门任务，而通用对齐（写作、问答、遵循指令）几乎没有人做。</p>
+<p>作者选了 DPO 作为切入点，理由是它简单、效果好。它的关键难点也很明确：DPO 需要精确的对数似然，而扩散模型给不出来。最自然的替代是用 ELBO 代替对数似然。ELBO 里有两层期望，一层对扩散时间（遮盖程度）求，一层对“遮哪些词”求；代入 DPO 后，偏好分数变成四个 ELBO 的线性组合（当前模型和参考模型，各自对好、差两个回答）。实际训练时，每个 ELBO 都要用“双重蒙特卡洛”去估：先抽几个时间，每个时间再抽几种遮法。</p>
+<p>作者证明，这个估计给 DPO 的损失和梯度都额外引入了偏差和方差；并且这两种误差都由同一个量控制，即<b>偏好分数估计值的方差</b>。由此得到 VRPO 的三个办法：加大每个 ELBO 的采样预算；把预算分配到不同的时间上、每个时间只抽一种遮法；在当前模型和参考模型的 ELBO 估计之间做对偶采样。这三个办法在理论上都被证明能无偏地降低分数估计的方差，在玩具例子（原文图 2）和大规模消融（§4.2）里也得到了验证。作者还讨论了它们怎样推广到 PPO、GRPO。</p>
+<p>最后，作者把 VRPO 用在 LLaDA 8B Instruct 上，使用 35 万（350K）个偏好对，得到 LLaDA 1.5。它在数学、代码和对齐任务上都稳定地超过 LLaDA，并且在 Math 上取得了图 1 右侧所比模型里的最高分。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“LLaDA 1.5”这个名字容易让人以为是重新预训练的新一代模型。实际上它就是 LLaDA 8B Instruct 再做一轮偏好优化得到的，架构、预训练数据都没有变，计算量不到预训练的 0.5%（§4.1）。</li>
+  <li>标题里的 “Preference Optimization” 在引言的一处被写成了 “Variance-Reduced Policy Optimization”，是笔误；全文其他地方都是偏好优化。</li>
+  <li>本文的“对齐”指的是离线的 DPO：训练数据是事先收集好的固定偏好对，训练中不让模型自己生成回答。这和 <a href="d1.html">d1</a> 那种在线采样、用程序判对错的强化学习是两类做法（§3.4 会对照）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.19223v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：DPO 要什么，扩散模型给得出什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>后面的方法建立在两块基础上。第一块是 DPO：它的损失长什么样、是从哪里推出来的、为什么一定要用到“整条回答的对数似然比”。第二块是掩码扩散模型的似然：为什么只能算一个下界（ELBO），这个下界又为什么只能用随机样本去估。把两块放在一起，才能看清 §3 说的“估计误差会怎样传到 DPO 里”。论文本身只用一页交代这些，本页补得更细一些，并单独补一小节蒙特卡洛估计与偏差、方差的基础。</div>
+
+<h4 id="n-2-1">2.1 从奖励模型、强化学习到 DPO</h4>
+<div class="note-pre"><b>先补一点背景：Bradley–Terry 模型，怎样把“谁更好”变成概率。</b>
+<p>假设每个回答都有一个看不见的“质量分” \(r(x,y)\)（\(x\) 是问题，\(y\) 是回答）。Bradley–Terry 模型（1952 年提出，原本用来给体育比赛或品尝试验排名）假定：人在两个回答之间选 \(y_w\) 而不选 \(y_l\) 的概率，只取决于两者质量分的差，并且是这个差的 sigmoid 函数：</p>
+<div class="formula">$$P(y_w\succ y_l\mid x)=\sigma\big(r(x,y_w)-r(x,y_l)\big),\qquad \sigma(z)=\frac{1}{1+e^{-z}}$$</div>
+<p>举个例子：如果两个回答的质量分分别是 1.0 和 −0.5，差是 1.5，那么人选前者的概率是 \(\sigma(1.5)\approx0.82\)（推算）；分差为 0 时概率是 0.5，就是抛硬币。分差越大，选择越确定。</p>
+<p>有了这个模型，就可以从数据里学出质量分：用一个神经网络 \(r_{\phi}\) 当奖励模型，让它给人类偏好的回答打更高的分，也就是最大化上面那个概率的对数。这就是论文式 (1)：</p>
+<div class="formula">$$\mathcal L_{\text{Reward}}(\phi)=-\mathbb E_{(x,y_w,y_l)\sim\mathcal D}\Big[\log\sigma\big(r_{\phi}(x,y_w)-r_{\phi}(x,y_l)\big)\Big]$$</div>
+<p>这个损失后面会反复出现，记住它的形状：“\(-\log\sigma\)（好的分数 − 差的分数）”。</p>
+</div>
+
+<p><b>传统做法：先训奖励模型，再做强化学习。</b>有了奖励模型 \(r_{\phi}\)，第二步是调整语言模型（在强化学习里叫“策略” \(\pi_{\theta}\)，\(\pi_{\theta}(y\mid x)\) 就是它对问题 \(x\) 生成回答 \(y\) 的概率），让它生成的回答拿到高分，同时又不要离出发点太远。“不要太远”用一个 KL 散度惩罚来表达，参照物 \(\pi_{\text{ref}}\) 通常就是冻结的 SFT 模型。论文式 (2)：</p>
+<div class="formula">$$\max_{\pi_{\theta}}\ \mathbb E_{x\sim\mathcal D,\ y\sim\pi_{\theta}(\cdot\mid x)}\big[r_{\phi}(x,y)\big]-\beta\,\mathbb D_{\text{KL}}\big(\pi_{\theta}(\cdot\mid x)\,\|\,\pi_{\text{ref}}(\cdot\mid x)\big)$$</div>
+<p>系数 \(\beta\) 越大，模型越被拉回参考模型附近。KL 惩罚之所以必要，是因为奖励模型只在它见过的那类回答上可靠；如果不加约束，策略会钻奖励模型的空子，写出分数很高但人看了并不满意的回答。论文特别提了一句：对 AR 模型来说，策略的“采样”和“算似然”都由同一个语言模型分布精确给出，这正是下面 DPO 能成立的前提。</p>
+
+<p><b>DPO：把奖励模型“藏进”策略里。</b>式 (2) 这个带 KL 惩罚的最大化问题有一个闭式最优解（DPO 原论文推导，这里只给结论和直觉）：</p>
+<div class="formula">$$\pi^{*}(y\mid x)=\frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\exp\!\Big(\frac{1}{\beta}r(x,y)\Big)$$</div>
+<p>它的意思是：最优策略就是把参考模型的概率按奖励的指数重新加权，奖励高的回答被放大，奖励低的被压低；\(Z(x)\) 是让概率加起来等于 1 的归一化常数，只和问题 \(x\) 有关。把这个式子反过来解出奖励：</p>
+<div class="formula">$$r(x,y)=\beta\log\frac{\pi^{*}(y\mid x)}{\pi_{\text{ref}}(y\mid x)}+\beta\log Z(x)$$</div>
+<p>这一步是 DPO 的关键：<b>奖励可以用“策略相对参考模型把这个回答的概率抬高了多少”来表示</b>，所以这个量常被叫作“隐式奖励”。把它代入 Bradley–Terry 的偏好概率，两个回答的奖励相减时，只和问题有关的 \(\beta\log Z(x)\) 正好抵消，于是奖励模型完全不需要了。剩下的就是论文式 (3) 的 DPO 损失：</p>
+<div class="formula">$$\ell_{\text{DPO}}(x,y_w,y_l;\theta)=-\log\sigma\Big(\beta\log\frac{\pi_{\theta}(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)}-\beta\log\frac{\pi_{\theta}(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)$$</div>
+<p>和奖励模型的损失 (1) 对照一下，形状完全一样，只是“质量分”换成了隐式奖励 \(\beta\log\frac{\pi_{\theta}}{\pi_{\text{ref}}}\)。sigmoid 里面那一项，本文后面叫它<b>偏好分数</b>，记作 \(s_{\theta}\)。直觉上，DPO 在做的事情是：让当前模型相对参考模型，把好回答的概率抬得比差回答更多。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：两阶段的 RLHF 与一步到位的 DPO</div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2);min-width:76px">RLHF：</span><span class="dia-box">偏好数据<small>\((x,y_w,y_l)\)</small></span><span class="dia-arrow">→</span><span class="dia-box pred">训练奖励模型 \(r_{\phi}\)<small>式 (1)，Bradley–Terry</small></span><span class="dia-arrow">→</span><span class="dia-box enc">PPO 等强化学习<small>式 (2)；要在线采样回答、打分</small></span><span class="dia-arrow">→</span><span class="dia-box act">对齐后的 \(\pi_{\theta}\)</span></div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2);min-width:76px">DPO：</span><span class="dia-box">偏好数据<small>\((x,y_w,y_l)\)</small></span><span class="dia-arrow">→</span><span class="dia-box enc">直接最小化式 (3)<small>只需四个对数似然：\(\pi_{\theta},\pi_{\text{ref}}\) 各对 \(y_w,y_l\)</small></span><span class="dia-arrow">→</span><span class="dia-box act">对齐后的 \(\pi_{\theta}\)</span></div>
+  <div class="dia-note">本站示意图。DPO 省掉了奖励模型和在线采样，代价是每一步都要精确算出整条回答的对数似然，而且要算四次（当前模型和参考模型，各对好、差两个回答）。扩散模型恰恰在这一点上做不到。</div>
+</div>
+
+<p><b>DPO 的梯度在做什么。</b>对式 (3) 求导，可以得到一个很好懂的形式（把 \(s_{\theta}\) 记作 sigmoid 里面那一项）：</p>
+<div class="formula">$$\nabla_{\theta}\ell_{\text{DPO}}=-\underbrace{\sigma(-s_{\theta})}_{\text{权重}}\cdot\beta\Big[\nabla_{\theta}\log\pi_{\theta}(y_w\mid x)-\nabla_{\theta}\log\pi_{\theta}(y_l\mid x)\Big]$$</div>
+<p>方括号里是方向：抬高好回答的对数概率、压低差回答的。前面的 \(\sigma(-s_{\theta})\) 是权重：如果模型已经明显偏好 \(y_w\)（\(s_{\theta}\) 很大），权重接近 0，这对数据基本不再推；如果模型反而偏好 \(y_l\)（\(s_{\theta}\) 为负），权重接近 1，使劲推。这个“排错了的对多推、排对了的对少推”的自适应权重，是 DPO 好用的原因之一。§3.2 会看到，分数估计里的噪声恰好会破坏这个权重。</p>
+
+<div class="note-pre"><b>先补一点背景：为什么 DPO 需要整条回答的对数似然，AR 模型为什么一次前向就够。</b>
+<p>DPO 损失里的 \(\log\pi_{\theta}(y\mid x)\) 是“模型生成整个回答 \(y\) 的概率”的对数，不是某一个词的概率。AR 模型按链式法则把它拆成每个词在前文条件下的概率之和：</p>
+<div class="formula">$$\log\pi_{\text{AR}}(y\mid x)=\sum_{i=1}^{L}\log\pi_{\text{AR}}\big(y^{i}\mid x,y^{1},\dots,y^{i-1}\big)$$</div>
+<p>因为用了因果注意力，把整个回答送进模型做<b>一次</b>前向计算，每个位置的输出就是它在前文条件下的分布，把 \(L\) 个位置上“真实词”的对数概率读出来加起来，就是精确的 \(\log\pi(y\mid x)\)。所以 AR 模型上一步 DPO 的计算量大约是：当前模型对 \(y_w,y_l\) 各一次前向加反向，参考模型各一次前向。</p>
+</div>
+<div class="note-warn"><b>读的时候容易混淆的一点：</b>DPO 里的 \(\beta\) 和式 (2) 里 KL 惩罚的 \(\beta\) 是同一个数，它控制“允许偏离参考模型多远”。LLaDA 1.5 取 \(\beta=0.2\)（附录 D.3）。另外，DPO 是离线的：训练数据是一批固定的偏好对，训练时模型从不自己生成回答，所以它没有 RL 里“采样很贵”的问题，难点全在“算似然”上。</div>
+
+<h4 id="n-2-2">2.2 掩码扩散模型：似然只有下界，下界也只能估</h4>
+<div class="note-pre"><b>先补一点背景：掩码扩散模型怎么训练（详细推导见 <a href="mdlm.html">MDLM 精读</a> 和 <a href="llada.html">LLaDA 精读</a>）。</b>
+<p>掩码扩散模型定义了两个过程。<b>前向过程</b>从完整的回答出发，随时间 \(t\) 从 0 走到 1，把每个词独立地以概率 \(t\) 换成掩码符号 \(\mathrm M\)；到 \(t=1\) 时整段都是 \(\mathrm M\)。<b>反向过程</b>从全是 \(\mathrm M\) 的序列出发，一轮一轮地把 \(\mathrm M\) 换回词。模型本身是一个双向注意力的 Transformer（论文叫它掩码预测器 \(p_{\theta}\)），它看到一个被遮了一部分的序列，同时预测所有被遮位置原来是什么词。</p>
+<p>训练的目标是让模型在各种遮盖程度下都猜得准。对一个回答 \(y\)（问题 \(x\) 不遮），先抽一个时间 \(t\sim\mathcal U[0,1]\)，再按 \(t\) 遮出 \(y_t\)，计算被遮位置上“猜中原词”的对数概率之和，再乘以权重 \(\frac1t\)（附录式 (13)）：</p>
+<div class="formula">$$\ell_{\pi}(y_t,t,y\mid x)=\frac{1}{t}\sum_{i=1}^{L}\mathbf 1\big[y_t^{i}=\mathrm M\big]\log p_{\theta}\big(y^{i}\mid y_t,x\big)$$</div>
+<p>权重 \(\frac1t\) 的作用是平衡：\(t\) 小时被遮的词少，每个词的贡献放大一些。这个量对 \(t\) 和遮法取期望，就是 ELBO。</p>
+</div>
+
+<p>论文式 (4) 把 ELBO 写成：</p>
+<div class="formula">$$\mathcal B_{\pi}(y\mid x)=\mathbb E_{t\sim\mathcal U[0,1]}\ \mathbb E_{y_t\sim q(y_t\mid t,y,x)}\big[\ell_{\pi}(y_t,t,y\mid x)\big]\ \le\ \log\pi(y\mid x)$$</div>
+<p>这里 \(\pi(y\mid x)\) 是反向过程生成 \(y\) 的概率。它算不出来的原因在于：生成 \(y\) 可以走无数条不同的“填空路径”（哪一轮填哪些位置），真实概率要对所有路径求和。ELBO 是变分推断里的标准技巧给出的一个下界，好处是只需要上面那种“随机遮一遍、猜一遍”的量就能算。论文 v2 说，对训练充分的模型、在连续时间的极限下，ELBO 和真实对数似然的差距可以忽略（引用了扩散模型的若干经典工作）；ACL 版把这句话改得更谨慎，说差距“可以很小”。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：AR 模型一次前向就得到精确似然，掩码扩散模型只能用多次随机遮盖去估 ELBO</div>
+  <div class="dia-row"><span class="lbl">AR：一次前向</span><div class="cells"><span class="cell">x</span><span class="cell a">今</span><span class="cell a">天</span><span class="cell a">下</span><span class="cell a">雨</span><span class="cell a">了</span></div></div>
+  <div class="dia-out">每个位置读出 \(\log\pi(\text{该词}\mid\text{前文})\)，相加就是精确的 \(\log\pi(y\mid x)\)。</div>
+  <div class="dia-row"><span class="lbl">MDM 样本 1：\(t=0.4\)</span><div class="cells"><span class="cell">x</span><span class="cell a">今</span><span class="cell c">M</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell a">了</span></div></div>
+  <div class="dia-out">遮了 2 个词：读出这 2 个位置猜中原词的对数概率之和，乘以 \(1/0.4=2.5\)。</div>
+  <div class="dia-row"><span class="lbl">MDM 样本 2：\(t=0.8\)</span><div class="cells"><span class="cell">x</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">遮了 4 个词：对数概率之和乘以 \(1/0.8=1.25\)。每个样本都是 ELBO 的一个无偏但有噪声的估计，取平均才是 \(\widehat{\mathcal B}\)。</div>
+  <div class="dia-note">本站示意图，一个汉字当一个 token。灰色 x 是问题（从不遮），蓝色是没被遮的回答词，橙色 M 是被遮、要计入损失的位置。两个样本遮的程度不同、遮的位置不同，算出来的数也会差很多，这就是后面所说的“ELBO 估计的方差”。</div>
+</div>
+
+<p><b>双重蒙特卡洛估计。</b>ELBO 里有两层期望，精确计算不可能，实际做法是两层都抽样（论文式 (5)(6)）：先独立抽 \(n_t\) 个时间 \(t^{(1)},\dots,t^{(n_t)}\)；对每个时间 \(t^{(j)}\)，再独立抽 \(n_{y_t}\) 种遮法；把这 \(n=n_t\times n_{y_t}\) 个样本上的 \(\ell_{\pi}\) 取平均：</p>
+<div class="formula">$$\widehat{\mathcal B}_{\pi}(y)=\frac{1}{n_t}\sum_{j=1}^{n_t}\frac{1}{n_{y_t}}\sum_{k=1}^{n_{y_t}}\ell_{\pi}\big(y_{t^{(j)}}^{(k)},t^{(j)},y\big)$$</div>
+<p>由期望的线性，这个估计是 ELBO 的<b>无偏</b>估计：平均意义上不多不少。但每多一个样本就要多做一次前向（训练时还要反向），所以 \(n\) 不可能取很大，估计值总带着随机误差，也就是<b>方差</b>。论文要解决的就是：在 DPO 里，这个方差会造成什么后果，又该怎么压低它。</p>
+<p><b>实际用的是“遮恰好 \(l\) 个词”的版本。</b>附录 A 指出，还有一种和式 (4) 期望相等的写法（附录式 (14)(15)）：不抽时间 \(t\)，而是从 \(\{1,\dots,L\}\) 里均匀抽一个整数 \(l\)，不放回地恰好遮 \(l\) 个词，权重换成 \(\frac{L}{l}\)。两种写法期望相同，但后者每次遮的词数是确定的，不会出现“抽到 \(t=0.5\) 却碰巧只遮了 1 个词”这种额外的波动，所以方差更小；LLaDA 的论文已经指出这一点，本文的似然估计也用这个版本。下文说的“时间步”在实现里对应的就是这个 \(l\)。</p>
+<p><b>底座模型。</b>LLaDA 是 8B 参数的掩码扩散模型，在 2.3T（2.3 万亿）个 token 上预训练，再用 450 万对 SFT 数据微调，得到 LLaDA 8B Instruct，本文以它为起点和参考模型。附录表 3 给出了它的结构：32 层、隐藏维度 4096、32 个注意力头（KV 头也是 32 个，没有用分组查询注意力）、词表 126,464、FFN 维度 12,288，总参数 8.02B，不含嵌入层 6.98B。和 LLaMA 一样用 RMSNorm、RoPE 和 SwiGLU，只是注意力是双向的。</p>
+
+<h4 id="n-2-3">2.3 补充：蒙特卡洛估计、偏差与方差</h4>
+<p>这一小节是本站补的基础，论文默认读者已经熟悉。后面所有论证都建立在这几个概念上。</p>
+<div class="note-pre"><b>先补一点背景：蒙特卡洛估计、无偏与方差。</b>
+<p>想知道一个随机量 \(Z\) 的期望 \(\mathbb E[Z]\)，但算不出来，就独立地抽 \(n\) 个样本取平均，这叫<b>蒙特卡洛估计</b>。好比想知道全国人的平均身高，就随机量 \(n\) 个人求平均。</p>
+<ul>
+  <li><b>偏差</b>是“估计值的平均”和“真值”之差。如果多次重复估计、平均下来正好等于真值，就叫<b>无偏</b>。随机抽人量身高的平均是无偏的；如果只在篮球队里抽，就有偏，抽再多人也纠正不了。</li>
+  <li><b>方差</b>是估计值围绕自己的平均来回波动的程度。\(n\) 个独立样本平均之后，方差是单个样本方差的 \(\frac1n\)，标准差是 \(\frac{1}{\sqrt n}\)。所以样本多 4 倍，误差只缩小一半。</li>
+</ul>
+<p>打靶的比喻：偏差是弹孔的中心离靶心多远，方差是弹孔散得多开。一个估计可以无偏但方差很大（弹孔散布在靶心周围），也可以方差很小但有偏（弹孔扎堆在靶心旁边）。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：无偏估计经过非线性变换，就不再无偏了。</b>
+<p>假设 \(X\) 是某个量 \(\mu\) 的无偏估计，即 \(\mathbb E[X]=\mu\)。如果我们真正想要的是 \(f(\mu)\)，就会很自然地拿 \(f(X)\) 去估它。只要 \(f\) 是线性的，\(\mathbb E[f(X)]=f(\mu)\)，没有问题；可一旦 \(f\) 是弯的，平均值就会被拉偏。这叫 Jensen 不等式：\(f\) 是凸函数（向上弯）时 \(\mathbb E[f(X)]\ge f(\mathbb E[X])\)，凹函数时反过来。</p>
+<p>一个最小的例子：\(\mu=0\)，\(X\) 以一半概率取 \(+2\)、一半取 \(-2\)，平均正好是 0，是无偏的。取 \(f(x)=x^2\)，\(f(\mu)=0\)，可 \(\mathbb E[f(X)]=4\)。\(X\) 波动越大，\(f(X)\) 的平均偏离越多。§3.1 会看到，DPO 的 \(-\log\sigma(\cdot)\) 就是这样一个“弯”的函数。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：两层抽样的方差怎么算（全方差公式）。</b>
+<p>ELBO 估计是两层抽样：先抽时间，再在每个时间下抽遮法。全方差公式说，总方差可以拆成两部分：</p>
+<div class="formula">$$\mathbb V[Z]=\underbrace{\mathbb V_t\big[\mathbb E[Z\mid t]\big]}_{\text{不同时间之间的差别}}+\underbrace{\mathbb E_t\big[\mathbb V[Z\mid t]\big]}_{\text{同一时间下换遮法的波动}}$$</div>
+<p>用调查做比喻：想估全国家庭的平均收入，先抽城市、再在每个城市里抽家庭。总的不确定性一部分来自“城市和城市之间差别很大”，一部分来自“同一城市里家庭之间的差别”。第一部分只有多抽城市才能降下来，在同一个城市里多抽家庭对它毫无帮助。§3.3 的“最优分配”就是这个道理。</p>
+</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.19223v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A1" target="_blank" rel="noopener">附录 A：MDM 的完整写法 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A4" target="_blank" rel="noopener">附录 D.2：模型结构 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 方法：用 ELBO 代替似然，再把估计的方差压下去</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把 DPO 里的对数似然换成 ELBO 之后，损失变成什么样？ELBO 只能靠随机样本估计，这个估计误差会怎样影响 DPO 的损失和梯度？既然误差有偏差和方差两种，为什么作者说只需要盯住一个量？VRPO 的三个办法分别从哪里下手，为什么不会引入新的偏差？最后，这套分析能不能搬到 PPO、GRPO 上，和 d1 的做法有什么不同？</div>
+
+<h4 id="n-3-1">3.1 把 DPO 里的似然换成 ELBO：分数无偏，损失却有偏</h4>
+<p>第一步很直接：把 DPO 损失 (3) 里的四个对数似然全部换成各自的 ELBO，得到论文式 (7)：</p>
+<div class="formula">$$\ell_{\text{DPO-E}}(y_w,y_l;\theta)=-\log\sigma\Big(\underbrace{\beta\big(\mathcal B_{\pi_{\theta}}(y_w)-\mathcal B_{\pi_{\text{ref}}}(y_w)\big)-\beta\big(\mathcal B_{\pi_{\theta}}(y_l)-\mathcal B_{\pi_{\text{ref}}}(y_l)\big)}_{s_{\theta}(y_w,y_l)\ \text{：基于 ELBO 的偏好分数}}\Big)$$</div>
+<p>大括号里的量叫<b>偏好分数</b> \(s_{\theta}\)，它是四个 ELBO 的线性组合。含义和原版 DPO 一样：比较当前模型相对参考模型，在好回答上的 ELBO 抬高了多少、在差回答上抬高了多少，前者越多于后者，损失越小。作者认为这个替代是可靠的，理由有两条：一是 §2.2 提到的，训练充分时 ELBO 和对数似然的差距很小；二是 DPO 损失本身的结构（好、差两边对称相减，加上 sigmoid 很平滑）会进一步缓和这种近似误差。</p>
+<div class="note-warn"><b>本站补充一点分析（论文没有这样写）：</b>如果把 ELBO 和真实对数似然之间的差距记作 \(g_{\pi}(y)=\log\pi(y)-\mathcal B_{\pi}(y)\ge0\)，那么 ELBO 版的隐式奖励 \(\beta(\mathcal B_{\pi_{\theta}}-\mathcal B_{\pi_{\text{ref}}})\) 和真正的隐式奖励之间差的是 \(\beta\big(g_{\pi_{\text{ref}}}(y)-g_{\pi_{\theta}}(y)\big)\)，也就是两个模型“差距之差”。训练从 \(\pi_{\theta}=\pi_{\text{ref}}\) 出发，学习率又很小（\(5\times10^{-7}\)，§4.1），只要两个模型在训练中一直很接近，这两个差距大部分会相互抵消。这可以看作作者“结构有助于缓和误差”一说的具体含义。但这一层误差 VRPO 没有处理，论文也没有测量。</div>
+
+<p><b>实际训练用的是估计值。</b>每个 ELBO 都用 §2.2 的双重蒙特卡洛去估，得到论文式 (8) 的“估计损失”：</p>
+<div class="formula">$$\widehat\ell_{\text{DPO-E}}(y_w,y_l;\theta)=-\log\sigma\big(\hat s_{\theta}(y_w,y_l)\big),\qquad \hat s_{\theta}=\beta\big(\widehat{\mathcal B}_{\pi_{\theta}}(y_w)-\widehat{\mathcal B}_{\pi_{\text{ref}}}(y_w)\big)-\beta\big(\widehat{\mathcal B}_{\pi_{\theta}}(y_l)-\widehat{\mathcal B}_{\pi_{\text{ref}}}(y_l)\big)$$</div>
+<p>因为四个 ELBO 估计各自无偏，而 \(\hat s_{\theta}\) 只是它们的线性组合，所以分数估计 \(\hat s_{\theta}\) 也是无偏的（附录命题 3），这一点没有问题。问题出在外面那一层 \(-\log\sigma\)。对一对固定的数据，每次抽到的时间和遮法不同，\(\hat s_{\theta}\) 就不同，于是估计损失变成了一个随机量，它和它的梯度都带上了<b>方差</b>。更麻烦的是，\(-\log\sigma\) 是一个弯曲的函数，按 §2.3 讲的 Jensen 不等式，\(\mathbb E\big[\log\sigma(\hat s_{\theta})\big]\) 不等于目标 \(\log\sigma(s_{\theta})=\log\sigma\big(\mathbb E[\hat s_{\theta}]\big)\)，于是损失还带上了<b>偏差</b>。分数是无偏的，损失却是有偏的，这是本文分析的起点。</p>
+
+<figure class="paper-fig"><div class="imgs"><img src="llada-1-5/fig/transformation.svg" alt="原文图 2a" loading="lazy"><img src="llada-1-5/fig/var_bias.svg" alt="原文图 2b" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>这是一个与语言模型无关的玩具例子（附录 C）：从均值为 0 的高斯分布 \(X\sim\mathcal N(0,\sigma^2)\) 里抽 1000 个点，看 \(\log\sigma(X)\) 的平均会不会等于 \(\log\sigma(0)\)。(a) 取方差 1。横轴上浅蓝色的钟形曲线是 \(X\) 的分布，黑色曲线是函数 \(x\mapsto\log\sigma(x)\)，纵轴上的蓝色直方图是变换之后 \(\log\sigma(X)\) 的分布；蓝色水平虚线是它的样本平均，红色星号和红线标的是“正确答案” \(\log\sigma(\mathbb E[X])=\log\sigma(0)\approx-0.693\)。两条水平线之间的缝就是偏差：\(X\) 往负方向波动时 \(\log\sigma\) 掉得很快，往正方向波动时却几乎不涨，平均下来就被拉低了。(b) 横轴是 \(X\) 的方差（0.1 到 1.0 共十档），纵轴是 \(\log\sigma(X)\) 的偏差和方差，两者都随 \(X\) 的方差单调上升。本站按同样设定推算：方差 0.1、0.5、1.0 时，偏差约 0.012、0.058、0.111，\(\log\sigma(X)\) 的方差约 0.025、0.131、0.270。结论：想同时压低偏差和方差，就去压低 \(X\) 的方差。</figcaption></figure>
+
+<p>把玩具例子换成 DPO 的语言，再看一个更夸张、也更接近实际的算例。假设某对数据的真实分数 \(s_{\theta}=0\)（模型对两个回答没有偏好），真实损失是 \(-\log\sigma(0)=\log2\approx0.693\)。估计值 \(\hat s_{\theta}\) 以一半概率偏高 \(d\)、一半概率偏低 \(d\)，平均仍是 0。下表的 \(d\) 取的是表 2 中几种配置实测分数方差的平方根，只是借用它们的数量级：</p>
+<div class="table-wrap"><table>
+  <tr><th>分数估计的标准差 \(d\)</th><th>对应表 2 哪种配置的数量级</th><th class="num">估计损失的平均</th><th class="num">偏差（比 0.693 多出多少）</th></tr>
+  <tr><td>1.0</td><td>每个 ELBO 8 个样本，对偶采样（方差 1.0）</td><td class="num">0.813</td><td class="num">0.120</td></tr>
+  <tr><td>2.0</td><td>（介于其间）</td><td class="num">1.127</td><td class="num">0.434</td></tr>
+  <tr><td>6.63</td><td>每个 ELBO 1 个样本，对偶采样（方差 44.0）</td><td class="num">3.318</td><td class="num">2.625</td></tr>
+  <tr><td>46.7</td><td>4 个样本，不做对偶采样（方差 2183.7）</td><td class="num">23.37</td><td class="num">22.67</td></tr>
+</table></div>
+<p>以上均为推算。可以看到两点。第一，偏差的方向是固定的：\(-\log\sigma\) 是凸函数，噪声只会让估计损失<b>偏大</b>，不会偏小。第二，偏差随标准差增长得很快，当标准差到几十时，估计损失几乎等于 \(\max(0,-\hat s_{\theta})\) 的平均，和真实损失已经毫无关系。后面看训练曲线（§4.3）时，会在“不做对偶采样”那一组里看到正是这个量级的损失。</p>
+
+<h4 id="n-3-2">3.2 定理 1：损失的偏差和方差，都被分数估计的方差管着</h4>
+<p>作者的核心理论结果是定理 1：对一对固定的偏好数据，估计损失的偏差和方差都可以用分数估计的方差来界定：</p>
+<div class="formula">$$\mathbb E\Big[\big|\ell_{\text{DPO-E}}-\widehat\ell_{\text{DPO-E}}\big|\Big]\le\sqrt{\mathbb V\big[\hat s_{\theta}(y_w,y_l)\big]},\qquad \mathbb V\big[\widehat\ell_{\text{DPO-E}}\big]\le4\,\mathbb V\big[\hat s_{\theta}(y_w,y_l)\big]$$</div>
+<p>期望和方差都是对估计时的随机抽样（时间、遮法）取的。证明只用到两个事实（附录 B.1、B.2）。第一，\(f(x)=\log\sigma(x)\) 的导数 \(f'(x)=\sigma(-x)\) 始终在 0 和 1 之间，所以它是“1-Lipschitz”的：输入变动多少，输出最多变动多少。于是 \(|f(\hat s)-f(s)|\le|\hat s-s|\)，取平均后再用一次 Jensen 不等式，\(\mathbb E|\hat s-s|\le\sqrt{\mathbb E(\hat s-s)^2}\)，而因为 \(\hat s\) 无偏，后者正好是 \(\hat s\) 的标准差。第二，方差那一条用了 \((a+b)^2\le2(a^2+b^2)\) 拆两次，所以出来一个系数 4。</p>
+<p>直观地说：\(-\log\sigma\) 这个函数“不会把输入的抖动放大”，所以分数估计抖多少，损失最多就跟着抖多少；分数估计越稳，损失的平均就越接近真值。这样一来，两个看似不同的问题（偏差、方差）被归结成同一个问题：<b>把 \(\mathbb V[\hat s_{\theta}]\) 降下来</b>。</p>
+<p><b>这个上界有多紧。</b>只给上界还不够，万一上界很松，降低 \(\mathbb V[\hat s_{\theta}]\) 未必真能降低误差。附录 B.2.3 用一阶泰勒展开给了两个“紧性”结果（定理 2、3）：在分数估计的峰度有限这一很宽松的条件下，偏差约为 \(\Theta\big(f'(s_{\theta})\sqrt{\mathbb V[\hat s_{\theta}]}\big)\)，方差约为 \(f'(s_{\theta})^2\,\mathbb V[\hat s_{\theta}]\)。也就是说，误差确实和分数的标准差、方差同阶增长，上界里缺的只是一个 0 到 1 之间的因子 \(f'(s_{\theta})=\sigma(-s_{\theta})\)。这个因子在模型已经明显偏好 \(y_w\) 时很小，所以对那些“已经学会”的数据，实际误差比上界小得多。</p>
+<p><b>梯度也一样。</b>真正决定训练的是梯度，附录 B.4 给了平行的结论（定理 4）。在“每个遮盖样本的损失梯度有界”这个假设下（假设 1），分数梯度的范数也有界，记为 \(\tilde C=2\beta C\)，于是：</p>
+<div class="formula">$$\Big\|\mathbb E\big[\nabla_{\theta}\widehat\ell_{\text{DPO-E}}\big]-\nabla_{\theta}\ell_{\text{DPO-E}}\Big\|_2\le\frac{\tilde C}{4}\sqrt{\mathbb V[\hat s_{\theta}]}+\sqrt{\operatorname{tr}\mathbb V[\nabla_{\theta}\hat s_{\theta}]},\qquad \operatorname{tr}\mathbb V\big[\nabla_{\theta}\widehat\ell_{\text{DPO-E}}\big]\le\frac{\tilde C^2}{8}\mathbb V[\hat s_{\theta}]+\operatorname{tr}\mathbb V[\nabla_{\theta}\hat s_{\theta}]$$</div>
+<p>和损失相比，这里多了一项 \(\operatorname{tr}\mathbb V[\nabla_{\theta}\hat s_{\theta}]\)，即分数梯度本身的波动。把 §2.1 的 DPO 梯度改写成估计版，就能看清这两项各管什么：</p>
+<div class="formula">$$\nabla_{\theta}\widehat\ell_{\text{DPO-E}}=-\underbrace{\sigma(-\hat s_{\theta})}_{\text{权重：受 }\mathbb V[\hat s_{\theta}]\text{ 影响}}\cdot\underbrace{\beta\big[\nabla_{\theta}\widehat{\mathcal B}_{\pi_{\theta}}(y_w)-\nabla_{\theta}\widehat{\mathcal B}_{\pi_{\theta}}(y_l)\big]}_{\text{方向：受 }\operatorname{tr}\mathbb V[\nabla_{\theta}\hat s_{\theta}]\text{ 影响}}$$</div>
+<p>参考模型的 ELBO 不依赖 \(\theta\)，所以它不出现在“方向”里，只出现在“权重”里。这是理解对偶采样的关键，下一小节还会用到。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：分数估计的噪声越大，DPO 梯度的权重越被拉向 0.5，“排对的少推、排错的多推”就失效了</div>
+  <svg class="dg" viewBox="0 0 640 250" role="img" aria-label="不同噪声水平下 DPO 梯度权重的平均值" style="max-width:640px">
+    <rect x="90" y="6" width="12" height="12" style="fill:var(--c-enc)"/>
+    <text x="108" y="12" class="t-sm">真实分数 s = +2（模型已偏好 y_w）</text>
+    <rect x="360" y="6" width="12" height="12" style="fill:var(--c-pred)"/>
+    <text x="378" y="12" class="t-sm">真实分数 s = −2（模型排错了）</text>
+    <line x1="70" y1="200" x2="620" y2="200" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="70" y1="200" x2="70" y2="28" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="70" y1="115" x2="620" y2="115" style="stroke:var(--text-3);stroke-width:1;stroke-dasharray:5 4"/>
+    <text x="62" y="200" class="t-r t-xs">0</text>
+    <text x="62" y="115" class="t-r t-xs">0.5</text>
+    <text x="62" y="30" class="t-r t-xs">1</text>
+    <text x="24" y="115" class="t-c t-sm" transform="rotate(-90 24 115)">平均权重 σ(−ŝ)</text>
+    <rect x="91" y="179.8" width="30" height="20.2" style="fill:var(--c-enc)"/><text x="106" y="171" class="t-c t-xs">0.12</text>
+    <rect x="129" y="50.2" width="30" height="149.8" style="fill:var(--c-pred)"/><text x="144" y="42" class="t-c t-xs">0.88</text>
+    <rect x="201" y="173.7" width="30" height="26.3" style="fill:var(--c-enc)"/><text x="216" y="165" class="t-c t-xs">0.16</text>
+    <rect x="239" y="56.5" width="30" height="143.5" style="fill:var(--c-pred)"/><text x="254" y="48" class="t-c t-xs">0.84</text>
+    <rect x="311" y="167.9" width="30" height="32.1" style="fill:var(--c-enc)"/><text x="326" y="159" class="t-c t-xs">0.19</text>
+    <rect x="349" y="62.1" width="30" height="137.9" style="fill:var(--c-pred)"/><text x="364" y="54" class="t-c t-xs">0.81</text>
+    <rect x="421" y="134.6" width="30" height="65.4" style="fill:var(--c-enc)"/><text x="436" y="126" class="t-c t-xs">0.39</text>
+    <rect x="459" y="95.8" width="30" height="104.2" style="fill:var(--c-pred)"/><text x="474" y="87" class="t-c t-xs">0.61</text>
+    <rect x="531" y="118.1" width="30" height="81.9" style="fill:var(--c-enc)"/><text x="546" y="110" class="t-c t-xs">0.48</text>
+    <rect x="569" y="112.3" width="30" height="87.7" style="fill:var(--c-pred)"/><text x="584" y="104" class="t-c t-xs">0.52</text>
+    <text x="125" y="216" class="t-c t-sm">无噪声</text><text x="125" y="232" class="t-c t-xs">（真实权重）</text>
+    <text x="235" y="216" class="t-c t-sm">标准差 1.0</text><text x="235" y="232" class="t-c t-xs">8 样本，对偶</text>
+    <text x="345" y="216" class="t-c t-sm">标准差 1.5</text><text x="345" y="232" class="t-c t-xs">4 样本，对偶</text>
+    <text x="455" y="216" class="t-c t-sm">标准差 6.6</text><text x="455" y="232" class="t-c t-xs">1 样本，对偶</text>
+    <text x="565" y="216" class="t-c t-sm">标准差 46.7</text><text x="565" y="232" class="t-c t-xs">4 样本，无对偶</text>
+  </svg>
+  <div class="dia-note">本站推算，不是论文数据：假设分数估计 \(\hat s\) 服从均值为真实分数、标准差如横轴所示的高斯分布，计算权重 \(\sigma(-\hat s)\) 的平均值。标准差取自表 2 实测方差的平方根，只借用数量级。没有噪声时，模型已排对的那对数据（蓝）权重只有 0.12，排错的那对（橙）有 0.88；噪声大到几十时，两者都接近 0.5，模型分不清哪些数据该多学。</div>
+</div>
+<p>这张图说明了方差为什么不只是“让训练抖一点”这么简单。DPO 的自适应权重本来会把力气集中在排错的数据上；分数估计的噪声一大，权重就退化成随机的 0 或 1，平均起来接近 0.5，于是已经学会的数据被继续推、还没学会的数据推得不够。这正是梯度偏差的具体表现，也是定理 4 里 \(\mathbb V[\hat s_{\theta}]\) 那一项的含义。</p>
+<div class="note-warn"><b>读定理时容易忽略的细节：</b>
+<ul>
+  <li>定理 1 左边是“估计损失和真实损失之差的绝对值的平均”，不是严格意义上的偏差 \(\big|\mathbb E[\widehat\ell]-\ell\big|\)。前者总是不小于后者，所以把它当作偏差的上界来读是对的，但它同时也包含了随机波动。</li>
+  <li>v2 的方差界写成 \(4\,\mathbb E_{y_w,y_l}\big[\mathbb V[\hat s_{\theta}]\big]\)，对“一对固定的数据”而言，外面那层对数据的期望是多余的。这是从 v1 沿用下来的记号：v1 先把整体损失的误差拆成“数据抽样的方差”和“分数估计带来的偏差、方差”，再对后两者取数据平均。</li>
+  <li>附录引理 1 的证明里写“因为 \(f''(x)\ge0\)，所以 \(f\) 是凹函数”，实际上 \(f''(x)=-\frac{e^x}{(1+e^x)^2}\le0\)，结论（凹）是对的，不等号方向是笔误。</li>
+  <li>假设 1 要求每个遮盖样本的损失梯度对所有参数一致有界，这对深度网络只能算一个方便分析的假设。它只影响常数 \(\tilde C\)，不影响“误差随 \(\mathbb V[\hat s_{\theta}]\) 增长”的结论。</li>
+</ul></div>
+
+<h4 id="n-3-3">3.3 VRPO：三个不引入偏差的降方差办法</h4>
+<p>既然目标是降低 \(\mathbb V[\hat s_{\theta}]\)，作者给出三个办法：</p>
+<ol>
+  <li><b>加大采样预算</b>：增加每个 ELBO 用的样本数 \(n=n_t\times n_{y_t}\)。代价是偏好优化的计算量变成原来的 \(n\) 倍。</li>
+  <li><b>最优分配</b>：预算固定时，全部用来抽不同的时间，即 \(n_t=n\)、\(n_{y_t}=1\)，每个时间只抽一种遮法。不增加计算，只是换一种分法。</li>
+  <li><b>对偶采样</b>：对同一个回答（\(y_w\) 或 \(y_l\)），当前模型 \(\pi_{\theta}\) 和参考模型 \(\pi_{\text{ref}}\) 的 ELBO 估计使用<b>完全相同</b>的时间和遮法。同样不增加计算，只是复用样本，作者称之为降方差的“免费午餐”。</li>
+</ol>
+<p>为什么是这三个，要从分数估计的方差怎么构成说起。把 \(\hat s_{\theta}\) 的定义展开（好、差两个回答的估计互相独立），得到论文式 (9)：</p>
+<div class="formula">$$\mathbb V\hat s_{\theta}(y_w,y_l)=\beta^2\!\!\sum_{y\in\{y_w,y_l\}}\Big[\mathbb V\widehat{\mathcal B}_{\pi_{\theta}}(y)+\mathbb V\widehat{\mathcal B}_{\pi_{\text{ref}}}(y)-2\,\mathrm{Corr}\big(\widehat{\mathcal B}_{\pi_{\theta}}(y),\widehat{\mathcal B}_{\pi_{\text{ref}}}(y)\big)\sqrt{\mathbb V\widehat{\mathcal B}_{\pi_{\theta}}(y)\,\mathbb V\widehat{\mathcal B}_{\pi_{\text{ref}}}(y)}\Big]$$</div>
+<p>这就是“两个随机量之差的方差 = 各自方差之和 − 2 倍协方差”。它直接指出了两条路：一是降低<b>每个</b> ELBO 估计的方差（前两项），这是办法 1 和 2 做的事；二是提高同一个回答上两个模型 ELBO 估计之间的<b>相关性</b>（第三项），这是办法 3 做的事。</p>
+
+<p><b>办法 1、2 的依据：命题 1。</b>附录引理 5 用 §2.3 的全方差公式算出了单个 ELBO 估计的方差：</p>
+<div class="formula">$$\mathbb V\widehat{\mathcal B}_{\pi}(y)=\frac{1}{n_t}\underbrace{\mathbb V_t\,\mathbb E_{y_t\mid t,y}\big[\ell_{\pi}(y_t,t,y)\big]}_{V_t\text{：不同时间之间}}+\frac{1}{n_t n_{y_t}}\underbrace{\mathbb E_t\,\mathbb V_{y_t\mid t,y}\big[\ell_{\pi}(y_t,t,y)\big]}_{V_{y_t}\text{：同一时间换遮法}}$$</div>
+<p>\(V_t\) 和 \(V_{y_t}\) 由数据和前向过程决定，训练时改变不了，能调的只有 \(n_t\) 和 \(n_{y_t}\)。由此得到命题 1 的两个结论。(i) 方差按 \(\Theta(\frac1n)\) 下降，所以加预算有用。(ii) 预算 \(n\) 固定时，第二项永远是 \(\frac{V_{y_t}}{n}\)，和怎么分无关；第一项 \(\frac{V_t}{n_t}\) 则随 \(n_t\) 增大而减小，所以把全部预算给时间（\(n_t=n\)）最好。这就是调查比喻里的“多抽城市，每个城市只访一户”：在同一个遮盖程度下多换几种遮法，只能平均掉第二种波动，对“不同遮盖程度之间差别很大”这第一种波动毫无帮助。附录命题 5 证明了分数梯度的方差有完全相同的结构，同样的结论也成立。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样 4 个遮盖样本的两种分法（格子里是抽到的时间 t）</div>
+  <div class="dia-row"><span class="lbl">1 个时间 × 4 种遮法</span><div class="cells"><span class="cell c">0.3</span><span class="cell c">0.3</span><span class="cell c">0.3</span><span class="cell c">0.3</span></div></div>
+  <div class="dia-out">四个样本都在 \(t=0.3\)，只是遮的位置不同。如果这次恰好抽到一个“不典型”的时间，四个样本一起偏。方差 \(=V_t+\frac{V_{y_t}}{4}\)。</div>
+  <div class="dia-row"><span class="lbl">4 个时间 × 1 种遮法</span><div class="cells"><span class="cell a">0.1</span><span class="cell a">0.4</span><span class="cell a">0.6</span><span class="cell a">0.9</span></div></div>
+  <div class="dia-out">四个样本覆盖了四种遮盖程度，时间带来的偏离也被平均掉了。方差 \(=\frac{V_t}{4}+\frac{V_{y_t}}{4}\)。</div>
+  <div class="dia-note">本站示意图。算例（推算，\(V_t\)、\(V_{y_t}\) 为假设值）：若 \(V_t=8\)、\(V_{y_t}=4\)，预算 4 时，“4 个时间 × 1”的方差是 3，“2 × 2”是 5，“1 × 4”是 9；预算降到 1 时是 12，加到 8（8 × 1）时是 1.5。在实现里“时间”对应遮掉的词数 \(l\)（§2.2）。</div>
+</div>
+<p>ACL 版附录 B.8 补了一组直接的测量：把时间固定在 \(t=0.2,0.4,0.6,0.8\)，其余设置同表 2 的基准配置，分数估计的方差分别是 0.649、0.618、0.716、1.264，都小于时间随机时的 2.2（表 2 基准）。这说明“时间之间的差别”确实贡献了分数方差的相当一部分（粗略推算超过一半），和命题 1 的出发点一致。作者同时指出，不同固定时间之间的方差差别不大，所以没有去研究自适应的时间调度，并把它列为局限之一。同一张表里，固定时间后的梯度方差是 7.8–16.4，反而高于表 2 基准配置的 2.5，论文没有解释；两张表的测量口径可能不同，这组梯度数字本站不做解读。</p>
+
+<p><b>办法 3 的依据：命题 2，对偶采样。</b>如果两个模型的 ELBO 估计正相关，式 (9) 里减去的那一项就是正的，相关性越高、减得越多；而当两边用独立的随机样本时，相关性为 0，什么也减不掉。命题 2 的条件是“共享样本时相关系数为正”，结论是“共享样本比独立样本的分数方差更低”。为什么共享样本会让两者高度相关？因为当前模型从参考模型初始化，又只训练了很小的步长，两者几乎是同一个网络；喂给它们完全相同的被遮序列，它们给出的对数概率也几乎相同，样本带来的随机性（这次碰巧遮掉了难猜的词、那次遮掉了好猜的词）在相减时绝大部分抵消。</p>
+<div class="dia">
+  <div class="dia-title">示意图：独立遮盖与共享遮盖（对偶采样）</div>
+  <div class="dia-row"><span class="lbl">独立：\(\pi_{\theta}\)</span><div class="cells"><span class="cell">x</span><span class="cell a">今</span><span class="cell c">M</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell a">了</span></div></div>
+  <div class="dia-row"><span class="lbl">独立：\(\pi_{\text{ref}}\)</span><div class="cells"><span class="cell">x</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell a">雨</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">两个模型抽到不同的遮法，一个只要猜 2 个词，一个要猜 4 个，差值里大部分是“抽样运气”的差别。</div>
+  <div class="dia-row"><span class="lbl">共享：\(\pi_{\theta}\)</span><div class="cells"><span class="cell">x</span><span class="cell a">今</span><span class="cell c">M</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell a">了</span></div></div>
+  <div class="dia-row"><span class="lbl">共享：\(\pi_{\text{ref}}\)</span><div class="cells"><span class="cell">x</span><span class="cell a">今</span><span class="cell c">M</span><span class="cell a">下</span><span class="cell c">M</span><span class="cell a">了</span></div></div>
+  <div class="dia-out">两个模型面对同一道“填空题”，差值只反映两个模型本身的不同，这才是 DPO 想要的信号。</div>
+  <div class="dia-note">本站示意图，颜色同 §2.2。类比：想知道吃一顿饭体重涨了多少，用同一台秤在饭前饭后各称一次，秤本身的系统误差在相减时抵消；用两台不同的秤，差值里就混进了两台秤的误差之差。</div>
+</div>
+<p>一个极端但很说明问题的情形是训练刚开始时：此时 \(\pi_{\theta}=\pi_{\text{ref}}\)，共享样本下两个 ELBO 估计完全相等，分数估计恒为 0，权重恰好是 0.5，没有任何噪声；而用独立样本时，分数估计是两个独立噪声之差，DPO 一开始就在拟合噪声。随着训练进行，两个模型慢慢分开，相关性略有下降。ACL 版附录 B.9 实测了共享样本下两者 ELBO 估计的皮尔逊相关系数：第 20、40、60、80、100 步分别是 0.999985、0.999962、0.999927、0.999890、0.999848，最终的 LLaDA 1.5 是 0.999152，始终极高。本站也可以从表 2 反推一个数：在两个模型方差相同的近似下，共享与独立时的分数方差之比是 \(1-\rho\)，表 2 中这个比值是 \(2.2/2183.7\approx0.001\)，对应 \(\rho\approx0.999\)（推算），和实测是同一个数量级。相关系数 0.999 意味着两者之差的方差只有独立时的千分之一，这就是表 2 里方差差了三个数量级的原因。</p>
+<p><b>三个办法都不引入偏差（命题 4）。</b>改变 \(n_t\)、\(n_{y_t}\) 不改变每个样本的分布，所以每个 ELBO 估计仍然无偏；共享样本只改变两个估计之间的关系，不改变各自的分布，由期望的线性，分数估计也仍然无偏。这一点很重要：降方差的办法很多，但有些办法（例如对损失做截断、给分数加缩放）会改变优化的目标；VRPO 的三个办法只让估计更准，不改目标。</p>
+<p>回到 §3.2 的梯度分解，还能看出三个办法分工的一个细节：参考模型不出现在梯度的“方向”里，所以对偶采样不改变 \(\operatorname{tr}\mathbb V[\nabla_{\theta}\hat s_{\theta}]\)，它只通过压低 \(\mathbb V[\hat s_{\theta}]\) 来修正“权重”；而方向上的噪声只能靠办法 1 和 2 降低（附录命题 5 也只证明了这两个办法对梯度方差的作用）。按本站的理解，表 2 的梯度方差数据和这个分工一致：去掉对偶采样后梯度方差从 2.5 升到 10.6，而“方向”那一项理应不受对偶采样影响，所以增加的部分应来自权重的随机化（§4.3）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="llada-1-5/fig/method.png" alt="原文图 3" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>最左边是一对偏好数据，蓝色是好回答 \(y_w\)，绿色是差回答 \(y_l\)，每个小方块是一个 token，带斜纹的方块是被遮住的位置。中间一大块是“不做最优分配、不做对偶采样”的版本：四个 ELBO（I：\(\pi_{\theta}\) 对 \(y_w\)；II：\(\pi_{\text{ref}}\) 对 \(y_w\)；III：\(\pi_{\theta}\) 对 \(y_l\)；IV：\(\pi_{\text{ref}}\) 对 \(y_l\)）各自独立地抽 2 个时间，每个时间分出两个箭头、抽 2 种遮法，共 4 个样本，四列之间的遮法互不相同。右边是 VRPO：同样 4 个样本，改成 4 个不同的时间 \(t^{(1)}\) 到 \(t^{(4)}\)、每个时间一种遮法（红色箭头），并且 I 和 II、III 和 IV 之间标了 “share”，表示参考模型直接复用当前模型的时间和遮法，所以图上只画了 I 和 III 两列。最右边把四个估计组合成估计损失 \(\widehat{\mathcal L}_{\text{DPO-E}}\)。</figcaption></figure>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>术语。</b>在蒙特卡洛方法的教科书里，“对偶变量”（antithetic variates）通常指构造一对<b>负相关</b>的样本（比如 \(U\) 和 \(1-U\)）来降低一个<b>均值</b>的方差；而让两个系统共用同一组随机数、以降低它们<b>差值</b>的方差，一般叫“公共随机数”（common random numbers）。两者依据的是同一个恒等式 \(\mathbb V(A\pm B)=\mathbb VA+\mathbb VB\pm2\mathrm{Cov}(A,B)\)。VRPO 做的是后者，论文沿用了前者的名字，本页按论文叫“对偶采样”。</li>
+  <li><b>“免费”指的是计算量。</b>办法 2、3 不增加前向次数，但办法 1 的 \(n\) 个遮盖副本都要留在计算图里：因为损失是 \(\hat s_{\theta}\) 的非线性函数，不能像普通损失那样把样本拆开、逐个反传再累加梯度，所以显存随 \(n\) 增长。论文没有讨论显存，后来的 BGPO 正是从这一点入手的（见“后来怎么样了”）。</li>
+  <li><b>相关性的前提。</b>对偶采样的效果完全依赖当前模型和参考模型足够接近。在 DPO 这种只训一轮、学习率很小的设置下它成立；如果训练很久、或者参考模型换成和当前模型差别很大的模型，效果会变弱。</li>
+</ul></div>
+<p>作者最后强调，本文的贡献不只是三个技巧本身，更在于背后的系统分析：它说明了为什么要这样做、哪些看似合理的做法（例如在同一时间下多抽几种遮法）其实是次优的，这些结论不依赖于具体的模型和数据，可以迁移到其他扩散模型的对齐中。</p>
+
+<h4 id="n-3-4">3.4 推广到 PPO / GRPO，以及和 d1 的对照</h4>
+<p>论文 §3.3 讨论了这套分析能否用在其他对齐算法上。PPO 和 GRPO 优化的是同一类目标：在旧策略采样的回答上，用新旧策略的概率比 \(\frac{\pi_{\theta}(y\mid x)}{\pi_{\theta_{\text{old}}}(y\mid x)}\) 给优势 \(\hat A(x,y)\) 加权；而优势常用带 KL 惩罚的奖励 \(r(x,y)-\beta\log\frac{\pi_{\theta}(y\mid x)}{\pi_{\text{ref}}(y\mid x)}\) 来算。用到扩散模型上时，这里的似然或似然比都要换成 ELBO（之差），结构和 DPO 里的完全类似，所以加大预算、最优分配和对偶采样都可以直接用，而且照样不引入偏差。作者还说，这些场景里没有外层的 \(\log\sigma\)，分析反而更简单。</p>
+<div class="note-warn"><b>本站补充：</b>“没有外层非线性”只对 KL 惩罚这种线性出现的 ELBO 之差成立（v1 讨论的也正是 KL 项）。PPO 的概率比是 \(\exp\big(\widehat{\mathcal B}_{\pi_{\theta}}-\widehat{\mathcal B}_{\pi_{\text{old}}}\big)\)，指数同样是一个弯曲的函数，估计噪声同样会带来偏差，只是本文的定理 1 不能直接套用。ACL 版的“局限”一节也承认：PPO、GRPO 上的推广只做了理论讨论，没有实验验证。</div>
+<p>把 VRPO 和同期的 <a href="d1.html">d1</a>（<i>diffu</i>-GRPO）放在一起看，能更清楚地看到两种思路的取舍。两者都要在掩码扩散模型上近似“整条回答的对数似然”，但站在偏差—方差权衡的两端：</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>d1：<i>diffu</i>-GRPO</th><th>LLaDA 1.5：VRPO</th></tr>
+  <tr><td>训练方式</td><td>在线强化学习（GRPO），模型自己生成回答，程序判对错给奖励</td><td>离线 DPO，使用事先收集好的 350K 偏好对</td></tr>
+  <tr><td>似然怎么估</td><td>回答整段遮住、题目随机遮 15%，做一次前向，把各位置“猜中原词”的对数概率直接相加（均场近似）</td><td>ELBO 的蒙特卡洛估计：每个回答抽 8 个（时间，遮法）样本，按权重平均</td></tr>
+  <tr><td>偏差</td><td>有偏：只相当于 ELBO 在“全部遮住”那一个时间点上的单个样本，且题目被改动过（见 d1 精读 §3.1）</td><td>对 ELBO 无偏；ELBO 与真实似然之间的差距没有处理</td></tr>
+  <tr><td>方差处理</td><td>题目的遮法在当前、旧、参考三个模型之间共用（据<a href="../legacy/tracks/dllm/17-rl.html#c-diffu-grpo">旧版拆解页</a>对官方代码的核对），思路与对偶采样相同</td><td>加大预算、最优分配、对偶采样</td></tr>
+  <tr><td>每条回答、每个模型的前向次数</td><td>1 次</td><td>8 次</td></tr>
+</table></div>
+<p>简单地说，d1 用偏差换速度，因为在线 RL 每一步都要先生成回答，采样已经很贵，似然估计必须便宜；VRPO 保住无偏，多付 8 倍的似然计算，再用两个免费的办法把方差压下来，这在离线 DPO 里负担得起，因为不需要采样。后来的工作大多在这两端之间寻找更好的折中（见“后来怎么样了”）。另一个相关的做法是 DiffuCoder 的 coupled-GRPO，它为同一条回答构造一对互补的掩码来降低估计方差；论文的相关工作一节认为它可以和 VRPO 互补使用。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.19223v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A2" target="_blank" rel="noopener">附录 B：全部证明 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A3" target="_blank" rel="noopener">附录 C：图 2 的设定 ↗</a> · 相关：<a href="d1.html">d1 精读页</a>、<a href="mdlm.html#n-3">MDLM 精读 §3（掩码扩散的 ELBO）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 实验：VRPO 带来了什么，方差和分数是不是同步变化</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>VRPO 用在一个真实的 8B 扩散模型上，相对只做过 SFT 的 LLaDA、相对不做降方差的朴素 DPO，各提升了多少？三个办法分别把方差降了多少，方差降低是否真的换来了更好的分数？这些数字是在什么数据、什么采样设置下测出来的，又有多可靠？论文正文只用两页讲实验，大量关键设置在附录 D 里，本节把它们放在一起读。</div>
+
+<h4 id="n-4-1">4.1 实验设置：数据、训练、计算量和评测方式</h4>
+<p><b>数据。</b>作者用 VRPO 在 LLaDA 8B Instruct 上训练一个 epoch，数据是 35 万（350K）个偏好对，全部是内部收集的，没有公开。处理流程包括：过滤低质量样本（ACL 版说明还过滤了含个人身份信息或冒犯性内容的样本）、按相似度去重、用奖励模型排序挑选高质量数据，以及<b>把一部分被偏好的回答替换成当时最先进的大模型的输出</b>。最终的数据分布如下：</p>
+<div class="dia">
+  <div class="dia-title">示意图：350K 偏好对的任务分布（附录 D.3）</div>
+  <div class="dia-row"><span class="lbl">350K 偏好对</span><div class="dia-track"><span class="dia-seg kv" style="flex:35">创意写作 35%</span><span class="dia-seg w" style="flex:18">知识问答 18%</span><span class="dia-seg cmp" style="flex:16">NLP 任务 16%</span><span class="dia-seg res" style="flex:14">数学 14%</span><span class="dia-seg oth" style="flex:7">推荐 7%</span><span class="dia-seg frag" style="flex:5">代码 5%</span><span class="dia-seg oth" style="flex:3">推理 3%</span><span class="dia-seg oth" style="flex:2">其他</span></div></div>
+  <div class="dia-out">数学类约 4.9 万对、代码类约 1.75 万对（推算）。剩下约 2% 是安全等其他任务（推算：100% 减去列出的各项之和）。</div>
+  <div class="dia-note">本站按论文列出的比例绘制。ACL 版强调，数据收集没有偏向某个领域，数学只占 14%、代码只占 5%，以此说明 VRPO 用少量领域数据也能提升这些领域。ACL 版附录 B.5 给了两个数据样例（一道选择题和一道要求全大写回答的问题），可以看出数据的格式与 LLaMA 3 的对话模板一致。</div>
+</div>
+<p><b>训练超参数（附录 D.3）。</b>批大小 64，AdamW 优化器（权重衰减 0.01，\(\beta_1=0.9\)，\(\beta_2=0.95\)），15 步预热到最大学习率 \(5\times10^{-7}\)，之后余弦衰减。DPO 的 \(\beta=0.2\)。参考模型就是 LLaDA 8B Instruct。v2 新增了一条：损失里另外加了一项权重为 0.05 的掩码扩散 SFT 损失，“用于提高训练稳定性”；论文没有说明这一项算在哪些回答上（通常的做法是只算在被偏好的回答上）。作者说明由于硬件资源有限，没有做任何超参数搜索。</p>
+<p><b>实现（附录 D.1）。</b>为了把显卡用满，多条偏好数据被打包进同一个长度为 4096 的序列，并构造块对角的注意力掩码，让不同数据的 token 互相看不见；序列末尾用 |EOS| 补齐到 4096，这些补齐的 |EOS| 不计入损失。</p>
+<p><b>计算量。</b>默认预算 \(n=8\)，所以偏好优化的计算量大约是“不需要蒙特卡洛估计的方法”（AR 模型或 \(n=1\)）的 8 倍。具体到 LLaDA 1.5，训练大约用了 405 个 H100 GPU 小时，作者说这不到预训练成本的 0.5%。LLaDA 论文报告的预训练用了约 13 万个 H800 GPU 小时，405 ÷ 130,000 ≈ 0.3%（推算，两种 GPU 型号不同，只看数量级）。如果每个批里的 64 条是 64 个偏好对，一个 epoch 约 5,470 步（推算）；但数据是打包的，每条序列装了多少对论文没说，所以实际步数不确定。</p>
+<p><b>评测（§4、附录 D.4）。</b>九个基准分三类：数学与科学推理（GSM8K、Math、GPQA），代码生成（HumanEval、MBPP），对齐（IFEval、Arena-Hard、AlignBench、MT-Bench）。后三个对齐基准用大模型当裁判打分，本文用的裁判是 OpenAI 的 “gpt-4-32k” 接口。掩码扩散模型生成时有三种常用的采样方式：纯扩散采样、低置信度重掩码（每步把模型最没把握的预测重新遮回去）、半自回归采样（把回答切成块，块与块之间从左到右，块内按扩散方式生成）。作者对 LLaDA 和 LLaDA 1.5 都试了不同的采样方式，回答长度在 {64, 128, 256, 512, 1024} 里调，半自回归的块长在 {8, 16, 32, 64, 128} 里调，各自报告最好的结果。另外，评测时把 |EOS| 的置信度设为 0：LLaDA 的 SFT 数据里补齐了大量 |EOS|，模型很容易过早写出 |EOS|、把回答截短（详见 <a href="llada.html#n-2-4">LLaDA 精读 §2.4</a>），这个设置让 LLaDA 的 HumanEval 从 47.6 升到 49.4，表 1 的基线用的就是后者。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">LLaDA 块长</th><th class="num">LLaDA 回答长度</th><th class="num">LLaDA 1.5 块长</th><th class="num">LLaDA 1.5 回答长度</th></tr>
+  <tr><td>GSM8K</td><td class="num">8</td><td class="num">256</td><td class="num">16</td><td class="num">256</td></tr>
+  <tr><td>Math</td><td class="num">64</td><td class="num">512</td><td class="num">128</td><td class="num">1024</td></tr>
+  <tr><td>GPQA</td><td class="num">64</td><td class="num">64</td><td class="num">16</td><td class="num">256</td></tr>
+  <tr class="hl"><td>HumanEval</td><td class="num">512</td><td class="num">512</td><td class="num">32</td><td class="num">512</td></tr>
+  <tr class="hl"><td>MBPP</td><td class="num">256</td><td class="num">256</td><td class="num">32</td><td class="num">512</td></tr>
+  <tr class="hl"><td>IFEval</td><td class="num">512</td><td class="num">512</td><td class="num">32</td><td class="num">512</td></tr>
+  <tr><td>Arena-Hard</td><td class="num">128</td><td class="num">1024</td><td class="num">128</td><td class="num">1024</td></tr>
+  <tr><td>AlignBench</td><td class="num">32</td><td class="num">512</td><td class="num">32</td><td class="num">512</td></tr>
+  <tr><td>MT-Bench</td><td class="num">32</td><td class="num">512</td><td class="num">16</td><td class="num">256</td></tr>
+</table></div>
+<p>上表是附录表 6 的推理配置。块长小于回答长度表示半自回归采样，否则是不分块的扩散采样。高亮的三行最值得注意：LLaDA 在 HumanEval、MBPP、IFEval 上用的是不分块的采样（块长等于回答长度），LLaDA 1.5 用的却是块长 32 的半自回归。也就是说，表 1 在这三个任务上比较的不只是两个模型，还有两种不同的采样方式。§4.4 的表 4 会把采样方式拆开看。</p>
+<div class="note-warn"><b>论文 vs 官方评测文档：</b>作者后来在 LLaDA 仓库的 EVAL.md 里公开了评测配置，并用开源的 OpenCompass 重测。LLaDA 1.5 的配置和表 6 基本一致，只有 IFEval 写的是回答长度 256、块长 16（表 6 是 512、32）；用内部工具测的 GSM8K 写的是 83.8（表 1 是 83.3）。OpenCompass 的重测结果：LLaDA 1.5 为 GSM8K 83.6、Math 42.3、GPQA 34.8、HumanEval 51.2、MBPP 42.6、IFEval 65.2；LLaDA 8B Instruct 为 GSM8K 78.9、Math 42.7、GPQA 32.3、HumanEval 47.0、MBPP 39.6。也就是说，换一套评测工具后，GSM8K、GPQA、HumanEval、MBPP 上的提升都还在（分别约 +4.7、+2.5、+4.2、+3.0，推算），Math 上的 +0.4 却变成了 −0.4。</div>
+
+<h4 id="n-4-2">4.2 主结果：VRPO 在九个基准上都高于 SFT，朴素 DPO 有升有降</h4>
+<p>表 1 比较三个模型：只做过 SFT 的 LLaDA 8B Instruct；用同样数据做“朴素 DPO”的 LLaDA（每个 ELBO 只用 1 个样本，\(n_t=1\)、\(n_{y_t}=1\)，不做对偶采样）；以及用完整 VRPO 训练的 LLaDA 1.5（\(n_t=8\)、\(n_{y_t}=1\)，做对偶采样）。朴素 DPO 这一列是 v2 才加进来的，v1 的表 1 只有两列。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">LLaDA 8B Instruct<br>（SFT）</th><th class="num">朴素 DPO<br>（SFT + DPO，\(n=1\)，无对偶）</th><th class="num">LLaDA 1.5<br>（SFT + VRPO）</th></tr>
+  <tr><td colspan="4"><b>数学与科学</b></td></tr>
+  <tr><td>GSM8K</td><td class="num">78.6</td><td class="num">80.7（+2.1）</td><td class="num">83.3（+4.7）</td></tr>
+  <tr><td>Math</td><td class="num">42.2</td><td class="num">41.6（−0.6）</td><td class="num">42.6（+0.4）</td></tr>
+  <tr><td>GPQA</td><td class="num">33.3</td><td class="num">34.3（+1.0）</td><td class="num">36.9（+3.6）</td></tr>
+  <tr><td colspan="4"><b>代码</b></td></tr>
+  <tr><td>HumanEval</td><td class="num">49.4</td><td class="num">48.2（−1.2）</td><td class="num">52.4（+3.0）</td></tr>
+  <tr><td>MBPP</td><td class="num">41.0</td><td class="num">41.4（+0.4）</td><td class="num">42.8（+1.8）</td></tr>
+  <tr><td colspan="4"><b>对齐</b></td></tr>
+  <tr><td>IFEval</td><td class="num">62.2</td><td class="num">62.0（−0.2）</td><td class="num">66.2（+4.0）</td></tr>
+  <tr><td>Arena-Hard</td><td class="num">10.0</td><td class="num">11.9（+1.9）</td><td class="num">14.3（+4.3）</td></tr>
+  <tr><td>AlignBench</td><td class="num">5.4</td><td class="num">5.8（+0.4）</td><td class="num">5.9（+0.5）</td></tr>
+  <tr><td>MT-Bench</td><td class="num">7.2</td><td class="num">7.1（−0.1）</td><td class="num">7.3（+0.1）</td></tr>
+</table></div>
+<div class="dia">
+  <div class="dia-title">示意图：相对 LLaDA 8B Instruct 的变化（百分点，表 1 中按百分制计分的七个基准）</div>
+  <svg class="dg" viewBox="0 0 640 305" role="img" aria-label="朴素 DPO 与 VRPO 相对 SFT 模型的分数变化" style="max-width:640px">
+    <rect x="180" y="6" width="12" height="12" style="fill:var(--text-3)"/>
+    <text x="198" y="12" class="t-sm">朴素 DPO（n=1，无对偶）</text>
+    <rect x="400" y="6" width="12" height="12" style="fill:var(--c-enc)"/>
+    <text x="418" y="12" class="t-sm">VRPO（LLaDA 1.5）</text>
+    <line x1="240" y1="30" x2="240" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="320" y1="30" x2="320" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="360" y1="30" x2="360" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="400" y1="30" x2="400" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="440" y1="30" x2="440" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="480" y1="30" x2="480" y2="282" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="280" y1="30" x2="280" y2="282" style="stroke:var(--text-3);stroke-width:1.4"/>
+    <text x="240" y="294" class="t-c t-xs">−1</text><text x="280" y="294" class="t-c t-xs">0</text><text x="320" y="294" class="t-c t-xs">+1</text><text x="360" y="294" class="t-c t-xs">+2</text><text x="400" y="294" class="t-c t-xs">+3</text><text x="440" y="294" class="t-c t-xs">+4</text><text x="480" y="294" class="t-c t-xs">+5</text>
+    <text x="150" y="50" class="t-r">GSM8K</text>
+    <rect x="280" y="37" width="84" height="12" style="fill:var(--text-3)"/><text x="368" y="43" class="t-xs">+2.1</text>
+    <rect x="280" y="51" width="188" height="12" style="fill:var(--c-enc)"/><text x="472" y="57" class="t-xs">+4.7</text>
+    <text x="150" y="86" class="t-r">Math</text>
+    <rect x="256" y="73" width="24" height="12" style="fill:var(--text-3)"/><text x="252" y="79" class="t-r t-xs">−0.6</text>
+    <rect x="280" y="87" width="16" height="12" style="fill:var(--c-enc)"/><text x="300" y="93" class="t-xs">+0.4</text>
+    <text x="150" y="122" class="t-r">GPQA</text>
+    <rect x="280" y="109" width="40" height="12" style="fill:var(--text-3)"/><text x="324" y="115" class="t-xs">+1.0</text>
+    <rect x="280" y="123" width="144" height="12" style="fill:var(--c-enc)"/><text x="428" y="129" class="t-xs">+3.6</text>
+    <text x="150" y="158" class="t-r">HumanEval</text>
+    <rect x="232" y="145" width="48" height="12" style="fill:var(--text-3)"/><text x="228" y="151" class="t-r t-xs">−1.2</text>
+    <rect x="280" y="159" width="120" height="12" style="fill:var(--c-enc)"/><text x="404" y="165" class="t-xs">+3.0</text>
+    <text x="150" y="194" class="t-r">MBPP</text>
+    <rect x="280" y="181" width="16" height="12" style="fill:var(--text-3)"/><text x="300" y="187" class="t-xs">+0.4</text>
+    <rect x="280" y="195" width="72" height="12" style="fill:var(--c-enc)"/><text x="356" y="201" class="t-xs">+1.8</text>
+    <text x="150" y="230" class="t-r">IFEval</text>
+    <rect x="272" y="217" width="8" height="12" style="fill:var(--text-3)"/><text x="268" y="223" class="t-r t-xs">−0.2</text>
+    <rect x="280" y="231" width="160" height="12" style="fill:var(--c-enc)"/><text x="444" y="237" class="t-xs">+4.0</text>
+    <text x="150" y="266" class="t-r">Arena-Hard</text>
+    <rect x="280" y="253" width="76" height="12" style="fill:var(--text-3)"/><text x="360" y="259" class="t-xs">+1.9</text>
+    <rect x="280" y="267" width="172" height="12" style="fill:var(--c-enc)"/><text x="456" y="273" class="t-xs">+4.3</text>
+  </svg>
+  <div class="dia-note">本站根据原文表 1 的数字绘制。AlignBench 和 MT-Bench 是 10 分制（变化分别为 +0.4 / +0.5 和 −0.1 / +0.1），刻度不同，没有画进来。</div>
+</div>
+<p>论文从表 1 读出的结论是：LLaDA 1.5 在所有基准上都稳定地超过两个对照，说明 VRPO 在各类任务上都有效；尤其是数学，虽然训练数据里数学只占 14%，LLaDA 1.5 仍然表现很强。结合原文图 1 右侧，作者说它在同规模的掩码扩散模型和 AR 模型里，取得了 GSM8K 的最高 4-shot 分数和 Math 的最高 0-shot 分数。</p>
+<p>本站从表中再读出两点。第一，提升主要集中在 GSM8K、GPQA、HumanEval、IFEval、Arena-Hard 这五项，幅度 3.0–4.7 个点；Math（+0.4）、MT-Bench（+0.1）、AlignBench（+0.5）几乎没有变化。第二，朴素 DPO 并不是“效果小一点的 VRPO”：它在 GSM8K、Arena-Hard 上有一半左右的提升，在 Math、HumanEval、IFEval、MT-Bench 上却比 SFT 模型还低。这和 §3 的分析是吻合的：分数估计噪声很大时，DPO 的权重接近随机，训练信号被冲淡，甚至可能把模型推向错误的方向。</p>
+
+<h4 id="n-4-3">4.3 消融：方差降了多少，分数跟着变了多少</h4>
+<p>为了看清三个办法各自的作用，作者以 \(n=4\)、\(n_t/n_{y_t}=4/1\)、做对偶采样为基准配置，分三组改变设置：预算（\(n=1\) 和 \(n=8\)）、分配（\(1\times4\) 和 \(2\times2\)）、去掉对偶采样。每种配置测三类量：分数估计的方差；损失和梯度的方差；九个基准的分数。方差的测法（附录 D.5）：取 128 个偏好对，批大小 16，每个数据点独立重复计算 8 次；参考模型是 LLaDA，当前模型取 VRPO 训练过程中的一个检查点；因为模型太大，存不下每次的完整梯度，梯度方差只记录第一个 Transformer 块里 FFN 上投影层的梯度，作为整个梯度的代理。</p>
+<div class="table-wrap"><table>
+  <tr><th>配置 \(n_t\times n_{y_t}\)</th><th class="num">4×1，对偶<br>（基准）</th><th class="num">1×1，对偶</th><th class="num">8×1，对偶</th><th class="num">1×4，对偶</th><th class="num">2×2，对偶</th><th class="num">4×1，无对偶</th></tr>
+  <tr><td>改变的是</td><td class="num">—</td><td class="num">预算</td><td class="num">预算</td><td class="num">分配</td><td class="num">分配</td><td class="num">对偶采样</td></tr>
+  <tr><td>分数估计的方差</td><td class="num">2.2</td><td class="num">44.0</td><td class="num">1.0</td><td class="num">7.3</td><td class="num">4.7</td><td class="num">2183.7</td></tr>
+  <tr><td>损失的方差</td><td class="num">3.1×10⁻³</td><td class="num">8.7×10⁻²</td><td class="num">2.6×10⁻³</td><td class="num">3.2×10⁻²</td><td class="num">7.3×10⁻³</td><td class="num">62.0</td></tr>
+  <tr><td>梯度的方差</td><td class="num">2.5</td><td class="num">13.0</td><td class="num">1.6</td><td class="num">4.7</td><td class="num">2.5</td><td class="num">10.6</td></tr>
+  <tr><td>GSM8K</td><td class="num">82.8</td><td class="num">80.1</td><td class="num">83.3</td><td class="num">81.4</td><td class="num">82.3</td><td class="num">82.0</td></tr>
+  <tr><td>Math</td><td class="num">42.3</td><td class="num">41.7</td><td class="num">42.6</td><td class="num">41.9</td><td class="num">42.4</td><td class="num">42.4</td></tr>
+  <tr><td>GPQA</td><td class="num">36.4</td><td class="num">34.3</td><td class="num">36.9</td><td class="num">34.9</td><td class="num">36.4</td><td class="num">35.9</td></tr>
+  <tr><td>HumanEval</td><td class="num">51.2</td><td class="num">50.6</td><td class="num">52.4</td><td class="num">48.2</td><td class="num">48.8</td><td class="num">47.0</td></tr>
+  <tr><td>MBPP</td><td class="num">42.8</td><td class="num">40.6</td><td class="num">42.8</td><td class="num">40.8</td><td class="num">41.0</td><td class="num">41.2</td></tr>
+  <tr><td>IFEval</td><td class="num">66.1</td><td class="num">63.9</td><td class="num">66.2</td><td class="num">64.8</td><td class="num">66.2</td><td class="num">65.8</td></tr>
+  <tr class="hl"><td>Arena-Hard</td><td class="num">13.9</td><td class="num">13.5</td><td class="num">14.3</td><td class="num">13.8</td><td class="num">13.4</td><td class="num">15.6</td></tr>
+  <tr><td>AlignBench</td><td class="num">5.9</td><td class="num">5.6</td><td class="num">5.9</td><td class="num">5.8</td><td class="num">5.9</td><td class="num">5.9</td></tr>
+  <tr><td>MT-Bench</td><td class="num">7.4</td><td class="num">7.0</td><td class="num">7.3</td><td class="num">7.0</td><td class="num">7.2</td><td class="num">7.2</td></tr>
+</table></div>
+<p>上表即原文表 2（列的顺序与原文相同）。“8×1，对偶”就是 LLaDA 1.5 本身。下面这张图把方差画在对数刻度上，和 GSM8K 分数并排：</p>
+<div class="dia">
+  <div class="dia-title">示意图：分数估计的方差（对数刻度）与 GSM8K，按方差从小到大排列</div>
+  <svg class="dg" viewBox="0 0 640 240" role="img" aria-label="表 2 各配置的分数估计方差与 GSM8K" style="max-width:640px">
+    <text x="150" y="26" class="t-r t-sm">配置</text>
+    <text x="190" y="26" class="t-c t-sm">GSM8K</text>
+    <text x="410" y="26" class="t-c t-sm">分数估计的方差</text>
+    <line x1="258.6" y1="36" x2="258.6" y2="212" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="353.6" y1="36" x2="353.6" y2="212" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="448.6" y1="36" x2="448.6" y2="212" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="543.6" y1="36" x2="543.6" y2="212" style="stroke:var(--border);stroke-dasharray:3 4"/>
+    <line x1="230" y1="36" x2="230" y2="212" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <text x="258.6" y="224" class="t-c t-xs">1</text><text x="353.6" y="224" class="t-c t-xs">10</text><text x="448.6" y="224" class="t-c t-xs">100</text><text x="543.6" y="224" class="t-c t-xs">1000</text>
+    <text x="150" y="50" class="t-r t-sm">8×1，对偶</text><text x="190" y="50" class="t-c t-sm">83.3</text>
+    <rect x="230" y="42" width="28.6" height="16" style="fill:var(--c-enc)"/><text x="263" y="50" class="t-xs">1.0</text>
+    <text x="150" y="80" class="t-r t-sm">4×1，对偶</text><text x="190" y="80" class="t-c t-sm">82.8</text>
+    <rect x="230" y="72" width="61.1" height="16" style="fill:var(--c-enc)"/><text x="295" y="80" class="t-xs">2.2</text>
+    <text x="150" y="110" class="t-r t-sm">2×2，对偶</text><text x="190" y="110" class="t-c t-sm">82.3</text>
+    <rect x="230" y="102" width="92.5" height="16" style="fill:var(--c-enc)"/><text x="327" y="110" class="t-xs">4.7</text>
+    <text x="150" y="140" class="t-r t-sm">1×4，对偶</text><text x="190" y="140" class="t-c t-sm">81.4</text>
+    <rect x="230" y="132" width="110.6" height="16" style="fill:var(--c-enc)"/><text x="345" y="140" class="t-xs">7.3</text>
+    <text x="150" y="170" class="t-r t-sm">1×1，对偶</text><text x="190" y="170" class="t-c t-sm">80.1</text>
+    <rect x="230" y="162" width="184.7" height="16" style="fill:var(--c-enc)"/><text x="419" y="170" class="t-xs">44.0</text>
+    <text x="150" y="200" class="t-r t-sm">4×1，无对偶</text><text x="190" y="200" class="t-c t-sm">82.0</text>
+    <rect x="230" y="192" width="345.8" height="16" style="fill:var(--c-pred)"/><text x="580" y="200" class="t-xs">2183.7</text>
+  </svg>
+  <div class="dia-note">本站根据原文表 2 绘制，横轴从 0.5 开始、每格放大 10 倍。蓝色五档都做了对偶采样：方差从小到大，GSM8K 从 83.3 单调降到 80.1。橙色一档去掉了对偶采样，方差大了三个数量级，GSM8K 却只比基准低 0.8。</div>
+</div>
+<p><b>论文读出的结论。</b>(1) 分数估计的方差越低，损失和梯度的方差一般也越低，基准分数也越好，这支持定理 1“用 \(\mathbb V[\hat s_{\theta}]\) 控制误差”的思路。(2) 加大预算稳定地降低方差、提高分数：\(n\) 从 1 增加到 8，方差从 44.0 降到 1.0，GSM8K 从 80.1 升到 83.3，验证了命题 1(i)。(3) 预算固定为 4 时，比较第 1、4、5 列和第 1、6 列：最优分配（4×1）的方差低于 2×2 和 1×4，分数总体也更好，验证了命题 1(ii)；去掉对偶采样后方差暴涨，验证了命题 2。但作者也承认，方差的大幅下降<b>并不总是</b>转化为下游分数的大幅提升，例如去掉对偶采样后 Arena-Hard 反而最高（15.6）。他们的解释是：基准分数取决于“优化”和“泛化”两方面，VRPO 改善的是优化，泛化受很多难以控制的因素影响；并猜测不做对偶采样可能让模型接触到更多样的数据模式，对某些任务有利。</p>
+<p><b>本站从表 2 再读出三点（均为推算）。</b></p>
+<ul>
+  <li><b>方差下降得比命题 1 预测的还快。</b>命题 1 说方差按 \(\frac1n\) 下降，那么从 \(n=1\) 的 44.0 出发，\(n=4\) 应约为 11、\(n=8\) 应约为 5.5，实测却是 2.2 和 1.0。同样，按引理 5，“1×4”的方差 \(V_t+\frac{V_{y_t}}{4}\) 至少是“1×1”方差的四分之一，即不低于 11，实测是 7.3。论文没有讨论这个出入。可能的原因有：每个数据点只重复了 8 次，方差的估计本身噪声很大；单样本估计因为 \(\frac{L}{l}\) 权重而有重尾，少数极端值会抬高 \(n=1\) 的方差；论文也没有说明各配置是否在同一个检查点上测量。这些都不影响“方差随 \(n\) 下降”的定性结论，但说明表里的方差数值只能看数量级。</li>
+  <li><b>定理 1 的上界相当松，紧性分析给出的关系却对得上。</b>做了对偶采样的五列里，“损失方差 ÷ 分数方差”在 0.0014 到 0.0044 之间，远小于上界给出的 4。按定理 3，这个比值约等于 \(\sigma(-s_{\theta})^2\)，反推 \(\sigma(-s_{\theta})\) 约 0.04–0.07，也就是说，测量所用的检查点对多数偏好对已经给出了相当大的分数差。去掉对偶采样那一列，这个比值跳到 0.028，说明分数波动太大时一阶近似已经不成立。</li>
+  <li><b>梯度方差大致按 \(\frac1n\) 下降。</b>13.0（\(n=1\)）→ 2.5（\(n=4\)）→ 1.6（\(n=8\)），从 1 到 8 正好降了约 8 倍。去掉对偶采样后梯度方差是 10.6，是基准配置的 4 倍多；§3.3 讲过，这部分增量来自权重 \(\sigma(-\hat s_{\theta})\) 的随机化，而不是梯度方向本身。</li>
+</ul>
+<figure class="paper-fig"><div class="imgs"><img src="llada-1-5/fig/loss_curve.svg" alt="原文图 5 上" loading="lazy"><img src="llada-1-5/fig/loss_curve_no_antithetic.svg" alt="原文图 5 下" loading="lazy"></div>
+<figcaption><b>原文图 5（附录 D.3）。怎么看：</b>横轴是训练步数（0 到约 500），纵轴是训练损失，所有曲线都用系数 0.3 的指数滑动平均平滑过。第一张是做了对偶采样的五种配置（1×1、1×4、2×2、4×1、8×1），纵轴 0.4 到 1.0；第二张是不做对偶采样的两种配置，其中“1×1、无对偶”就是表 1 的朴素 DPO，纵轴 0 到 70，因为损失的量级差得太多，只能分成两张画。第一张里，几条曲线开头都在 0.7 左右，这和 §3.3 的分析一致：训练刚开始时两个模型相同，共享遮法下分数恒为 0，损失正好是 \(\log2\approx0.69\)。之后样本越多、分给时间越多，降得越快、越平稳：最后约一成步数的平均损失，1×1 约 0.61，1×4 约 0.58，2×2 约 0.49，4×1 和 8×1 都约 0.43（读图估计）。第二张里，朴素 DPO 的损失在 15 到 75 之间大幅跳动，后期平均仍约 30；4×1 无对偶约 9 到 12（读图估计）。作者据此说，降方差让训练曲线更平滑、下降更快、最终损失更低，和梯度方差降低、优化更稳定一致。</figcaption></figure>
+<div class="note-warn"><b>看损失曲线时要注意：</b>这些曲线上的“损失”本身就是用各自的估计器算出来的估计损失。§3.1 讲过，估计噪声越大，估计损失就系统性地越偏高（Jensen 不等式），所以不同配置的损失高低不完全是“优化得好不好”，有一部分只是“量尺的噪声大不大”。第二张图是最极端的例子：分数估计的标准差有几十时，估计损失的平均约等于 0.4 × 标准差（推算，高斯近似）。4×1 无对偶的标准差约 47，对应约 19；朴素 DPO 的预算只有 1，标准差大约再乘 2，对应约 37。两者和图上读出的 9–12、约 30 是同一个数量级。换句话说，第二张图里的损失值主要反映的是噪声，而不是模型学得怎么样。</div>
+
+<h4 id="n-4-4">4.4 采样方式、随机种子、开源数据与案例</h4>
+<p><b>换采样方式还有提升吗？</b>附录表 4 在 GSM8K、HumanEval、IFEval 上，分别用三种采样方式评测两个模型（回答长度和块长取各自的最优配置）：</p>
+<div class="table-wrap"><table>
+  <tr><th>基准与采样方式</th><th class="num">LLaDA 8B Instruct</th><th class="num">LLaDA 1.5</th><th class="num">变化（推算）</th></tr>
+  <tr><td>GSM8K · 纯扩散采样</td><td class="num">53.2</td><td class="num">55.7</td><td class="num">+2.5</td></tr>
+  <tr><td>GSM8K · 低置信度重掩码</td><td class="num">69.4</td><td class="num">70.3</td><td class="num">+0.9</td></tr>
+  <tr><td>GSM8K · 半自回归</td><td class="num">78.6</td><td class="num">83.3</td><td class="num">+4.7</td></tr>
+  <tr><td>HumanEval · 纯扩散采样</td><td class="num">12.2</td><td class="num">17.1</td><td class="num">+4.9</td></tr>
+  <tr class="hl"><td>HumanEval · 低置信度重掩码</td><td class="num">49.4</td><td class="num">47.0</td><td class="num">−2.4</td></tr>
+  <tr><td>HumanEval · 半自回归</td><td class="num">47.6</td><td class="num">52.4</td><td class="num">+4.8</td></tr>
+  <tr><td>IFEval · 纯扩散采样</td><td class="num">55.2</td><td class="num">59.4</td><td class="num">+4.2</td></tr>
+  <tr class="hl"><td>IFEval · 低置信度重掩码</td><td class="num">62.2</td><td class="num">60.1</td><td class="num">−2.1</td></tr>
+  <tr><td>IFEval · 半自回归</td><td class="num">61.7</td><td class="num">66.2</td><td class="num">+4.5</td></tr>
+</table></div>
+<p>作者的结论是，在多数采样方式下 LLaDA 1.5 都更好，说明 VRPO 的提升不依赖某一种采样器。这在半自回归和纯扩散采样下成立（六格全部提升 2.5–4.9 个点），但在低置信度重掩码下，HumanEval 和 IFEval 反而下降了 2 个点以上（高亮行）。而这两项恰好是 LLaDA 的最好成绩所在：表 1 的基线 49.4、62.2 来自低置信度重掩码，LLaDA 1.5 的 52.4、66.2 来自半自回归。所以 HumanEval、IFEval 上的提升，是“两个模型各取最好的采样方式”比较出来的；如果固定为 LLaDA 最好的那种采样方式，结论会反过来。论文没有讨论为什么低置信度重掩码下会变差；一种可能（本站推测，未经验证）是 VRPO 改变了模型回答的长度或风格，而半自回归更能避免 |EOS| 过早出现。</p>
+
+<p><b>换随机种子还稳吗？</b>附录表 5 用另外两个随机种子各重训了一次，三次训练只有种子不同，报告均值 ± 标准差和 95% 置信区间（用 t 分布算）。三个用大模型当裁判的基准因为裁判本身有波动，没有放进来；基线 LLaDA 的推理是确定性的，只评一次。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">LLaDA</th><th class="num">LLaDA 1.5（3 次训练）</th><th class="num">95% 置信区间</th><th class="num">表 1 的单次结果</th></tr>
+  <tr><td>GSM8K</td><td class="num">78.6</td><td class="num">82.9 ± 0.6</td><td class="num">[81.4, 84.3]</td><td class="num">83.3</td></tr>
+  <tr class="hl"><td>Math</td><td class="num">42.2</td><td class="num">43.0 ± 0.3</td><td class="num">[42.2, 43.8]</td><td class="num">42.6</td></tr>
+  <tr class="hl"><td>GPQA</td><td class="num">33.3</td><td class="num">35.7 ± 1.0</td><td class="num">[33.1, 38.3]</td><td class="num">36.9</td></tr>
+  <tr><td>HumanEval</td><td class="num">49.4</td><td class="num">52.0 ± 0.7</td><td class="num">[50.3, 53.7]</td><td class="num">52.4</td></tr>
+  <tr class="hl"><td>MBPP</td><td class="num">41.0</td><td class="num">42.3 ± 0.8</td><td class="num">[40.4, 44.1]</td><td class="num">42.8</td></tr>
+  <tr><td>IFEval</td><td class="num">62.2</td><td class="num">65.1 ± 0.9</td><td class="num">[62.8, 67.4]</td><td class="num">66.2</td></tr>
+</table></div>
+<p>论文说，对多数任务，LLaDA 1.5 的 95% 置信区间完全落在 LLaDA 的分数之上。逐行核对：GSM8K、HumanEval、IFEval 三项确实如此；Math 的区间下端正好等于基线 42.2，GPQA（下端 33.1 低于 33.3）和 MBPP（下端 40.4 低于 41.0）的区间都包含了基线（高亮行）。所以准确地说是六项中的三项。另外，表 1 报告的那一次训练，在六项里有五项高于三次的均值（GSM8K 83.3 对 82.9、GPQA 36.9 对 35.7、IFEval 66.2 对 65.1 等），只有 Math 低于均值，说明表 1 那一次是偏好运的一次（推算）。这组实验衡量的只是“训练随机性”，不包括评测集本身的抽样误差，也不包括上面说的采样方式选择。</p>
+
+<p><b>换成公开数据呢？</b>为了说明提升不是内部 350K 数据特有的，ACL 版附录 B.6 补了一组实验：在公开的 Math Step-DPO 10K 偏好数据上，用和表 1 相同的训练、评测流程训练 LLaDA。结果是：朴素 DPO 让 GSM8K 从 78.6 降到 77.1（−1.5）、Math 从 42.2 降到 42.1（−0.1）；VRPO 是 78.8（+0.2）和 42.6（+0.4）。作者认为这和主结果一致：朴素 DPO 让模型变差，VRPO 带来稳定提升。本站的读法是：这组实验很好地支持了“降方差比不降好”（VRPO 比朴素 DPO 高 1.7 和 0.5 个点），但 VRPO 相对 SFT 模型本身的提升只有零点几个点，远小于内部数据上的 +4.7，说明表 1 里的大部分提升应当归功于那 350K 内部数据本身。</p>
+
+<p><b>案例（附录 E）。</b>作者展示了四个 LLaDA 与 LLaDA 1.5 的对比。在指令遵循上：要求“写一个人物小传、不许用逗号、至少用 markdown 高亮三个小节”时，LLaDA 第一句就用了逗号，而且把字面上的 “*highlighted section*” 当成了小节标题；LLaDA 1.5 没有用逗号，并给出了“早年”“事业”“成就”等五个高亮小节。要求“写一个关于 Zoe 和泡泡的笑话、至少含三个方括号占位符”时，LLaDA 只用了一个占位符，LLaDA 1.5 用了很多个，但内容是反复堆砌同一个占位符。要求“先原样复述请求、再给两个品牌名”时，LLaDA 只复述了请求，LLaDA 1.5 两件事都做了。在数学上：求 9 模 100 的逆元，LLaDA 推导出“不存在”，LLaDA 1.5 用扩展欧几里得算法得到 89（本站核对：\(9\times89=801\equiv1\pmod{100}\)，正确）；公交车男女比 5:9、共 84 人、下车 20 名女性，LLaDA 把“每份 6 人”误当成“男性 6 人、女性 9 人”，得出 9，LLaDA 1.5 正确算出 54 − 20 = 34。</p>
+<div class="note-warn"><b>读案例时要注意：</b>这些是挑选出来的样例，论文没有统计类似改进出现的频率。Zoe 那个例子里，LLaDA 1.5 满足了“至少三个占位符”的字面要求，但笑话本身靠重复凑数，说明 IFEval 这类按规则自动判分的基准，衡量的是“有没有满足格式约束”，不完全等于回答质量。</div>
+<h4 id="n-4-5">4.5 结果的份量</h4>
+<p>这一小节把上面的数字逐项放回它们的对照条件里，说明哪些结论站得住、哪些需要打折扣。</p>
+<p><b>对照是什么，匹配了什么。</b>表 1 的三列用的是同一个底座（LLaDA 8B Instruct）、同样的 350K 数据、同样的超参数和同样的评测调参方式，所以<b>朴素 DPO 和 VRPO 之间</b>的比较只差在似然估计器上，这是一个干净的对照，直接检验了本文的方法。而 <b>SFT 模型和 LLaDA 1.5 之间</b>的差别混合了三样东西：偏好数据本身（其中一部分被偏好的回答换成了当时最强的大模型的输出，带有蒸馏的成分）、额外加的 0.05 倍 SFT 损失、以及 VRPO。论文没有“只在被偏好的回答上做 SFT”这样的对照，因此 +4.7 这类数字不能全部记在偏好优化上。ACL 版的开源数据实验（§4.4）从侧面印证了这一点：换成公开的 10K 数学偏好数据后，VRPO 相对 SFT 只提升零点几个点。另外，两种 DPO 都没有做超参数搜索（\(\beta=0.2\)、学习率 \(5\times10^{-7}\) 固定），朴素 DPO 可能没有调到它的最好状态，但 VRPO 也没调，这一点对双方是对称的。</p>
+<p><b>提升和评测噪声相比有多大。</b>按二项分布粗估单次评测的标准误（推算）：GSM8K 有 1,319 题，在 80% 左右时标准误约 1.1 个点，+4.7 相当于多做对约 62 题，三次训练的置信区间也都在基线之上，这项提升是可靠的。HumanEval 只有 164 题，标准误约 3.9 个点，+3.0 只相当于多做对约 5 题，而且如上所述，两个模型用的采样方式不同，固定为同一种采样方式时结论可能反过来，所以这项证据偏弱。IFEval 有 541 条指令（论文没说用的是哪一种计分方式），标准误约 2 个点，+4.0 约合 22 条，三次训练也稳定，但同样依赖采样方式的选择。Math 的 +0.4、MT-Bench 的 +0.1、AlignBench 的 +0.5 都在噪声范围内，Math 在 OpenCompass 重测时变成了 −0.4。Arena-Hard 从 10.0 到 14.3，裁判是 gpt-4-32k，只评了一次；这个裁判和公开榜单所用的裁判不一定相同，所以分数不能和公开榜单直接对比。</p>
+<p><b>在测试集上调了多少东西。</b>每个模型、每个任务都在“5 种回答长度 × 5 种块长 × 采样方式”里挑测试集上最好的那个组合。两个模型享受同样的调参，比较是对称的，但报告的绝对分数偏乐观；而且两个模型最后选中的配置不一样（例如 Math 上 LLaDA 1.5 用 1024 的回答长度，LLaDA 用 512），所以一部分差距来自“新模型恰好在另一种配置下更好”。</p>
+<p><b>和自回归模型、其他扩散模型比。</b>原文图 1 右侧的“最高分”比较，口径很不统一：few-shot 示例数有 0、4、8 三种；Dream 7B 的 77.2 是 8-shot 的基座模型分数（<a href="d1.html#n-4-3">d1 精读 §4.3</a> 核对过 Dream 博客的那张表）；d1-LLaDA 的 82.1 是在 GSM8K 训练集上专门做过 RL 之后的 0-shot 分数；图中 LLaMA 3 8B 的 78.0 / 29.5，与 LLaDA 论文表 2 里 LLaMA3 8B Instruct 的 78.3 / 29.6 接近但不相等，论文没有说明来源。训练量也不对等：LLaDA 预训练用了 2.3T token，LLaMA 3 用了约 15T。作为参照，同规模、后训练更完整的 AR 模型 Qwen2.5-7B-Instruct 自己报告的 GSM8K 是 91.6、MATH 是 75.5（见 <a href="llada.html#n-3-2">LLaDA 精读 §3.2</a> 的对照表）。所以“最高分”只在图中挑选的这几个模型里成立，不能说明扩散模型的数学能力已经超过同规模的 AR 模型。</p>
+<p><b>消融的份量。</b>表 2 的每种配置只训练了一次，而表 5 显示单个基准在不同种子之间的标准差约 0.3–1.0 个点。按这个尺度：预算从 1 加到 8，GSM8K 提升 3.2 个点，约为种子标准差的 5 倍，可信；最优分配相对“1×4”提升 1.4 个点，约 2 倍标准差，方向可信；相对“2×2”的 0.5 个点在噪声以内；对偶采样在下游分数上的作用则有正有负。理论预言的方差下降在表 2 里非常明显，而且一致；但方差下降怎样转化为下游分数，只有“加大预算”这一项有清楚的证据。</p>
+<p><b>可复现性和代价。</b>权重以 MIT 许可公开在 Hugging Face，评测配置和脚本公开在 LLaDA 主仓库（EVAL.md，含 OpenCompass 重测）；但训练代码和 350K 数据都没有公开，LLaDA-1.5 仓库里只有一个说明文档。计算上，VRPO 的偏好优化开销是朴素 DPO 的 8 倍左右，405 个 H100 GPU 小时相对预训练很小，但对于想在更大数据上做 DPO 的人并非可以忽略；显存开销论文没有报告。</p>
+<div class="note-warn"><b>一句话总结份量：</b>“在同样数据上，降方差的 DPO 明显好于不降方差的 DPO”这个结论站得住，表 1 的后两列、开源数据实验和表 2 的预算消融都指向同一方向。LLaDA 1.5 相对 LLaDA 在 GSM8K 上的 +4.7 经得起多次训练和换评测工具的检验，但其中多少来自 VRPO、多少来自内部数据和额外的 SFT 项，论文的实验分不开。HumanEval、IFEval 的提升依赖采样方式的选择；Math、MT-Bench、AlignBench 基本没有变化；“同规模最高分”只在一个口径不统一的小集合里成立。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.19223v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S4.T1" target="_blank" rel="noopener">表 1 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S4.T2" target="_blank" rel="noopener">表 2 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A4" target="_blank" rel="noopener">附录 D：实验细节、表 3–6、图 5 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#A5" target="_blank" rel="noopener">附录 E：案例 ↗</a> · <a href="https://aclanthology.org/2026.acl-long.524.pdf" target="_blank" rel="noopener">ACL 版 PDF（附录 B.6–B.9）↗</a> · <a href="https://github.com/ML-GSAI/LLaDA/blob/main/EVAL.md" target="_blank" rel="noopener">官方评测文档 EVAL.md ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 相关工作、局限与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这篇论文和已有的扩散模型对齐工作是什么关系，作者认为自己补上的是哪一块？VRPO 的降方差思路在更早的哪些领域出现过？作者自己承认的局限是什么？</div>
+<p><b>掩码扩散模型这条线。</b>掩码扩散模型源自离散扩散（D3PM 等），后来的工作提出了各种前向、反向过程的变体；在困惑度上，掩码扩散模型能追平 AR 模型，并出现了 SEDD、MDLM、MD4、RADD 等简化的训练目标；再往后是规模化研究，既有从零训练（同组的 SMDM、LLaDA），也有从预训练 AR 模型改造（DiffuLLaMA、Dream）。本站对应的精读页见 <a href="d3pm.html">D3PM</a>、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>、<a href="dream.html">Dream</a>。</p>
+<p><b>扩散模型的对齐这条线。</b>论文列举的工作大致分几类：Zekri 和 Boullé 利用离散扩散反向过程的去噪分布，提出通用的策略梯度方法；Borso 等人把离散扩散看作连续时间马尔可夫链，把每一步去噪当作一个动作，提出一个 DPO 变体，但只在小规模的二进制序列上验证；d1、MMaDA、wd1 等把每个 token 的生成当作动作，做 GRPO 类方法来增强推理；Huang 等人把扩散的中间步骤当作强化学习的轨迹，主要做推理和代码；DiffuCoder 为代码生成提出带“耦合采样”降方差技巧的 GRPO，作者认为它可以和 VRPO 互补使用。作者给自己的定位是：基于 DPO、用 ELBO 近似似然是扩散模型最自然的选择；VRPO 有理论支撑，并且在推理和代码之外的通用对齐任务上做了大规模验证，是对已有方法的补充。</p>
+<p><b>降方差这条线。</b>作者把 VRPO 放进三个更老的领域里看。第一是蒙特卡洛方法本身，经典的降方差技巧有控制变量、分层抽样等，VRPO 借用的是对偶变量的思路来耦合两个相关的 ELBO。第二是“双重随机优化”：ELBO 的两层期望和双重随机梯度下降里的嵌套结构类似，这启发作者用全方差公式拆出两个方差来源。第三是重要性加权的变分推断（IWAE 等）：那里也有“外层的偏差随内层方差减小而减小”的现象，和定理 1 的逻辑相通。</p>
+<p><b>结论。</b>作者总结：他们分析了用 ELBO 估计似然给扩散模型偏好对齐带来的方差和偏差问题，提出有理论保证、经过实验验证的 VRPO；得到的 LLaDA 1.5 在数学、代码和对齐上都强于 LLaDA；消融研究了每个办法对降方差的作用，以及由此带来的优化稳定性；并讨论了推广到其他基于强化学习的对齐算法的可能。</p>
+<p><b>局限（ACL 版新增）。</b>作者列了四点。一是加大采样预算会增加训练开销。二是最优分配只回答了“固定预算怎样在时间和遮法之间分”，没有研究自适应的时间调度，虽然做了初步的按时间的方差分析（§3.3 提到的固定时间实验）。三是方差的大幅下降并不总能转化为基准分数的大幅提升，除了泛化因素，可能还和“人类偏好数据与扩散模型的去噪训练过程之间的不匹配”有关，留给以后研究。四是 PPO、GRPO 上的推广只做了理论讨论，没有实验验证。</p>
+<p><b>伦理声明。</b>论文承认模型仍可能生成歧视性、有偏见或有害的内容，作者在可行范围内过滤了偏好数据中的有害内容。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>v1 的引言和 §4.1 里都有“这些结果表明掩码扩散模型与基于强化学习的对齐算法是兼容的”这类表述，v2 删掉了它们，并把 §2.1 的标题从“基于 RL 的对齐方法”改成了“对齐方法”。这和实验内容是一致的：本文实际做的只是离线的 DPO，没有做在线强化学习。另外，局限第三点提到的“偏好数据与去噪训练不匹配”还有一个更具体的版本：DPO 优化的是 ELBO 意义下的“似然”，而模型实际生成时用的是低置信度重掩码、分块等启发式采样器，两者并不是同一个分布。后来的一些 RL 工作（见下文）正是从“训练和采样不一致”这一点继续推进的。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.19223v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2505.19223v2#S6" target="_blank" rel="noopener">§6 结论 ↗</a> · <a href="https://aclanthology.org/2026.acl-long.524.pdf" target="_blank" rel="noopener">ACL 版（局限、附录 A 相关工作）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>LLaDA 1.5 发表后，“ELBO 估计的方差”成了扩散语言模型强化学习里一个被单独拿出来处理的问题。下面只列本站核对过摘要或论文正文的工作；其中不少被 ACL 版的相关工作一节当作同期工作引用。</p>
+<h4 id="n-impact-1">同一团队的后续</h4>
+<ul>
+  <li><b>LLaDA-MoE</b>（arXiv 2509.24389，第一作者就是本文的 Fengqi Zhu）：从零训练的混合专家掩码扩散模型，约 20T token，总参数 7B、推理时激活 1.4B。摘要称它在多个基准上超过了 LLaDA、LLaDA 1.5 和 Dream；LLaDA 主仓库的说明也写到，它的指令版只用约 1B 激活参数就超过了 8B 稠密的 LLaDA 1.5。</li>
+  <li><b>LLaDA2.0</b>（arXiv 2512.15745）：把 AR 混合专家模型转换成 16B / 100B 的块扩散模型，后训练的最后一步同样是“用 ELBO 代替似然”的 DPO，用了 150 万对偏好数据，\(\beta=0.1\)。见 <a href="llada2.html">LLaDA2.0 精读 §5.3</a>。</li>
+  <li><b>ESPO</b>（arXiv 2512.03759，作者包括 Jingyang Ou 与李崇轩）：把整条回答看作一个动作，用 ELBO 作为序列级似然的代理来做强化学习，用于增强推理和代码能力。</li>
+</ul>
+<h4 id="n-impact-2">围绕估计器方差和代价的工作</h4>
+<ul>
+  <li><b>GDPO</b>（arXiv 2510.08554，Rojas 等）：重新拆解了 ELBO 估计的方差来源，指出普通的双重蒙特卡洛在预算很小时方差会“爆炸”，改为沿少数关键维度做确定性的数值积分（半确定性蒙特卡洛），在紧预算下得到可证明更低方差的估计。这可以看作命题 1 思路的延伸：既然时间带来的波动占大头，就干脆不随机抽时间。摘要称它在多数任务上优于 <i>diffu</i>-GRPO。</li>
+  <li><b>BGPO</b>（arXiv 2510.11683，Lin 等）：指出基于 ELBO 的方法要对非线性项求梯度，必须把所有蒙特卡洛样本都留在计算图里，显存因此限制了样本数（§3.3 的“免费”只是计算上免费）；它构造了一个对每个样本线性可加的下界，使梯度可以逐样本累加、显存恒定，从而能用更大的样本数。</li>
+  <li><b>SPG</b>（arXiv 2510.09541）：认为只用 ELBO 下界会给策略梯度带来单侧偏差，改为同时用真实对数似然的上界和下界把它“夹住”。</li>
+  <li><b>DiffuCoder 的 coupled-GRPO</b>（arXiv 2506.20639）：为同一条回答构造一对互补的掩码来降低估计方差，论文认为它和 VRPO 可以互补。见 <a href="diffucoder.html">DiffuCoder 精读</a>。</li>
+  <li>更多基于 GRPO 的后续（wd1、TraceRL、Flexibility Trap 等），以及它们怎样处理“训练用的似然和实际采样器不一致”的问题，见 <a href="d1.html#n-impact">d1 精读的“后来怎么样了”</a>。</li>
+</ul>
+<p>回头看，LLaDA 1.5 的贡献主要有两点：一是把“用 ELBO 做 DPO 时，估计噪声如何传到损失和梯度里”讲清楚了，并给出三个不改变目标的降方差办法，其中对偶采样几乎不花成本，效果却以数量级计；二是第一次在 8B 规模、通用对齐任务上把扩散模型的偏好优化跑通，并公开了权重。它的数字提升有一部分来自未公开的数据，这一点在读结果时需要记住。想看 d1、LLaDA 1.5、TraceRL 三种似然估计方式的并排对比和配套简答题，见<a href="../legacy/tracks/dllm/17-rl.html#llada-15">旧版结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文（arXiv v2）署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Fengqi Zhu</b>（共同一作）<div class="aff">中国人民大学高瓴人工智能学院博士生，李崇轩的 GSAI-ML 组（组页面）；论文注明本工作在蚂蚁集团实习期间完成</div>LLaDA 与 SMDM（《Scaling up Masked Diffusion Models on Text》，ICLR 2025）的第二作者；之后是 LLaDA-MoE 的第一作者。</div>
+  <div class="author-card"><b>Rongzhen Wang</b>（共同一作）<div class="aff">中国人民大学高瓴人工智能学院博士生，GSAI-ML 组（组页面）</div></div>
+  <div class="author-card"><b>Shen Nie</b><div class="aff">中国人民大学高瓴人工智能学院博士生（2022 年起，导师李崇轩）；本科毕业于西安交通大学</div>LLaDA 与 SMDM 的第一作者，U-ViT（《All are Worth Words》，CVPR 2023）的共同作者。</div>
+  <div class="author-card"><b>Xiaolu Zhang、Chunwei Wu、Jun Hu、Jun Zhou</b><div class="aff">蚂蚁集团（论文署名）</div>其中 Xiaolu Zhang、Jun Hu、Jun Zhou 也是 LLaDA 论文的作者。</div>
+  <div class="author-card"><b>Jianfei Chen</b><div class="aff">清华大学计算机系副教授，TSAIL 组</div>主页列出的研究方向是高效机器学习，包括量化神经网络、随机优化算法和概率推断算法；DPM-Solver 的共同作者（与李崇轩合作）。ACL 版署名中没有他。</div>
+  <div class="author-card senior"><b>Yankai Lin</b>（项目负责人）<div class="aff">中国人民大学高瓴人工智能学院长聘副教授（tenure track）</div>主页列出的研究包括基于大模型的智能体和工具学习，代表作有 ToolLLM（ICLR 2024 spotlight）。</div>
+  <div class="author-card senior"><b>Ji-Rong Wen</b><div class="aff">中国人民大学高瓴人工智能学院执行院长、教授</div>学院主页显示：曾在微软亚洲研究院工作 14 年，任网络搜索与挖掘组负责人；2013 年加入人大；北京智源人工智能研究院首席科学家，曾任 SIGIR 2020 程序委员会主席。</div>
+  <div class="author-card senior"><b>Chongxuan Li</b>（项目负责人、通讯作者）<div class="aff">中国人民大学高瓴人工智能学院长聘副教授，GSAI-ML 组负责人</div>清华大学计算机系博士（导师张钹、朱军），读博期间在阿姆斯特丹大学 AMLab 与 Max Welling 合作一年。主页列出的代表作包括 Analytic-DPM（ICLR 2022 杰出论文奖）、DPM-Solver、ProlificDreamer，以及扩散语言模型 LLaDA（NeurIPS 2025 oral）、LLaDA-V 和本文。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：ACL 2026 主会长文（Proceedings of the 64th Annual Meeting of the ACL, Volume 1: Long Papers，第 11425–11460 页，2026 年 7 月，圣地亚哥；<a href="https://aclanthology.org/2026.acl-long.524/" target="_blank" rel="noopener">ACL Anthology 页面</a>）。arXiv v1 发布于 2025-05-25，v2 于 2025-10-12 更新（补充了理论分析、朴素 DPO 对照与实验细节，修正了图）。</li>
+  <li><b>开源</b>：权重 <a href="https://huggingface.co/GSAI-ML/LLaDA-1.5" target="_blank" rel="noopener">GSAI-ML/LLaDA-1.5</a> 以 MIT 许可发布，截至 2026-10-20 有 41 个点赞，Hugging Face 显示近 30 天下载约 1.2 万次。仓库 <a href="https://github.com/ML-GSAI/LLaDA-1.5" target="_blank" rel="noopener">ML-GSAI/LLaDA-1.5</a> 只有说明文档，54 个 star、3 个 fork（截至 2026-10-20），没有训练代码；推理沿用 LLaDA 的 generate.py，评测配置和 OpenCompass 脚本在 <a href="https://github.com/ML-GSAI/LLaDA" target="_blank" rel="noopener">ML-GSAI/LLaDA</a> 主仓库（约 4.0k star，同日）。</li>
+  <li><b>作为对照</b>：LLaDA-MoE 等后续扩散模型把 LLaDA 1.5 放进对比表；GDPO、BGPO 等扩散模型 RL 工作把“ELBO 估计的方差与代价”当作主要问题，与本文的分析一脉相承。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/17-rl.html#llada-15">旧版结构拆解：dLLM 的强化学习中的 LLaDA 1.5 部分</a>（含 d1、TraceRL 的并排对比与简答题）</li>
+  <li><a href="llada.html">LLaDA 精读页</a>：本文的底座，掩码扩散的训练目标、|EOS| 补齐与各种采样方式</li>
+  <li><a href="d1.html">d1 精读页</a>：同期的在线 RL 做法（<i>diffu</i>-GRPO），一步估计与均场近似</li>
+  <li><a href="mdlm.html">MDLM 精读页</a>：掩码扩散 ELBO 的推导</li>
+  <li><a href="llada2.html">LLaDA2.0 精读页</a>：100B 块扩散模型上基于 ELBO 的 DPO</li>
+  <li><a href="diffucoder.html">DiffuCoder 精读页</a>：coupled-GRPO 的互补掩码</li>
+  <li><a href="mmada.html">MMaDA 精读页</a>：UniGRPO</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Fengqi Zhu, Rongzhen Wang, Shen Nie, Xiaolu Zhang, Chunwei Wu, Jun Hu, Jun Zhou, Jianfei Chen, Yankai Lin, Ji-Rong Wen, Chongxuan Li. <em>LLaDA 1.5: Variance-Reduced Preference Optimization for Large Language Diffusion Models.</em> <a href="https://arxiv.org/abs/2505.19223" target="_blank" rel="noopener">arXiv:2505.19223</a>（v1 2025-05-25，v2 2025-10-12），ACL 2026。论文以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布；本页的原文图 1、2、3、5 取自 arXiv HTML 版（v2）的图片文件，未做修改，版权归原作者。本页是对论文的中文精读笔记，正文与示意图由本站撰写和绘制，并非翻译；数字与结论以原文为准，标“推算”的为本站计算，标“读图估计”的为本站从原图坐标读出的近似值。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

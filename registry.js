@@ -543,7 +543,7 @@ window.ATLAS_REGISTRY = {
         { "date": "2025-08", "label": "D2F：蒸馏出块因果学生，GSM8K 上快于同尺寸 AR", "node": "d2f" },
         { "date": "2025-08", "label": "FlexMDM：插入 [MASK] + 去掩码实现任意顺序变长生成（ICLR 2026）", "url": "https://arxiv.org/abs/2509.01025" },
         { "date": "2025-09", "label": "LLaDA-MoE：从零训练约 20T tokens 的 7B-A1B MoE 掩码扩散", "node": "llada-moe" },
-        { "date": "2025-09", "label": "Fast-dLLM v2：约 1B tokens 把 Qwen2.5 改成块扩散", "node": "fast-dllm-v2" },
+        { "date": "2025-09", "label": "Fast-dLLM v2：约 1.3B tokens 把 Qwen2.5-7B 改成块扩散", "node": "fast-dllm-v2" },
         { "date": "2025-09", "label": "dParallel：确定性强制蒸馏，LLaDA GSM8K 256→30 步", "node": "dparallel" },
         { "date": "2025-09", "label": "TraceRL / TraDo：轨迹感知 RL 与扩散价值模型", "node": "tracerl" },
         { "date": "2025-09", "label": "Dream-Coder 7B：全开放配方的代码 dLLM", "node": "dream-coder" },
@@ -3890,7 +3890,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/s-sahoo/duo-67f9ff8fde919224e5fbd875" }
       ],
       "page": "legacy/tracks/dllm/05-uniform.html",
-      "tldr": "证明在 one-hot 上做高斯扩散再取 argmax，得到的正是均匀态离散扩散；借此用 softmax 松弛做低方差课程（训练约快 2×），并沿高斯确定性轨迹做离散一致性蒸馏，把生成从 1024 步压到 8–16 步。",
+      "reading": "papers/duo.html",
+      "tldr": "论文证明：对 one-hot 向量做高斯扩散、每个时刻取 argmax，得到的正是一个均匀态离散扩散，两边的噪声参数由一个可数值计算的函数一一对应。借这层对应，作者用“低温 softmax 输入 + 窄时间窗”的课程把均匀态模型的训练步数约减半，并沿高斯一侧的确定性轨迹做离散一致性蒸馏，把 1024 步生成压到 16 步（Greedy-Tail 8 步），但困惑度仍落后于掩码扩散。",
       "tags": ["均匀态扩散", "课程学习", "一致性蒸馏", "少步生成"],
       "facts": {
         "noise": "均匀态（uniform prior），由高斯扩散的 argmax 推前得到",
@@ -4297,17 +4298,18 @@ window.ATLAS_REGISTRY = {
       "lane": "scale",
       "title": "Seed Diffusion",
       "full_title": "Seed Diffusion: A Large-Scale Diffusion Language Model with High-Speed Inference",
-      "authors": ["Yuxuan Song", "…", "Hao Zhou"],
+      "authors": ["Yuxuan Song", "Zheng Zhang", "Cheng Luo", "Pengyang Gao", "Fan Xia", "Hao Luo", "Zheng Li", "Yuehang Yang", "Hongli Yu", "Xingwei Qu", "Yuwei Fu", "Jing Su", "Ge Zhang", "Wenhao Huang", "Mingxuan Wang", "Lin Yan", "Xiaoying Jia", "Jingjing Liu", "Wei-Ying Ma", "Ya-Qin Zhang", "Yonghui Wu", "Hao Zhou"],
       "org": "ByteDance Seed; Tsinghua University (AIR)",
       "date": "2025-08",
-      "venue": "",
+      "venue": "arXiv 技术报告",
       "arxiv": "2508.02193",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2508.02193" },
         { "label": "Project", "url": "https://seed.bytedance.com/seed_diffusion" }
       ],
       "page": "legacy/tracks/dllm/10-industrial.html#seed-diffusion",
-      "tldr": "代码 dLLM 预览版：先掩码后编辑噪声的两段课程、ELBO 挑选的受限顺序轨迹蒸馏、最小化轨迹长度的 on-policy 学习，块级半自回归推理；作者称 H20 上 2146 tok/s。",
+      "reading": "papers/seed-diffusion.html",
+      "tldr": "字节跳动 Seed 只用代码数据训练的实验性扩散语言模型的技术报告：先掩码、后加编辑噪声的两段训练，按 ELBO 挑选生成轨迹的受限顺序蒸馏，以及直接减少去噪步数的 on-policy 学习，推理时按块生成并缓存前文。报告自称在 H20 上每秒生成 2,146 个 token，但卡数、批大小和模型大小都未公开；在相同评测协议下，它在八项代码基准中有七项略低于同源的 AR 模型 Seed-Coder-8B-Instruct，只在 CanItEdit 上更高。",
       "tags": ["代码", "编辑噪声", "on-policy", "速度"],
       "facts": {
         "noise": "前 80% 训练步掩码噪声，后 20% 加入基于编辑（插入/删除/替换）的噪声",
@@ -4387,10 +4389,10 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "SDAR",
       "full_title": "SDAR: A Synergistic Diffusion-AutoRegression Paradigm for Scalable Sequence Generation",
-      "authors": ["Shuang Cheng", "…", "Bowen Zhou"],
+      "authors": ["Shuang Cheng", "Yihan Bian", "Dawei Liu", "Linfeng Zhang", "Qian Yao", "Zhongbo Tian", "Wenhai Wang", "Qipeng Guo", "Kai Chen", "Biqing Qi", "Bowen Zhou"],
       "org": "Shanghai AI Laboratory; Zhejiang University; UMD; Shanghai Jiao Tong University; Tsinghua University",
       "date": "2025-10",
-      "venue": "",
+      "venue": "ACL 2026 Findings",
       "arxiv": "2510.06303",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2510.06303" },
@@ -4398,7 +4400,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/JetLM/sdar-689b1b6d392a4eeb2664f8ff" }
       ],
       "page": "legacy/tracks/dllm/12-ar-to-block.html",
-      "tldr": "把训练好的 AR 模型用 50B tokens 继续训练转成块扩散（块间 AR、块内并行去噪），在 1.7B–30B（含 MoE）上与同管线 AR 基本持平；2B 受控实验显示 AR 底座比掩码扩散底座更省算力。",
+      "reading": "papers/sdar.html",
+      "tldr": "把训练好的 Qwen3 自回归模型（1.7B 到 30B，含 MoE）只用 50B token 继续训练加 4B token 指令微调，就改造成块扩散模型（块与块之间从左到右、块内并行去噪），分数与走同样流程的 AR 模型基本持平。在单张 H200 上，小 batch 时实测最快约为 AR 的 2.3 倍，但 batch 到 64 以上就不再领先。",
       "tags": ["AR 转换", "块扩散", "MoE", "LMDeploy"],
       "facts": {
         "noise": "块内吸收态掩码 [M]，块间不加噪",
@@ -4417,7 +4420,7 @@ window.ATLAS_REGISTRY = {
       "lane": "block",
       "title": "Fast-dLLM v2",
       "full_title": "Fast-dLLM v2: Efficient Block-Diffusion LLM",
-      "authors": ["Chengyue Wu", "…", "Enze Xie"],
+      "authors": ["Chengyue Wu", "Hao Zhang", "Shuchen Xue", "Shizhe Diao", "Yonggan Fu", "Zhijian Liu", "Pavlo Molchanov", "Ping Luo", "Song Han", "Enze Xie"],
       "org": "The University of Hong Kong; NVIDIA; MIT",
       "date": "2025-09",
       "venue": "ICLR 2026",
@@ -4428,16 +4431,17 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/Efficient-Large-Model/Fast_dLLM_v2_7B" }
       ],
       "page": "legacy/tracks/dllm/12-ar-to-block.html#fast-dllm-v2",
-      "tldr": "以约 1B tokens 把 Qwen2.5-Instruct 微调成块扩散：互补掩码让每个 token 都受监督，token shift 贴近原 AR 头；推理用块级精确 KV + 块内子块 DualCache + 置信度阈值并行。",
+      "reading": "papers/fast-dllm-v2.html",
+      "tldr": "它用约 1.3B token 的 SFT 把 Qwen2.5-7B-Instruct 改造成块长 32 的块扩散模型（块对齐填充、互补掩码、token shift），推理时把精确的块级缓存、块内置信度并行解码和子块缓存叠在一起。与同数据、同步数的自回归微调相比平均分相当（代码更好，MATH 和 IFEval 更差），A100 上单条请求约快 2.5 倍，批大小 64 时降到 1.5–1.8 倍。",
       "tags": ["AR 转换", "块扩散", "互补掩码", "分层缓存"],
       "facts": {
         "noise": "块内随机掩码 m 与互补掩码 1−m 两个视图",
-        "init": "Qwen2.5-1.5B / 7B-Instruct；约 1B tokens SFT（作者自述），64×A100、8–12 h",
+        "init": "Qwen2.5-1.5B / 7B-Instruct；SFT 7B 用约 1.31B、1.5B 用约 3.15B tokens（附录 A.1：步数 × 256 × 2048），64×A100、8–12 h",
         "attn": "块内双向、块间因果；块级 KV 精确，块内子块用近似 DualCache",
         "decode": "块 D=32、子块 8、置信度阈值 0.9；质量主表阈值为 1（不并行）",
         "train": "掩码位交叉熵（式中无 1/t），token shift（用 i−1 的隐状态预测 i），样本 pad 到块长整数倍",
         "eval": "7B 平均 60.3 vs 同数据 NTP 微调 AR 59.6（Tab. 1，但 MATH 61.6 vs 72.0）；GSM8K 吞吐在 batch 64 时 A100 1.5×、H100 1.8×（Fig. 5）",
-        "limits": "推理块长须与训练一致；AR 基线的推理引擎未写明；约 1B tokens 无法由文中步数核算"
+        "limits": "推理块长须与训练一致；AR 基线的推理引擎未写明"
       }
     },
     {
@@ -4607,7 +4611,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Code", "url": "https://github.com/horseee/dKV-Cache" }
       ],
       "page": "legacy/tracks/dllm/14-kv-cache.html#dkv-cache",
-      "tldr": "观察到 token 被定稿那一步 K/V 变化最大、之后趋于稳定，于是只缓存已定稿 token 并延迟一步写入、定期刷新（Decode 近无损；Prefill / PD 缓存提示；Greedy 版降到 O(L²)），免训练 2–10× 加速。",
+      "reading": "papers/dkv-cache.html",
+      "tldr": "掩码扩散模型的双向注意力让 key/value 每一步都在变，没法照搬自回归模型的 KV 缓存。本文发现 token 定稿之后表示才趋于稳定，于是只缓存已定稿的 token、比定稿再晚一步才存、并定期整段刷新，免训练地让 LLaDA 和 Dream 提速约 2–10 倍（10 倍来自长提示、短输出、只缓存提示的设置）。",
       "tags": ["免训练", "延迟缓存", "近似 KV cache"],
       "facts": {
         "noise": "不改模型（沿用掩码扩散）",
@@ -4626,18 +4631,19 @@ window.ATLAS_REGISTRY = {
       "lane": "decode",
       "title": "D2F",
       "full_title": "Diffusion LLMs Can Do Faster-Than-AR Inference via Discrete Diffusion Forcing",
-      "authors": ["Xu Wang", "…", "Zhijie Deng"],
+      "authors": ["Xu Wang", "Chenkai Xu", "Yijie Jin", "Jiachun Jin", "Hao Zhang", "Zhijie Deng"],
       "org": "Shanghai Jiao Tong University; UC San Diego; Shanghai University",
       "date": "2025-08",
       "venue": "ICLR 2026",
       "arxiv": "2508.09192",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2508.09192" },
-        { "label": "Code", "url": "https://github.com/zhijie-group/Discrete-Diffusion-Forcing" },
+        { "label": "Code", "url": "https://github.com/SJTU-DENG-Lab/Discrete-Diffusion-Forcing" },
         { "label": "Weights", "url": "https://huggingface.co/SJTU-Deng-Lab/D2F_LLaDA_Instruct_8B_Lora" }
       ],
       "page": "legacy/tracks/dllm/14-kv-cache.html#d2f",
-      "tldr": "离散扩散强制：块掩码率单调递增，学生改为块间因果并以非对称 KL 从双向教师蒸馏（LoRA），获得精确块级 KV；流水线并行解码让后块不等前块写完。GSM8K 上 D2F-Dream 119.9 tok/s，为 LLaMA3-8B 的 2.5×。",
+      "reading": "papers/d2f.html",
+      "tldr": "D2F 把现成的双向扩散语言模型（LLaDA、Dream）用 LoRA 蒸馏成块内双向、块间因果的学生：训练时越靠后的块遮得越多，学生只看前文却要模仿看全文的老师，于是写完的块能精确缓存，后一块也不必等前一块写完就能开始解码。单条请求下，D2F-Dream 在 GSM8K 上每秒生成 119.9 个 token，约为 LLaMA3-8B 的 2.5 倍，但 AR 基线的推理框架未说明，分数也低于同源的 Qwen2.5-7B。",
       "tags": ["蒸馏", "块因果", "精确 KV cache", "流水线并行"],
       "facts": {
         "noise": "块间单调递增的掩码率（0.3–0.7）",
@@ -4875,11 +4881,12 @@ window.ATLAS_REGISTRY = {
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2505.19223" },
         { "label": "ACL Anthology", "url": "https://aclanthology.org/2026.acl-long.524/" },
-        { "label": "Code", "url": "https://github.com/ML-GSAI/LLaDA-1.5" },
+        { "label": "README（无训练代码）", "url": "https://github.com/ML-GSAI/LLaDA-1.5" },
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/LLaDA-1.5" }
       ],
       "page": "legacy/tracks/dllm/17-rl.html#llada-15",
-      "tldr": "用 ELBO 代替对数似然做 DPO，证明损失与梯度的偏差和方差都受偏好分数估计方差控制；以增大预算、全部分给时间步、策略与参考对偶采样三种无偏手段降方差（VRPO），得到 LLaDA 1.5。",
+      "reading": "papers/llada-1-5.html",
+      "tldr": "掩码扩散模型算不出 DPO 需要的对数似然，只能用 ELBO 的蒙特卡洛估计代替；论文证明这个估计的方差同时决定了 DPO 损失和梯度的偏差与方差，并用加大采样、把样本全部分给不同时间步、让当前模型与参考模型共用同一组遮法三个办法把它压下来（VRPO）。在 LLaDA 8B Instruct 上用 35 万个内部偏好对训练一轮后，GSM8K、GPQA、HumanEval、IFEval、Arena-Hard 提升 3–5 个点，而不降方差的朴素 DPO 在其中几项反而下降。",
       "tags": ["偏好优化", "DPO", "ELBO", "方差缩减"],
       "facts": {
         "noise": "掩码扩散；ELBO 用双重蒙特卡洛估计",
@@ -4935,11 +4942,12 @@ window.ATLAS_REGISTRY = {
       "arxiv": "2506.20639",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2506.20639" },
-        { "label": "Code", "url": "https://github.com/apple/ml-diffucoder" },
+        { "label": "Code", "url": "https://github.com/apple-aiml-research/ml-diffucoder" },
         { "label": "Weights", "url": "https://huggingface.co/apple/DiffuCoder-7B-cpGRPO" }
       ],
       "page": "legacy/tracks/dllm/18-code.html",
-      "tldr": "由 Qwen2.5-Coder-7B 改造、训练 130B 代码 token 的 7B 掩码扩散模型。用局部 / 全局 AR 性指标分析解码顺序，发现温度会同时改变 token 与生成顺序；提出用互补掩码估计 log π 的 coupled-GRPO，使 EvalPlus +4.4。",
+      "reading": "papers/diffucoder.html",
+      "tldr": "Apple 与港大从 AR 代码模型 Qwen2.5-Coder-7B 出发，用 130B 代码 token 改造出 7B 掩码扩散模型 DiffuCoder，并发现提高采样温度会同时改变它“写什么”和“先写哪里”。基于这种多样性，论文提出用一对互补掩码估计 token 对数概率的 coupled-GRPO，只用 2.1 万道题就把 EvalPlus 从 63.6 提到 67.9，但所有分数都是在每步只定一个 token 的条件下测得的。",
       "tags": ["代码", "AR 性", "coupled-GRPO", "RL", "AR 改造"],
       "facts": {
         "noise": "掩码（absorbing）扩散，加权交叉熵 1/t",
@@ -5060,7 +5068,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/GSAI-ML/LLaDA-V" }
       ],
       "page": "legacy/tracks/dllm/19-multimodal.html#llada-v",
-      "tldr": "LLaVA 式视觉指令微调（SigLIP2 + MLP），把语言塔换成 LLaDA-8B，只对回答做掩码扩散；与流水线完全相同、只换语言塔的 LLaMA3-V 对照，18 个基准中 11 个胜出，数据扩展性更好。",
+      "reading": "papers/llada-v.html",
+      "tldr": "LLaDA-V 沿用 LLaVA 的视觉指令微调配方（SigLIP2 视觉塔、两层 MLP、三阶段约 1,600 万条数据），只把语言塔换成掩码扩散模型 LLaDA-8B，训练时只遮回答、整段对话双向注意力。与流程完全相同、只换回 LLaMA3-8B 的对照模型相比，它在 18 个基准中赢 11 个：多学科知识题更强，图表、文档和真实场景照片较弱。",
       "tags": ["多模态", "视觉指令微调", "AR 对照"],
       "facts": {
         "noise": "只掩回答（图像特征与问题保持干净），掩码扩散 1/t",
@@ -5090,7 +5099,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Weights", "url": "https://huggingface.co/collections/jacklishufan/lavida-10-682ecf5a5fa8c5df85c61ded" }
       ],
       "page": "legacy/tracks/dllm/19-multimodal.html#lavida",
-      "tldr": "LLaDA / Dream 骨干的扩散 VLM：用互补掩码让每个回答 token 都有监督，推理时用前缀 DLM 缓存视觉与问题的 K/V（COCO 上约 3.9× 加速），用凸的时间步偏移（α=1/3）保住少步质量；受约束看图写诗的约束满足率为 100%。",
+      "reading": "papers/lavida.html",
+      "tldr": "LaViDa 按 LLaVA 的做法给掩码扩散语言模型 LLaDA / Dream 接上 SigLIP 视觉编码器，用互补掩码让每个回答 token 都参与训练，用只在推理时启用的前缀缓存避免每步重算约 1000 个视觉 token，用凸的时间步偏移保住少步数时的质量。在相同图文数据规模下，它在 14 个理解基准上与自回归的 Open-LLaVA-Next-8B 七胜七负（OCR 明显落后），COCO 描述在减半步数时比自回归基线更快也更好，受约束写诗的约束满足率为 100%。",
       "tags": ["多模态", "互补掩码", "前缀缓存", "时间步偏移", "填空"],
       "facts": {
         "noise": "只掩回答；每个样本一对互补掩码（官方代码为不加权的 CE 均值）",

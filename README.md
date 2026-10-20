@@ -42,6 +42,7 @@
     - [SEDD](papers/sedd.html)
     - [MDLM（含 MD4）](papers/mdlm.html)
     - [Discrete Flow Matching](papers/discrete-flow-matching.html)
+    - [Duo](papers/duo.html)
   - 规模：
     - [LLaDA](papers/llada.html)
     - [Dream 7B](papers/dream.html)
@@ -50,12 +51,21 @@
     - [Block Diffusion](papers/block-diffusion.html)
     - [Fast-dLLM](papers/fast-dllm.html)
     - [DFlash](papers/dflash.html)
+    - [Fast-dLLM v2](papers/fast-dllm-v2.html)
+    - [SDAR](papers/sdar.html)
+    - [dKV-Cache](papers/dkv-cache.html)
+    - [D2F](papers/d2f.html)
   - 后训练与局限：
     - [d1](papers/d1.html)
     - [Train for the Worst, Plan for the Best](papers/token-ordering.html)
+    - [LLaDA 1.5](papers/llada-1-5.html)
+    - [DiffuCoder](papers/diffucoder.html)
   - 多模态与工业：
     - [MMaDA](papers/mmada.html)
     - [Mercury](papers/mercury.html)
+    - [Seed Diffusion](papers/seed-diffusion.html)
+    - [LLaDA-V](papers/llada-v.html)
+    - [LaViDa](papers/lavida.html)
 - 循环 Transformer（looped / recurrent-depth）。每页都有“结果的份量”一节，写明每个比较到底对齐了什么（参数、训练算力、推理算力、KV 缓存还是数据）。
   - 奠基与理论：
     - [Universal Transformer](papers/universal-transformers.html)

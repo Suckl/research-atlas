@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DiffuCoder / coupled-GRPO 精读</title>
+<meta name="description" content="DiffuCoder（ICLR 2026）逐节精读：从 Qwen2.5-Coder 改造出的 7B 掩码扩散代码模型怎么训练，局部 / 全局 AR 性与熵汇说明了什么，温度为什么会同时改变写什么和先写哪，coupled-GRPO 的互补掩码怎样降低对数概率估计的方差，以及这些数字是在什么条件下得到的。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="dllm" data-node="diffucoder">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · 扩散 LLM · ICLR 2026</div>
+  <h1>DiffuCoder：看清掩码扩散模型怎样写代码，再为它设计强化学习</h1>
+  <p class="en-title">DiffuCoder: Understanding and Improving Masked Diffusion Models for Code Generation</p>
+  <div class="paper-authors">Shansan Gong<sup>1‡2</sup>, Ruixiang Zhang<sup>1</sup>, Huangjie Zheng<sup>1</sup>, Jiatao Gu<sup>1</sup>, Navdeep Jaitly<sup>1†</sup>, Lingpeng Kong<sup>2†</sup>, Yizhe Zhang<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Apple　<sup>2</sup>The University of Hong Kong　<sup>†</sup>Core advising　<sup>‡</sup>在 Apple 实习期间完成</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2506.20639" target="_blank" rel="noopener">arXiv 2506.20639 ↗</a>
+    <a class="pill" href="https://iclr.cc/virtual/2026/poster/10011497" target="_blank" rel="noopener">ICLR 2026 ↗</a>
+    <a class="pill" href="https://github.com/apple-aiml-research/ml-diffucoder" target="_blank" rel="noopener">Code: apple-aiml-research/ml-diffucoder ↗</a>
+    <a class="pill" href="https://huggingface.co/apple/DiffuCoder-7B-cpGRPO" target="_blank" rel="noopener">权重：apple/DiffuCoder-7B-cpGRPO ↗</a>
+    <a class="pill" href="../legacy/tracks/dllm/18-code.html">结构拆解：代码扩散模型</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>837</b><span>GitHub star（apple-aiml-research/ml-diffucoder，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页依据 arXiv v2（2025-06-26）、arXiv 上的 TeX 源文件（图中的数值由本站从矢量图读出）和官方仓库代码；ICLR 2026 定稿版若有改动，本站未逐项核对。官方仓库原地址 github.com/apple/ml-diffucoder 现已跳转到 apple-aiml-research 组织下。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文以 CC BY-NC-SA 4.0 发布，不允许本站直接转载原图，所以页面里的图都是本站自己画的示意图或按论文数字重画的简化图表，每张图都附有原图链接。标“推算”的数字是本站根据论文或官方代码算出来的，标“读图”的数字是本站从论文 TeX 源文件里的矢量图坐标换算出来的约值，都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>扩散语言模型（dLLM）生成文字的方式和 ChatGPT 这类自回归（AR）模型不同。AR 模型从左到右一个词一个词地写，写下的词不能再改；掩码扩散模型则先在回答的位置上铺满“空白”（<code>[MASK]</code>，下文记作 <code>[M]</code>），然后一轮一轮地把空白填上，每一轮都能看到整张画布，原则上可以先写后面、再回头补前面。直觉上，这种方式特别适合写代码：程序员常常先定下函数签名和返回值，再回头填中间的逻辑。Mercury、Gemini Diffusion 这些商用扩散模型也宣称在代码上能和顶尖的 AR 模型打平。</p>
+<p>可是到 2025 年中，开源的扩散模型在代码上还明显落后，而且没有人认真量过：这些模型实际解码时到底有多“不按顺序”？另一方面，已有的给扩散模型做强化学习（RL）的方法，比如 d1，都依赖“半自回归”的分块解码，也就是把回答切成小块、一块一块从左往右写，这又把扩散模型“全局规划”的特点丢掉了。</p>
+<p>这篇论文做了三件事。第一，它从 AR 代码模型 Qwen2.5-Coder-7B 出发，用 130B 个代码 token 继续训练，把它改造成一个 7B 的掩码扩散代码模型 <b>DiffuCoder</b>，再做指令微调，作为后面所有分析的“实验台”。第二，它定义了两个指标来度量解码顺序有多接近从左到右（<b>局部 AR 性</b>和<b>全局 AR 性</b>），发现了一个叫<b>熵汇</b>（entropy sink）的现象，并指出：对扩散模型来说，提高采样温度不仅让“写哪个词”更多样，还让“先写哪个位置”更多样。第三，它利用这种多样性设计了一个不需要分块解码的 RL 算法 <b>coupled-GRPO</b>：在估计每个 token 的对数概率时，用一对<b>互补</b>的掩码，让每个 token 恰好在其中一份里被遮住、在另一份里可见，从而降低估计的方差。</p>
+<p>最重要的结果是：在 DiffuCoder-Instruct 上只用 2.1 万道题、训练 1 个 epoch，coupled-GRPO 把 EvalPlus（HumanEval+ 与 MBPP+ 的平均分）从 63.6 提高到 67.9，即摘要里的“+4.4%”；而且 RL 之后把解码步数减半时，掉分比 RL 之前少。需要先说清的是：这些分数都是在“每步只定 1 个 token”的设置下测的，论文没有报告实际速度；同样数据训练的 AR 模型在绝对分数上仍然更高（§5.6 会详细讨论）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一段小函数，三种不同的“落笔顺序”（格子里的数字是第几步写下这一格）</div>
+  <div class="dia-row"><span class="lbl">token</span><div class="cells"><span class="cell">def</span><span class="cell">f</span><span class="cell">(</span><span class="cell">x</span><span class="cell">)</span><span class="cell">:</span><span class="cell">ret</span><span class="cell">x</span><span class="cell">+</span><span class="cell">1</span><span class="cell">pad</span><span class="cell">pad</span></div></div>
+  <div class="dia-row"><span class="lbl">AR 模型</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell b">5</span><span class="cell b">6</span><span class="cell b">7</span><span class="cell b">8</span><span class="cell c">9</span><span class="cell c">10</span><span class="cell c">11</span><span class="cell c">12</span></div></div>
+  <div class="dia-out">严格从左到右，写到结束符为止。</div>
+  <div class="dia-row"><span class="lbl">dLLM，低温度</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span><span class="cell b">5</span><span class="cell b">6</span><span class="cell c">9</span><span class="cell c">10</span><span class="cell c">11</span><span class="cell c">12</span><span class="cell b">7</span><span class="cell b">8</span></div></div>
+  <div class="dia-out">大体从左到右，但画布末尾的填充符（pad）很“好猜”，常常提前被定下。</div>
+  <div class="dia-row"><span class="lbl">dLLM，高温度</span><div class="cells"><span class="cell a">1</span><span class="cell a">4</span><span class="cell b">5</span><span class="cell b">6</span><span class="cell b">7</span><span class="cell a">3</span><span class="cell c">10</span><span class="cell c">12</span><span class="cell c">11</span><span class="cell c">9</span><span class="cell a">2</span><span class="cell b">8</span></div></div>
+  <div class="dia-out">先定下开头、结尾和长度，关键的那一行逻辑反而最后才写。</div>
+  <div class="dia-note">本站示意图，不是论文数据。蓝 = 前 4 步，绿 = 中间 4 步，橙 = 最后 4 步。论文用真实样本画了同样的现象，见 <a href="https://arxiv.org/html/2506.20639v2#S0.F1" target="_blank" rel="noopener">原文图 1(a) ↗</a>（温度 1.2）和 <a href="https://arxiv.org/html/2506.20639v2#A3.F10" target="_blank" rel="noopener">附录图 10 ↗</a>（温度 0.2 与 1.2 对比）。</div>
+</div>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>DiffuCoder 是怎么从一个 AR 代码模型改造出来的，每个阶段用了多少数据？它和 AR 模型比，比的是什么？</li>
+  <li>局部 AR 性和全局 AR 性分别怎么算？“熵汇”是什么，它为什么会让扩散模型仍然偏向从左往右写？</li>
+  <li>为什么温度会改变扩散模型的生成顺序？pass@k 和 RL 有什么关系？</li>
+  <li>RL 为什么需要每个 token 的对数概率？掩码扩散模型怎么估计它，d1 的估计有什么偏差？</li>
+  <li>一对互补掩码为什么能降低方差？这种估计在代码里具体怎么实现，和论文的公式有哪些出入？</li>
+  <li>+4.4 这个提升是和谁比、在什么条件下测的，有哪些地方要打折扣？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2506.20639" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么拿代码来研究扩散模型，又为什么要重新设计 RL</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散语言模型号称能“全局规划”，代码生成看起来正好需要这种能力，那么开源扩散模型在代码上为什么还不行？已有的扩散模型后训练方法（DPO、GRPO）效果有限，或者要靠分块解码才有效，问题出在哪里？作者打算先“看清”模型的解码行为，再据此设计 RL，这条思路的逻辑是什么？</div>
+<div class="note-pre"><b>先补一点背景：掩码扩散模型怎样生成一段回答，什么叫“半自回归”。</b>
+<p>以 LLaDA、Dream 为代表的掩码扩散语言模型，生成时先把题目（prompt）放在前面，后面接一段固定长度的 <code>[M]</code> 当作“画布”。每一步，模型看着整张画布（双向注意力，前后都能看到），为每个 <code>[M]</code> 位置预测一个词的分布；然后按某种规则挑出几个位置，把预测的词填进去，其余位置继续保持 <code>[M]</code>。重复若干步，直到画布填满。挑位置的规则常用“低置信度重掩码”：只保留模型最有把握的那几个位置，其余的重新遮回去，下一步再猜。LLaDA 用“预测概率最大值”衡量把握大小，Dream 用“预测分布的负熵”（熵越小越笃定）。</p>
+<p>如果每步只填 1 个位置，步数就等于画布长度，生成的次数和 AR 模型一样多，而且每一步都要把整段序列重新算一遍（没有 AR 那样的 KV 缓存），所以反而更慢；步数越少、每步填得越多，才可能更快，但质量通常会下降。</p>
+<p><b>半自回归（分块）解码</b>是一种折中：把画布切成若干小块（比如每块 32 个 token），块与块之间严格从左到右，只在块内部按置信度挑位置。块越小，就越接近 AR 的从左到右。LLaDA 的指令模型在一些任务上要靠分块解码才能拿到好分数，d1 等 RL 工作也依赖它。这样做虽然有效，但等于又把“从左到右”硬塞回去了，模型自己的“先写哪里”就发挥不出来。详细的生成过程见 <a href="llada.html#n-2-4">LLaDA 精读页 §2.4</a> 和 <a href="dream.html#n-4-4">Dream 精读页 §4.4</a>，分块的系统化版本见 <a href="block-diffusion.html">Block Diffusion 精读页</a>。</p>
+</div>
+<p>作者的出发点是一个朴素的观察：写代码本来就不是严格从左往右的。人会先写函数头、想好返回什么，再回头补中间的实现，还会来回修改。扩散模型每一步都能看到整段文字，听上去天然适合这种“来回”的写法。商用的 Mercury 和 Gemini Diffusion 也确实声称代码能力能和顶尖 AR 模型相当。但开源模型的情况并不乐观：后面的表 1 会显示，Dream-7B 和 LLaDA-8B 在代码上都落后于同规模的 AR 代码模型。</p>
+<p>后训练这一侧也有问题。按论文的评价，LLaDA 1.5 用 DPO 做偏好对齐，提升幅度有限；d1 和 MMaDA 用 GRPO 做强化学习，但 rollout 和评测都依赖小块的半自回归解码。作者认为这偏离了扩散模型的初衷。所以论文的路线是：先弄清楚扩散模型解码时“到底有多不自回归”，再设计一套“扩散原生”的 RL 方法，不借助分块解码。</p>
+<p>为此，作者需要一个足够强、而且自己能控制训练全过程的模型，这就是 DiffuCoder：7B 规模，在 130B 个有效代码 token 上训练（“有效”是因为其中一部分数据重复了多遍，见 §3）。论文的贡献依次是：</p>
+<ol>
+  <li>训练并开源一个 7B 的代码扩散模型和完整的训练配方（§3）。</li>
+  <li>提出局部和全局 AR 性两个指标，追踪它们在不同模型、不同数据、不同训练阶段的变化，并发现高温采样会让生成顺序更不 AR（§4）。</li>
+  <li>提出 coupled-GRPO，用互补掩码估计 token 对数概率，并用“对偶变量”方差缩减技巧证明它的方差更小（§5、附录 A.4）。</li>
+  <li>实验上，coupled-GRPO 只用 2.1 万个样本就把 EvalPlus 提高了 4.4 分。</li>
+</ol>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“在 130B token 上训练的 7B 模型”很容易被读成“从零训练”。实际上 DiffuCoder 的起点是 Qwen2.5-Coder-7B，而 Qwen2.5-Coder 本身是在 Qwen2.5 的基础上又继续预训练了 5.5T 以上的 token（Qwen2.5-Coder 技术报告摘要）。所以 130B 只是“把 AR 模型改造成扩散模型”这一段的数据量，模型的大部分知识来自 AR 预训练。这一点在后面比较“扩散 vs AR”时非常关键。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：掩码扩散、把去噪看成决策过程、GRPO</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>后面所有内容都建立在三样东西上：掩码扩散模型的训练目标（一个按 \(1/t\) 加权的交叉熵）、把多步去噪过程看成一个“马尔可夫决策过程”从而能用策略梯度、以及 GRPO 这种不需要价值网络的策略优化算法。这一节把三者串起来，并说明为什么到了扩散模型这里，GRPO 里最基本的一个量——每个 token 的对数概率——突然变得很难算。</div>
+
+<h4 id="n-2-1">2.1 掩码扩散模型：随机遮住，整体猜回，按 1/t 加权</h4>
+<p>扩散模型都有一个“加噪”的前向过程和一个“去噪”的反向过程。对文本来说，最成功的一类是<b>吸收态</b>（absorbing）离散扩散，也就是掩码扩散：前向过程把每个 token 以一定概率换成 <code>[M]</code>，一旦变成 <code>[M]</code> 就不再变回来（所以叫“吸收”）。用连续时间来描述时，时刻 \(t\in[0,1]\) 就是<b>掩码比例</b>：\(t=0\) 是原文，\(t=1\) 是全部遮住，中间时刻每个 token 独立地以概率 \(t\) 被遮住。</p>
+<p>反向过程由一个 Transformer \(f_{\theta}\) 完成：输入一段部分被遮住的序列 \(x_t\)，输出每个位置的词分布。训练目标是负对数似然的一个上界（ELBO），在线性噪声调度 \(\alpha_t=1-t\) 下化简成一个很直观的形式（论文式 (1)，附录 A.1 有推导）：</p>
+<div class="formula">$$\mathcal L_t=\frac{1}{t}\,\mathbb E_{q(x_t\mid x_0)}\Big[-\sum_{n=1}^{N}\mathbf 1\big[x_t^n=\texttt{[M]}\big]\,\log f_{\theta}\big(x_t\big)_n\big[x_0^n\big]\Big]$$</div>
+<p>读法是：随机抽一个掩码比例 \(t\)，按这个比例遮住原文 \(x_0\) 的一部分得到 \(x_t\)，让模型猜被遮住的那些位置原来是什么，只对被遮住的位置计交叉熵，最后乘上 \(1/t\)。为什么要乘 \(1/t\)？因为遮得少的时候（\(t\) 小），被计入损失的位置也少，乘 \(1/t\) 正好把它“放大”回整句的量级；从理论上说，正是这个权重让 \(\mathbb E_t[\mathcal L_t]\) 成为 \(-\log p_{\theta}(x_0)\) 的上界。这个结论在 <a href="mdlm.html#n-3-6">MDLM 精读页 §3.6</a> 有完整推导。</p>
+<p>这个式子有一个后面会反复用到的性质：<b>每一次抽样，只有被遮住的位置才贡献信号</b>。一个 token 如果这次没被遮住，它这次就“没被评估”。</p>
+
+<h4 id="n-2-2">2.2 把去噪看成决策过程：RL 为什么需要每一步的对数概率</h4>
+<div class="note-pre"><b>先补一点背景：策略梯度。</b>
+<p>把模型看成一个“策略” \(\pi_{\theta}\)：在某个状态下按一定概率采取某个动作。强化学习的目标是让奖励的期望 \(J(\theta)\) 尽量大。REINFORCE 给出的梯度是：</p>
+<div class="formula">$$\nabla_{\theta} J=\mathbb E\Big[\sum_{t}\nabla_{\theta}\log\pi_{\theta}(a_t\mid s_t)\;r_t\Big]$$</div>
+<p>意思是：采样一条完整轨迹，如果它最后拿到的回报高，就沿着“让这条轨迹上每个动作的概率变大”的方向走一步。要计算这个梯度，<b>必须能以可求导的方式算出每个动作的对数概率</b> \(\log\pi_{\theta}(a_t\mid s_t)\)。</p>
+<p>对 AR 语言模型来说，“动作”就是下一个 token，\(\log\pi_{\theta}(o^k\mid c,o^{&lt;k})\) 由一次前向计算就能对所有位置同时得到（因果注意力保证第 \(k\) 个位置只看到前面）。这是 AR 模型做 RL 如此方便的根本原因。</p>
+</div>
+<p>DDPO、DPPO 等工作把（连续）扩散模型的去噪过程看成一个马尔可夫决策过程（MDP）。论文照搬到掩码扩散上：状态是 \(s_t=(c,t,x_t)\)，即题目 \(c\)、当前时刻和当前的半成品画布；动作是下一步的画布 \(a_t=x_{t-1}\)；策略就是模型的一步去噪分布 \(\pi_{\theta}(a_t\mid s_t)=p_{\theta}(x_{t-1}\mid x_t,c)\)。中间步骤的好坏很难打分，所以奖励只在最后一步给出：\(R=r(x_0,c)\)，例如生成的代码通过了多少测试。于是策略梯度变成：</p>
+<div class="formula">$$\nabla_{\theta} J=\mathbb E\Big[\sum_{t}\nabla_{\theta}\log p_{\theta}\big(x_{t-1}\mid x_t,c\big)\;r(x_0,c)\Big]$$</div>
+<p>理论上这很干净，实际上很麻烦：一条回答如果用 256 步生成，就有 256 个动作，每个动作的概率都要在当时那张半成品画布上算一次前向，而且要保留梯度。这比 AR 模型的“一次前向全部拿到”贵了两个数量级。所以实践中没有人真的回放整条去噪轨迹，而是找一个便宜的“代理量”来代替每个 token 的对数概率，这正是 §5 的主题。</p>
+
+<h4 id="n-2-3">2.3 GRPO：用组内平均当基准，再加裁剪和 KL</h4>
+<div class="note-pre"><b>先补一点背景：GRPO 的三个零件。</b>
+<p><b>组内相对优势。</b>对每道题 \(c\)，用采样时的旧策略生成一组 \(G\) 条回答 \(\{o_i\}\)，每条得到奖励 \(r(o_i)\)。用这组奖励的平均值当“基准”，第 \(i\) 条的优势就是 \(A_i=r(o_i)-\frac1G\sum_j r(o_j)\)：比同组平均好的回答被鼓励，差的被抑制。这样就不需要 PPO 里那个和策略一样大的价值网络。</p>
+<p><b>重要性比值与裁剪。</b>同一批回答会被拿来连续更新好几次参数（DiffuCoder 是 \(\mu=2\) 次），第二次更新时参数已经变了，所以要乘一个修正系数 \(\rho_i^k=\pi_{\theta}(o_i^k\mid\cdot)/\pi_{\text{old}}(o_i^k\mid\cdot)\)，并把它裁剪到 \([1-\varepsilon,1+\varepsilon]\) 内，防止一步走太远。</p>
+<p><b>KL 惩罚。</b>再减去 \(\beta\) 倍的、当前策略相对参考策略的 KL 散度，防止模型离出发点太远。</p>
+<p>三者合起来就是论文式 (3)。逐项的数值例子和裁剪曲线，可以看 <a href="d1.html#n-2-2">d1 精读页 §2.2</a>，那里讲得很细。</p>
+</div>
+<div class="formula">$$\mathcal J_{\text{GRPO}}(\theta)=\mathbb E_{o_i\sim\pi_{\text{old}}}\Big[\sum_{i=1}^{G}\sum_{k=1}^{|o_i|}\min\big(\rho_i^kA_i,\ \mathrm{clip}(\rho_i^k,1-\varepsilon,1+\varepsilon)A_i\big)-\beta\,D_{\mathrm{KL}}\big(\pi_{\theta}\,\|\,\pi_{\text{ref}}\big)\Big],\qquad \rho_i^k=\frac{\pi_{\theta}(o_i^k\mid c,o_i^{&lt;k})}{\pi_{\text{old}}(o_i^k\mid c,o_i^{&lt;k})}$$</div>
+<p>注意式子里的 \(\pi(o_i^k\mid c,o_i^{&lt;k})\) 是 AR 式的条件概率。把 GRPO 搬到扩散模型上，就必须回答：这个量在扩散模型里用什么代替？这是 §5 的出发点。</p>
+<p>论文在 §5 还试了另一种基准：<b>留一法</b>（leave-one-out，LOO），即用“同组其他 \(G-1\) 条的平均”当第 \(i\) 条的基准，\(A_i=r(o_i)-\frac{1}{G-1}\sum_{j\ne i}r(o_j)\)。因为这个基准和第 \(i\) 条回答本身无关，所以梯度估计是无偏的。</p>
+<div class="note-warn"><b>本站补充的一个小推导：</b>不除以标准差时，“组平均基准”和“留一基准”只差一个常数倍。把第 \(i\) 条自己从平均里拆出来就能看到：\(r_i-\frac1G\sum_j r_j=\frac{G-1}{G}\big(r_i-\frac{1}{G-1}\sum_{j\ne i}r_j\big)\)。DiffuCoder 取 \(G=10\)，所以组平均基准下的优势恰好是留一基准的 0.9 倍（推算）。两者的差别相当于把学习率放大约 11%（再加上裁剪的细微影响）。§5.5 的表 2 里这两种设置在 HumanEval 上相差 2.5 分，这提示我们：几分的差距里，可能有相当一部分来自训练本身的随机波动。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#S2.SS2" target="_blank" rel="noopener">§2.2 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#S2.SS3" target="_blank" rel="noopener">§2.3 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A1.SS1" target="_blank" rel="noopener">附录 A.1 ELBO 推导 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 DiffuCoder：从 AR 代码模型改造出一个扩散代码模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>要研究扩散模型写代码的行为、再在上面做 RL，首先得有一个足够强的代码扩散模型。DiffuCoder 是怎么训出来的：从哪个模型出发、分几个阶段、每个阶段用多少数据和多少算力？训完之后，它和同规模的 AR 代码模型、和其他扩散模型相比处在什么位置？为什么作者看到结果后决定去做 RL？</div>
+
+<h4 id="n-3-1">3.1 四个训练阶段</h4>
+<div class="note-pre"><b>先补一点背景：怎样把一个 AR 模型“改造”成扩散模型。</b>
+<p>从零训练一个 7B 扩散模型非常昂贵（LLaDA 8B 用了 2.3T token）。DiffuLLaMA 和 Dream 走了另一条路：直接拿训练好的 AR 模型的权重来初始化，再用扩散目标继续训练。难点在于两种模型的“习惯”不同。AR 模型的注意力是因果的（只看左边），并且第 \(i\) 个位置的输出预测的是第 \(i+1\) 个 token；扩散模型的注意力是双向的，被遮住的位置要预测的是它自己。改造时常用两个技巧：</p>
+<ul>
+  <li><b>注意力掩码退火</b>：不是一下子把因果注意力换成双向注意力，而是在训练开始的一段时间里逐渐放开，让模型慢慢适应能看到右边。DiffuCoder 退火了 1 万步。</li>
+  <li><b>保留移位（shift）</b>：仍然让第 \(i\) 个位置的输出去预测第 \(i+1\) 个位置的 token，这样 AR 时期学到的输出头可以直接复用。DiffuCoder 和 Dream-7B 共用同一套模型结构和推理代码（论文附录 B.2），官方训练代码里取 logits 时也做了这一格移位。</li>
+</ul>
+<p>Dream 为什么一定要保留移位，见 <a href="dream.html#n-4-1">Dream 精读页 §4.1</a>。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：中期训练（mid-training）和“退火数据”。</b>
+<p>大模型预训练的最后一段，常把学习率降到很低，同时换上一小批质量特别高的数据（精选的代码片段、教科书式的讲解、合成的题解等），这一段叫<b>退火</b>（annealing）。OpenCoder 把这段数据公开了。论文把这样一个介于预训练和后训练之间的阶段称为<b>中期训练</b>，并引用工作说明它对后面的 RL 很重要。</p>
+</div>
+<p>DiffuCoder 的训练分四个阶段（论文 §3 与附录 B.1）：</p>
+<ol>
+  <li><b>阶段 1：改造预训练。</b>从 Qwen2.5-Coder-7B 出发，用 DiffuLLaMA 的方法继续预训练。语料约 400B token：RefineCode（从 Stack v2 筛出的代码）330B、Fineweb 中的代码网页 55B、DCLM 子集 33B、Fineweb 中的数学网页 3B（采样权重 3），代码 : 文本 : 数学 ≈ 78% : 20% : 2%。上下文 4096，每张卡批大小 2，10 个节点 × 8 张 H100，学习率 2e-5，预热 2 万步后余弦衰减到 10%。训了 10 万步、65B token，约 40 小时（\(2\times4096\times80\times10^5\approx65.5\)B，与报告的 65B 吻合，推算）。另外，仿照 LLaDA，1% 的数据被截成随机长度，另 1% 用一段随机长度的前缀当作不加噪的条件。</li>
+  <li><b>阶段 2：中期训练。</b>用 OpenCoder 的约 16B token 退火数据（算法语料和高质量合成代码）训 4 轮，合计约 65B token；8 个节点 × 8 张 A100，约 90 小时，学习率 1e-5。得到 <b>DiffuCoder-Base</b>。</li>
+  <li><b>阶段 3：指令微调。</b>用 OpenCoder 的 43.6 万条指令数据做 SFT，聊天模板和 Qwen2.5-Coder 相同。训练时题目部分不加噪、只遮回答（论文称为 classifier-free guidance 式的 SFT，本质就是“条件掩码”）。每条样本用一个新训练的填充符 <code>&lt;|dlm_pad|&gt;</code> 补到固定长度 2048，这样模型学会了“用填充符决定回答多长”。因为前两个阶段都是无条件训练，第 1 个 epoch 逐步引入条件掩码，之后再固定长度训 4 个 epoch，共 5 个 epoch；8 个节点 × 8 张 H100，约 24 小时。得到 <b>DiffuCoder-Instruct</b>。</li>
+  <li><b>阶段 4：coupled-GRPO。</b>从 AceCoder-87K 里挑出 2.1 万道带测试用例的难题，训 1 个 epoch；单节点 8 张 H100，约 40 小时。得到 <b>DiffuCoder-cpGRPO</b>（§5）。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：DiffuCoder 的四个训练阶段（数字来自论文 §3 与附录 B.1）</div>
+  <div class="dia-flow"><span class="dia-box tgt">Qwen2.5-Coder-7B<small>AR 代码模型；Qwen2.5 之上再训 5.5T+ token</small></span><span class="dia-arrow">→</span><span class="dia-box enc">阶段 1：改造预训练<small>约 400B 语料中训 65B 后早停；注意力掩码退火 1 万步</small></span><span class="dia-arrow">→</span><span class="dia-box enc">阶段 2：中期训练<small>16B 退火代码 × 4 轮 ≈ 65B</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box reg">DiffuCoder-Base</span><span class="dia-arrow">→</span><span class="dia-box act">阶段 3：SFT<small>43.6 万条；定长 2048 + 填充符；条件掩码；5 epoch</small></span><span class="dia-arrow">→</span><span class="dia-box reg">DiffuCoder-Instruct</span><span class="dia-arrow">→</span><span class="dia-box pred">阶段 4：coupled-GRPO<small>2.1 万道难题，1 epoch</small></span><span class="dia-arrow">→</span><span class="dia-box reg">DiffuCoder-cpGRPO</span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2506.20639v2#S3.F2" target="_blank" rel="noopener">原文图 2 左半部分 ↗</a>。原图把前三个阶段画成表格：阶段 1、2 用“打包、无条件”的训练方式（多条样本拼成一条长序列，整条一起加噪），阶段 3 用“补齐、有条件”的方式（每条样本单独补到定长，只给回答加噪）。</div>
+</div>
+<p>阶段 1 有一个值得注意的决定：作者也把阶段 1 训到了 700B token，结果在下游验证集上反而<b>比只训 65B 更差</b>，而且接着做阶段 2 也没有带来更多提升，所以最终用了 65B 的检查点（早停）。作者把原因归于预训练语料的质量，并坦言“如果语料质量更高，结论可能不同”。附录表 4 给出的数字很说明问题：阶段 1 训 65B 后，HumanEval 只有 39.0；训到 720B 后降到 31.1；而只要接上 16B 的中期训练，HumanEval 就跳到 66.5。也就是说，改造预训练本身让模型的代码能力<b>先掉了一大截</b>（起点 Qwen2.5-Coder 是 61.6），主要靠高质量的中期训练数据才补回来并超过起点。</p>
+<div class="table-wrap"><table>
+  <tr><th>检查点（附录表 4）</th><th class="num">HumanEval</th><th class="num">HE+</th><th class="num">MBPP</th><th class="num">MBPP+</th><th class="num">BCB-C 全/难</th></tr>
+  <tr><td>Qwen2.5-Coder-7B（起点，AR）</td><td class="num">61.6</td><td class="num">51.8</td><td class="num">75.9</td><td class="num">61.4</td><td class="num">46.1 / 16.2</td></tr>
+  <tr><td>阶段 1，训 65B</td><td class="num">39.0</td><td class="num">31.7</td><td class="num">48.4</td><td class="num">38.3</td><td class="num">–</td></tr>
+  <tr><td>阶段 1，训 720B</td><td class="num">31.1</td><td class="num">23.3</td><td class="num">38.8</td><td class="num">31.3</td><td class="num">–</td></tr>
+  <tr><td>阶段 2，训 16B</td><td class="num">66.5</td><td class="num">61.0</td><td class="num">71.9</td><td class="num">57.1</td><td class="num">36.7 / 8.8</td></tr>
+  <tr class="hl"><td>阶段 2，训 65B（= DiffuCoder-Base）</td><td class="num">67.1</td><td class="num">60.4</td><td class="num">74.2</td><td class="num">60.9</td><td class="num">40.2 / 12.8</td></tr>
+</table></div>
+<div class="note-warn"><b>论文内部的两处小出入：</b>正文 §3 说阶段 1 延长到 700B，附录表 4 写的是 720B；正文说“所有实验都在 8–10 个节点的 H100 上进行”，附录 B.1 写中期训练用的是 8 个节点的 A100。两处都不影响结论，但复现时要注意。</div>
+
+<h4 id="n-3-2">3.2 评测设置与表 1：和 AR 代码模型、其他扩散模型比</h4>
+<div class="note-pre"><b>先补一点背景：几个代码基准各测什么，pass@1 是什么。</b>
+<ul>
+  <li><b>HumanEval</b>：OpenAI 随 Codex 论文发布的 164 道手写 Python 题，每道给函数签名和文档字符串，要求补全函数体，用单元测试判对错。</li>
+  <li><b>MBPP</b>：入门级 Python 编程题，给一句自然语言描述和几个测试。</li>
+  <li><b>EvalPlus</b>：给 HumanEval 和 MBPP 补充了大量测试用例的加强版（HumanEval+ 的测试数量是原版的约 80 倍），能抓出原测试漏掉的错误代码。本文所说的“EvalPlus 分数”是作者自己定义的：<b>HumanEval+ 与 MBPP+ 的平均</b>。</li>
+  <li><b>BigCodeBench</b>：1140 道需要调用 139 个库（各种工具函数）的实用编程任务，平均每题 5.6 个测试；分“补全”（C，给文档字符串）和“指令”（I，给简短的自然语言指令）两种提问方式，各有全集和难题子集。</li>
+</ul>
+<p><b>pass@1</b> 就是“生成一次就通过全部测试”的比例。表中的分数都是 pass@1，单位是百分比。HumanEval 只有 164 题，所以 1 道题就是约 0.6 分（推算）；HumanEval 上一两分的差距，只是一两道题的差别。</p>
+</div>
+<p>评测基于 Qwen2.5-Coder 的官方评测套件，全部是 Python 题。扩散模型的解码沿用 Dream 的实现：按负熵挑位置，默认温度 0.2，步数等于生成长度，也就是每步只定一个 token（论文附录 B.2、C.3）。指令模型的评测用了固定的聊天模板（附录表 5、6），模板里助手的回答已经预先写好了开头 “Here is the code to solve this problem:” 和一个 Python 代码块的起始标记，模型从这之后开始生成。</p>
+<p>下表摘录论文表 1（BCB-C 为 BigCodeBench 补全版；带 * 的是从公开报告里抄来的数字，不是作者自己测的）：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>范式</th><th class="num">HE</th><th class="num">HE+</th><th class="num">MBPP</th><th class="num">MBPP+</th><th class="num">EvalPlus</th><th class="num">BCB-C 全</th><th class="num">BCB-C 难</th></tr>
+  <tr><td colspan="9"><b>Base 模型</b></td></tr>
+  <tr><td>Qwen2.5-Coder-7B</td><td>AR</td><td class="num">61.6</td><td class="num">51.8</td><td class="num">75.9</td><td class="num">61.4</td><td class="num">56.6</td><td class="num">46.1</td><td class="num">16.2</td></tr>
+  <tr><td>OpenCoder-8B*</td><td>AR</td><td class="num">66.5</td><td class="num">63.4</td><td class="num">79.9</td><td class="num">70.4</td><td class="num">66.9</td><td class="num">40.5</td><td class="num">9.5</td></tr>
+  <tr><td>LLaDA-8B</td><td>扩散</td><td class="num">35.4</td><td class="num">30.5</td><td class="num">50.1</td><td class="num">42.1</td><td class="num">36.3</td><td class="num">18.9</td><td class="num">4.1</td></tr>
+  <tr><td>Dream-7B</td><td>扩散</td><td class="num">56.7</td><td class="num">50.0</td><td class="num">68.7</td><td class="num">57.4</td><td class="num">53.7</td><td class="num">23.6</td><td class="num">4.1</td></tr>
+  <tr class="hl"><td>DiffuCoder-7B-Base</td><td>扩散</td><td class="num">67.1</td><td class="num">60.4</td><td class="num">74.2</td><td class="num">60.9</td><td class="num">60.6</td><td class="num">40.2</td><td class="num">12.8</td></tr>
+  <tr><td colspan="9"><b>Instruct 模型</b></td></tr>
+  <tr><td>Qwen2.5-Coder-7B-Instruct（官方）</td><td>AR</td><td class="num">90.2</td><td class="num">85.4</td><td class="num">83.9</td><td class="num">72.0</td><td class="num">78.7</td><td class="num">50.7</td><td class="num">21.6</td></tr>
+  <tr><td>Qwen2.5-Coder-7B + 同数据 SFT</td><td>AR</td><td class="num">82.9</td><td class="num">75.6</td><td class="num">80.1</td><td class="num">66.1</td><td class="num">70.9</td><td class="num">46.9</td><td class="num">16.2</td></tr>
+  <tr><td>OpenCoder-8B-Instruct*</td><td>AR</td><td class="num">83.5</td><td class="num">78.7</td><td class="num">79.1</td><td class="num">69.0</td><td class="num">73.9</td><td class="num">40.3</td><td class="num">16.9</td></tr>
+  <tr><td>LLaDA-8B-Instruct</td><td>扩散</td><td class="num">35.4</td><td class="num">31.7</td><td class="num">31.5</td><td class="num">28.6</td><td class="num">30.2</td><td class="num">16.5</td><td class="num">2.7</td></tr>
+  <tr><td>Dream-7B-Instruct</td><td>扩散</td><td class="num">57.9</td><td class="num">53.7</td><td class="num">68.3</td><td class="num">56.1</td><td class="num">54.9</td><td class="num">10.6</td><td class="num">0.7</td></tr>
+  <tr class="hl"><td>DiffuCoder-7B-Instruct</td><td>扩散</td><td class="num">72.0</td><td class="num">65.2</td><td class="num">75.1</td><td class="num">61.9</td><td class="num">63.6</td><td class="num">35.7</td><td class="num">12.2</td></tr>
+  <tr class="hl"><td>　+ coupled-GRPO</td><td>扩散</td><td class="num">73.2</td><td class="num">68.3</td><td class="num">78.6</td><td class="num">67.5</td><td class="num">67.9</td><td class="num">40.4</td><td class="num">10.8</td></tr>
+  <tr><td colspan="9"><b>商用模型（公开报告）</b></td></tr>
+  <tr><td>GPT-4o*</td><td>AR</td><td class="num">90.2</td><td class="num">–</td><td class="num">82.2</td><td class="num">–</td><td class="num">82.4</td><td class="num">49.9</td><td class="num">–</td></tr>
+  <tr><td>Mercury*</td><td>扩散</td><td class="num">90.0</td><td class="num">–</td><td class="num">77.1</td><td class="num">–</td><td class="num">80.4</td><td class="num">45.5</td><td class="num">–</td></tr>
+  <tr><td>Gemini Diffusion*</td><td>扩散</td><td class="num">89.6</td><td class="num">–</td><td class="num">76.0</td><td class="num">–</td><td class="num">–</td><td class="num">45.4</td><td class="num">–</td></tr>
+</table></div>
+<p>从这张表能读出三件事。</p>
+<p><b>第一，DiffuCoder-Base 和它的出发点 Qwen2.5-Coder-7B 大体打平。</b>HumanEval 和 HE+ 更高（67.1 对 61.6，60.4 对 51.8），MBPP 系列略低，BigCodeBench 低约 6 分；EvalPlus 60.6 对 56.6。它明显强于另外两个开源扩散模型 LLaDA 和 Dream。不过要记住，DiffuCoder 比 Qwen2.5-Coder 多吃了 OpenCoder 的 16B 高质量退火数据（×4 轮），而表里的 Qwen2.5-Coder 没有接受这一段训练，所以这不是一个数据对齐的比较（§5.6 展开）。</p>
+<p><b>第二，指令微调对扩散模型几乎没用，对 AR 模型却很有用。</b>这是整篇论文转向 RL 的直接动机。用<b>完全相同的</b> 43.6 万条数据做 SFT，Qwen2.5-Coder 的 EvalPlus 从 56.6 涨到 70.9（+14.3），DiffuCoder 只从 60.6 涨到 63.6（+3.0），BigCodeBench 补全版甚至下降了 4.5。其他扩散模型同样如此：Dream 官方的 Instruct 只比 base 高 1.2；附录表 4 里作者用同一份数据给 Dream 做 SFT，EvalPlus 只到约 54.7（推算：(50.6 + 58.7) / 2）。作者没有给出这个差距的原因，只把它当作“需要别的后训练手段”的证据。</p>
+<div class="dia">
+  <div class="dia-title">简化图表：同一份 SFT 数据、同一份 RL 数据，AR 模型和扩散模型各涨了多少（EvalPlus）</div>
+  <svg class="dg" viewBox="0 0 660 262" role="img" aria-label="三个模型在 base、同数据 SFT、RL 三个阶段的 EvalPlus 分数" style="max-width:660px;--dg-min:560px">
+<line class="grid-ln" x1="60" y1="175.0" x2="640" y2="175.0"/>
+<text x="52" y="175.0" class="t-r t-xs">20</text>
+<line class="grid-ln" x1="60" y1="130.0" x2="640" y2="130.0"/>
+<text x="52" y="130.0" class="t-r t-xs">40</text>
+<line class="grid-ln" x1="60" y1="85.0" x2="640" y2="85.0"/>
+<text x="52" y="85.0" class="t-r t-xs">60</text>
+<line class="grid-ln" x1="60" y1="40.0" x2="640" y2="40.0"/>
+<text x="52" y="40.0" class="t-r t-xs">80</text>
+<line class="axis" x1="60" y1="220.0" x2="640" y2="220.0"/>
+<text x="52" y="220" class="t-r t-xs">0</text>
+<text x="14" y="130" class="t-c t-xs" transform="rotate(-90 14 130)">EvalPlus（%）</text>
+<rect class="box tgt" x="70" y="10" width="14" height="12" rx="2"/>
+<text x="90" y="16" class="t-sm">base</text>
+<rect class="box enc" x="140" y="10" width="14" height="12" rx="2"/>
+<text x="160" y="16" class="t-sm">+ SFT（同一份 43.6 万条）</text>
+<rect class="box pred" x="330" y="10" width="14" height="12" rx="2"/>
+<text x="350" y="16" class="t-sm">+ RL（同一份 2.1 万道题）</text>
+<rect class="box tgt" x="95" y="92.6" width="40" height="127.4" rx="2"/>
+<text x="115" y="83.6" class="t-c t-sm">56.6</text>
+<rect class="box enc" x="143" y="60.5" width="40" height="159.5" rx="2"/>
+<text x="163" y="51.5" class="t-c t-sm">70.9</text>
+<rect class="box pred" x="191" y="53.7" width="40" height="166.3" rx="2"/>
+<text x="211" y="44.7" class="t-c t-sm">73.9*</text>
+<text x="163" y="240" class="t-c t-sm t-b">Qwen2.5-Coder-7B（AR）</text>
+<rect class="box tgt" x="285" y="83.7" width="40" height="136.3" rx="2"/>
+<text x="305" y="74.7" class="t-c t-sm">60.6</text>
+<rect class="box enc" x="333" y="76.9" width="40" height="143.1" rx="2"/>
+<text x="353" y="67.9" class="t-c t-sm">63.6</text>
+<rect class="box pred" x="381" y="67.2" width="40" height="152.8" rx="2"/>
+<text x="401" y="58.2" class="t-c t-sm">67.9</text>
+<text x="353" y="240" class="t-c t-sm t-b">DiffuCoder-7B（扩散）</text>
+<rect class="box tgt" x="475" y="99.2" width="40" height="120.8" rx="2"/>
+<text x="495" y="90.2" class="t-c t-sm">53.7</text>
+<rect class="box enc" x="523" y="96.9" width="40" height="123.1" rx="2"/>
+<text x="543" y="87.9" class="t-c t-sm">54.7*</text>
+<text x="543" y="240" class="t-c t-sm t-b">Dream-7B（扩散）</text>
+<text x="591" y="200" class="t-c t-xs">无 RL 结果</text>
+</svg>
+  <div class="dia-note">数字来自原文表 1、表 2 与附录表 4。带 * 的两根柱子是本站推算：Qwen2.5-Coder + SFT + GRPO 的 EvalPlus = (75.0 + 72.8) / 2 = 73.9；Dream + 同数据 SFT = (50.6 + 58.7) / 2 ≈ 54.7。对应 <a href="https://arxiv.org/html/2506.20639v2#S3.T1" target="_blank" rel="noopener">原文表 1 ↗</a>、<a href="https://arxiv.org/html/2506.20639v2#S5.T2" target="_blank" rel="noopener">表 2 ↗</a>、<a href="https://arxiv.org/html/2506.20639v2#A2.T4" target="_blank" rel="noopener">附录表 4 ↗</a>。</div>
+</div>
+<p><b>第三，商用扩散模型的数字高得多，但不能直接比。</b>Mercury 的 HumanEval 是 90.0，Gemini Diffusion 是 89.6，都来自厂商自己的公开报告，评测模板、解码设置和模型大小都不公开（Mercury 的情况见 <a href="mercury.html">Mercury 精读页</a>）。它们在表里的作用只是说明“扩散模型写代码的上限可能很高”。</p>
+<p>附录还补充了一个细节：DiffuCoder-Base 在 BigCodeBench 指令版上几乎是零分（1.8 / 0.7），而 Qwen2.5-Coder base 是 40.2 / 14.2。作者的解释是改造预训练的语料让 base 模型只会“补全代码”、不会“听指令”；做完 SFT 后，指令版恢复到 34.0 / 8.8。SFT 的几种做法也比较过：只训 1 个 epoch 时 HumanEval 为 67.1，训满 5 个 epoch 为 72.0；把“定长 2048 补齐”换成“补齐到批内最长”的灵活补齐，反而更差（65.2）。</p>
+<div class="note-warn"><b>读表时要注意：</b>表 1 最后一列“Avg.”和 EvalPlus 都是作者自己定义的平均分，不是 EvalPlus 官方排行榜的口径；商用模型那几行的 EvalPlus 也来自各自报告，计算方式未必相同。另外，表中 “Qwen2.5-Coder-7B-Instruct（官方）” 是阿里用大得多的私有数据做后训练的版本，和 DiffuCoder-Instruct 不是同数据对比，真正同数据的对照是 “+ 同数据 SFT” 那一行。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A2.SS1" target="_blank" rel="noopener">附录 B.1 训练细节 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A2.SS2" target="_blank" rel="noopener">附录 B.2 评测细节 ↗</a> · 相关：<a href="dream.html">Dream 精读页（AR 初始化的扩散模型）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 看清解码行为：扩散模型到底有多“不按顺序”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散模型理论上可以按任意顺序填空，但实际用低置信度重掩码解码时，它们的顺序离“从左到右”有多远？这个距离怎么量？它会不会随模型来源（从零训练还是 AR 改造）、数据类型（数学还是代码）、训练阶段而变？为什么扩散模型仍然偏爱从左往右？温度又在其中扮演什么角色？这些问题的答案，决定了后面 RL 该怎么设计。</div>
+<p>论文先交代了背景：LLaDA 和 Dream 默认都用低置信度重掩码；LLaDA 在一些任务上要靠分块的半自回归解码才能拿到更好的分数；而且大家普遍把扩散步数设成和序列长度相同，等于一个 token 一个 token 地生成。在这样的设定下，“生成顺序”是一个很具体的东西：第 1 步揭开哪个位置、第 2 步揭开哪个位置……一直到最后。作者想回答三件事：扩散模型的解码模式和 AR 有什么不同；数据类型（代码还是数学）有什么影响；AR 性在不同训练阶段怎么变化。</p>
+
+<h4 id="n-4-1">4.1 两把尺子：局部 AR 性与全局 AR 性</h4>
+<p>设生成长度为 \(L\)，步数 \(T=L\)，每步恰好揭开一个位置。记第 \(n\) 步揭开的位置为 \(p_n\)，这样整个生成过程就对应一个顺序 \(p_1,p_2,\dots,p_T\)（附录 A.2 的设定；论文用 \(t\) 记步号，这里改用 \(n\)，免得和掩码比例混淆）。纯 AR 解码时 \(p_n=n\)。论文从两个角度衡量一个顺序有多像 AR：</p>
+<ul>
+  <li><b>局部 AR 性@k（“接着写下一个”）</b>：第 \(n\) 步揭开的位置，如果它和前 \(k\) 步揭开的位置恰好连成一段严格递增、首尾相接的序列（即 \(p_{n-1}=p_n-1,\dots,p_{n-k}=p_n-k\)），这一步就算“局部 AR”。对所有步取平均。\(k\) 越大要求越长的连续段，所以这个指标随 \(k\) 增大而变小。</li>
+  <li><b>全局 AR 性@k（“先填最左边”）</b>：在第 \(n\) 步之前，把仍被遮住的位置从左到右排好，如果 \(p_n\) 落在最左边的 \(k\) 个之中，这一步就算“全局 AR”。对所有步取平均。\(k\) 越大越容易满足，所以这个指标随 \(k\) 增大而变大。</li>
+</ul>
+<div class="formula">$$\text{局部@}k=\frac1T\sum_{n=1}^{T}\mathbf 1\Big[\{p_{n-i}\}_{i=1}^{k}=\{p_n-i\}_{i=1}^{k}\Big],\qquad \text{全局@}k=\frac1T\sum_{n=1}^{T}\mathbf 1\Big[p_n\in\big\{m^{(1)}_{n-1},\dots,m^{(k)}_{n-1}\big\}\Big]$$</div>
+<p>其中 \(m^{(1)}_{n-1}&lt;m^{(2)}_{n-1}&lt;\cdots\) 是第 \(n\) 步之前仍被遮住的位置。两个指标越接近 1，生成越像 AR；纯 AR 解码时两者都恒等于 1。下面用一个本站构造的小例子走一遍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：8 个位置（1–6 是代码，7–8 是填充符），揭开顺序为 1, 2, 8, 7, 3, 4, 6, 5</div>
+  <div class="table-wrap"><table>
+    <tr><th class="num">步 n</th><th class="num">揭开位置 \(p_n\)</th><th>揭开前仍被遮住的位置</th><th>局部@1：上一步恰好是 \(p_n-1\)？</th><th>全局@1：是剩下最左的吗？</th></tr>
+    <tr><td class="num">1</td><td class="num">1</td><td>1 2 3 4 5 6 7 8</td><td>—（没有上一步，记 0）</td><td>是</td></tr>
+    <tr><td class="num">2</td><td class="num">2</td><td>2 3 4 5 6 7 8</td><td>是（上一步是 1）</td><td>是</td></tr>
+    <tr class="hl"><td class="num">3</td><td class="num">8</td><td>3 4 5 6 7 8</td><td>否</td><td>否（最左是 3）</td></tr>
+    <tr class="hl"><td class="num">4</td><td class="num">7</td><td>3 4 5 6 7</td><td>否</td><td>否</td></tr>
+    <tr><td class="num">5</td><td class="num">3</td><td>3 4 5 6</td><td>否（上一步是 7，不是 2）</td><td>是</td></tr>
+    <tr><td class="num">6</td><td class="num">4</td><td>4 5 6</td><td>是</td><td>是</td></tr>
+    <tr><td class="num">7</td><td class="num">6</td><td>5 6</td><td>否</td><td>否（最左是 5）</td></tr>
+    <tr><td class="num">8</td><td class="num">5</td><td>5</td><td>否（上一步是 6）</td><td>是</td></tr>
+  </table></div>
+  <div class="dia-out" style="margin-left:0">局部@1 = 2/8 = 0.25；全局@1 = 5/8 ≈ 0.63；全局@2 = 6/8 = 0.75（第 7 步的 6 落在最左两个 {5, 6} 之内）。</div>
+  <div class="dia-note">本站构造的例子，数值均为推算。作为对照：同样只把 5、6 两格对调，但把两个填充符留到最后（顺序 1, 2, 3, 4, 6, 5, 7, 8），全局@1 就是 7/8。可见“先定填充符”这一件事就能把全局 AR 性拉低很多。论文用一句 “I love dogs and cats” 的小例子画了两个指标的含义，见 <a href="https://arxiv.org/html/2506.20639v2#S4.F3" target="_blank" rel="noopener">原文图 3 右(b) ↗</a>。</div>
+</div>
+<p>这个例子也说明了两个指标的分工。局部指标对“跳一下再回来”非常敏感：第 5 步回头去写位置 3，虽然 3 是最左的空位，但因为上一步写的是 7，所以不算“接着写”。全局指标则只关心“有没有挑最左的空位”，对回头补写比较宽容，对“先写后面”很敏感。</p>
+
+<h4 id="n-4-2">4.2 解码分析：模型来源、数据类型、训练阶段</h4>
+<p>实验设置：都用低置信度重掩码，生成长度和扩散步数都是 512；数学任务用 8-shot 的 GSM8K，代码任务用零样本的 HumanEval。比较三组对象：从零训练的 LLaDA 与从 AR 改造的 Dream / DiffuCoder；数学与代码；DiffuCoder 的各个训练阶段。论文只给了曲线图，没有给数值表，所以下面的数值是本站从 TeX 源文件中的矢量图坐标换算出来的约值（读图），取的是每条曲线的中线。</p>
+<div class="dia">
+  <div class="dia-title">简化图表：k = 1 时的局部 / 全局 AR 性（读图约值）</div>
+  <svg class="dg" viewBox="0 0 700 380" role="img" aria-label="不同模型、数据与训练阶段下的局部与全局 AR 性（k=1）" style="max-width:700px;--dg-min:600px">
+<rect x="262" y="8" width="14" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="282" y="13" class="t-sm">局部 AR 性@1（接着上一步写下一格）</text>
+<rect x="512" y="8" width="14" height="10" rx="2" style="fill:var(--c-pred)"/>
+<text x="532" y="13" class="t-sm">全局 AR 性@1（挑剩下最左的）</text>
+<line class="grid-ln" x1="262" y1="34" x2="262" y2="338"/>
+<text x="262" y="352" class="t-c t-xs">0</text>
+<line class="grid-ln" x1="362" y1="34" x2="362" y2="338"/>
+<text x="362" y="352" class="t-c t-xs">0.2</text>
+<line class="grid-ln" x1="462" y1="34" x2="462" y2="338"/>
+<text x="462" y="352" class="t-c t-xs">0.5</text>
+<line class="grid-ln" x1="562" y1="34" x2="562" y2="338"/>
+<text x="562" y="352" class="t-c t-xs">0.8</text>
+<line class="grid-ln" x1="662" y1="34" x2="662" y2="338"/>
+<text x="662" y="352" class="t-c t-xs">1</text>
+<text x="252" y="51" class="t-r t-sm">LLaDA（从零训练）· 代码</text>
+<rect x="262" y="40" width="96.0" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="363.0" y="45" class="t-xs">0.24</text>
+<rect x="262" y="52" width="60.4" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="327.4" y="57" class="t-xs">0.15</text>
+<text x="252" y="81" class="t-r t-sm">LLaDA（从零训练）· 数学</text>
+<rect x="262" y="70" width="98.0" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="365.0" y="75" class="t-xs">0.24</text>
+<rect x="262" y="82" width="76.8" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="343.8" y="87" class="t-xs">0.19</text>
+<line class="frame" x1="10" y1="96" x2="690" y2="96"/>
+<text x="252" y="111" class="t-r t-sm">Dream（AR 改造）· 数学</text>
+<rect x="262" y="100" width="206.4" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="473.4" y="105" class="t-xs">0.52</text>
+<rect x="262" y="112" width="150.8" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="417.8" y="117" class="t-xs">0.38</text>
+<line class="frame" x1="10" y1="126" x2="690" y2="126"/>
+<text x="252" y="141" class="t-r t-sm">DiffuCoder 阶段 1（65B）· 代码</text>
+<rect x="262" y="130" width="269.6" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="536.6" y="135" class="t-xs">0.67</text>
+<rect x="262" y="142" width="104.8" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="371.8" y="147" class="t-xs">0.26</text>
+<text x="252" y="171" class="t-r t-sm">阶段 1 继续训到 700B</text>
+<rect x="262" y="160" width="358.8" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="625.8" y="165" class="t-xs">0.90</text>
+<rect x="262" y="172" width="254.0" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="521.0" y="177" class="t-xs">0.64</text>
+<text x="252" y="201" class="t-r t-sm">阶段 2（16B）</text>
+<rect x="262" y="190" width="343.2" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="610.2" y="195" class="t-xs">0.86</text>
+<rect x="262" y="202" width="331.2" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="598.2" y="207" class="t-xs">0.83</text>
+<text x="252" y="231" class="t-r t-sm">阶段 2（65B）= Base</text>
+<rect x="262" y="220" width="327.6" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="594.6" y="225" class="t-xs">0.82</text>
+<rect x="262" y="232" width="322.0" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="589.0" y="237" class="t-xs">0.81</text>
+<text x="252" y="261" class="t-r t-sm">阶段 3：SFT 1 个 epoch</text>
+<rect x="262" y="250" width="383.2" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="650.2" y="255" class="t-xs">0.96</text>
+<rect x="262" y="262" width="376.8" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="643.8" y="267" class="t-xs">0.94</text>
+<text x="252" y="291" class="t-r t-sm">阶段 3：SFT 5 个 epoch</text>
+<rect x="262" y="280" width="382.4" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="649.4" y="285" class="t-xs">0.96</text>
+<rect x="262" y="292" width="365.2" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="632.2" y="297" class="t-xs">0.91</text>
+<text x="252" y="321" class="t-r t-sm">+ coupled-GRPO</text>
+<rect x="262" y="310" width="388.8" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="655.8" y="315" class="t-xs">0.97</text>
+<rect x="262" y="322" width="94.0" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="361.0" y="327" class="t-xs">0.23（全局@2 ≈ 0.85）</text>
+<text x="350" y="368" class="t-c t-xs">AR 性@1（1 = 完全从左到右；数值为本站从原文矢量图读出的约值）</text>
+</svg>
+  <div class="dia-note">前两行来自 <a href="https://arxiv.org/html/2506.20639v2#S4.F3" target="_blank" rel="noopener">原文图 3 左上两格 ↗</a>（LLaDA）；第 3、4 行来自图 3 中“Adapted DLM”两格，注意<b>数学用的是 Dream、代码用的是 DiffuCoder 阶段 1</b>，并不是同一个模型；后 6 行来自 <a href="https://arxiv.org/html/2506.20639v2#S4.F4" target="_blank" rel="noopener">原文图 4 ↗</a>，都是 HumanEval 上的代码生成。原图还画了每条曲线周围的阴影带（论文没说明是标准差还是分位数），以及 k 从 1 到 9（局部）和 1 到 4（全局）的完整曲线。数值由本站换算，误差约 ±0.01。</div>
+</div>
+<p><b>扩散模型和 AR 有什么不同？</b>AR 解码时两个指标都恒为 1。扩散模型不是这样：相当一部分 token 既不是“接着上一个写”，也不是“填最左边的空”。论文据此认为扩散模型的解码顺序比 AR 灵活。同时论文也说，两种 AR 性都“更接近 1 而不是 0”，并解释为文本本身带有从左到右的结构，扩散模型无论从零训练还是从 AR 改造都学到了它；而从 AR 改造的模型 AR 性更高，因为它继承了 AR 训练留下的左到右依赖。</p>
+<p>按读图的数值看，这句“更接近 1”需要加一点限定：LLaDA 的局部@1 只有约 0.24、全局@1 约 0.15–0.19，DiffuCoder 阶段 1 的全局@1 也只有约 0.26；真正接近 1 的是阶段 2 之后的 DiffuCoder（0.8–0.96）。所以更准确的说法是：<b>AR 性高低和模型、训练阶段关系很大</b>，从零训练的 LLaDA 在 k = 1 时其实相当“不 AR”。</p>
+<p>AR 性低有什么用？作者在附录 C.3 解释：AR 性高意味着 token 之间有很强的从左到右依赖，后面的 token 必须等前面的写完才能确定，这限制了每步同时写多个 token 的空间；AR 性低则说明模型能比较独立地生成多个 token，于是可以减少扩散步数、加快生成。反过来，AR 性高也不一定坏：LLaDA 常常要靠分块解码人为加回因果偏置才能拿到更好的分数。作者主张，DiffuCoder 能“自己决定”要多因果，不需要外加分块。</p>
+<p><b>数据类型有什么影响？</b>论文的结论是：数学和代码的局部 AR 性高低不一，但一个一致的现象是<b>代码生成的全局 AR 性均值更低、方差更大</b>，也就是生成代码时模型更常先写后面的 token，把前面的空留到很晚才填。作者的解释是数学推导本质上是顺序的，需要一步一步从左往右算；代码有自己的结构，模型会更“全局”地规划，像程序员在代码里来回跳着改。在 LLaDA 这一对同模型的比较里，代码的全局@1 约 0.15，数学约 0.19（读图），方向和结论一致但差距不大；“改造模型”那一对的差距更大（0.26 对 0.38），但两边是不同的模型，模型来源和数据类型的影响混在了一起。</p>
+<p><b>训练阶段的影响。</b>这是图 4 的内容，也是图表里后 6 行：</p>
+<ul>
+  <li>阶段 1 训 65B 后，AR 性已经相对较低（局部@1 ≈ 0.67，全局@1 ≈ 0.26）；延长到 700B，AR 性<b>升高</b>（≈ 0.90 / 0.64），同时下游分数下降（§3.1 的表）。作者怀疑是预训练数据质量限制了性能，所以选 65B 的检查点进入阶段 2。</li>
+  <li>中期训练（阶段 2）和指令微调（阶段 3）在高质量数据的第一个 epoch 上，模型会学到很强的因果偏置（阶段 2 训 16B 时全局@1 ≈ 0.83，SFT 1 个 epoch 时 ≈ 0.94）。继续多看几遍数据后，任务分数提高，而 AR 性开始回落（阶段 2 训满 65B 时 ≈ 0.81，SFT 训满 5 个 epoch 时 ≈ 0.91）。作者据此推测：过了第一个 epoch，扩散模型开始捕捉纯 AR 顺序之外的依赖。</li>
+  <li>GRPO 之后，全局 AR 性进一步下降，同时把解码步数减半时掉分更少（§5.5）。</li>
+</ul>
+<div class="note-warn"><b>读图时本站注意到的三件事：</b>
+<ul>
+  <li><b>GRPO 之后的“全局 AR 性下降”主要发生在 k = 1。</b>读图约值：Instruct 模型全局@1 ≈ 0.94、全局@2 ≈ 0.98；GRPO 之后全局@1 骤降到 ≈ 0.24，全局@2 却仍有 ≈ 0.85，局部@1 甚至略升到 ≈ 0.97。这种“@1 很低、@2 很高”的组合意味着：模型大多数时候挑的是<b>剩下第二靠左</b>的空，最靠左的那一格被长期留着。这更像是某一个靠前的位置（例如开头的某个格式 token）被系统性地推迟，而不是整段代码都变得“跳着写”。论文没有分析这一点。</li>
+  <li><b>比较时温度不一样。</b>论文说 GRPO 后的 AR 性是在“新的最优温度”（0.3 或 0.4）下测的，而 Instruct 模型用的是默认的 0.2。下文 §4.3 会看到温度本身就会显著降低 AR 性，所以图 4 右的差别里有一部分可能来自温度，而不全是 RL 的作用。</li>
+  <li><b>两条曲线完全重合。</b>读图时发现，图 4 右“Instruct Model”那条曲线与图 4 中“SFT 1 个 epoch”的曲线数值完全相同（局部@1 都是 0.958、全局@1 都是 0.942），图 5 的 Instruct（温度 0.2）也是这组数。这可能说明图 4 右和图 5 用的“Instruct”其实是 1 个 epoch 的检查点，也可能只是作图时复用了数据。哪种情况，论文没有交代。</li>
+</ul></div>
+
+<h4 id="n-4-3">4.3 熵汇：为什么扩散模型仍然偏向从左往右写</h4>
+<div class="note-pre"><b>先补一点背景：注意力汇（attention sink）。</b>
+<p>人们在 AR 大模型里发现，很多注意力头会把大量注意力分给序列开头的第一个 token，哪怕它没有什么语义。这个现象叫“注意力汇”，常被解释为 softmax 必须把权重分出去、模型就找了一个固定的地方“倒掉”多余的注意力。论文借用这个名字，提出了扩散模型里一个形状相似的现象。</p>
+</div>
+<p>条件生成的第一步，回答部分全是 <code>[M]</code>，模型要一次性为所有位置给出预测。作者记录了这一步每个位置的置信度（LLaDA 用最大概率，Dream 用负熵），发现分布呈一个“L”形：<b>紧挨在 prompt 右边的少数几个位置置信度明显更高，后面一大片位置的置信度都差不多低</b>。作者把这个现象叫做<b>熵汇</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：熵汇——第一步解码时，置信度集中在紧挨 prompt 的位置</div>
+  <svg class="dg" viewBox="0 0 640 214" role="img" aria-label="熵汇示意：第一步时紧挨 prompt 的位置置信度明显更高" style="max-width:640px;--dg-min:560px">
+<rect class="box data" x="20" y="120" width="96" height="50" rx="4"/>
+<text x="68" y="138" class="t-c t-sm">prompt</text>
+<text x="68" y="156" class="t-c t-xs">（已知，不遮）</text>
+<line class="axis" x1="124" y1="170" x2="616" y2="170"/>
+<rect x="130" y="46" width="11" height="124" rx="1" style="fill:var(--c-enc)"/>
+<rect x="146" y="54" width="11" height="116" rx="1" style="fill:var(--c-enc)"/>
+<rect x="162" y="76" width="11" height="94" rx="1" style="fill:var(--c-enc)"/>
+<rect x="178" y="104" width="11" height="66" rx="1" style="fill:var(--c-enc)"/>
+<rect x="194" y="130" width="11" height="40" rx="1" style="fill:var(--c-enc)"/>
+<rect x="210" y="138" width="11" height="32" rx="1" style="fill:var(--c-enc)"/>
+<rect x="226" y="142" width="11" height="28" rx="1" style="fill:var(--c-enc)"/>
+<rect x="242" y="140" width="11" height="30" rx="1" style="fill:var(--c-enc)"/>
+<rect x="258" y="144" width="11" height="26" rx="1" style="fill:var(--c-enc)"/>
+<rect x="274" y="140" width="11" height="30" rx="1" style="fill:var(--c-enc)"/>
+<rect x="290" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="306" y="142" width="11" height="28" rx="1" style="fill:var(--c-enc)"/>
+<rect x="322" y="144" width="11" height="26" rx="1" style="fill:var(--c-enc)"/>
+<rect x="338" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="354" y="140" width="11" height="30" rx="1" style="fill:var(--c-enc)"/>
+<rect x="370" y="148" width="11" height="22" rx="1" style="fill:var(--c-enc)"/>
+<rect x="386" y="144" width="11" height="26" rx="1" style="fill:var(--c-enc)"/>
+<rect x="402" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="418" y="142" width="11" height="28" rx="1" style="fill:var(--c-enc)"/>
+<rect x="434" y="148" width="11" height="22" rx="1" style="fill:var(--c-enc)"/>
+<rect x="450" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="466" y="144" width="11" height="26" rx="1" style="fill:var(--c-enc)"/>
+<rect x="482" y="148" width="11" height="22" rx="1" style="fill:var(--c-enc)"/>
+<rect x="498" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="514" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="530" y="150" width="11" height="20" rx="1" style="fill:var(--c-enc)"/>
+<rect x="546" y="148" width="11" height="22" rx="1" style="fill:var(--c-enc)"/>
+<rect x="562" y="146" width="11" height="24" rx="1" style="fill:var(--c-enc)"/>
+<rect x="578" y="150" width="11" height="20" rx="1" style="fill:var(--c-enc)"/>
+<rect x="594" y="148" width="11" height="22" rx="1" style="fill:var(--c-enc)"/>
+<text x="370" y="186" class="t-c t-xs">回答画布上的位置（第一步时全部是 [M]）→</text>
+<text x="124" y="28" class="t-xs">第一步每个位置的置信度（示意）</text>
+<path class="edge" d="M250,70 C215,70 190,50 152,48"/>
+<text x="256" y="66" class="t-sm">紧挨 prompt 的几格：模型很有把握</text>
+<text x="256" y="82" class="t-sm">后面的大片位置：几乎一样低，像一块平地</text>
+<text x="440" y="118" class="t-c t-xs">“L”的横画</text>
+<text x="196" y="196" class="t-c t-xs">“L”的竖画</text>
+</svg>
+  <div class="dia-note">本站示意图，柱高是为说明形状而设的，不是论文数据。原图用 LLaDA（最大概率，约 250 个位置）和 Dream（负熵，约 500 个位置）的真实单步数据画出了同样的“L”形，见 <a href="https://arxiv.org/html/2506.20639v2#S4.F3" target="_blank" rel="noopener">原文图 3 右(a) ↗</a>；附录图 9 把它推广到所有解码步的热力图，见 <a href="https://arxiv.org/html/2506.20639v2#A3.F9" target="_blank" rel="noopener">附录图 9 ↗</a>。</div>
+</div>
+<p>这个现象怎么导致 AR 偏好？低置信度重掩码每一步都挑“最有把握”的位置揭开。第一步时最有把握的是紧挨 prompt 的那几格，于是它们先被填上；填上之后，新的“紧挨已知内容”的位置又变成了最有把握的，于是又被填上……一步步推下去，就形成了很强的从左往右的趋势。作者的假设是：文本本身的性质让模型偏向紧挨前缀右边的 token，因为那些位置的位置信号更强、离已知上下文更近，所以得到了不成比例的高置信度。论文也提到它可能和注意力汇有关，但明确说成因还需要进一步分析和验证。附录 C.1 的热力图显示，在后面的解码步里仍能看到这种因果偏向，但比严格的因果掩码多了不少灵活性。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>熵汇说的是“第一步时的置信度分布”，它解释了 AR 性为什么不是 0，但它本身不是 AR 性的度量。另外，画布末尾的填充符位置往往也很“好猜”（回答该在哪里结束，模型常常很早就有把握），这会让它们被提前揭开，从而拉低全局 AR 性（见 §4.1 的例子和附录 C.2 的观察）。所以“全局 AR 性低”不一定全是在“全局规划代码”，其中一部分可能只是“先定长度”。</div>
+
+<h4 id="n-4-4">4.4 温度：同时改变“写什么”和“先写哪”</h4>
+<div class="note-pre"><b>先补一点背景：采样温度、top-p，以及 DiffuCoder 的解码器怎样挑位置。</b>
+<p>模型对每个位置输出一组 logits。<b>温度</b> \(T\) 就是在 softmax 之前把 logits 除以 \(T\)：\(T&lt;1\) 让分布更尖（更确定），\(T&gt;1\) 让分布更平（更随机）。<b>top-p</b>（核采样）只保留累计概率达到 \(p\) 的那些候选，再在其中采样。</p>
+<p>按官方推理代码（DiffuCoder 与 Dream 共用的 <code>generation_utils.py</code>，参数 <code>alg="entropy"</code>），每一步是这样的：对每个被遮住的位置，先把 logits 除以温度、做 top-p 截断、算出概率；在这个分布里<b>采样</b>一个候选词；同时计算这个分布的<b>负熵</b>当作“置信度”；然后在所有被遮位置中挑置信度最高的若干个（<code>alg_temp=0</code> 时就是直接取前几名），把采到的词填进去。官方示例用 <code>top_p=0.95</code>，base 模型用温度 0.2，cpGRPO 模型用 0.4。</p>
+</div>
+<p>对 AR 模型来说，温度只影响“这个位置写哪个词”。对扩散模型，作者发现温度还会改变“先写哪个位置”。按上面的解码流程，温度可以从两条路影响顺序（这是本站根据代码的分析，论文只给出现象）：</p>
+<ol>
+  <li><b>改变“谁最笃定”的排名。</b>置信度是用<b>除过温度</b>的分布算的熵。温度一变，不同位置的熵按不同的比例变化，排名可能翻转。下面的小例子说明了这一点。</li>
+  <li><b>改变后续的上下文。</b>温度高时采到的词更随机，填进画布后，其余位置看到的上下文就变了，它们的置信度和后续顺序也随之改变。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：两个被遮住的位置，温度一变，“先填谁”就翻转了</div>
+  <div class="table-wrap"><table>
+    <tr><th>位置</th><th>温度 1 时的预测分布</th><th class="num">温度 1 时的熵</th><th class="num">温度 0.2 时的熵</th></tr>
+    <tr><td>A</td><td>一个候选占 0.7，另外 30 个候选各占 0.01</td><td class="num">1.63</td><td class="num">≈ 0.00</td></tr>
+    <tr><td>B</td><td>两个候选各占 0.5</td><td class="num">0.69</td><td class="num">0.69</td></tr>
+    <tr><td colspan="2">按“熵最小者先填”</td><td class="num">先填 B</td><td class="num">先填 A</td></tr>
+  </table></div>
+  <div class="dia-note">本站构造的例子，数值为推算（自然对数）。温度 0.2 相当于把概率取 5 次方再归一化：A 的长尾被压到几乎为零，熵接近 0；B 的两个候选同样大，怎么缩放都还是各占一半，熵不变。加上官方代码里的 top_p = 0.95 截断，温度 1 时 A 的熵约为 1.42，仍大于 B，结论不变（推算）。温度越高，像 A 这样“有一个主选、但尾巴很长”的位置越吃亏，排名就越由别的因素决定。</div>
+</div>
+<p>论文图 5 左量的就是这个效果：对 base 和 instruct 两个模型，把温度从 0.2 调到 1.0，HumanEval 上的两种 AR 性都明显下降。读图约值如下：</p>
+<div class="table-wrap"><table>
+  <tr><th>模型与温度（HumanEval，读图约值）</th><th class="num">局部@1</th><th class="num">全局@1</th><th class="num">全局@4</th></tr>
+  <tr><td>Base，温度 0.2</td><td class="num">0.82</td><td class="num">0.81</td><td class="num">0.97</td></tr>
+  <tr><td>Base，温度 1.0</td><td class="num">0.55</td><td class="num">0.33</td><td class="num">0.69</td></tr>
+  <tr><td>Instruct，温度 0.2</td><td class="num">0.96</td><td class="num">0.94</td><td class="num">1.00</td></tr>
+  <tr class="hl"><td>Instruct，温度 1.0</td><td class="num">0.71</td><td class="num">0.09</td><td class="num">0.15</td></tr>
+</table></div>
+<p>Instruct 模型在温度 1.0 时，全局@1 只有约 0.09，连全局@4 也只有约 0.15：模型几乎从不填最靠左的几个空。附录 C.2 的可视化给出了直观的样子：温度高时，模型倾向于先确定右边，<b>包括决定生成长度的填充符</b>，而这段代码的关键部分反而接近最后才生成。原文图 1(a) 就是这样一个温度 1.2 的真实例子。</p>
+<div class="note-pre"><b>先补一点背景：pass@k，以及它和 RL 的关系。</b>
+<p><b>pass@k</b> 是“对一道题采样 k 次，至少有一次通过全部测试”的概率。实际计算时，通常对每道题采 \(n\ge k\) 次，数出其中正确的 \(c\) 次，用无偏估计 \(1-\binom{n-c}{k}\big/\binom{n}{k}\) 再对题目取平均（Codex 论文提出）。论文没有写每题采了多少次。</p>
+<p>它和 RL 的关系是：GRPO 这类方法只能“强化”采样中已经出现过的好答案。如果一道题采 10 次都错，组内奖励全一样，优势全是 0，这道题就提供不了任何学习信号。论文引用 Yue 等人的工作：AR 模型 RL 之后的推理路径，基本被 base 模型的 pass@k 能力所限定。所以 pass@k 高，说明模型“会做但不稳定”，RL 有东西可以挖；pass@k 和 pass@1 差不多，说明采样缺乏多样性，RL 就很难起作用。</p>
+</div>
+<p>作者用 pass@k 衡量生成的多样性（图 5 右、图 6）。结论是：温度低时 pass@1 高，但 pass@k 随 k 增长很慢，说明样本缺乏多样性；把温度调到合适的范围（例如 1.0 到 1.2），pass@k 明显上升，说明模型有潜在的能力没被单次采样发挥出来。下面是图 6 的数字：</p>
+<div class="dia">
+  <div class="dia-title">简化图表：不同温度下的 pass@1 与 pass@10（HumanEval / HumanEval+）</div>
+  <svg class="dg" viewBox="0 0 680 276" role="img" aria-label="不同温度下 DiffuCoder 的 pass@1 与 pass@10" style="max-width:680px;--dg-min:600px">
+<line class="grid-ln" x1="52" y1="194.0" x2="666" y2="194.0"/>
+<text x="46" y="194.0" class="t-r t-xs">20</text>
+<line class="grid-ln" x1="52" y1="156.0" x2="666" y2="156.0"/>
+<text x="46" y="156.0" class="t-r t-xs">40</text>
+<line class="grid-ln" x1="52" y1="118.0" x2="666" y2="118.0"/>
+<text x="46" y="118.0" class="t-r t-xs">60</text>
+<line class="grid-ln" x1="52" y1="80.0" x2="666" y2="80.0"/>
+<text x="46" y="80.0" class="t-r t-xs">80</text>
+<line class="grid-ln" x1="52" y1="42.0" x2="666" y2="42.0"/>
+<text x="46" y="42.0" class="t-r t-xs">100</text>
+<line class="axis" x1="52" y1="232.0" x2="666" y2="232.0"/>
+<text x="46" y="232.0" class="t-r t-xs">0</text>
+<rect class="box tgt" x="56" y="9" width="13" height="11" rx="2"/>
+<text x="74" y="15" class="t-xs">T=0.2 pass@1</text>
+<rect class="box enc" x="180" y="9" width="13" height="11" rx="2"/>
+<text x="198" y="15" class="t-xs">T=1.0 pass@1</text>
+<rect x="304" y="9" width="13" height="11" rx="2" style="fill:var(--c-enc)"/>
+<text x="322" y="15" class="t-xs">T=1.0 pass@10</text>
+<rect class="box pred" x="428" y="9" width="13" height="11" rx="2"/>
+<text x="446" y="15" class="t-xs">T=1.2 pass@1</text>
+<rect x="552" y="9" width="13" height="11" rx="2" style="fill:var(--c-pred)"/>
+<text x="570" y="15" class="t-xs">T=1.2 pass@10</text>
+<rect class="box tgt" x="64" y="104.5" width="22" height="127.5" rx="2"/>
+<text x="75" y="97.5" class="t-c t-xs">67.1</text>
+<rect class="box enc" x="90" y="127.1" width="22" height="104.9" rx="2"/>
+<text x="101" y="120.1" class="t-c t-xs">55.2</text>
+<rect x="116" y="65.2" width="22" height="166.8" rx="2" style="fill:var(--c-enc)"/>
+<text x="127" y="58.2" class="t-c t-xs">87.8</text>
+<text x="101" y="248.0" class="t-c t-xs t-b">Base · HumanEval</text>
+<rect class="box tgt" x="192" y="117.2" width="22" height="114.8" rx="2"/>
+<text x="203" y="110.2" class="t-c t-xs">60.4</text>
+<rect class="box enc" x="218" y="137.0" width="22" height="95.0" rx="2"/>
+<text x="229" y="130.0" class="t-c t-xs">50</text>
+<rect x="244" y="80.2" width="22" height="151.8" rx="2" style="fill:var(--c-enc)"/>
+<text x="255" y="73.2" class="t-c t-xs">79.9</text>
+<text x="229" y="248.0" class="t-c t-xs t-b">Base · HumanEval+</text>
+<rect class="box tgt" x="330" y="95.2" width="22" height="136.8" rx="2"/>
+<text x="341" y="88.2" class="t-c t-xs">72</text>
+<rect class="box enc" x="356" y="136.2" width="22" height="95.8" rx="2"/>
+<text x="367" y="129.2" class="t-c t-xs">50.4</text>
+<rect x="382" y="74.5" width="22" height="157.5" rx="2" style="fill:var(--c-enc)"/>
+<text x="393" y="67.5" class="t-c t-xs">82.9</text>
+<rect class="box pred" x="408" y="141.4" width="22" height="90.6" rx="2"/>
+<text x="419" y="134.4" class="t-c t-xs">47.7</text>
+<rect x="434" y="68.6" width="22" height="163.4" rx="2" style="fill:var(--c-pred)"/>
+<text x="445" y="61.6" class="t-c t-xs">86</text>
+<text x="393" y="248.0" class="t-c t-xs t-b">Instruct · HumanEval</text>
+<rect class="box tgt" x="506" y="108.1" width="22" height="123.9" rx="2"/>
+<text x="517" y="101.1" class="t-c t-xs">65.2</text>
+<rect class="box enc" x="532" y="145.2" width="22" height="86.8" rx="2"/>
+<text x="543" y="138.2" class="t-c t-xs">45.7</text>
+<rect x="558" y="84.9" width="22" height="147.1" rx="2" style="fill:var(--c-enc)"/>
+<text x="569" y="77.9" class="t-c t-xs">77.4</text>
+<rect class="box pred" x="584" y="149.0" width="22" height="83.0" rx="2"/>
+<text x="595" y="142.0" class="t-c t-xs">43.7</text>
+<rect x="610" y="77.9" width="22" height="154.1" rx="2" style="fill:var(--c-pred)"/>
+<text x="621" y="70.9" class="t-c t-xs">81.1</text>
+<text x="569" y="248.0" class="t-c t-xs t-b">Instruct · HumanEval+</text>
+</svg>
+  <div class="dia-note">数值由本站从原文图 6 的矢量文件中读出，柱子的分组按矢量图里的横坐标核对过。温度 1.2 只对 Instruct 模型画了柱子；温度 0.2 只给了 pass@1。对应 <a href="https://arxiv.org/html/2506.20639v2#S4.F6" target="_blank" rel="noopener">原文图 6 ↗</a>，pass@1 到 pass@10 的完整曲线（温度 0 到 1.5）见 <a href="https://arxiv.org/html/2506.20639v2#S4.F5" target="_blank" rel="noopener">原文图 5 右 ↗</a>。</div>
+</div>
+<p>以 Instruct 模型的 HumanEval 为例：温度 0.2 时 pass@1 是 72.0；温度 1.2 时单次采样只有 47.7，但采 10 次至少对一次的比例达到 86.0。温度 1.2 的 pass@10 也高于温度 1.0 的 82.9。作者的判断是：这么大的 pass@k 空间，正是 RL 可以把它“压”到 pass@1 上的潜力；而高温度同时让生成顺序更多样，进一步扩大了 rollout 的搜索空间。由此引出论文的核心论断：<b>在 AR 模型里，温度只影响选哪个 token；在扩散模型里，温度同时影响选哪个 token 和它们的生成顺序。</b></p>
+<div class="note-warn"><b>读的时候要注意：</b>pass@10 是“10 次里至少对一次”，它衡量的是上限，不是 RL 之后能达到的 pass@1。实际上 coupled-GRPO 之后 HumanEval 的 pass@1 是 73.2，只比 72.0 高 1.2，离 86.0 还很远。另外，“顺序更多样”和“答对率更高”之间的因果关系，论文并没有单独验证：高温度同时改变了 token 和顺序，图 6 的 pass@k 提升里两者各占多少，无从区分。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A1.SS2" target="_blank" rel="noopener">附录 A.2 AR 性的定义 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A3" target="_blank" rel="noopener">附录 C 熵热力图与解码样例 ↗</a> · 相关：<a href="token-ordering.html">“Train for the Worst, Plan for the Best” 精读页（解码顺序为什么重要）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 coupled-GRPO：用一对互补掩码估计 token 的对数概率</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>§2 说过，GRPO 的每一项都需要“每个 token 的对数概率”，而掩码扩散模型给不出精确值，只能用蒙特卡洛估计。估计得太粗，梯度噪声大、有偏差；估计得太细，每次更新要做很多次前向，训练太慢。d1 的“一次全遮”估计便宜但有偏，在代码任务上训不稳。coupled-GRPO 想在几乎不增加计算的前提下，让每个 token 都得到一个“看得见部分上下文”的估计，并且方差更小。它是怎么做到的，为什么有效，代价又是什么？</div>
+
+<h4 id="n-5-1">5.1 难点：扩散模型的对数概率只能估计，d1 的估计有偏</h4>
+<p>掩码扩散模型目前都用蒙特卡洛采样来估计对数概率：负对数似然被 ELBO 界住，即 \(\mathcal P_i=\mathbb E_{t,\,x_t\sim q(x_t\mid x_0)}[\mathcal L_t(x_t)]\)，其中 \(\mathcal L_t\) 就是 §2.1 的加权交叉熵。抽很多个 \(t\) 和掩码取平均，估计就准；但 LLaDA 论文里一条回答要抽 128 次，放进 GRPO 的训练循环里，每次更新都要做上百次带梯度的前向，代价完全无法接受。d1 已经指出了这个问题。</p>
+<p><b>d1 的做法（论文称为基线）。</b>把补全部分全部遮住，只做一次前向，读出每个位置上原词的概率，当作这个 token 的对数概率。这等价于只在 \(t=T\)（全遮）这一个时刻采样一次；论文把这串对数概率记作 \(\mathcal P_{t=T}\)，比值就是 \(\rho_i^k=\pi_{\theta}(o_i^k\mid c,\,o_i^k=\texttt{[M]})/\pi_{\text{old}}(o_i^k\mid c,\,o_i^k=\texttt{[M]})\)。d1 还会把题目随机遮掉 \(p=15\%\) 来增加多样性。作者发现，在代码任务上遮题目会让补全 token 的概率估计不可靠，奖励不能稳定上升（图 7 左），推测是因为代码比数学对 token 级的准确性要求更高。所以他们把题目遮盖比例改回 \(p=0\)，以“补全全遮、题目不遮”的 \(\mathcal P_{t=T}\) 作为基线。d1 估计器的四层近似（看不到其他回答词、词与词当独立、题目被改、与采样器无关）在 <a href="d1.html#n-3-1">d1 精读页 §3.1</a> 有逐条分析。</p>
+<p>论文进一步指出，即使不遮题目，这个基线也是<b>有偏</b>的：根据 §4.3 的熵汇分析，全遮状态下各位置的置信度分布很不均匀，结果 RL 训练会更激进地更新靠前的 token。</p>
+<div class="note-warn"><b>原文这里有一处字面上的矛盾：</b>论文写的是“高熵的 token 倾向于位于左侧”，而 §4.3 的熵汇说的是左侧（紧挨 prompt）的位置置信度高、也就是熵低。按上下文，本站的理解是：在全遮状态下，只有靠左的位置能得到比较“像样”的预测，越往右的位置越接近瞎猜，所以基于全遮估计的学习信号会偏向前面的 token。论文没有用实验量化这个偏差。</div>
+
+<h4 id="n-5-2">5.2 耦合采样：两份互补的掩码，加一份全遮</h4>
+<p>问题的根源在 §2.1 提过的那个性质：在 \(\mathcal L_t\) 的计算里，只有被遮住的位置才计入损失。采样次数有限时，这既浪费（没被遮的 token 白算了），又带来方差（有的 token 这次被评估、下次没被评估）。coupled-GRPO 的办法是：</p>
+<ol>
+  <li>选 \(\lambda\) 对时刻 \((t,\hat t)\)，满足 \(t+\hat t=T\)（连续时间里就是 \(\hat t=1-t\)）。</li>
+  <li>对每一对，抽两张<b>互补</b>的补全掩码：第一张遮住集合 \(M\)，第二张恰好遮住剩下的 \(\bar M\)。两张合起来覆盖全部补全 token，而且每个 token 恰好在其中一次前向里被遮住、在另一次里可见。</li>
+  <li>再保留 d1 式的全遮那一份。把三项加起来求平均，作为每个 token 的对数概率估计（论文式 (4)、(13)）：</li>
+</ol>
+<div class="formula">$$\widehat{\log\pi_{\theta}}\big(o^k\big)=\frac{1}{\lambda+1}\Big[\sum_{t+\hat t=T}\big(\mathcal L_t(x_t)+\mathcal L_{\hat t}(x_{\hat t})\big)+\mathcal L_T(x_T)\Big],\qquad \text{实践中 }\lambda=1$$</div>
+<p>论文这里直接把损失 \(\mathcal L\) 写成了 \(\log\pi\)，符号上有些随意（损失是正的，对数概率是负的）。官方代码用的是带符号的对数概率，逐 token 写出来就是（\(\lambda=1\)；本站按 <code>coupled_grpo.py</code> 改写）：</p>
+<div class="formula">$$\widehat{\log\pi_{\theta}}\big(o^k\big)=\frac12\Big[\underbrace{\log p_{\theta}\big(o^k\mid c,\,x_{\text{全遮}}\big)}_{\text{v0：全遮，权重 }1}+\underbrace{\tfrac{\mathbf 1[k\in M]}{t}\log p_{\theta}\big(o^k\mid c,\,x^{M}\big)+\tfrac{\mathbf 1[k\notin M]}{1-t}\log p_{\theta}\big(o^k\mid c,\,x^{\bar M}\big)}_{\text{v1 / v2：恰好有一项非零}}\Big]$$</div>
+<p>其中 \(x^{M}\) 是遮住集合 \(M\) 的补全（v1），\(x^{\bar M}\) 是遮住补集的补全（v2）。代码里先抽一个掩码比例 \(t\)，再给每个位置抽一个均匀随机数 \(u_k\)：\(u_k&lt;t\) 的位置在 v1 里遮住，\(u_k&gt;t\) 的位置在 v2 里遮住，所以两份恰好互补。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一条 8 个 token 的补全，coupled-GRPO 送进模型的三份输入（t = 0.6）</div>
+  <div class="dia-row"><span class="lbl">原补全 o</span><div class="cells"><span class="cell b">o1</span><span class="cell b">o2</span><span class="cell b">o3</span><span class="cell b">o4</span><span class="cell b">o5</span><span class="cell b">o6</span><span class="cell b">o7</span><span class="cell b">o8</span></div></div>
+  <div class="dia-row"><span class="lbl">v0：全遮</span><div class="cells"><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span></div></div>
+  <div class="dia-out">d1 的基线就是只有这一份。每个 token 都在“什么回答都看不到”的情况下被评估，权重 1。</div>
+  <div class="dia-row"><span class="lbl">v1：遮住 M（约 60%）</span><div class="cells"><span class="cell">M</span><span class="cell b">o2</span><span class="cell">M</span><span class="cell">M</span><span class="cell b">o5</span><span class="cell">M</span><span class="cell">M</span><span class="cell b">o8</span></div></div>
+  <div class="dia-row"><span class="lbl">v2：遮住补集（约 40%）</span><div class="cells"><span class="cell b">o1</span><span class="cell">M</span><span class="cell b">o3</span><span class="cell b">o4</span><span class="cell">M</span><span class="cell b">o6</span><span class="cell b">o7</span><span class="cell">M</span></div></div>
+  <div class="dia-row"><span class="lbl">部分可见估计取自</span><div class="cells"><span class="cell a">v1</span><span class="cell c">v2</span><span class="cell a">v1</span><span class="cell a">v1</span><span class="cell c">v2</span><span class="cell a">v1</span><span class="cell a">v1</span><span class="cell c">v2</span></div></div>
+  <div class="dia-out">蓝格的 token 用 v1 中的对数概率乘 1/0.6 ≈ 1.67；橙格的 token 用 v2 中的对数概率乘 1/0.4 = 2.5。每个 token 最后 = (v0 那一项 + 这一项) / 2。</div>
+  <div class="dia-note">本站示意图。题目（prompt）在三份输入里都完整可见，图中省略。原图把这三份画成三个批次的矩阵，并用一张小表比较“token 覆盖率”和“方差缩减”：coupled 两项都高，传统随机采样覆盖率低，只用全遮则方差缩减低，见 <a href="https://arxiv.org/html/2506.20639v2#S3.F2" target="_blank" rel="noopener">原文图 2 右半部分 ↗</a>。</div>
+</div>
+<p>作者列出这样做的两个好处：（1）每个 token 的对数概率至少被算了一次（在 v1 或 v2 中被遮住），所以每个 token 都有非零的学习信号；（2）每个 token 都有一次是在“真实的部分遮盖上下文”里被评估的，而不是总在全遮状态下被猜，估计更准确。代价是：和 d1 的基线相比，每次更新多了 \(2\lambda\) 次前向，\(\lambda=1\) 时就是多 2 次（附录 A.3）。为了公平，作者还设计了一个对照——<b>去耦合</b>（decoupled）采样：前向次数相同，但两张掩码各自独立随机抽，不要求互补。</p>
+
+<h4 id="n-5-3">5.3 为什么互补能降低方差：对偶变量法</h4>
+<div class="note-pre"><b>先补一点背景：对偶变量（antithetic variates）。</b>
+<p>这是蒙特卡洛方法里一个经典的方差缩减技巧。举个最简单的例子：想用随机数估计 \(\mathbb E[U]\)，\(U\) 在 \([0,1]\) 上均匀分布。独立抽两个 \(U_1,U_2\) 取平均，方差是 \(\frac{1}{12}\cdot\frac12=\frac{1}{24}\)。如果改成抽一个 \(U\)，再配上它的“对偶” \(1-U\)，取 \(\frac{U+(1-U)}{2}\)，结果恒等于 0.5，方差为 0。原因是 \(U\) 和 \(1-U\) 完全负相关：一个偏大，另一个必然偏小，相加时误差互相抵消。一般地，两个同分布的估计量取平均，方差等于 \(\frac{\sigma^2+\mathrm{Cov}}{2}\)；只要协方差为负，就比独立的两个样本更准。</p>
+</div>
+<p>附录 A.4 把耦合采样套进这个框架。定义每个 token 的打分函数 \(g(t,M,k)=M_k\cdot\frac1t\cdot\ell(o^k\mid c,o_{1-M})\)：只有 token \(k\) 被遮住（\(M_k=1\)）时才非零，\(\ell\) 是在可见上下文下预测 \(o^k\) 的交叉熵。要估计的量是它的期望 \(v_k=\mathbb E_{t,M}[g(t,M,k)]\)，也就是 ELBO 中属于 token \(k\) 的那一份。</p>
+<ul>
+  <li><b>标准蒙特卡洛</b>：独立抽 \(2N\) 组 \((t,M)\)，取平均。</li>
+  <li><b>耦合（对偶）估计</b>：抽 \(N\) 组 \((t,M)\)，每组配上它的对偶 \((\hat t,\hat M)=(1-t,\,1-M)\)，每对取平均再对 \(N\) 对取平均。</li>
+</ul>
+<p>证明的关键只有一句话：对任何一个 token，\(M_k\) 和 \(1-M_k\) 恰好一个是 1、一个是 0，所以一对里的两个打分<b>恰好有一个是 0</b>，乘积恒为 0。于是协方差 \(=0-v_k\cdot v_k=-v_k^2&lt;0\)。代入方差公式，两种估计在前向次数相同（都是 \(2N\) 次）时的方差差为：</p>
+<div class="formula">$$\mathrm{Var}(\hat v_{k,\text{MC}})-\mathrm{Var}(\hat v_{k,\text{AV}})=\frac{\sigma_g^2}{2N}-\frac{\sigma_g^2-v_k^2}{2N}=\frac{v_k^2}{2N}&gt;0$$</div>
+<p>无偏性的证明则依赖于 \((t,M)\) 和 \((1-t,1-M)\) 同分布：\(t\) 的分布关于 0.5 对称、每个位置以概率 \(t\) 被遮，那么 \(1-t\) 和 \(1-M\) 满足同样的规律。</p>
+<p>用一个最简单的情形算一下这个差距有多大（推算）。假设某个 token 不管上下文如何，交叉熵都是同一个常数 \(c\)，并且像官方代码那样 \(t\) 在 \([0.2,0.8]\) 上均匀抽取。此时 \(\mathbb E[1/t]=\ln 4/0.6\approx2.31\)，可以算出：</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样两次带遮盖的前向，三种估计 token 打分的方式（交叉熵恒为 c 的玩具情形）</div>
+  <div class="table-wrap"><table>
+    <tr><th>估计方式</th><th class="num">带遮盖的前向次数</th><th class="num">期望</th><th class="num">方差（单位 \(c^2\)）</th></tr>
+    <tr><td>只用一张随机掩码</td><td class="num">1</td><td class="num">\(c\)</td><td class="num">1.31</td></tr>
+    <tr><td>两张独立随机掩码取平均（类似论文的“去耦合”对照）</td><td class="num">2</td><td class="num">\(c\)</td><td class="num">0.66</td></tr>
+    <tr class="hl"><td>一对互补掩码取平均（耦合）</td><td class="num">2</td><td class="num">\(c\)</td><td class="num">0.16</td></tr>
+  </table></div>
+  <div class="dia-note">推算过程：单张掩码时 \(g=M c/t\)，\(\mathbb E[g]=c\)，\(\mathbb E[g^2]=c^2\,\mathbb E[1/t]\approx2.31c^2\)，方差 \(\approx1.31c^2\)；两张独立的取平均，方差减半为 0.66；互补的一对，\(\mathbb E[h^2]=\frac{c^2}{4}\mathbb E[\frac1t+\frac1{1-t}]\approx1.16c^2\)，方差 \(\approx0.16c^2\)。两者之差 0.5 正好等于公式里的 \(v_k^2/2N\)（\(v_k=c\)，\(N=1\)）。在这个玩具里方差缩小到约四分之一。</div>
+</div>
+<p>这个玩具还顺带说明了为什么 \(t\) 要截断在 \([0.2,0.8]\)：如果 \(t\) 取遍 \((0,1)\)，\(\mathbb E[1/t]\) 是发散的，上面两种估计的方差都会是无穷大（推算）。论文从另一个角度给了同样的理由：附录图 8 显示，在 DiffuLLaMA 的验证集上，\(t\) 太大或太小时加权损失会出现极端值，\([0.2,0.8]\) 是一个“甜区”，对 DiffuCoder 也成立。</p>
+<div class="note-warn"><b>这个理论保证覆盖到哪里为止：</b>
+<ul>
+  <li><b>估计的对象是 \(v_k\)，不是真实的 \(\log\pi\)。</b>\(v_k\) 是 ELBO 里属于 token \(k\) 的那一份，它本身只是对数似然的一个代理量（上界的一部分）。“无偏”指的是对 \(v_k\) 无偏。</li>
+  <li><b>实现和证明不完全一致。</b>证明假设 \(t\sim\mathcal U(0,1)\)，实现用的是 \(\mathcal U[0.2,0.8]\)（仍关于 0.5 对称，同分布的论证照样成立，但估计对象相应变成了截断后的量）；实现还额外加了全遮的 v0 项，再除以 2。按代码逐 token 算，v1/v2 那一项（一对里非零的那个）的期望是 \(2v_k\)，所以最终的估计相当于“\(v_k\) 的对偶估计 + 全遮项的一半”，这个组合不在 A.4 的证明范围内（本站推算）。</li>
+  <li><b>比值不是真实的概率比。</b>代入 GRPO 后，重要性比值 \(\rho=\exp\big(\widehat{\log\pi}_{\theta}-\widehat{\log\pi}_{\text{old}}\big)\)。按上面的逐 token 公式，它等于“全遮概率比的 1/2 次方 × 部分可见概率比的 \(w/2\) 次方”，其中 \(w=1/t\) 或 \(1/(1-t)\)，取值在 1.25 到 5 之间。举个例子：如果两种上下文下的概率都涨了 10%，抽到 \(w=1.25\) 时比值约 1.11，抽到 \(w=5\) 时比值约 1.33（推算）。同样的变化，比值大小取决于这次抽到的 \(t\)。官方配置把裁剪范围设成 \(\varepsilon=0.5\)，比 PPO 常用的 0.2 宽得多，可能与此有关（本站推测）。</li>
+</ul></div>
+
+<h4 id="n-5-4">5.4 完整的训练流程与官方实现</h4>
+<p>算法 1（附录 A.3）的流程是：外层循环开始时把参考模型同步为当前模型；内层每一步取一批题目，用旧策略对每题采 \(G\) 条补全，执行测试用例算奖励，算优势（组平均或留一）；然后做 \(\mu\) 次 GRPO 迭代，每次随机抽一对 \((t_j,\hat t_j)\)、构造互补掩码、算出 \(\mathcal L_{t_j}\)、\(\mathcal L_{\hat t_j}\)、\(\mathcal L_T\)，得到耦合估计和重要性比值，再按式 (4) 更新参数。</p>
+<div class="dia">
+  <div class="dia-title">示意图：coupled-GRPO 的一轮更新（超参数来自附录 B.1 与官方配置）</div>
+  <div class="dia-flow"><span class="dia-box tgt">① 采样<small>旧策略对每题生成 G = 10 条补全；最长 256 token、扩散 256 步（每步 1 个 token）；论文温度 1.2</small></span><span class="dia-arrow">→</span><span class="dia-box act">② 奖励<small>E2B 沙箱执行测试；r = 2.0 × 通过率 + 0.5 × 格式分</small></span><span class="dia-arrow">→</span><span class="dia-box act">③ 优势<small>组内减平均（或留一），不除以标准差</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box enc">④ 构造三份输入<small>v0 全遮、v1 按 t 遮、v2 遮补集；t ~ U[0.2, 0.8]</small></span><span class="dia-arrow">→</span><span class="dia-box enc">⑤ 一次批量前向<small>当前、旧、参考三个策略都用同一个掩码种子</small></span><span class="dia-arrow">→</span><span class="dia-box pred">⑥ 更新<small>逐 token 比值裁剪（ε = 0.5）+ KL（β = 0.01）；μ = 2 次，每次换一组掩码</small></span></div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2506.20639v2#A1.SS3" target="_blank" rel="noopener">原文附录 A.3 算法 1 ↗</a>。“同一个掩码种子”来自官方代码：每批 rollout 为 \(\mu\) 次内循环各抽一个随机种子，当前策略、旧策略和参考策略在同一次内循环里用同一组掩码计算，比值才可比。</div>
+</div>
+<p>其他细节：</p>
+<ul>
+  <li><b>训练数据。</b>从 AceCoder-87K 中，按参考解的通过率挑出“平均通过率低（后 20%）且方差大（前 40%）”的题目，得到 2.1 万道难题，只训 1 个 epoch。作者强调把难度筛到合适区间很重要。</li>
+  <li><b>奖励。</b>格式分：回答里有合法的 Markdown 代码块并通过 Python 语法检查得 0.5，代码块格式对但有语法错误得 0.25，格式不对得 0（已乘上权重 0.5）；只有格式完全正确时才去执行测试，正确性奖励是测试通过率乘 2.0。所以单条回答的奖励最高是 2.5（推算）。</li>
+  <li><b>超参数。</b>参考模型每 64 步同步一次，\(\mu=2\)，\(\beta=0.01\)，\(\varepsilon=0.5\)，学习率 1e-6，补全最长 256，扩散步数 256，\(G=10\)，采样温度 1.2；单节点 8 张 H100，约 40 小时。代码基于 Open-R1，并借鉴了 d1 的实现。</li>
+  <li><b>代价。</b>和 d1 的基线相比，每次更新多 2 次前向；在作者的环境里，DiffuCoder 端到端的 GRPO 训练时间是 AR 模型 Qwen2.5-Coder 的 2 倍（附录 C.4）。慢的另一个来源是 rollout：没有 KV 缓存，每条补全要做 256 次完整前向。</li>
+</ul>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（apple-aiml-research/ml-diffucoder）</span>
+<ul>
+  <li><b>rollout 温度。</b>论文 §1 和附录 B.1 都说用 1.2（图 7 右也显示 1.2 好于 1.0），官方配置 <code>recipes/config_coupled_code.yaml</code> 写的却是 <code>generation_temperature: 1.0</code>。复现时应以哪个为准，仓库没有说明。</li>
+  <li><b>优势的基准。</b>论文的主结果用组平均基准，留一基准是表 2 里单独的一行；官方 <code>coupled_grpo.py</code> 里却把 <code>leave_one_out = True</code> 写死了，发布的代码默认就是留一基准。按 §2.3 的推导，两者只差 0.9 倍的常数。</li>
+  <li><b>掩码比例的范围。</b>代码里 <code>random.uniform(0.2, 0.8)</code>，注释却写着“0.1 到 0.9”；论文附录 B.1 是 \([0.2,0.8]\)，以代码和论文为准。</li>
+  <li><b>符号。</b>论文式 (4)、(13) 把正的损失 \(\mathcal L\) 直接写成 \(\log\pi\)；代码对 log-softmax 取加权平均，符号是对的：<code>final = (p0 + where(mask, p1 / t, p2 / (1 - t))) / 2</code>（这里的 p 都是对数概率）。</li>
+  <li><b>题目不加噪。</b>配置里 <code>p_mask_prompt: 0.0</code>，与论文“回到 \(p=0\)”一致；三份输入里题目都完整可见，logits 只取补全的位置。</li>
+</ul></div>
+
+<h4 id="n-5-5">5.5 实验结果：奖励曲线、表 2、温度与步数</h4>
+<p>表 2 比较了几种设置。所有分数都是在评测温度 \(\{0.2,0.3,0.4\}\) 中取最好的那个。</p>
+<div class="table-wrap"><table>
+  <tr><th>设置（原文表 2）</th><th class="num">HE</th><th class="num">HE+</th><th class="num">MBPP</th><th class="num">MBPP+</th><th class="num">BCB-C 全 / 难</th><th class="num">BCB-I 全 / 难</th><th class="num">EvalPlus（推算）</th></tr>
+  <tr><td>Qwen2.5-Coder + SFT（AR）</td><td class="num">82.9</td><td class="num">75.6</td><td class="num">80.1</td><td class="num">66.1</td><td class="num">46.9 / 16.2</td><td class="num">39.5 / 14.9</td><td class="num">70.9</td></tr>
+  <tr><td>　+ GRPO（AR）</td><td class="num">80.5</td><td class="num">75.0</td><td class="num">84.4</td><td class="num">72.8</td><td class="num">49.7 / 16.2</td><td class="num">40.0 / 10.2</td><td class="num">73.9</td></tr>
+  <tr><td>DiffuCoder-Instruct</td><td class="num">72.0</td><td class="num">65.2</td><td class="num">75.1</td><td class="num">61.9</td><td class="num">35.7 / 12.2</td><td class="num">34.0 / 8.8</td><td class="num">63.6</td></tr>
+  <tr class="hl"><td>　+ coupled-GRPO</td><td class="num">73.2</td><td class="num">68.3</td><td class="num">78.6</td><td class="num">67.5</td><td class="num">40.4 / 10.8</td><td class="num">37.5 / 10.8</td><td class="num">67.9</td></tr>
+  <tr><td>　+ coupled-GRPO（留一基准）</td><td class="num">70.7</td><td class="num">62.2</td><td class="num">79.6</td><td class="num">68.5</td><td class="num">41.2 / 13.5</td><td class="num">37.6 / 12.8</td><td class="num">65.4</td></tr>
+  <tr><td>　只用全遮估计（d1 式，p = 0）</td><td class="num">66.5</td><td class="num">59.1</td><td class="num">77.0</td><td class="num">65.1</td><td class="num">38.0 / 8.8</td><td class="num">35.6 / 13.5</td><td class="num">62.1</td></tr>
+  <tr><td>　去耦合采样（前向次数相同）</td><td class="num">68.9</td><td class="num">62.8</td><td class="num">78.3</td><td class="num">66.4</td><td class="num">40.4 / 10.8</td><td class="num">36.5 / 10.8</td><td class="num">64.6</td></tr>
+</table></div>
+<p>论文的结论是：coupled-GRPO 有效，而 d1 式、只用全遮、去耦合这几种基线的奖励学习都不稳定。从表上看：</p>
+<ul>
+  <li>相对 Instruct，coupled-GRPO 在表中 8 个指标的 7 个上提高，EvalPlus 从 63.55 到 67.9（+4.35，四舍五入即摘要里的 +4.4）；BigCodeBench 补全版难题集下降了 1.4。</li>
+  <li>“只用全遮”在 HumanEval 系列上明显<b>掉分</b>（HE −5.5、HE+ −6.1），在 MBPP 系列上小幅上涨；“去耦合”介于两者之间。这和“互补掩码更好”的论点一致。</li>
+  <li>同一张表里还有 AR 模型做 GRPO 的结果：Qwen2.5-Coder + SFT 做 GRPO 后，EvalPlus 从约 70.9 到约 73.9（+3.0，推算），HumanEval 反而略降。也就是说，coupled-GRPO 给扩散模型带来的提升幅度和 AR 模型做 GRPO 相当，但绝对分数仍落后约 6 分。</li>
+</ul>
+<p><b>奖励曲线（图 7）。</b>论文只给了曲线图。本站从矢量图读出的大致走势如下（奖励上限为 2.5，推算）：左图中，d1 式基线（题目遮 15%）起点约 1.0，先升到约 1.2，随后崩到约 0.2；只用全遮（\(p=0\)）从约 1.0 升到约 1.45 后回落到约 1.2；coupled-GRPO 从约 1.2 稳步升到约 1.7。中图中，去耦合从约 1.0 升到约 1.6 后回落到约 1.4，coupled-GRPO 升到约 1.75。右图显示 rollout 温度 1.2 比 1.0 的奖励更高。附录图 12 右还给出了 coupled-GRPO 与 AR 模型常规 GRPO 的对比：AR 起点只有约 0.5，最后升到约 1.8，高于 coupled-GRPO 的约 1.7。</p>
+<div class="note-warn"><b>读奖励曲线时要注意：</b>按读图，图 7 左、中两张图里 coupled-GRPO 的曲线起点约为 1.17，而各个基线的起点约为 1.0，起点并不相同；附录图 12 的图注说明，基线对比实验是在“早期版本的 DiffuCoder-Instruct”上做的。在附录图 12 左、中（全部基于早期版本）里，除了一条起点较晚的“只用全遮”曲线，各条曲线的起点接近（约 1.34–1.42），差距也小得多：例如 coupled 从约 1.37 升到约 1.60，去耦合从约 1.34 升到约 1.56。所以图 7 的“稳定 vs 不稳定”大体可信，但两条曲线之间的高度差不宜直接解读为方法的差距。曲线是否经过平滑、跑了几个随机种子，论文没有说。</div>
+<p><b>温度的两个发现。</b>第一，rollout 温度很关键：图 6 中 DiffuCoder-Instruct 在温度 1.2 下的 pass@10 比 1.0 更高，和 coupled-GRPO 训练时的奖励趋势一致。第二，RL 之后<b>评测时的最优温度</b>从 0.2 移到了 0.3 或 0.4，说明训练让每个 token 的分布变尖了（同样的温度下更“自信”，所以可以用稍高的温度）；作者指出这和 AR 模型上最近关于 RL 与熵的研究一致。在新的最优温度下，全局 AR 性降低（§4.2 的图表最后一行）。</p>
+<p><b>步数减半。</b>更有意思的发现是图 1(c)：把解码步数减到一半（每步定 2 个 token，相当于生成快 2 倍），coupled-GRPO 之后的模型掉分比 RL 之前少。作者据此认为 RL 降低了 AR 性、提高了可并行性。附录图 11 给了更完整的对比：</p>
+<div class="dia">
+  <div class="dia-title">简化图表：步数减半时的相对掉分（越短越好）</div>
+  <svg class="dg" viewBox="0 0 680 362" role="img" aria-label="步数减半时各模型的相对掉分" style="max-width:680px;--dg-min:580px">
+<rect x="120" y="10" width="13" height="10" rx="2" style="fill:var(--c-tgt)"/>
+<text x="139" y="15" class="t-xs">SFT 只训 1 个 epoch</text>
+<rect x="390" y="10" width="13" height="10" rx="2" style="fill:var(--c-enc)"/>
+<text x="409" y="15" class="t-xs">Instruct（SFT 5 个 epoch）</text>
+<rect x="120" y="28" width="13" height="10" rx="2" style="fill:var(--c-act)"/>
+<text x="139" y="33" class="t-xs">+ coupled-GRPO，评测温度 0.2</text>
+<rect x="390" y="28" width="13" height="10" rx="2" style="fill:var(--c-pred)"/>
+<text x="409" y="33" class="t-xs">+ coupled-GRPO，评测温度 0.4</text>
+<line class="grid-ln" x1="120" y1="52" x2="120" y2="318"/>
+<text x="120" y="331" class="t-c t-xs">0</text>
+<line class="grid-ln" x1="250" y1="52" x2="250" y2="318"/>
+<text x="250" y="331" class="t-c t-xs">−10%</text>
+<line class="grid-ln" x1="380" y1="52" x2="380" y2="318"/>
+<text x="380" y="331" class="t-c t-xs">−20%</text>
+<line class="grid-ln" x1="510" y1="52" x2="510" y2="318"/>
+<text x="510" y="331" class="t-c t-xs">−30%</text>
+<text x="110" y="83" class="t-r t-sm t-b">HumanEval</text>
+<rect x="120" y="58" width="343.2" height="10" rx="1.5" style="fill:var(--c-tgt)"/>
+<text x="468.2" y="63" class="t-xs">−26.4%</text>
+<rect x="120" y="71" width="397.8" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="522.8" y="76" class="t-xs">−30.6%</text>
+<rect x="120" y="84" width="271.7" height="10" rx="1.5" style="fill:var(--c-act)"/>
+<text x="396.7" y="89" class="t-xs">−20.9%</text>
+<rect x="120" y="97" width="217.1" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="342.1" y="102" class="t-xs">−16.7%</text>
+<text x="110" y="151" class="t-r t-sm t-b">HumanEval+</text>
+<rect x="120" y="126" width="367.9" height="10" rx="1.5" style="fill:var(--c-tgt)"/>
+<text x="492.9" y="131" class="t-xs">−28.3%</text>
+<rect x="120" y="139" width="388.7" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="513.7" y="144" class="t-xs">−29.9%</text>
+<rect x="120" y="152" width="240.5" height="10" rx="1.5" style="fill:var(--c-act)"/>
+<text x="365.5" y="157" class="t-xs">−18.5%</text>
+<rect x="120" y="165" width="221.0" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="346.0" y="170" class="t-xs">−17%</text>
+<text x="110" y="219" class="t-r t-sm t-b">MBPP</text>
+<rect x="120" y="194" width="250.9" height="10" rx="1.5" style="fill:var(--c-tgt)"/>
+<text x="375.9" y="199" class="t-xs">−19.3%</text>
+<rect x="120" y="207" width="182.0" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="307.0" y="212" class="t-xs">−14%</text>
+<rect x="120" y="220" width="219.7" height="10" rx="1.5" style="fill:var(--c-act)"/>
+<text x="344.7" y="225" class="t-xs">−16.9%</text>
+<rect x="120" y="233" width="122.2" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="247.2" y="238" class="t-xs">−9.4%</text>
+<text x="110" y="287" class="t-r t-sm t-b">MBPP+</text>
+<rect x="120" y="262" width="249.6" height="10" rx="1.5" style="fill:var(--c-tgt)"/>
+<text x="374.6" y="267" class="t-xs">−19.2%</text>
+<rect x="120" y="275" width="183.3" height="10" rx="1.5" style="fill:var(--c-enc)"/>
+<text x="308.3" y="280" class="t-xs">−14.1%</text>
+<rect x="120" y="288" width="222.3" height="10" rx="1.5" style="fill:var(--c-act)"/>
+<text x="347.3" y="293" class="t-xs">−17.1%</text>
+<rect x="120" y="301" width="123.5" height="10" rx="1.5" style="fill:var(--c-pred)"/>
+<text x="248.5" y="306" class="t-xs">−9.5%</text>
+<text x="340" y="348" class="t-c t-xs">把扩散步数从“等于长度”减到一半（每步定 2 个 token）后，分数相对下降的百分比</text>
+</svg>
+  <div class="dia-note">数值来自原文 <a href="https://arxiv.org/html/2506.20639v2#A3.F11" target="_blank" rel="noopener">附录图 11 ↗</a> 中标注的百分比（各柱与模型的对应关系由本站按矢量图中的横坐标核对）；Instruct 与“评测温度 0.4”两组也出现在 <a href="https://arxiv.org/html/2506.20639v2#S0.F1" target="_blank" rel="noopener">原文图 1(c) ↗</a>。按 Instruct 在 HumanEval 上的 72.0 推算，减半后约为 50.0。</div>
+</div>
+<p>附录 C.3 从图 11 得出三条结论：（1）和 RL 的起点 Instruct 相比，GRPO 提高了可并行性；（2）和只训 1 个 epoch 的 SFT 相比，训 5 个 epoch 能降低 AR 性；（3）GRPO 之后的模型，用较高的评测温度（0.4）掉分更少。按图上的数字，第（3）条在四个基准上都成立；第（1）条对“温度 0.4”的 GRPO 模型在四个基准上都成立，但“温度 0.2”的 GRPO 模型在 MBPP 和 MBPP+ 上掉得比 Instruct 还多（16.9% 对 14.0%，17.1% 对 14.1%）；第（2）条只在 MBPP 系列上成立，在 HumanEval 系列上 5 个 epoch 反而掉得更多（30.6% 对 26.4%）。所以“RL 让模型更可并行”的证据里，有一部分和评测温度纠缠在一起。</p>
+<p>附录 C.4 还记录了两点：训练中补全长度没有像 AR 的 GRPO 那样持续变长，作者认为是因为没有鼓励长链推理；附录表 4 里训 2 个 epoch 的 coupled-GRPO，EvalPlus 降到约 65.25（推算），但 BigCodeBench 四项都更高（例如补全版难题 14.9 对 10.8）。不过 B.1 又说，即使只训 1 个 epoch，性能也随训练步数持续上升。</p>
+
+<h4 id="n-5-6">5.6 结果的份量：这些数字是在什么条件下得到的</h4>
+<p>把上面的比较逐项拆开，看每个对比到底控制了什么。</p>
+<ul>
+  <li><b>和 AR 模型比：参数相同，数据不同。</b>论文说 DiffuCoder 与 Dream-7B 共用 Qwen2.5-7B 的结构（官方 config 为 28 层、隐藏维度 3584），所以它和 Qwen2.5-Coder-7B 的参数量相同。但 DiffuCoder = Qwen2.5-Coder-7B（Qwen2.5 之上再训 5.5T+ token）+ 130B 扩散训练，其中 65B 是 OpenCoder 的高质量退火数据（16B × 4 轮），表里的 Qwen2.5-Coder 没有吃过这一段。所以 base 模型“打平甚至略好”，不能理解为“扩散目标和 AR 目标一样好”，而只能理解为“改造之后没有把 AR 预训练的能力丢光”。附录表 4 甚至表明，单靠改造预训练（阶段 1），HumanEval 会从 61.6 掉到 39.0。</li>
+  <li><b>SFT 对比是同数据的，RL 对比基本也是。</b>“Qwen2.5-Coder + SFT”用的是和 DiffuCoder-Instruct 完全相同的 SFT 流程和数据，这是全文最干净的对照，它显示了扩散模型在 SFT 上的明显短板（+3.0 对 +14.3）。表 2 的 AR GRPO 按附录 B.1 的说法也用同一批 2.1 万道题，但 AR 侧的超参数没有单独列出。两条起点不同的模型做 RL，提升幅度相近（+4.35 对约 +3.0），AR 的绝对分数仍高约 6 分（约 73.9 对 67.9，推算）。</li>
+  <li><b>速度：这篇论文没有测速度。</b>所有质量数字都是在“步数 = 长度”、每步只定 1 个 token、没有 KV 缓存的条件下得到的；在这个条件下，扩散模型生成一段代码要做和 token 数一样多次的整段前向，实际上比带 KV 缓存的 AR 模型慢。步数减半的实验只报告了掉分（Instruct 掉 14–31%，RL 后掉 9–21%），没有报告实际耗时、硬件和批大小。训练侧，端到端的 GRPO 时间是 AR 的 2 倍。所以“扩散模型写代码更快”这个说法，在本文中没有证据；它属于 <a href="mercury.html">Mercury</a>、<a href="fast-dllm.html">Fast-dLLM</a> 这些工作要回答的问题。</li>
+  <li><b>基准与口径。</b>全部是 Python 题；EvalPlus 是作者自定义的两项平均；HumanEval 只有 164 题，HE 上 +1.2 分只相当于多做对 2 道题（推算）。表 2 的每一行都在 3 个评测温度里挑了最好的那个，而且是在测试集上挑的，这会让每一行都略微偏高（所有行同样处理，所以对相对比较影响较小）。商用模型的数字来自厂商报告，评测方式未知。指令模型的评测模板预先写好了回答开头和代码块标记，这和其他论文的评测口径未必一致，跨论文比较代码分数时要特别小心。</li>
+  <li><b>RL 的基线与稳定性。</b>RL 的对照是同一个 Instruct 模型，前后对比是干净的。但提升并不均匀：BCB-C 难题集下降，留一基准那一行 HE 反而比 Instruct 低 1.3。§2.3 推导过，留一基准和组平均基准只差 0.9 倍的常数，两行之间 HE 却差了 2.5 分、MBPP 差了 1.0 分且方向相反，这说明单次训练的随机波动可能有好几分，而论文每种设置只报告了一次运行，没有误差棒。训练题来自 AceCoder（带测试的 Python 函数题），评测也是同类的 Python 函数题，论文没有在代码以外的任务上检查 RL 的效果是否泛化。</li>
+  <li><b>分析部分。</b>AR 性只在 HumanEval（164 题）和 GSM8K 上测，只给图、不给数值和置信区间；“代码 vs 数学”的那一对比较用的是两个不同的模型；GRPO 前后的 AR 性比较用了不同的评测温度；全局@1 对“最左边那一格被推迟”这种局部现象非常敏感（§4.2 的提示框）。这些都不否定论文的定性结论，但说明定量上的说服力有限。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#S5.F7" target="_blank" rel="noopener">原文图 7 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#S5.T2" target="_blank" rel="noopener">原文表 2 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A1.SS3" target="_blank" rel="noopener">附录 A.3 算法 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A1.SS4" target="_blank" rel="noopener">附录 A.4 方差分析 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A2.F8" target="_blank" rel="noopener">附录图 8 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A3.SS3" target="_blank" rel="noopener">附录 C.3 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A3.SS4" target="_blank" rel="noopener">附录 C.4 ↗</a> · 相关：<a href="d1.html">d1 精读页（diffu-GRPO）</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 相关工作、局限与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DiffuCoder 在文本扩散、代码生成、强化学习这三条线上各处在什么位置？作者自己承认了哪些局限？全文的结论可以怎样概括？</div>
+<p><b>文本扩散模型。</b>早期的文本扩散在连续空间里加噪（Diffusion-LM、DiffuSeq 等，见 <a href="diffusion-lm.html">Diffusion-LM 精读页</a>）；之后的离散扩散直接在 token 上加离散噪声（D3PM、SEDD），再发展为掩码扩散（MDLM、MD4 等）。规模化方面，DiffuLLaMA 首先从预训练的 AR 模型改造出扩散模型，LLaDA 和 Dream 是最早在性能上能和 AR 模型相当的开源扩散大模型；块扩散（BD3-LM）在块之间自回归、块内扩散，是 AR 与扩散的折中；LaViDa、MMaDA、Dimple 把文本扩散和视觉模型结合；还有一批工作研究缓存和并行解码来加速推理。</p>
+<p><b>代码生成。</b>开源代码模型以 Qwen2.5-Coder、OpenCoder 为代表；CodeFusion 最早把扩散模型用于代码生成，但规模小、任务简单；商用的 Mercury、Gemini Diffusion 宣称在代码上能和领先的 AR 模型相当，同时生成快得多。</p>
+<p><b>强化学习。</b>用可验证奖励做 GRPO（RLVR）在数学和代码上效果显著；有工作指出中期训练对 RL 扩展很重要。把 RL 用到扩散语言模型上：VRPO（LLaDA 1.5）为 DPO 设计了方差缩减的采样（见 <a href="llada-1-5.html">LLaDA 1.5 精读页</a>）；d1 和 MMaDA 用 GRPO 优化数学推理，但 rollout 和评测都严重依赖块扩散解码；LLadDou 额外训练一个模块给 token 的顺序打分；更早的 DDPO、DPPO 在连续扩散模型上把去噪过程建模为 MDP 做策略优化。</p>
+<p><b>作者承认的局限（附录 D）。</b></p>
+<ul>
+  <li><b>数据质量。</b>所有训练数据都来自开源社区；作者的重点是验证方法而不是追求最高分，所用数据未必是最高质量的，高质量数据的量也有限。§3.1 中阶段 1 训得越多越差的现象，也被归因于此。</li>
+  <li><b>模板单一。</b>GRPO 训练数据的指令模板比较固定、缺乏多样性，模型可能过度依赖特定的提示格式。</li>
+  <li><b>只有 Python。</b>训练和评测都主要在 Python 上，多语言和“文本 + 代码”的智能体场景留待以后。</li>
+  <li><b>没有长推理。</b>DiffuCoder 没有在长推理链的任务上训练，主要受限于当前扩散模型较短的序列长度和较慢的推理速度。</li>
+  <li><b>熵的动态。</b>AR 模型上已有研究分析 RL 过程中 token 熵的变化，作者认为在扩散模型上做类似分析是有前景的方向。</li>
+</ul>
+<p><b>结论。</b>论文给出了一个开源的 7B 代码扩散模型和完整的训练配方，并系统分析了扩散模型写代码时的解码模式：它和 AR 模型有根本的不同，尤其是采样温度不仅影响选哪个 token，还影响生成顺序，从而为 RL 提供了丰富的样本多样性。在此基础上提出的 coupled-GRPO 尊重扩散模型非自回归的本性，用耦合采样给出更准确的似然估计，显著提高了 DiffuCoder 的代码能力。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2506.20639v2#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#S7" target="_blank" rel="noopener">§7 ↗</a> · <a href="https://arxiv.org/html/2506.20639v2#A4" target="_blank" rel="noopener">附录 D 讨论 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>DiffuCoder 的三份权重（Base、Instruct、cpGRPO）在 2025 年 7 月初发布到 Hugging Face，社区很快做了 MLX 的 8-bit 版本（官方 README）。论文被 ICLR 2026 接收为 poster。它之后的工作大致沿着三条线展开，本站的旧版拆解页里有更详细的介绍：</p>
+<ul>
+  <li><b>更强的代码扩散模型。</b><a href="../legacy/tracks/dllm/18-code.html#dream-coder">Dream-Coder 7B</a> 同样从 Qwen2.5-Coder-7B 出发，只用公开数据做了更大规模的预训练和 SFT，RL 阶段沿用了互补掩码；<a href="../legacy/tracks/dllm/18-code.html#stable-diffcoder">Stable-DiffCoder</a> 则换了一条路，在一条成熟的 AR 代码模型流水线里插入块大小为 4 的块扩散持续预训练，和它自己的 AR 版本做对照。Dream-Coder 的指令模型对比表里就列了 DiffuCoder-7B-cpGRPO（见旧版拆解页的表 3）。</li>
+  <li><b>扩散模型 RL 里的似然估计。</b>“怎样便宜又准确地估计 \(\log\pi\)”成了扩散 RL 的核心问题。与 DiffuCoder 几乎同时的 <a href="llada-1-5.html">LLaDA 1.5（VRPO）</a> 在 DPO 里用了它称为“对偶采样”的技巧：让当前策略和参考策略共用同一组时刻和掩码，两者的估计高度正相关，相减时误差大部分抵消。这和 DiffuCoder 代码里“三种策略共用掩码种子”的做法思路一致；注意它和 coupled-GRPO 的互补掩码是两回事，前者靠正相关的两项相减，后者靠负相关的两项相加。之后的 <a href="../legacy/tracks/dllm/17-rl.html#tracerl">TraceRL</a> 不再用随机掩码，而是沿模型实际的解码轨迹计算每步的概率，让训练和采样器更一致。d1 的估计器及其后续改进见 <a href="d1.html#n-impact">d1 精读页“后来怎么样了”</a>。</li>
+  <li><b>把“可并行”兑现成速度。</b>DiffuCoder 只证明了 RL 后“步数减半掉分更少”，没有测速度。真正把扩散模型的速度做出来，要靠近似 KV 缓存、按置信度并行解码、块扩散等推理技术（<a href="fast-dllm.html">Fast-dLLM</a>、<a href="d2f.html">D2F</a>），以及工业界的 <a href="mercury.html">Mercury</a> 和 <a href="seed-diffusion.html">Seed Diffusion</a>，后两者都以代码为主要展示场景。</li>
+</ul>
+<p>想看 coupled-GRPO 的可交互架构图、伪代码，以及 DiffuCoder 与 Dream-Coder、Stable-DiffCoder 的逐项对照表，见<a href="../legacy/tracks/dllm/18-code.html">旧版结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Shansan Gong</b>（第一作者）<div class="aff">香港大学博士候选人，导师 Lingpeng Kong；本工作在 Apple 实习期间完成</div>本科与硕士毕业于上海交通大学。文本扩散方向的系列工作：DiffuSeq（ICLR 2023）第一作者，DiffuLLaMA（ICLR 2025，从 AR 模型改造扩散模型）共同第一作者，DiffuCoder 正是沿用了 DiffuLLaMA 的改造方法。</div>
+  <div class="author-card"><b>Ruixiang Zhang</b><div class="aff">Apple（论文署名）</div></div>
+  <div class="author-card"><b>Huangjie Zheng</b><div class="aff">Apple（论文署名）</div></div>
+  <div class="author-card"><b>Jiatao Gu</b><div class="aff">论文发表时为 Apple MLR 研究科学家（2022–2026）；现为宾夕法尼亚大学 CIS 系助理教授</div>此前在 Meta FAIR（2018–2022），博士毕业于香港大学。代表作包括非自回归神经机器翻译、Levenshtein Transformer、Matryoshka Diffusion Models、DART、STARFlow 等，长期研究非自回归生成与扩散模型。</div>
+  <div class="author-card senior"><b>Navdeep Jaitly</b>（共同指导）<div class="aff">Apple（论文署名）</div>多伦多大学博士，导师 Geoffrey Hinton（Mathematics Genealogy Project 与其多伦多大学主页），博士期间研究用深度学习从语音信号中学习特征；此后曾在 Google Brain 工作。</div>
+  <div class="author-card senior"><b>Lingpeng Kong</b>（共同指导）<div class="aff">香港大学计算机科学系助理教授，HKU NLP 实验室联合负责人</div>2020 年 12 月加入港大，此前在 Google DeepMind 任研究科学家（2017–2020）。他的组做了 DiffuSeq、DiffuLLaMA、Dream 等一系列扩散语言模型工作。</div>
+  <div class="author-card senior"><b>Yizhe Zhang</b><div class="aff">Apple MLR Staff Research Scientist</div>此前在 Meta AI 和 Microsoft Research 工作，杜克大学博士。在微软时是对话预训练模型 DialoGPT 的第一作者；近年在 Apple 做了一系列文本扩散的工作。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>开源</b>：<a href="https://github.com/apple-aiml-research/ml-diffucoder" target="_blank" rel="noopener">apple-aiml-research/ml-diffucoder</a> 有 837 个 star、61 个 fork（截至 2026-10-20）；仓库创建于 2025-07-01，原地址 github.com/apple/ml-diffucoder 已跳转到这里。仓库包含 coupled-GRPO 的训练代码（基于 Open-R1）和推理示例，不含预训练与 SFT 代码（SFT 基于 LLaMA-Factory）。</li>
+  <li><b>权重</b>：Hugging Face 上的 <a href="https://huggingface.co/apple/DiffuCoder-7B-Base" target="_blank" rel="noopener">Base</a>、<a href="https://huggingface.co/apple/DiffuCoder-7B-Instruct" target="_blank" rel="noopener">Instruct</a>、<a href="https://huggingface.co/apple/DiffuCoder-7B-cpGRPO" target="_blank" rel="noopener">cpGRPO</a> 三个模型分别有 30、63、321 个点赞（截至 2026-10-20），许可证为 apple-amlr。</li>
+  <li><b>发表</b>：ICLR 2026 poster；arXiv 首版 2025-06-25。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/18-code.html">旧版结构拆解：代码扩散模型（DiffuCoder、Dream-Coder、Stable-DiffCoder）</a></li>
+  <li><a href="../legacy/tracks/dllm/17-rl.html">旧版结构拆解：扩散语言模型的强化学习（d1、LLaDA 1.5、TraceRL）</a></li>
+  <li><a href="d1.html">d1 精读页</a>：diffu-GRPO 的一步估计与均场近似，本文的直接基线。</li>
+  <li><a href="llada-1-5.html">LLaDA 1.5 精读页</a>：VRPO，偏好优化里的方差缩减。</li>
+  <li><a href="llada.html">LLaDA 精读页</a> 与 <a href="dream.html">Dream 精读页</a>：从零训练与 AR 初始化的两条扩散大模型路线、低置信度重掩码解码。</li>
+  <li><a href="mdlm.html">MDLM 精读页</a>：掩码扩散的 ELBO 与 \(1/t\) 权重的来历。</li>
+  <li><a href="token-ordering.html">“Train for the Worst, Plan for the Best” 精读页</a>：为什么解码顺序会影响掩码扩散模型的表现。</li>
+  <li><a href="mercury.html">Mercury 精读页</a>：商用代码扩散模型，速度与质量的口径。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2506.20639" target="_blank" rel="noopener">arXiv:2506.20639</a>。论文以 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a> 发布，本页没有转载任何原图；所有示意图与图表均由本站绘制，图表中的数值来自论文的表格、图中标注的数字，或由本站从论文 TeX 源文件中的矢量图读出（已在图注中说明）。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>
