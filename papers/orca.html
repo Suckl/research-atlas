@@ -1,0 +1,606 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orca 精读</title>
+<meta name="description" content="Orca（OSDI 2022）逐节精读：迭代级调度（今天所说的连续批处理）、选择性批处理、KV 槽位预留与分布式执行引擎，以及 36.9 倍这个数字是在什么条件下测出来的。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="orca">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · OSDI 2022</div>
+  <h1>Orca：面向 Transformer 生成式模型的分布式推理服务系统</h1>
+  <p class="en-title">Orca: A Distributed Serving System for Transformer-Based Generative Models</p>
+  <div class="paper-authors">Gyeong-In Yu<sup>1</sup>, Joo Seong Jeong<sup>1</sup>, Geon-Woo Kim<sup>1,2</sup>, Soojeong Kim<sup>2</sup>, Byung-Gon Chun<sup>1,2,*</sup></div>
+  <div class="paper-affil"><sup>1</sup>Seoul National University（首尔大学）　<sup>2</sup>FriendliAI　<sup>*</sup>通讯作者（Geon-Woo Kim 与 Byung-Gon Chun 的署名为 “FriendliAI and Seoul National University”）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank" rel="noopener">USENIX OSDI 2022 论文页 ↗</a>
+    <a class="pill" href="https://www.usenix.org/system/files/osdi22-yu.pdf" target="_blank" rel="noopener">PDF（开放获取）↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/15-orca-sarathi.html">结构拆解：Orca / Sarathi-Serve 时间轴与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>1,010</b><span>被引次数（Semantic Scholar，2026-10-20；其中高影响力引用 103）</span></div><div><b>13K</b><span>行 C++（论文 §5；代码未开源）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">这篇论文没有 arXiv 版本，页首的被引次数是本站按标题在 Semantic Scholar 查到的快照（2026-10-20）。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文没有采用允许转载的许可证，所以文中的图都是本站重新画的示意图，每张都附有原图在 PDF 中的页码链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>2022 年前后，要把 GPT-3 这样的大模型做成在线服务，常见的搭法是两层：上层是 NVIDIA Triton 这样的<b>推理服务系统</b>，负责接请求、排队、把若干请求凑成一批；下层是 FasterTransformer 这样的<b>执行引擎</b>，负责在 GPU 上真正把模型算一遍。这套分工原本是为图像分类、BERT 这类“一个请求只要把模型跑一遍”的任务设计的。生成式模型不一样：它每次只吐出一个 token，一个请求要把模型反复跑几十到几百遍才能结束，而且每个请求要跑多少遍事先不知道。于是，同一批里先生成完的请求只能陪着最长的请求一起跑完才能返回，批开始之后才到的新请求只能干等整批结束。</p>
+<p>Orca 的核心想法是把调度的粒度从“一个请求”缩小到“模型的一次前向计算”（论文叫一次<b>迭代</b>）：调度器每次只让引擎跑一次迭代，跑完立刻收回控制权，生成完的请求马上返回，新到的请求下一次迭代就能加入。这就是<b>迭代级调度</b>（iteration-level scheduling），今天大家更常叫它<b>连续批处理</b>（continuous batching）。为了让进度各不相同的请求真的能放进同一批一起算，论文又提出<b>选择性批处理</b>（selective batching）：线性层这类逐个 token 计算的算子把所有请求的 token 摊平成一个大矩阵一起算，只有注意力按请求拆开分别算。作者在这两个想法之上做了一个能跨多台机器运行千亿参数模型的系统，在 GPT-3 175B 上，延迟相同时吞吐量是 FasterTransformer 的 36.9 倍。</p>
+<p>今天几乎所有主流推理引擎都以连续批处理为基础，所以这篇论文是读 vLLM、Sarathi-Serve、DistServe 等后续工作的起点。读过 <a href="vllm.html">vLLM 精读</a>的读者会发现，vLLM 正是从 Orca 留下的问题（按最大长度预留 KV 显存）接着往下做的。本页会从零讲清楚迭代级调度和选择性批处理，并在最后说明 Orca 的哪些设计成了标准、哪些被后来的系统改掉了。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>按请求组批为什么不适合生成式模型？具体浪费在哪两个地方？</li>
+  <li>迭代级调度是怎么工作的？为什么它需要调度器和执行引擎紧密配合？</li>
+  <li>为什么处在不同进度的请求不能直接拼成一批？为什么线性层可以拼、注意力却要拆开？拆开注意力为什么几乎不吃亏？</li>
+  <li>Orca 的调度器怎么防止 KV 显存被占满而卡死？这个办法留下了什么问题？</li>
+  <li>36.9 倍是在什么模型、什么负载、和谁比、在哪个延迟水平上测出来的？</li>
+  <li>Orca 的哪些部分成了今天的标准，哪些被 vLLM、Sarathi-Serve 等改掉了？</li>
+</ul>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=2" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：生成式模型要“跑很多遍”，旧的调度方式跟不上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>当时已经有成熟的推理服务系统（Triton、TensorFlow Serving）和高度优化的执行引擎（FasterTransformer），为什么它们服务 GPT 这类生成式模型时表现不好？作者认为问题不在算子写得快不快，而在“服务系统和执行引擎之间多久沟通一次”：它们按整个请求来调度，而生成式模型的请求天生要跑很多次迭代。</div>
+
+<div class="note-pre"><b>先补一点背景：推理服务系统和执行引擎各管什么。</b>
+<p>把一个训练好的模型变成在线服务，通常分两层来做。<b>执行引擎</b>（如 TensorRT、FasterTransformer、TVM、PyTorch）只关心“给我一批输入张量，我把模型算一遍、把结果交回去”，它把矩阵乘、注意力这些算子在 GPU 上实现得尽可能快。<b>推理服务系统</b>（如 Triton Inference Server、TensorFlow Serving）站在引擎上面，负责对外暴露接口（HTTP、gRPC）、维护请求队列、决定什么时候把哪些请求凑成一批交给引擎、拿到结果后回复客户端。这种分层的好处是两边可以独立开发：同一个服务系统可以接各种模型和引擎。</p>
+<p>服务系统最重要的优化之一是<b>批处理</b>：把多个请求的输入拼成一个更大的张量，让引擎一次算完。GPU 有成千上万个计算单元，喂给它的张量越大越能用满；更关键的是，模型参数从显存读出来一次就能给批里所有请求共用（第 2.3 节会算一笔账）。所以引擎的吞吐量高度依赖批的大小。</p>
+</div>
+
+<p>对 ResNet 或 BERT 这样的模型，一个请求只需要把模型跑一遍，服务系统把一批请求交给引擎、引擎算完交回，一来一回就结束了。GPT 这类自回归生成模型则不同：它每跑一遍只产出一个 token，这个 token 要作为下一遍的输入，所以一个请求要生成多少个 token，就得把模型跑多少遍。论文把这叫<b>多迭代特性</b>（multi-iteration characteristic）。</p>
+<p>问题出在两层之间的接口上。当时的服务系统把“一批请求”整个交给引擎，引擎要把批里所有请求都生成完，才一次性把结果交回。由于不同请求需要的迭代次数不同，这带来两个后果：</p>
+<ul>
+  <li><b>先完成的请求不能返回。</b>批里某个请求已经生成了结束符，但只要批里还有请求没结束，它的结果就交不回服务系统，客户端只能干等，延迟被白白拉长。</li>
+  <li><b>后到达的请求不能加入。</b>批一旦交给引擎，中途新来的请求只能在队列里等这一整批全部结束，排队时间可能非常长。</li>
+</ul>
+<p>论文的解决办法是让服务系统<b>按迭代调度</b>引擎：每次只让引擎在当前这批请求上跑一次迭代，然后把控制权交回调度器。这样，新请求最多等一次迭代就有机会开始处理；调度器每次拿回结果都检查一遍哪些请求已经结束，结束的立刻返回给客户端。</p>
+<p>但这马上引出第二个难题：按迭代调度后，同一批里的请求进度各不相同，有的刚到、要处理整段输入，有的已经生成了几十个 token。Transformer 的注意力算子要求批里每个请求的张量形状一致，进度不同的请求凑不成一个规整的批。作者的办法是<b>选择性批处理</b>：只对一部分算子拼批，注意力按请求拆开单独算。作者观察到，不给注意力拼批对效率影响很小，因为注意力本身没有模型参数，拼批本来也省不下读参数的开销（第 3 节详细解释）。</p>
+<p>在这两项技术之上，作者实现了分布式推理服务系统 <b>Orca</b>：它借用训练系统里的层内并行和层间并行来放下几千亿参数的模型，并设计了一个同时考虑显存管理和多机流水线的调度算法。实验用了从 13B 到 341B 参数的多种 GPT-3 配置，与 FasterTransformer 相比，在相同延迟水平下吞吐量提高 36.9 倍。作者还指出，只要是基于 Transformer、按自回归方式生成的模型，图像、视频、语音等领域都可以用同样的方法，但论文的实验只做了语言模型。</p>
+<div class="note-warn"><b>几个容易混淆的名字：</b>
+<ul>
+  <li>论文自己的术语是<b>迭代级调度</b>。“连续批处理”（continuous batching）这个叫法是后来流行起来的，例如 Anyscale 在 2023 年 6 月的一篇博客里明确说它也叫迭代级调度；TensorRT-LLM 叫它 in-flight batching，FriendliAI（作者所在公司）叫它 iteration batching。它们指的是同一件事。</li>
+  <li>本文的 Orca 是首尔大学和 FriendliAI 的推理服务系统，与微软 2023 年发布的 Orca / Orca 2 语言模型无关。</li>
+  <li>Orca 的代码没有开源。vLLM、Sarathi-Serve 等论文里作为对照的 “Orca”，都是那些论文的作者按 Orca 论文的描述自己复现的。</li>
+</ul></div>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=2" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：GPT 怎么一步步生成，推理服务系统怎么分工</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>GPT 生成一段文字时，GPU 上到底按什么顺序算了哪些东西？“一次迭代”指什么，第一次迭代和之后的迭代有什么不同？一层 Transformer 里有哪些算子，哪些带模型参数？为什么生成过程中要一直保存 key 和 value？现有的服务系统又是怎么把请求交给引擎的？后面所有设计都建立在这些事实之上。</div>
+
+<h4 id="n-2-1">2.1 一次迭代、两个阶段：GPT 的推理过程</h4>
+<p>GPT 接收一串输入 token，然后一个接一个地生成后续 token，直到生成结束符 &lt;EOS&gt; 或达到长度上限。论文用一个三层 GPT 的例子（原文图 1a）说明这个过程：输入是 “I think this”。论文把“把模型的所有层从头到尾跑一遍”定义为一次<b>迭代</b>，每次迭代产出一个 token。</p>
+<ul>
+  <li><b>第 1 次迭代</b>一次性读入全部输入 token “I think this”，算出下一个 token “is”。论文把这个负责处理输入、产出第一个输出 token 的阶段叫<b>初始阶段</b>（initiation phase）。因为输入 token 全部已知，它们可以在一次迭代里并行处理。</li>
+  <li><b>第 2、3 次迭代</b>各自只输入上一次刚生成的那一个 token（“is”，然后 “great”），分别产出 “great” 和 &lt;EOS&gt;。论文把这些迭代合称<b>增量阶段</b>（increment phase）。因为每一步都依赖上一步的输出，这个阶段只能一步一步地走。</li>
+</ul>
+<p>今天的文献通常把这两个阶段叫 <b>prefill</b> 和 <b>decode</b>。本页沿用论文的叫法，但两者是一回事：初始阶段 = prefill，增量阶段 = decode。</p>
+
+<div class="note-pre"><b>先补一点背景：注意力为什么需要保存 key 和 value。</b>
+<p>Transformer 每一层里，每个 token 都会算出三个向量：query、key、value。处理第 \(t\) 个 token 时，注意力拿它的 query 去和第 1 到第 \(t\) 个 token 的 key 逐一做点积，经过 softmax 得到一组权重，再用这组权重对这些 token 的 value 加权平均。GPT 使用<b>因果遮挡</b>，每个 token 只看它自己和它前面的 token，看不到后面的。</p>
+<p>所以，第 \(t\) 步要用到前面所有 token 在这一层的 key 和 value。最朴素的做法是每一步把整段序列（输入加上已经生成的 token）重新算一遍，得到所有 key 和 value，但这样前面的 token 每一步都被重复计算。fairseq 提出的<b>增量解码</b>（incremental decoding）是把算过的 key 和 value 存下来，下一步直接复用，每步只算新 token 的那一份。FasterTransformer、Megatron-LM 也都这么做。这份被保存下来的数据，今天通常叫 <b>KV 缓存</b>；论文把它看作请求在多次迭代之间要维护的<b>内部状态</b>。更详细的解释见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>。</p>
+</div>
+<p>论文用原文图 1c 对比了 Transformer 和 LSTM 维护状态的方式：LSTM 每一步只保留一个固定大小的记忆向量，处理多少个 token 都一样大；Transformer 的状态（每一层所有已处理 token 的 key 和 value）每过一次迭代就多一份。处理第 \(t\) 个 token 时，第 \(l\) 层的注意力要同时用到之前的 \(k_{l,1:t-1}\)、\(v_{l,1:t-1}\) 和当前的 \(k_{l,t}\)、\(v_{l,t}\)。<b>这意味着注意力要处理的张量形状，取决于这个请求已经处理了多少个 token。</b>这一点是第 3 节所有麻烦的根源。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个请求在三次迭代里，某一层保存的 K/V 越来越多（对应原文图 1a、1c）</div>
+  <div class="dia-row"><span class="lbl">迭代 1（初始阶段）</span><div class="cells"><span class="cell a">I</span><span class="cell a">think</span><span class="cell a">this</span></div></div>
+  <div class="dia-out">一次读入 3 个输入 token，同时写入它们的 K/V，产出 “is”。</div>
+  <div class="dia-row"><span class="lbl">迭代 2（增量阶段）</span><div class="cells"><span class="cell a">I</span><span class="cell a">think</span><span class="cell a">this</span><span class="cell b">is</span></div></div>
+  <div class="dia-out">只输入 “is”：算出它的 K/V 追加进去，用它的 query 对 4 个 key 做注意力，产出 “great”。</div>
+  <div class="dia-row"><span class="lbl">迭代 3（增量阶段）</span><div class="cells"><span class="cell a">I</span><span class="cell a">think</span><span class="cell a">this</span><span class="cell b">is</span><span class="cell b">great</span></div></div>
+  <div class="dia-out">只输入 “great”：对 5 个 key 做注意力，产出 &lt;EOS&gt;，请求结束。</div>
+  <div class="dia-row"><span class="lbl">对比：LSTM</span><div class="cells"><span class="cell c">c, h</span></div></div>
+  <div class="dia-out">无论处理到第几个 token，状态始终是一个固定大小的向量。</div>
+  <div class="dia-note">蓝色是输入 token 的 K/V，绿色是生成出来的 token 的 K/V。格子里的单词只是标明“这是哪个 token 的 K/V”，实际存的是向量。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=4" target="_blank" rel="noopener">原文图 1 ↗</a>（PDF 第 4 页）。</div>
+</div>
+
+<h4 id="n-2-2">2.2 一层 Transformer 里有哪些算子，注意力为什么特殊</h4>
+<p>GPT 只有一叠解码器层（原始 Transformer 有编码器和解码器两叠）。原文图 1b 列出了一层里按顺序执行的算子：先做层归一化（LayerNorm），然后是 <b>QKV Linear</b>（一次线性变换后切成 query、key、value 三份），然后是<b>注意力</b>，接着是 <b>Attn Out Linear</b>（注意力输出的线性变换）、残差相加（Add）、再一次层归一化，然后是 MLP（线性层、GeLU 激活、线性层），最后再做一次残差相加。</p>
+<p>这里有一个后面会反复用到的定义。论文里的 “Attention” 采用<b>窄定义</b>：只包括“query 和 key 做点积、softmax、对 value 加权平均”这三步，不包括前后的 QKV Linear 和 Attn Out Linear（有些文献把这两个线性层也算进注意力里）。在窄定义下，注意力<b>没有任何模型参数</b>，它的输入全是当前请求自己的 query、key、value。</p>
+<div class="dia">
+  <div class="dia-title">示意图：GPT 一层里的算子，哪些带参数，哪些需要知道“token 属于哪个请求”（对应原文图 1b）</div>
+  <div class="dia-flow"><span class="dia-box">LayerNorm<small>逐 token</small></span><span class="dia-arrow">→</span><span class="dia-box enc">QKV Linear<small>带参数 · 逐 token</small></span><span class="dia-arrow">→</span><span class="dia-box pred">Attention<small>无参数 · 要按请求算</small></span><span class="dia-arrow">→</span><span class="dia-box enc">Attn Out Linear<small>带参数 · 逐 token</small></span><span class="dia-arrow">→</span><span class="dia-box">Add<small>逐 token</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box">LayerNorm<small>逐 token</small></span><span class="dia-arrow">→</span><span class="dia-box enc">MLP：Linear → GeLU → Linear<small>带参数 · 逐 token</small></span><span class="dia-arrow">→</span><span class="dia-box">Add<small>逐 token</small></span><span class="dia-arrow">→ 下一层</span></div>
+  <div class="dia-note">蓝框是带大块权重矩阵的线性层，模型绝大部分参数都在这里；橙框是窄定义下的注意力，没有参数，但它是唯一需要把“同一个请求的多个 token”放在一起算的算子。其余算子对每个 token 各算各的。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=4" target="_blank" rel="noopener">原文图 1b ↗</a>。</div>
+</div>
+<p>“逐 token”是什么意思？以线性层为例，输入矩阵的第 \(i\) 行乘以权重矩阵，就得到输出的第 \(i\) 行，跟其他行是什么内容毫无关系。所以把来自不同请求的 token 一行行堆在一起乘，每一行的结果和单独算时完全一样。LayerNorm、GeLU、Add 也是如此。注意力则不同：第 \(t\) 个 token 的输出取决于<b>同一请求</b>里它前面所有 token 的 key 和 value，而且绝不能混进别的请求的 token。所以注意力必须知道每个 token 属于哪个请求。这个区别就是第 3.4 节选择性批处理的出发点。</p>
+
+<h4 id="n-2-3">2.3 推理服务系统：调度器、执行引擎和批处理</h4>
+<div class="note-pre"><b>先补一点背景：为什么批越大，吞吐量越高。</b>
+<p>增量阶段每次迭代每个请求只处理一个 token，计算量很小，但每一层的权重矩阵都得从显存读到计算单元一遍。以 130 亿参数的模型为例，FP16 参数约 26 GB；A100 每秒能从显存读约 1.5 TB，光读一遍参数就要十几毫秒（推算），而真正的计算只要很短时间，GPU 大部分时间在等数据。如果把 32 个请求放进一个批，参数仍然只读一遍，却能同时为 32 个请求各算出一个 token。读参数的时间几乎不变，产出变成 32 倍。这就是论文说的“批处理能复用已经读进来的模型参数”。用下面的屋顶线小工具可以直观地看到：增量阶段（decode）在批很小时远远落在“受带宽限制”的一侧，批越大越往“受算力限制”的方向移动。详细推导见 <a href="vllm.html#n-1">vLLM 精读 §1</a>。</p>
+</div>
+<div data-widget="roofline" data-panel="roofline"></div>
+<p>论文用原文图 2 描述了当时的标准做法。服务系统（例如 Triton）的核心是一个<b>调度器</b>：它从请求队列里取出若干请求组成一批，交给执行引擎（例如 FasterTransformer）；引擎在这批请求上反复跑迭代，直到全部生成完，再把生成的文字一起交回服务系统。图里的例子是两个请求 x1 “I think” 和 x2 “I love” 组成一批，引擎分别生成 “this is great” 和 “you”。</p>
+<div class="dia">
+  <div class="dia-title">示意图：当时的服务方式（Triton + FasterTransformer）与 Orca 的服务方式（对应原文图 2、图 4）</div>
+  <div class="dia-flow"><b style="width:86px">当时的做法</b><span class="dia-box">请求队列</span><span class="dia-arrow">→ ① 取一批 →</span><span class="dia-box reg">调度器（服务系统）</span><span class="dia-arrow">→ ② 整批交出 →</span><span class="dia-box enc">执行引擎<small>反复迭代，直到批里每个请求都结束</small></span><span class="dia-arrow">→ ③ 一次性交回全部结果</span></div>
+  <div class="dia-flow"><b style="width:86px">Orca</b><span class="dia-box">请求池<small>记录每个请求已生成的 token</small></span><span class="dia-arrow">⇄ 每次迭代 ⇄</span><span class="dia-box reg">调度器<small>选出这一步要算的请求</small></span><span class="dia-arrow">→ 只跑一次迭代 →</span><span class="dia-box enc">执行引擎<small>每个被选中的请求各产出 1 个 token</small></span><span class="dia-arrow">→ 立即交回</span></div>
+  <div class="dia-note">上一行里，服务系统和引擎只在“交出一批”和“整批完成”两个时刻打交道；下一行里，两者每次迭代都打一次交道。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=5" target="_blank" rel="noopener">原文图 2 ↗</a> 与 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=6" target="_blank" rel="noopener">原文图 4 ↗</a>。</div>
+</div>
+<p>论文还列出了服务系统通常关心的其他问题：从同一模型的多个变体里挑一个、把多个模型部署在同一块加速器上等等。这些都和本文无关，本文只关心“批处理与调度”这一项。</p>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=3" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 挑战与方案：迭代级调度和选择性批处理</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>按请求调度具体会造成哪些浪费？如果改成每次迭代都重新调度，又会碰到什么新的障碍？论文用“挑战 C1 → 方案 S1，挑战 C2 → 方案 S2”的结构回答：C1 是先完成的请求走不了、后到的请求进不来，S1 是迭代级调度；C2 是进度不同的请求凑不成一批，S2 是选择性批处理。这一节是全文的核心。</div>
+
+<h4 id="n-3-1">3.1 挑战一：先完成的走不了，后到达的进不来</h4>
+<p>现有系统里，服务系统和执行引擎只在两个时刻打交道：服务系统把下一批交给空闲的引擎时，以及引擎把当前这批全部算完时。换句话说，调度的粒度是<b>请求</b>：引擎在整批请求全部结束之前，一直固定地处理这一批。</p>
+<p>论文用原文图 3 举例：x1 “I think” 要生成 “this is great &lt;EOS&gt;”，共 4 次迭代；x2 “I love” 只生成 “you &lt;EOS&gt;”，2 次迭代就结束了。但因为它们在同一批里，引擎在第 3、4 次迭代仍然要为已经结束的 x2 做计算（图中的 “-”）。这些多余的计算降低了批处理的效率。更糟的是，x2 的结果要等到第 4 次迭代结束、整批交回时才能返回给客户端，平白多了两次迭代的延迟。同样，如果这批运行时来了新请求，它也必须等整批结束才能开始。</p>
+<div class="dia">
+  <div class="dia-title">示意图：按请求调度 vs 按迭代调度（每格是一次迭代）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td class="lbl"></td><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th></tr>
+    <tr><td colspan="8" class="gsub">① 按请求调度：整批同进同出</td></tr>
+    <tr><td class="lbl">x1（生成 4 个 token）</td><td style="background:var(--c-act)"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">x2（生成 2 个 token）</td><td style="background:var(--c-act)"></td><td class="r"></td><td class="p">-</td><td class="p">-</td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">x3（第 2 步时到达）</td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td style="background:var(--c-act)"></td><td class="r"></td><td class="r"></td></tr>
+    <tr><td colspan="8" class="gsub">② 按迭代调度：每次迭代都可以有请求离开、有请求加入</td></tr>
+    <tr><td class="lbl">x1（生成 4 个 token）</td><td style="background:var(--c-act)"></td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">x2（生成 2 个 token）</td><td style="background:var(--c-act)"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">x3（第 2 步时到达）</td><td></td><td class="q"></td><td style="background:var(--c-act)"></td><td class="r"></td><td class="r"></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">绿色 = 初始阶段（处理整段输入）；蓝色 = 增量阶段；红色 “-” = 请求已经结束却还在陪跑；斜纹 = 已到达但在排队。① 里 x2 要到第 4 次迭代后才能返回，x3 要排队 3 次迭代；② 里 x2 第 2 次迭代后就返回，x3 只等 1 次迭代，第 3 次迭代就开始。x1、x2 来自原文图 3，x3 是本站加的。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=5" target="_blank" rel="noopener">原文图 3 ↗</a>。</div>
+</div>
+<div class="note-pre"><b>先补一点背景：训练为什么没有这个问题。</b>
+<p>训练语言模型时，整段目标文字是已知的，可以用<b>教师强制</b>（teacher forcing）：把正确答案的前 \(t-1\) 个 token 直接当作预测第 \(t\) 个 token 的输入，于是一整段序列的所有位置能在一次前向计算里同时算完，不存在“有的序列先结束”的问题。只有推理时才必须一个 token 一个 token 地生成，所以“早完成、晚加入”是推理服务特有的问题，训练系统从来不需要处理它。</p>
+</div>
+<p>论文的结论是：按请求调度的机制处理不好具有多迭代特性的负载。这不是哪个引擎实现得不好，而是服务系统和引擎之间的接口本身决定的。</p>
+
+<h4 id="n-3-2">3.2 方案一：迭代级调度</h4>
+<p>迭代级调度把调度的粒度降到迭代。调度器不停地重复三件事：(1) 选出下一次迭代要处理的请求；(2) 让引擎在这些请求上只跑<b>一次</b>迭代；(3) 收回这次迭代的结果。因为每次迭代都会收到结果，调度器能及时发现哪个请求已经结束，并立刻把它生成的 token 返回给客户端。新到的请求只需等当前这一次迭代结束，就有机会被选中，排队时间大幅缩短。调度器对每次迭代处理多少个、哪些请求拥有完全的控制权。</p>
+<p>原文图 4 画出了 Orca 的整体结构。请求从<b>端点</b>（endpoint，例如 HTTPS 或 gRPC 接口）进来，被放进<b>请求池</b>（request pool）；请求池管理着系统里所有请求的整个生命周期。<b>调度器</b>监视请求池，负责挑选请求、让引擎跑一次迭代、接收输出 token、再把每个 token 追加到对应的请求后面。<b>执行引擎</b>负责真正的张量计算，可以跨多台机器的多张 GPU 并行。请求结束后，请求池把它移除，并通知端点发出回复。</p>
+<div class="dia">
+  <div class="dia-title">示意图：原文图 4 的例子——请求池里四个请求的状态，以及这一次迭代送进引擎的 token</div>
+  <div class="dia-row"><span class="lbl">x1（已跑 2 次）</span><div class="cells"><span class="cell a">x₁₁</span><span class="cell a">x₁₂</span><span class="cell b">x₁₃</span><span class="cell b" style="outline:2px solid var(--c-pred)">x₁₄</span><span class="cell">→</span><span class="cell c">x₁₅</span></div></div>
+  <div class="dia-row"><span class="lbl">x2（已跑 1 次）</span><div class="cells"><span class="cell a">x₂₁</span><span class="cell b" style="outline:2px solid var(--c-pred)">x₂₂</span><span class="cell">→</span><span class="cell c">x₂₃</span></div></div>
+  <div class="dia-row"><span class="lbl">x3（新请求）</span><div class="cells"><span class="cell a" style="outline:2px solid var(--c-pred)">x₃₁</span><span class="cell a" style="outline:2px solid var(--c-pred)">x₃₂</span><span class="cell">→</span><span class="cell c">x₃₃</span></div></div>
+  <div class="dia-row"><span class="lbl">x4（新请求）</span><div class="cells"><span class="cell a" style="outline:2px solid var(--c-pred)">x₄₁</span><span class="cell a" style="outline:2px solid var(--c-pred)">x₄₂</span><span class="cell a" style="outline:2px solid var(--c-pred)">x₄₃</span><span class="cell">→</span><span class="cell c">x₄₄</span></div></div>
+  <div class="dia-note">x<sub>ij</sub> 表示第 i 个请求的第 j 个 token。蓝色是客户端给的输入 token，绿色是 Orca 之前生成的 token，橙色是这一次迭代的输出。带橙色描边的 7 个 token 就是这次迭代要送进引擎的全部输入：x1、x2 各送 1 个（上一步刚生成的那个），x3、x4 第一次被调度，要把全部输入 token 送进去。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=6" target="_blank" rel="noopener">原文图 4 ↗</a>。</div>
+</div>
+<p>按图 4 的例子走一遍：x1 带着 2 个输入 token 到达，已经跑过 2 次迭代、生成了 x<sub>13</sub> 和 x<sub>14</sub>；x2 带着 1 个输入 token 到达，跑过 1 次、生成了 x<sub>22</sub>；x3 和 x4 刚到，还一次都没跑。调度器决定这一步处理全部四个请求，于是把 x3 的 (x<sub>31</sub>, x<sub>32</sub>) 和 x4 的 (x<sub>41</sub>, x<sub>42</sub>, x<sub>43</sub>) 交给引擎，x1、x2 只需要各自最新的那个 token。引擎跑完一次迭代，为四个请求各返回一个新 token：x<sub>15</sub>、x<sub>23</sub>、x<sub>33</sub>、x<sub>44</sub>。与图 2 的做法相比，这里批的成员可以在每次迭代改变。</p>
+
+<h4 id="n-3-3">3.3 挑战二：处在不同进度的请求凑不成一批</h4>
+<p>迭代级调度说起来简单，真正落地时最大的障碍是<b>批处理</b>。要做到高效，引擎必须能把调度器选出的<b>任意</b>一组请求放在一起批量计算；如果只能一个一个地算，GPU 的大规模并行能力就浪费了。</p>
+<div class="note-pre"><b>先补一点背景：传统的批处理要求形状一致。</b>
+<p>传统做法是把一批里每个请求的输入张量（形状 \([L, H]\)：\(L\) 个 token，每个是 \(H\) 维向量）在最前面加一维堆起来，得到形状为 \([B, L, H]\) 的三维张量，\(B\) 是批大小。这要求批里每个请求的 \(L\) 相同，因为一个张量的每一“片”必须一样大。比如在图 3 里，第 1 次迭代（初始阶段，两个请求都有 2 个输入 token）的输入是 \([2, 2, H]\)，第 2 次迭代（增量阶段，每个请求 1 个 token）是 \([2, 1, H]\)。如果长度不同，常见的补救办法是用无意义的<b>填充</b>（padding）把短的补到和最长的一样，代价是白算这些填充位置。</p>
+</div>
+<p>按迭代调度之后，任意两个请求 \(x_i\)、\(x_j\) 在下一次迭代未必能合成一批。论文列出了三种凑不成批的情况：</p>
+<div class="table-wrap"><table>
+  <tr><th>情况</th><th>例子（图 4）</th><th>哪里对不齐</th></tr>
+  <tr><td>① 都在初始阶段，但输入长度不同</td><td>x3（2 个 token）和 x4（3 个 token）</td><td>输入张量分别是 \([2, H]\) 和 \([3, H]\)，“长度”这一维不相等，堆不成 \([B, L, H]\)。</td></tr>
+  <tr><td>② 都在增量阶段，但处理的是不同位置的 token</td><td>x1（第 4 个 token）和 x2（第 2 个 token）</td><td>输入都是 1 个 token，但注意力要用的历史 key、value 一个有 3 份、一个只有 1 份，形状不同（呼应图 1c）。</td></tr>
+  <tr><td>③ 一个在初始阶段，一个在增量阶段</td><td>x1 和 x3</td><td>初始阶段为了效率一次并行处理全部输入 token，增量阶段一次只输入 1 个 token，输入的 token 数不同。</td></tr>
+</table></div>
+<p>只有当两个请求处在同一阶段，并且输入长度相同（初始阶段）或正在处理同一位置的 token（增量阶段）时，它们才能合批。这个条件非常苛刻：调度器得指望恰好有两个请求进度完全一致。批越大，要求越多请求同时对齐，概率按指数下降。于是，在现实负载下几乎不可能用大批，而大批恰恰是提高吞吐量的关键。论文的意思是：如果不解决这个问题，迭代级调度就只能退化成一个一个地算，得不偿失。</p>
+
+<h4 id="n-3-4">3.4 方案二：选择性批处理（selective batching）</h4>
+<p>选择性批处理的想法是：不必把模型里<b>所有</b>算子都改成批量形式，只对其中能批量化的那些算子拼批。上面三种情况的共同点是张量形状不规则，没法堆成一个大张量送进批量算子。但并非所有算子都在乎形状不规则。第 2.2 节说过，线性层、LayerNorm、Add、GeLU 都是逐 token 计算的，不需要区分 token 属于哪个请求。所以可以干脆<b>去掉批这一维</b>：把所有请求的 token 摊平，按顺序堆成一个形状为 \([\sum_i L_i, H]\) 的二维张量。例如图 4 里 x3 和 x4 的输入 \([2, H]\)、\([3, H]\) 可以拼成 \([5, H]\)，直接送进所有非注意力算子。</p>
+<p>注意力则需要“请求”这个概念，因为它只能在同一个请求的 token 之间计算，通常用 cuBLAS 的批量矩阵乘来实现。所以选择性批处理在注意力前插入一个 <b>Split</b> 操作，把摊平的张量按请求拆开，对每个请求单独做注意力；注意力的输出再用一个 <b>Merge</b> 操作拼回摊平的张量，后面的算子又可以批量计算了。论文把这概括为：注意力按请求拆开，其余算子按 <b>token</b> 而不是按请求来拼批。</p>
+<div class="dia">
+  <div class="dia-title">示意图：选择性批处理怎么在一层里处理图 4 的 4 个请求、7 个 token（对应原文图 5）</div>
+  <svg class="dg" viewBox="0 0 960 340" role="img" aria-label="选择性批处理：7 个 token 摊平后一起过 QKV Linear，按请求拆开做注意力，再合并起来一起过后面的线性层" style="--dg-min:760px">
+    <text x="20" y="43" class="t-sm">本次迭代的 7 个 token</text>
+    <g class="pred"><rect class="box" x="280" y="30" width="52" height="26" rx="5"/></g><text x="306" y="43" class="t-c t-sm" style="fill:var(--text)">x₁₄</text>
+    <g class="act"><rect class="box" x="338" y="30" width="52" height="26" rx="5"/></g><text x="364" y="43" class="t-c t-sm" style="fill:var(--text)">x₂₂</text>
+    <g class="enc"><rect class="box" x="396" y="30" width="52" height="26" rx="5"/><rect class="box" x="454" y="30" width="52" height="26" rx="5"/></g><text x="422" y="43" class="t-c t-sm" style="fill:var(--text)">x₃₁</text><text x="480" y="43" class="t-c t-sm" style="fill:var(--text)">x₃₂</text>
+    <g class="tgt"><rect class="box" x="512" y="30" width="52" height="26" rx="5"/><rect class="box" x="570" y="30" width="52" height="26" rx="5"/><rect class="box" x="628" y="30" width="52" height="26" rx="5"/></g><text x="538" y="43" class="t-c t-sm" style="fill:var(--text)">x₄₁</text><text x="596" y="43" class="t-c t-sm" style="fill:var(--text)">x₄₂</text><text x="654" y="43" class="t-c t-sm" style="fill:var(--text)">x₄₃</text>
+    <text x="692" y="43" class="t-sm">摊平成 [7, H]</text>
+    <path class="edge" d="M480,57 V76"/>
+    <g class="enc"><rect class="box" x="180" y="78" width="600" height="40" rx="8"/></g>
+    <text x="480" y="92" class="t-c t-b">QKV Linear（带权重）：[7, H] → [7, 3H]</text>
+    <text x="480" y="109" class="t-c t-sm">7 个 token 当作 7 行，做一次矩阵乘，权重只读一次</text>
+    <text x="20" y="134" class="t-sm">Split</text>
+    <path class="edge" d="M220,118 L100,150"/>
+    <path class="edge" d="M330,118 L275,150"/>
+    <path class="edge" d="M450,118 L450,150"/>
+    <path class="edge" d="M760,118 L850,150"/>
+    <g class="pred"><rect class="box" x="20" y="152" width="160" height="70" rx="8"/><rect class="box" x="195" y="152" width="160" height="70" rx="8"/><rect class="box" x="370" y="152" width="160" height="70" rx="8"/><rect class="box" x="770" y="152" width="160" height="70" rx="8"/></g>
+    <text x="100" y="170" class="t-c">x3 · 初始 · [2, 3H]</text><text x="100" y="189" class="t-c t-sm">2 个 query × 2 个 key</text><text x="100" y="207" class="t-c t-xs">因果遮挡，K/V 全是新算的</text>
+    <text x="275" y="170" class="t-c">x4 · 初始 · [3, 3H]</text><text x="275" y="189" class="t-c t-sm">3 个 query × 3 个 key</text><text x="275" y="207" class="t-c t-xs">因果遮挡，K/V 全是新算的</text>
+    <text x="450" y="170" class="t-c">x1 · 增量 · [1, 3H]</text><text x="450" y="189" class="t-c t-sm">1 个 query × 4 个 key</text><text x="450" y="207" class="t-c t-xs">其中 3 个取自 K/V 管理器</text>
+    <text x="850" y="170" class="t-c">x2 · 增量 · [1, 3H]</text><text x="850" y="189" class="t-c t-sm">1 个 query × 2 个 key</text><text x="850" y="207" class="t-c t-xs">其中 1 个取自 K/V 管理器</text>
+    <g class="reg"><rect class="box" x="560" y="152" width="180" height="70" rx="8"/></g>
+    <text x="650" y="170" class="t-c t-b">Attention K/V 管理器</text><text x="650" y="189" class="t-c t-sm">x1：x₁₁ x₁₂ x₁₃ 的 K/V</text><text x="650" y="207" class="t-c t-sm">x2：x₂₁ 的 K/V</text>
+    <path class="edge reg sg" d="M560,187 H534"/>
+    <path class="edge reg sg" d="M740,187 H766"/>
+    <path class="edge" d="M100,222 V250"/><text x="106" y="237" class="t-xs">[2, H]</text>
+    <path class="edge" d="M275,222 V250"/><text x="281" y="237" class="t-xs">[3, H]</text>
+    <path class="edge" d="M450,222 V250"/><text x="456" y="237" class="t-xs">[1, H]</text>
+    <path class="edge" d="M850,222 V250"/><text x="856" y="237" class="t-xs">[1, H]</text>
+    <rect class="box" x="20" y="252" width="910" height="24" rx="6"/>
+    <text x="475" y="264" class="t-c t-sm">Merge：按原来的顺序拼回 [7, H]</text>
+    <path class="edge" d="M480,276 V292"/>
+    <g class="enc"><rect class="box" x="180" y="294" width="600" height="34" rx="8"/></g>
+    <text x="480" y="311" class="t-c">Attn Out Linear → Add → LayerNorm → MLP → Add：全部按 [7, H] 一起算</text>
+  </svg>
+  <div class="dia-note">蓝框是带权重的算子，7 个 token 摊平后一起算；橙框是注意力，按请求拆开，每个请求的形状都不一样；青框是保存历史 K/V 的管理器，增量阶段的 x1、x2 从这里读之前 token 的 K/V，本次 7 个 token 新算出的 K/V 也会写回这里。为了简洁只画了一层。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=7" target="_blank" rel="noopener">原文图 5 ↗</a>（PDF 第 7 页）。</div>
+</div>
+<p>按原文图 5 的例子把形状走一遍。这一批有 x1、x2、x3、x4 四个请求，共 7 个输入 token，所以输入张量是 \([7, H]\)。它先整体通过 QKV Linear 得到 \([7, 3H]\)；Split 把它拆成 x3 的 \([2, 3H]\)、x4 的 \([3, 3H]\)、x1 和 x2 各自的 \([1, 3H]\)；四个注意力分别算完，输出 \([2, H]\)、\([3, H]\)、\([1, H]\)、\([1, H]\)；Merge 把它们拼回 \([7, H]\)，交给 Attn Out Linear 及之后的所有算子批量计算。</p>
+<p>为了让增量阶段的请求能用上之前迭代算出的 key 和 value，Orca 用一个 <b>Attention K/V 管理器</b>（Attention K/V manager）按请求分别保存它们，直到调度器明确通知“这个请求结束了，可以删掉”为止。x1 做注意力时，从管理器取出 x<sub>11</sub>、x<sub>12</sub>、x<sub>13</sub> 的 key 和 value，再加上 Split 给出的当前 token x<sub>14</sub> 的 query、key、value，计算当前 token 与之前所有 token 的注意力；x2 同理，只是历史里只有 x<sub>21</sub> 一份。</p>
+<p><b>为什么拆开注意力几乎不吃亏？</b>这是论文最关键的一个判断，值得把因果讲完整。批处理之所以能提高吞吐量，主要靠“参数读一次，给很多请求用”。线性层的权重矩阵很大，7 个 token 一起乘，权重只从显存读一次；如果分 7 次乘，就要读 7 次。所以线性层一定要拼批。注意力则没有参数：x1 的注意力只读 x1 自己的 key、value，x2 只读 x2 自己的，两个请求之间没有任何共享的数据。无论把它们放在一次批量调用里，还是分开调用，需要从显存读的数据总量完全一样。拼批对注意力来说只能省下一点启动内核的开销、提高一点并行度，而 Orca 在实现时还用内核融合把这部分也找了回来（第 5 节）。所以，把拼批的好处集中在带参数的算子上，就能拿到批处理的大部分收益，同时允许批里请求的进度各不相同。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li><b>“注意力不拼批”不等于“注意力一个接一个地串行执行”。</b>Orca 的实现把各个请求的注意力内核合并成一个内核一起启动（第 5 节），在 GPU 上它们是同时跑的。“不拼批”指的是不再要求它们共享同一个规整的 \([B, L, H]\) 张量形状。</li>
+  <li><b>“几乎不吃亏”有前提。</b>论文实验里每个请求的总长度最多 640 个 token（第 6 节），注意力在总耗时里占比不大。当上下文长到几万个 token、批又很大时，读 KV 缓存的时间会超过读参数的时间，注意力内核的效率就成了主要矛盾。这正是后来 PagedAttention、FlashInfer 等注意力内核要专门优化“一个批里长短不一的请求”的原因。</li>
+  <li><b>选择性批处理同时解决了三种情况。</b>论文以情况 ①（输入长度不同）为主线讲解，但情况 ②、③ 同理：只要注意力按请求拆开，其余算子按 token 摊平，初始阶段的整段输入和增量阶段的单个 token 就能放进同一次迭代。今天常说的“prefill 和 decode 混合批”就是从这里来的。</li>
+</ul></div>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=5" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 Orca 的设计：怎么撑起千亿参数的模型，每一步选谁来算</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了迭代级调度和选择性批处理，要做成一个真正可用的系统，还剩三个问题。第一，模型大到一张 GPU 放不下时，怎么切到多张 GPU、多台机器上，并且不让“每次迭代都要通信一次”的开销拖垮性能？第二，每次迭代到底该选哪些请求，怎么保证 KV 显存不会被占满而卡死？第三，多台机器做流水线时，迭代级调度能带来什么额外好处？</div>
+
+<h4 id="n-4-1">4.1 分布式架构：层内并行、层间并行，以及控制面与数据面分离</h4>
+<div class="note-pre"><b>先补一点背景：两种模型并行。</b>
+<p>当模型参数多到一张 GPU 放不下时，就要把参数和对应的计算拆到多张 GPU 上。论文用的两种拆法都来自训练系统（Megatron-LM、Mesh-TensorFlow）：</p>
+<ul>
+  <li><b>层内并行</b>（intra-layer parallelism，今天通常叫<b>张量并行</b>）：把每一层里的矩阵乘（线性层和注意力）按行或列切开，分给多张 GPU 各算一部分，每层算完后用 all-reduce 之类的集合通信把各自的部分结果合起来。它的通信很频繁（每层都要通信），所以一般放在同一台机器内、用 NVLink 这样的高速互连。细节见 <a href="megatron-lm.html">Megatron-LM 精读</a>。</li>
+  <li><b>层间并行</b>（inter-layer parallelism，今天通常叫<b>流水线并行</b>）：把连续的若干层整块分给一张 GPU（或一组 GPU），数据算完前几层后，把中间激活发给负责后几层的 GPU。它只在分区边界通信一次，通信量小，适合跨机器。Orca 给每个层间分区分配相同数量的 Transformer 层。</li>
+</ul>
+</div>
+<p>原文图 6 是一个组合两种并行的例子：一个 4 层的 GPT，先按层切成 2 个层间分区（第 1–2 层、第 3–4 层），每个分区再在层内切成 3 份，每一份放在一张 GPU 上，共用 6 张 GPU。FasterTransformer 也支持这两种并行。</p>
+<div class="dia">
+  <div class="dia-title">示意图：4 层 GPT 用 2 个层间分区 × 3 个层内分区，放在 6 张 GPU 上（对应原文图 6）</div>
+  <svg class="dg" viewBox="0 0 960 250" role="img" aria-label="层内并行与层间并行组合：两个层间分区各含三张 GPU" style="--dg-min:720px">
+    <text x="300" y="20" class="t-c t-b">层间分区 1（第 1–2 层）</text>
+    <text x="660" y="20" class="t-c t-b">层间分区 2（第 3–4 层）</text>
+    <line x1="480" y1="30" x2="480" y2="196" style="stroke:var(--c-loss);stroke-width:1.6;stroke-dasharray:6 4"/>
+    <rect class="frame" x="130" y="36" width="340" height="46" rx="8"/><rect class="frame" x="130" y="90" width="340" height="46" rx="8"/><rect class="frame" x="130" y="144" width="340" height="46" rx="8"/>
+    <rect class="frame" x="490" y="36" width="340" height="46" rx="8"/><rect class="frame" x="490" y="90" width="340" height="46" rx="8"/><rect class="frame" x="490" y="144" width="340" height="46" rx="8"/>
+    <g class="enc">
+      <rect class="box" x="140" y="44" width="155" height="30" rx="6"/><rect class="box" x="305" y="44" width="155" height="30" rx="6"/>
+      <rect class="box" x="140" y="98" width="155" height="30" rx="6"/><rect class="box" x="305" y="98" width="155" height="30" rx="6"/>
+      <rect class="box" x="140" y="152" width="155" height="30" rx="6"/><rect class="box" x="305" y="152" width="155" height="30" rx="6"/>
+    </g>
+    <g class="act">
+      <rect class="box" x="500" y="44" width="155" height="30" rx="6"/><rect class="box" x="665" y="44" width="155" height="30" rx="6"/>
+      <rect class="box" x="500" y="98" width="155" height="30" rx="6"/><rect class="box" x="665" y="98" width="155" height="30" rx="6"/>
+      <rect class="box" x="500" y="152" width="155" height="30" rx="6"/><rect class="box" x="665" y="152" width="155" height="30" rx="6"/>
+    </g>
+    <text x="217" y="59" class="t-c t-sm">第 1 层的第 1/3 份</text><text x="382" y="59" class="t-c t-sm">第 2 层的第 1/3 份</text>
+    <text x="217" y="113" class="t-c t-sm">第 1 层的第 2/3 份</text><text x="382" y="113" class="t-c t-sm">第 2 层的第 2/3 份</text>
+    <text x="217" y="167" class="t-c t-sm">第 1 层的第 3/3 份</text><text x="382" y="167" class="t-c t-sm">第 2 层的第 3/3 份</text>
+    <text x="577" y="59" class="t-c t-sm">第 3 层的第 1/3 份</text><text x="742" y="59" class="t-c t-sm">第 4 层的第 1/3 份</text>
+    <text x="577" y="113" class="t-c t-sm">第 3 层的第 2/3 份</text><text x="742" y="113" class="t-c t-sm">第 4 层的第 2/3 份</text>
+    <text x="577" y="167" class="t-c t-sm">第 3 层的第 3/3 份</text><text x="742" y="167" class="t-c t-sm">第 4 层的第 3/3 份</text>
+    <text x="120" y="59" class="t-r t-b">GPU 1</text><text x="120" y="113" class="t-r t-b">GPU 2</text><text x="120" y="167" class="t-r t-b">GPU 3</text>
+    <text x="840" y="59" class="t-b">GPU 4</text><text x="840" y="113" class="t-b">GPU 5</text><text x="840" y="167" class="t-b">GPU 6</text>
+    <text x="300" y="214" class="t-c t-sm">同一列的 3 张 GPU 合起来才是完整的一层：每层算完要做一次 all-reduce（层内并行）</text>
+    <text x="480" y="236" class="t-c t-sm" style="fill:var(--c-loss)">虚线两侧之间只传一次中间激活（层间并行）；分区 1 算完把激活发给分区 2</text>
+  </svg>
+  <div class="dia-note">每个虚线框是一张 GPU，里面放着它负责的那几层的三分之一参数。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=8" target="_blank" rel="noopener">原文图 6 ↗</a>（PDF 第 8 页）。</div>
+</div>
+<p>原文图 7 画出了 Orca 执行引擎的分布式结构。引擎由一个<b>引擎主进程</b>（engine master）和若干个 <b>worker 进程</b>组成。每个 worker 负责一个层间分区，不同的 worker 可以在不同的机器上；每个 worker 里有一个<b>控制器</b>（controller）和若干个 CPU 线程，每个线程专门控制一张 GPU，线程数等于层内并行的份数。</p>
+<p>一次迭代在引擎里是这样执行的：</p>
+<ol>
+  <li>调度器让引擎在某一批请求上跑一次迭代，引擎主进程把这批请求的信息转给第一个 worker。信息包括两部分：这次迭代的 token，以及一条<b>控制消息</b>。控制消息里有批里各请求的编号、增量阶段请求当前处理到第几个 token、初始阶段请求有几个输入 token。</li>
+  <li>第一个 worker 的控制器把这些信息交给它的各个 GPU 控制线程；每个线程解析信息，向自己的 GPU 发出相应的内核。例如注意力内核会根据请求编号和当前 token 的位置，找到 K/V 管理器里这个请求历史 key、value 所在的显存地址。</li>
+  <li>与此同时，控制器<b>不等</b>这些内核在 GPU 上执行完，就把控制消息转发给下一个 worker 的控制器。</li>
+  <li>最后一个 worker 的控制器和前面不同：它要等自己发出的内核全部执行完（即与 GPU 同步），才能取出每个请求的输出 token，交回引擎主进程。</li>
+</ol>
+<div class="note-pre"><b>先补一点背景：CPU 和 GPU 之间的“同步”为什么贵。</b>
+<p>CPU 给 GPU 发内核是异步的：CPU 把一个个内核放进 GPU 的执行队列后就可以去干别的，GPU 按顺序执行。只要 CPU 发得比 GPU 算得快，GPU 就一直有活干。但如果 CPU 需要读取某个 GPU 上算出来的值（比如一个数据放在 GPU 显存里的控制信息），它就必须等 GPU 把排在前面的内核全部执行完、再把数据拷回来，这叫一次<b>同步</b>。同步期间 CPU 不能继续发内核，同步结束后 GPU 又可能要等 CPU 发下一批内核，两边轮流空等。每次迭代都同步一次，这些空隙累积起来就很可观。</p>
+</div>
+<p>为了尽量减少这种同步，Orca 把<b>控制消息和张量数据分开走两条通道</b>。作者观察到，FasterTransformer 和 Megatron-LM 等已有的分布式推理系统通过 NCCL（GPU 之间的通信库）交换控制消息（批大小、序列长度、某个请求是否结束等元数据），而 NCCL 的数据在 GPU 显存里，CPU 要用这些控制信息就得和 GPU 同步。这种交换每次迭代都会发生，开销不可忽视。Orca 则只用 NCCL 交换 GPU 产生、GPU 消费的中间张量（数据面），控制消息和 token 则在引擎主进程和各 worker 控制器之间用不经过 GPU 的通道（例如 gRPC）传递（控制面）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Orca 执行引擎的控制面与数据面（两个 worker 的例子，对应原文图 7）</div>
+  <div class="dia-flow"><b style="width:86px">控制面<br><small>gRPC，CPU 之间</small></b><span class="dia-box reg">调度器</span><span class="dia-arrow">→</span><span class="dia-box">引擎主进程<small>转发 token + 控制消息</small></span><span class="dia-arrow">→</span><span class="dia-box">Worker 1 控制器<small>交给本机 GPU 线程发内核，不等执行完就转发</small></span><span class="dia-arrow">→</span><span class="dia-box">Worker 2 控制器<small>发完内核后等 GPU 算完，取出输出 token</small></span><span class="dia-arrow">→ 交回引擎主进程 → 调度器</span></div>
+  <div class="dia-flow"><b style="width:86px">数据面<br><small>NCCL，GPU 之间</small></b><span class="dia-box enc">Worker 1 的 GPU（层内并行）<small>每层算完在本机 GPU 之间 all-reduce</small></span><span class="dia-arrow">→ 中间激活 →</span><span class="dia-box act">Worker 2 的 GPU（层内并行）<small>继续算后面的层</small></span></div>
+  <div class="dia-note">关键在于：前面的 worker 只需要把控制消息往后传，不需要读取 GPU 上的任何结果，所以不必和 GPU 同步；整条流水线上只有最后一个 worker 每次迭代同步一次。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=8" target="_blank" rel="noopener">原文图 7 ↗</a>。</div>
+</div>
+
+<h4 id="n-4-2">4.2 调度算法：先来先服务、批大小上限和 KV 槽位预留</h4>
+<p>有了选择性批处理，引擎可以把<b>任意</b>一组请求放在一起算，调度器选请求时就有了很大的自由。剩下的问题是每次迭代具体选哪些。Orca 的调度器用了一个简单的原则：不改变客户端请求的处理顺序，先到的先处理。论文把它定义为<b>迭代级的先来先服务</b>（iteration-level FCFS）：对请求池里的任意两个请求，如果 \(x_i\) 比 \(x_j\) 先到，那么 \(x_i\) 跑过的迭代次数必须不少于 \(x_j\)。注意，这并不意味着先到的一定先结束：后到的请求如果需要的迭代少，完全可能更早返回。</p>
+<p>除了顺序，调度器还要考虑两个因素。</p>
+<p><b>第一，批变大的收益递减。</b>批越大吞吐量越高，但每次迭代也越慢，延迟随之上升；而且批大到一定程度后，吞吐量的增长越来越小。所以和其他服务系统一样，Orca 设了一个<b>批大小上限</b>（max batch size，下文记作 <code>max_bs</code>）：一个批里最多放多少个请求。运维人员可以调这个参数，在满足延迟要求的前提下尽量提高吞吐量（实验见第 6.4 节）。</p>
+<p><b>第二，显存有限。</b>中间结果的缓冲区可以在不同算子之间复用，这是 FasterTransformer、TensorRT 等系统常用的技巧，Orca 也用了。但 K/V 管理器里存放 key 和 value 的缓冲区不一样：它们要等调度器通知“这个请求结束了”才能回收。如果实现得太天真，调度器可能陷入<b>死锁</b>：显存里已经没有空间存放下一个 token 的 key 和 value，于是请求池里没有任何一个请求能再跑一次迭代；而没有请求能跑完，也就没有显存能被释放。</p>
+<div class="note-pre"><b>先补一点背景：为什么会死锁，举个例子。</b>
+<p>假设 K/V 区域总共能放 1,000 个 token 的 key 和 value。调度器一口气接纳了 10 个请求，每个都已经用掉 100 个位置，显存满了。下一次迭代，每个请求都要再存 1 个新 token 的 K/V，可是一个空位都没有了，谁也走不了；而只有走完的请求才会释放显存。这就像停车场停满了车、每辆车都要往前挪一格才能出去，结果谁也动不了。要避免这种局面，要么事先就为每个请求留够它将来需要的空间（Orca 的办法），要么在显存不够时把某些请求的 K/V 暂时请出去（后来 vLLM 的办法，见 <a href="vllm.html#n-4-5">vLLM 精读 §4.5</a>）。</p>
+</div>
+<p>Orca 的做法是：一个请求<b>第一次被调度时</b>，就按它的 <code>max_tokens</code> 一次性为它预留足够的 K/V 空间。<code>max_tokens</code> 是每个请求自带的选项，表示这个请求处理完后最多会有多少个 token（输入加输出）。论文把“存放一个 token 的 key 和 value 所需的显存”叫一个<b>槽位</b>（slot），<code>n_slots</code> 是分给 K/V 管理器的显存一共有多少个槽位，<code>n_rsrv</code> 是当前已经预留出去的槽位数。只要预留成功，因为请求的 token 数不可能超过 <code>max_tokens</code>，就能保证它从开始到结束都有地方存新的 key 和 value，死锁不会发生。</p>
+<p>论文还指出，<code>n_slots</code> 不像 <code>max_bs</code> 那样需要做实验权衡：给定模型规格（隐藏维度、层数等）和两种并行的份数，Orca 的显存占用主要取决于 <code>n_slots</code>，所以运维人员只要在显存允许的范围内把它设到最大即可。</p>
+<p>原文的 Algorithm 1 把这些规则写成了伪代码。请求有三种状态：<b>INITIATION</b>（还没被调度过）、<b>RUNNING</b>（正在引擎里跑）、<b>INCREMENT</b>（跑完一次迭代回来了，等下一次）。主循环和选批函数 <code>Select</code> 用本站的话说是这样的：</p>
+<ol>
+  <li><b>选批</b>：从请求池里取出所有当前<b>不在引擎里跑</b>的请求，按到达时间从早到晚排序，依次考虑。批里已经有 <code>max_bs</code> 个请求就停止。</li>
+  <li>如果正在考虑的请求还没被调度过（INITIATION），先看 \(n_{\text{rsrv}}\) 加上它的 <code>max_tokens</code> 是否超过 <code>n_slots</code>：超过就<b>停止选批</b>（不是跳过它去看下一个）；不超过就记下预留，把它放进批里。处在 INCREMENT 状态的请求已经预留过了，直接放进批里。</li>
+  <li><b>发出</b>：让引擎在选出的批上跑一次迭代，批里的请求都标为 RUNNING，在途批数加一。</li>
+  <li><b>等待</b>：只有当在途批数等于 worker 数（<code>n_workers</code>）时，才等待其中一批返回（这一点和流水线有关，见第 4.3 节）。返回的请求标为 INCREMENT；其中已经结束的请求释放它的 <code>max_tokens</code> 个槽位；在途批数减一。然后回到第 1 步。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：槽位预留怎么决定谁能进批（本站举例：n_slots = 1,000，max_bs = 4）</div>
+  <div class="dia-row"><span class="lbl">第一次选批</span><div class="dia-track"><span class="dia-seg kv" style="flex:300">A 预留 300</span><span class="dia-seg cmp" style="flex:400">B 预留 400</span><span class="dia-seg oth" style="flex:300">空闲 300</span></div></div>
+  <div class="dia-out">按到达顺序 A、B、C、D。C 的 max_tokens 是 500，超过剩下的 300，选批到此为止。排在 C 后面的 D 只要 100，本来放得下，但不能插队。本次批 = {A, B}。</div>
+  <div class="dia-row"><span class="lbl">A 结束之后</span><div class="dia-track"><span class="dia-seg cmp" style="flex:400">B 预留 400</span><span class="dia-seg res" style="flex:500">C 预留 500</span><span class="dia-seg frag" style="flex:100">D 100</span></div></div>
+  <div class="dia-out">A 释放 300 个槽位，n_rsrv 回到 400；C 进来后是 900，D 进来后正好 1,000。本次批 = {B, C, D}，B 是增量阶段，不用再预留。</div>
+  <div class="dia-note">数字是本站编的例子，用来演示 Algorithm 1 第 23–26 行的逻辑。可以看到两个特点：一是“停止而不是跳过”保证了先来先服务，代价是队头的大请求会挡住后面的小请求；二是预留按 max_tokens 而不是实际用量计算，如果 C 实际只生成了很少的 token，那 500 个槽位里的大部分从头到尾都空着。原文 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=9" target="_blank" rel="noopener">Algorithm 1 ↗</a> 在 PDF 第 9 页。</div>
+</div>
+<p>为了对“一个槽位有多大”有个数量级的感觉，可以算一下。一个槽位要存一个 token 在每一层的 key 和 value，所以</p>
+<div class="formula">$$\text{一个槽位的大小}=2\times n_{\text{layers}}\times H\times 2\ \text{字节（FP16）}\ \div\ \text{GPU 数}$$</div>
+<p>以论文的 13B 模型为例（40 层，\(H=5120\)，单卡），一个槽位约 0.82 MB；以 175B 模型为例（96 层，\(H=12288\)，16 张卡分摊），每张卡上一个槽位约 0.3 MB（都是推算）。按最大长度 2048 给一个请求预留，13B 模型就要约 1.68 GB（推算）。这个数字在第 6.2 节解释 FasterTransformer 为什么开不了大批时还会用到。</p>
+<div class="note-warn"><b>这一节留下的伏笔：</b>
+<ul>
+  <li><b>按 max_tokens 预留会浪费显存。</b>真实请求往往远没生成到上限就输出了结束符，预留的大部分槽位从头到尾都没用上，而这些槽位本可以让更多请求同时进批。Orca 论文没有讨论这个问题，因为它的实验让每个请求都恰好生成到上限（第 6.1 节）。一年后 vLLM 正是以此为突破口：它复现了 Orca 的三种预留策略作为对照，测得 KV 显存里真正存了数据的只有 20.4%–38.2%，然后用分页按需分配解决了它。见 <a href="vllm.html#n-3-1">vLLM 精读 §3.1</a> 和 <a href="vllm.html#n-6-1">§6.1</a>。</li>
+  <li><b>批大小上限按“请求数”计，不按“token 数”计。</b>一个批里可以同时放进好几个新请求的整段输入，一次迭代的 token 数可能从几个跳到几千个，这一步的耗时随之暴涨，正在生成中的请求都要等它。后来 Sarathi-Serve 把上限改成按 token 数的预算，并把长输入切块，见 <a href="sarathi-serve.html#n-3-2">Sarathi-Serve 精读 §3.2</a>。</li>
+  <li><b>调度器没有抢占。</b>请求一旦被接纳就一直跑到结束，所以 Orca 只能靠“接纳前先预留够”来防止死锁。</li>
+</ul></div>
+
+<h4 id="n-4-3">4.3 流水线并行：不需要把批切成微批</h4>
+<p>Algorithm 1 里“在途批数达到 worker 数才等待”这一条，是为了让层间并行的多个 worker 形成流水线。调度器发出一批后不急着等它返回，而是接着选下一批、再发出，直到引擎里同时有 <code>n_workers</code> 个批在跑。这样每个 worker 手里随时都有一个批在算，不会闲着。</p>
+<p>原文图 8a 用 3 个 worker、<code>max_bs</code> = 2 举例，请求按 A、B、C、D、E、F 的顺序到达。调度器先选出最早的 A、B 组成批 AB 发出，由 Worker 1、2、3 依次处理；它不等 AB 返回，又发出 CD 和 EF。AB 返回后，A、B 又是池里最早到达的请求，于是再次被选中、发出，如此循环。</p>
+<p>当时的服务系统和执行引擎（例如 Triton 加 FasterTransformer）做不到这一点：按请求调度意味着当前这批没结束之前，Triton 不能把下一个请求 C 交给 FasterTransformer。为了让多个层间分区形成流水线，FasterTransformer 只能把一批请求再切成若干<b>微批</b>（microbatch，GPipe 的做法），让各分区在不同微批上交错执行（原文图 8b 把批 AB 切成微批 A 和 B）。这带来一个两难：每个分区一次只能批量处理一个微批，微批比原来的批小，批处理的收益就变小了；可如果微批开得太大、数量少于分区数，流水线里又会出现空闲的<b>气泡</b>。FasterTransformer 必须在“批处理效率”和“流水线效率”之间取舍，Orca 因为本来就按迭代调度、可以直接塞进别的请求组成的批，不需要切微批，也就没有这个取舍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：3 个流水线阶段上的执行时间线（每格是一个阶段处理一次）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td class="lbl"></td><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th></tr>
+    <tr><td colspan="10" class="gsub">① Orca：引擎里同时有 3 个批（AB、CD、EF），每个批都是完整大小</td></tr>
+    <tr><td class="lbl">Worker 1</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td></tr>
+    <tr><td class="lbl">Worker 2</td><td></td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td></tr>
+    <tr><td class="lbl">Worker 3</td><td></td><td></td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td><td style="background:var(--c-act-bg);color:var(--text)">CD</td><td style="background:var(--c-pred-bg);color:var(--text)">EF</td><td style="background:var(--c-enc-bg);color:var(--text)">AB</td></tr>
+    <tr><td colspan="10" class="gsub">② FasterTransformer：只有批 AB，切成微批 A、B；C–F 要等 AB 全部生成完</td></tr>
+    <tr><td class="lbl">分区 1</td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td></tr>
+    <tr><td class="lbl">分区 2</td><td></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td></tr>
+    <tr><td class="lbl">分区 3</td><td></td><td></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td><td style="background:var(--c-enc-bg);color:var(--text)">B</td><td class="p"></td><td style="background:var(--c-enc-bg);color:var(--text)">A</td></tr>
+  </table>
+  </div>
+  <div class="dia-note">① 中，AB 的下一次迭代要等它走完第 3 个阶段才能开始（第 4 格），但这段时间 CD、EF 填满了流水线，没有空闲。② 中，微批 A 的下一次迭代同样要等它走完 3 个阶段，可只有 2 个微批，于是每个分区每 3 格就空 1 格（红格是气泡）；而且每格只处理半个批。为了好画，这里让一个微批和一个完整批的处理时间相同；实际上增量阶段的耗时主要花在读参数上，半个批的耗时只比完整批少一点，所以切微批几乎是白白损失了一半的批处理收益。本站示意图，对应 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=10" target="_blank" rel="noopener">原文图 8 ↗</a>（PDF 第 10 页）。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li><b>流水线不缩短单个请求的延迟。</b>同一个请求的相邻两次迭代之间，仍然要等它走完全部阶段；流水线提高的是同一时间在算的请求数，也就是吞吐量。引擎里同时在跑的请求最多是 <code>max_bs</code> × <code>n_workers</code> 个。</li>
+  <li><b>“没有气泡”的前提是每个批在每个阶段耗时差不多。</b>如果某个批里塞进了几个新请求的整段输入（几百上千个 token），而另一个批只有增量阶段的单个 token，两批在同一阶段的耗时会差很多倍，快的那批就得在下一阶段前面等着，气泡又回来了。Sarathi-Serve 后来实测了迭代级调度下仍然存在的流水线气泡，并用等长的分块来消除它，见 <a href="sarathi-serve.html#n-3-3">Sarathi-Serve 精读 §3.3</a>。</li>
+</ul></div>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=7" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=8" target="_blank" rel="noopener">§4.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实现：13K 行 C++ 与融合的注意力内核</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Orca 是用什么写的？各部分之间怎么通信？第 3.4 节说“拆开注意力几乎不吃亏”，那么拆开之后，每个请求一个注意力内核，启动内核的开销怎么办？</div>
+<p>Orca 用约 1.3 万行 C++ 实现，基于 CUDA 生态。控制面的通信用 gRPC，数据面用 NCCL，层间和层内的通信都走 NCCL。因为 Orca 专门面向 Transformer 生成式模型，它把常见的 Transformer 层做成了构建模块，包括原始的编码器—解码器 Transformer、GPT，以及 T5 论文（Raffel 等）里讨论过的各种变体。</p>
+<div class="note-pre"><b>先补一点背景：内核、线程块和内核融合。</b>
+<p>在 GPU 上，每个计算操作都要以一个<b>内核</b>（kernel）的形式启动。一个内核由许多<b>线程块</b>（thread block）组成，GPU 把这些线程块分派到各个计算单元上并行执行。每启动一个内核都有固定的开销，而且一个内核如果只有很少几个线程块，GPU 的大部分计算单元会闲着。把几个连续的小操作合并成一个内核一次做完，叫<b>内核融合</b>：既省下了多次启动的开销，也省掉了中间结果在显存里写进写出。</p>
+</div>
+<p>和其他训练、推理系统一样，Orca 为 LayerNorm、注意力和 GeLU 实现了融合内核。例如注意力的三步——query 和 key 的点积、softmax、对 value 的加权平均——被融合进一个 CUDA 内核。</p>
+<p>Orca 还往前多走了一步：把 Split 之后各个请求的注意力内核也融合在一起，做法很直接，就是把不同请求的内核的线程块全部拼进同一个内核里一起启动。这样一来，同一个内核里的线程块处理的张量形状不同，执行时间也不同。CUDA 编程的常规建议是避免这样做，因为形状不一的线程块会让负载不均衡；但作者发现这种融合是划算的：它减少了内核启动的开销，也让 GPU 更满。</p>
+<p>这个做法值得多看一眼，因为它就是后来“一个内核处理一个批里长短不一的请求”的雏形。vLLM 的 PagedAttention 内核、FlashAttention 的变长（varlen）接口、FlashInfer 等，都是在一个内核里按请求划分线程块，各自读各自的 KV，见 <a href="vllm.html#n-5">vLLM 精读 §5</a>。</p>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=10" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实验：和 FasterTransformer 比，快在哪里</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Orca 的执行引擎本身和 FasterTransformer 相比快不快？加上调度器之后，在随机到达、长短不一的请求流下，延迟和吞吐量差多少？36.9 倍是怎么来的？批大小上限该怎么设？如果所有请求长度一样、不存在“早完成”的问题，Orca 还剩多少优势？最后，这些数字能说明多少问题？</div>
+
+<h4 id="n-6-1">6.1 实验是怎么设计的</h4>
+<p><b>硬件。</b>实验在 Azure 的 ND96asr A100 v4 虚拟机上进行，每台有 8 张 40 GB 的 NVIDIA A100，机内用 NVLink 连接；每台机器有 8 块 200 Gb/s 的 HDR InfiniBand 网卡，机器之间合计 1.6 Tb/s 的带宽。按模型大小最多用 4 台。</p>
+<p><b>模型。</b>全部用 GPT（GPT-3 的结构）作为代表。13B 和 175B 的配置直接取自 GPT-3 论文；作者在此基础上改变层数和隐藏维度，又造出 101B 和 341B 两个配置（原文表 1）。所有模型的最大序列长度都是 2048，参数和中间激活都用 FP16。</p>
+<div class="table-wrap"><table>
+  <tr><th>参数量</th><th>层数</th><th>隐藏维度 \(H\)</th><th>层间分区数</th><th>层内分区数</th><th>GPU 数</th></tr>
+  <tr><td>13B</td><td>40</td><td>5120</td><td>1</td><td>1</td><td>1</td></tr>
+  <tr><td>101B</td><td>80</td><td>10240</td><td>1</td><td>8</td><td>8</td></tr>
+  <tr><td>175B</td><td>96</td><td>12288</td><td>2</td><td>8</td><td>16</td></tr>
+  <tr><td>341B</td><td>120</td><td>15360</td><td>4</td><td>8</td><td>32</td></tr>
+</table></div>
+<p>表中前五列取自原文表 1，GPU 数是两种分区数的乘积，与论文正文和图注一致。175B 模型用 2 个层间分区、每个分区再切 8 份，同一台机器上的 8 张 GPU 属于同一个层间分区。也就是说，通信频繁的层内并行走机内 NVLink，通信少的层间并行才跨机器走 InfiniBand。13B 模型一张卡就放得下，不做任何切分。</p>
+<p><b>对照系统。</b>只和 FasterTransformer 比。作者的理由是：它是当时支持分布式执行的推理引擎；Megatron-LM 和 DeepSpeed 也能分布式执行，但它们主要为训练设计和优化，推理性能相对较差。</p>
+<p><b>两种测试场景。</b></p>
+<ul>
+  <li><b>引擎微基准</b>：只测执行引擎，不运行 Orca 的调度器。测试脚本把同一批请求反复送进 Orca 引擎，直到批里所有请求都结束，模拟传统的按请求调度；批里所有请求的输入长度相同、生成长度也相同。记录处理整批的时间，与 FasterTransformer 比较。</li>
+  <li><b>端到端</b>：模拟真实负载。因为当时没有公开的生成式语言模型请求记录，作者自己合成了请求流。每个请求随机抽取输入 token 数和最多生成的 token 数 <code>max_gen_tokens</code>，两者相加就是第 4.2 节的 <code>max_tokens</code>。</li>
+</ul>
+<p>端到端测试有一个重要设定：作者假设<b>所有请求都一直生成到 <code>max_gen_tokens</code> 才停</b>，也就是让模型永远不输出 &lt;EOS&gt;。原因是作者手上既没有真实的模型权重，也没有真实的输入文本，无从判断什么时候该生成结束符。请求的到达时间按泊松过程生成，通过调整到达速率来模拟不同的负载。作者用多种分布生成的请求流来报告延迟和吞吐量。</p>
+<div class="note-pre"><b>先补一点背景：泊松到达与归一化延迟。</b>
+<p><b>泊松过程</b>是模拟“很多用户各自随机发请求”最常用的模型：给定平均速率（比如每秒 2 个请求），相邻请求的间隔是随机的，有时扎堆、有时稀疏。速率调高，系统就从空闲变得繁忙。</p>
+<p>端到端实验报告的是<b>中位数延迟除以该请求生成的 token 数</b>，单位是毫秒/token。因为一个请求的处理时间大致和它生成的 token 数成正比，不除的话，生成 128 个 token 的请求和生成 1 个 token 的请求放在一起比没有意义。注意论文用的是中位数，不是平均值，也没有报告 P99 这样的尾延迟。</p>
+</div>
+
+<h4 id="n-6-2">6.2 引擎微基准：去掉调度器，单看执行引擎</h4>
+<p>原文图 9 比较了在批内请求完全相同（输入 32 或 128 个 token，都生成 32 个 token，同时开始、同时结束）时，两个引擎处理一整批所需的时间。横轴是批大小（1、2、4、8、16、32），纵轴是执行时间（毫秒），分别测了 13B（1 张卡）、101B（8 张卡）和 175B（16 张卡）。</p>
+<ul>
+  <li><b>13B 和 101B：Orca 引擎和 FasterTransformer 差不多，或者略慢一点。</b>原因是 Orca 不对注意力拼批，而 FasterTransformer 对所有算子拼批。不过差距很小：注意力没有参数，拼批本来就省不下读参数的开销。作者据此认为，两个引擎在 CUDA 内核和层内并行通信上的实现效率相当。</li>
+  <li><b>FasterTransformer 开不了大批。</b>13B 模型上批大小达到 8、101B 上达到 16 时，FasterTransformer 显存不足（图中缺失的点）。原因是它为每个请求按模型最大序列长度 2048 预先分配 K/V 显存。Orca 按每个请求的 <code>max_tokens</code> 分别设定缓冲区大小，避免了这种多余的分配。</li>
+  <li><b>175B：Orca 引擎最多快 47%。</b>这个模型有 2 个层间分区。为了公平比较，作者关掉了两个系统的流水线执行（FasterTransformer 把微批大小设成等于批大小）。作者把这部分优势归功于第 4.1 节的控制面与数据面分离。341B 的结果与 175B 类似，论文没有画出来。</li>
+</ul>
+<p>为什么 FasterTransformer 恰好在这两个批大小上显存不足？可以用第 4.2 节的槽位大小验算一下（下表全部是本站推算，按 40 GB 粗算，忽略了 CUDA 上下文等开销）：</p>
+<div class="table-wrap"><table>
+  <tr><th></th><th>13B，1 张 GPU</th><th>101B，8 张 GPU（层内 8 份）</th></tr>
+  <tr><td>每张 GPU 上的参数（FP16）</td><td>约 26 GB</td><td>约 202 GB ÷ 8 ≈ 25 GB</td></tr>
+  <tr><td>剩给 K/V 和中间结果</td><td>约 14 GB</td><td>约 15 GB</td></tr>
+  <tr><td>一个 token 的 K/V（每张 GPU）</td><td>2 × 40 × 5120 × 2 B ≈ 0.82 MB</td><td>2 × 80 × 10240 × 2 B ÷ 8 ≈ 0.41 MB</td></tr>
+  <tr><td>FasterTransformer 按 2048 预分配，每个请求</td><td>约 1.68 GB</td><td>约 0.84 GB</td></tr>
+  <tr><td>论文报告显存不足的批大小</td><td>8（需要约 13.4 GB）</td><td>16（需要约 13.4 GB）</td></tr>
+  <tr><td>Orca 按 max_tokens 预留（最多 128 + 32 = 160），每个请求</td><td>约 0.13 GB</td><td>约 0.07 GB</td></tr>
+</table></div>
+<p>两种情况下，FasterTransformer 在报告显存不足的那个批大小上都需要约 13.4 GB 的 K/V，几乎吃光了剩余显存，再加上中间结果就放不下了。这和论文的现象吻合。而 Orca 在微基准里每个请求最多只需要 160 个槽位，批开到 32 也只用 4 GB 左右（推算）。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“最多快 47%”的原文是 outperforms by up to 47%，论文没有说明这是执行时间缩短了 47%，还是速度提高了 47%，也没有给出对应的批大小。而且这个对比关掉了流水线，所以它衡量的只是两个引擎在跨机器执行时的固定开销差异，不能直接和后面端到端的倍数相乘或相加。</div>
+
+<h4 id="n-6-3">6.3 端到端：随机到达的请求流</h4>
+<p>端到端实验测试的是完整的 Orca，包括调度器。每个请求的输入 token 数从 32 到 512 的均匀分布 \(U(32, 512)\) 中抽取，<code>max_gen_tokens</code> 从 \(U(1, 128)\) 中抽取，所以最省事的请求只需 1 次迭代，最费事的需要 128 次。</p>
+<p>FasterTransformer 本身没有调度器，作者为它写了一个：接收客户端请求，每次从队列里最多取 <code>max_bs</code> 个请求动态组成一批，交给 FasterTransformer。这是 Triton、TensorFlow Serving 等现有服务系统最常用的调度算法。对 FasterTransformer，除了 <code>max_bs</code>，作者还改变了微批大小这个控制流水线的参数。图例里 orca(<code>max_bs</code>) 表示批大小上限为 <code>max_bs</code> 的 Orca，ft(<code>max_bs</code>, <code>mbs</code>) 表示批大小上限 <code>max_bs</code>、微批大小 <code>mbs</code> 的 FasterTransformer。</p>
+<div class="note-pre"><b>先补一点背景：怎么读原文图 10。</b>
+<p>原文图 10 的横轴是<b>吞吐量</b>（每秒完成的请求数），纵轴是<b>中位数归一化延迟</b>（毫秒/token，对数坐标）。每条曲线上的点对应不同的请求到达速率：负载低时，吞吐量等于到达速率，延迟很低；负载升高，吞吐量跟着升高，延迟也慢慢上升；当到达速率超过系统的处理能力，吞吐量再也上不去，延迟则急剧上升，曲线几乎竖直向上。所以看这张图，要看哪条曲线<b>更靠右、更靠下</b>：同样的延迟下能扛更多请求，同样的吞吐下延迟更低。注意它和 vLLM 论文的图画法不同，vLLM 的横轴是请求到达速率。</p>
+</div>
+<p>结果是：Orca 的吞吐量显著更高、延迟显著更低。唯一的例外是 101B 模型在低负载时（原文图 10a）：这时两个系统都凑不出足够多的请求来组批，延迟主要由引擎本身的速度决定，也就是图 9b 的情况，FasterTransformer 的引擎稍快一点。随着负载变重，Orca 的吞吐量上升而延迟只略有增加，因为后到的请求可以“搭上”正在进行的批。FasterTransformer 则处理不好三种请求：到达时间不同的、需要的迭代次数不同的、输入长度不同的，它在 101B 上的峰值吞吐量只有 0.49 个请求/秒，延迟也高得多。</p>
+<p>对使用了多个层间分区的 175B 和 341B 模型（原文图 10b、10c），Orca 在每一档负载下的延迟和吞吐量都优于 FasterTransformer，在相近延迟下吞吐量高出一个数量级。论文举的具体例子是 175B 模型：在中位数归一化延迟为 190 毫秒/token 时，FasterTransformer 的吞吐量是 0.185 个请求/秒，Orca 是 6.81 个请求/秒，相差 36.9 倍。190 毫秒这个水平是作者选的：它是原文图 9c 中 orca(128) 的执行时间按生成 token 数归一化之后的两倍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：175B 模型、中位数归一化延迟 190 ms/token 时的吞吐量（论文报告的两个数）</div>
+  <div class="dia-row"><span class="lbl">FasterTransformer</span><div class="dia-track"><span class="dia-seg frag" style="flex:0.185;min-width:6px"></span><span class="dia-seg oth" style="flex:6.625;background:none"></span></div></div>
+  <div class="dia-out">0.185 个请求/秒</div>
+  <div class="dia-row"><span class="lbl">Orca</span><div class="dia-track"><span class="dia-seg kv" style="flex:6.81">6.81 个请求/秒</span></div></div>
+  <div class="dia-out">6.81 ÷ 0.185 ≈ 36.8（推算）；论文写 36.9 倍，差别应来自两个数的四舍五入。</div>
+  <svg class="dg" viewBox="0 0 640 250" role="img" aria-label="吞吐量—归一化延迟曲线的示意图，在 190 毫秒处截取两个系统的吞吐量" style="max-width:640px">
+    <line x1="70" y1="200" x2="610" y2="200" class="axis"/>
+    <line x1="70" y1="200" x2="70" y2="30" class="axis"/>
+    <text x="340" y="232" class="t-c t-sm">吞吐量（请求/秒）→</text>
+    <text x="22" y="115" class="t-c t-sm" transform="rotate(-90 22 115)">中位数归一化延迟（对数）→</text>
+    <text x="70" y="212" class="t-c t-xs">0</text><text x="214" y="212" class="t-c t-xs">2</text><text x="358" y="212" class="t-c t-xs">4</text><text x="502" y="212" class="t-c t-xs">6</text>
+    <text x="64" y="200" class="t-r t-xs">100</text><text x="64" y="40" class="t-r t-xs">1000</text>
+    <line x1="70" y1="155" x2="610" y2="155" style="stroke:var(--text-3);stroke-dasharray:4 4"/>
+    <text x="608" y="146" class="t-r t-xs">190 ms/token</text>
+    <path d="M72,172 C77,168 81,161 83,155 C86,140 91,92 98,36" style="fill:none;stroke:var(--c-loss);stroke-width:2.5"/>
+    <path d="M75,182 C300,180 470,172 560,155 C578,151 592,105 602,36" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <line x1="83" y1="155" x2="83" y2="200" style="stroke:var(--c-loss);stroke-dasharray:3 3"/>
+    <line x1="560" y1="155" x2="560" y2="200" style="stroke:var(--c-enc);stroke-dasharray:3 3"/>
+    <text x="104" y="48" class="t-sm" style="fill:var(--c-loss)">FasterTransformer</text>
+    <text x="530" y="48" class="t-r t-sm" style="fill:var(--c-enc)">Orca</text>
+    <text x="90" y="188" class="t-xs" style="fill:var(--c-loss)">0.185</text>
+    <text x="555" y="188" class="t-r t-xs" style="fill:var(--c-enc)">6.81</text>
+  </svg>
+  <div class="dia-note">上面的条形按真实比例画出了两个吞吐量。下面的曲线只是示意，形状不是论文数据；只有两条竖线的横坐标按论文报告的 0.185 和 6.81 画。可以看到，FasterTransformer 在吞吐量很低时就已经到了“竖直上升”的饱和段，所以在这个延迟水平上截取的倍数会特别大。原图见 <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=12" target="_blank" rel="noopener">原文图 10 ↗</a>（PDF 第 12 页）。</div>
+</div>
+
+<h4 id="n-6-4">6.4 批大小上限怎么设，FasterTransformer 为什么开大批反而没用</h4>
+<p>原文图 10 显示，Orca 把批大小上限从 1 提高到 8、16、32，吞吐量随之提高，延迟却没有明显变化。原因是迭代级调度解决了“早完成、晚加入”的问题：批开大并不会让请求陪跑或排队更久。不过论文也说明，在任意的硬件、模型和负载下，并不能保证加大批不会损害延迟，所以批大小上限仍需要结合延迟和吞吐的要求来设。</p>
+<p>有意思的是，FasterTransformer 加大批大小上限<b>不一定</b>能提高吞吐量。作者在所有模型、各档负载下试遍了 (<code>max_bs</code>, <code>mbs</code>) 的组合，发现最好的配置是 (1, 1) 和 (8, 8)。论文的解释有两层：</p>
+<ul>
+  <li><b>微批削弱了批处理。</b>第 4.3 节讲过，FasterTransformer 一次只能批量处理 <code>mbs</code> 个请求，所以微批大小取最大（等于 <code>max_bs</code>）的配置表现更好。</li>
+  <li><b>大批更容易混进长短悬殊的请求。</b>批越大，越可能同时包含输入长度或生成长度差别很大的请求。这时 FasterTransformer 有两个问题：一是第一次迭代时，它把所有请求都当作和最短的那个输入一样长来处理；二是先生成完的请求不能立刻返回。</li>
+</ul>
+<p>关于第一点，论文只说了这一句。按本站的理解，这意味着较长的请求多出来的输入 token 没能在第一次迭代里并行处理，只能在之后的迭代里像生成阶段那样逐个补上，失去了并行处理输入的效率。这也解释了为什么 FasterTransformer 在输入长度服从 \(U(32, 512)\) 的负载上，大批反而不划算。</p>
+
+<h4 id="n-6-5">6.5 同质请求：没有“早完成”问题时还剩多少优势</h4>
+<p>为了把迭代级调度的作用单独拿出来看，作者又用<b>同质请求</b>做了测试：请求流里每个请求的输入 token 数和 <code>max_gen_tokens</code> 都一样，所以所有请求需要的迭代次数相同，不存在“提前离开”的问题。原文图 11 在 175B 模型上测了两组：(输入, 生成) = (32, 32) 和 (256, 256)。因为请求都一样，这里的延迟没有归一化，单位是毫秒。</p>
+<p>结果是：这时加大 <code>max_bs</code> 对 FasterTransformer 有明显帮助，因为批里请求同进同出，不再有陪跑的浪费。即便如此，Orca 仍然优于 FasterTransformer 的 (8, 8) 配置，唯一的例外是批大小上限为 1 的 Orca：它退化成几个 worker 组成的简单流水线，完全不做批处理。</p>
+<div class="note-pre"><b>先补一点背景：同质请求下 Orca 还剩什么优势。</b>
+<p>同质请求去掉了“早完成”和“输入长短不一”两个问题，但另外两个差别还在：一是请求到达时间仍然随机，按请求调度时新请求要等整批结束，Orca 只要等一次迭代；二是 175B 模型用了 2 个层间分区，Orca 可以用完整大小的批填满流水线，FasterTransformer 必须切微批（第 4.3 节）。此外还有第 6.2 节测到的引擎本身的差距。所以这组实验说明的是：即使最有利于 FasterTransformer 的负载，Orca 的设计仍然有收益，但它没有把这几项收益分别拆开测量。</p>
+</div>
+
+<h4 id="n-6-6">6.6 结果的份量：36.9 倍是在什么条件下测出来的</h4>
+<p>36.9 倍是论文摘要里的数字，也是后来被引用最多的数字。把它放回实验条件里，可以看出它说明了什么、没有说明什么。</p>
+<ul>
+  <li><b>对照系统只有一个，而且是作者搭的。</b>在论文列举的几个 Transformer 推理引擎（FasterTransformer、LightSeq、TurboTransformers、EET）里，只有 FasterTransformer 支持分布式执行，拿它作对手是合理的；但论文没有写它的版本号（参考文献只注明 2021-12-13 访问的 GitHub 仓库），它前面的调度器是作者按 Triton / TensorFlow Serving 的常见做法自己写的。作者为它扫描了 (<code>max_bs</code>, <code>mbs</code>) 的全部组合并报告最好的配置，这一点是认真的。</li>
+  <li><b>倍数取决于在哪个延迟水平截取。</b>36.9 倍是在中位数归一化延迟 190 ms/token 这一个点上截出来的，在这个点上 FasterTransformer 已经接近饱和。延迟要求放宽，FasterTransformer 的吞吐量会高一些（101B 上峰值 0.49 请求/秒），倍数随之变小；论文正文的总结措辞是“高出一个数量级”。只看中位数，没有尾延迟，也没有把首 token 延迟（TTFT）和逐 token 间隔（TBT）分开，这两个指标是后来 DistServe、Sarathi-Serve 才成为标配的。</li>
+  <li><b>收益混合了好几个来源，没有消融。</b>端到端的差距同时来自：迭代级调度（不陪跑、不排队）、选择性批处理（不同长度的输入不用迁就最短的）、K/V 显存按 <code>max_tokens</code> 而不是按 2048 预留（能开更大的批）、不切微批的流水线、以及控制面与数据面分离（175B 上引擎本身最多快 47%）。论文没有逐项关掉来测量各自的贡献，所以不能说 36.9 倍全部来自迭代级调度。</li>
+  <li><b>负载是合成的，而且回避了显存浪费问题。</b>请求长度来自均匀分布，总长度最多 640 个 token，比今天的对话和长文档负载短得多。更重要的是，模型从不输出 &lt;EOS&gt;，每个请求都恰好生成 <code>max_gen_tokens</code> 个 token，所以按 <code>max_tokens</code> 预留的槽位最终全都用上了，“预留了却没用上”的浪费在实验里根本不会出现。按本站的粗略推算，175B 模型每张 GPU 放完约 22 GB 参数后还剩约 18 GB；即使只拿 10 GB 存 K/V、每个请求都按最长的 640 个 token 预留，也能同时容纳约 50 个请求（每个约 0.19 GB），按平均的约 336 个 token 算能容纳约 100 个，而引擎里同时在跑的请求最多是 32 × 2 = 64 个。所以在论文的负载下，K/V 预留大概率不是瓶颈（推算，取决于中间结果实际占多少显存）。一旦请求实际生成的长度远小于上限，显存利用率就会显著下降，这正是 vLLM 后来测到的情况。</li>
+  <li><b>没有用真实模型权重。</b>作者没有 GPT-3 的权重，所以测速时的权重不是训练好的模型。这对测速度本身没有影响，因为计算量与权重的具体数值无关；影响的只是结束符出现的时机，而这个已经被上一条的设定取代了。</li>
+  <li><b>硬件与规模。</b>全部是 40 GB 的 A100，机内 NVLink、机间 InfiniBand。端到端实验只做了 101B、175B、341B 三个多卡模型，13B 单卡只出现在引擎微基准里。</li>
+  <li><b>无法独立复现。</b>Orca 没有开源，致谢里写明这项工作由 FriendliAI 资助。后来的论文（vLLM、Sarathi-Serve）里作为对照的 “Orca” 都是按论文描述的复现，复现时的细节（例如 KV 预留策略、批大小上限）各不相同，见 <a href="vllm.html#n-6-1">vLLM 精读 §6.1</a> 和 <a href="sarathi-serve.html#n-5-1">Sarathi-Serve 精读 §5.1</a>。</li>
+</ul>
+<p>总的来说，这组实验有力地说明了一件事：在长度不一、随机到达的请求流下，按请求调度会让大模型服务的吞吐量损失一个数量级，而按迭代调度能把它找回来。至于“36.9 倍”这个具体数字，它属于这一个模型、这一个延迟点、这一种合成负载，不宜直接搬到别的场景。</p>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=11" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=12" target="_blank" rel="noopener">图 9、图 10 ↗</a> · <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=13" target="_blank" rel="noopener">图 11 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作、讨论与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>“细粒度地调度和批处理”在 Orca 之前有没有人做过？为什么那些办法用不到 Transformer 上？Orca 和当时其他 Transformer 推理引擎的根本区别是什么？它把调度器和引擎绑在一起，丢掉了分层设计的什么好处？</div>
+<div class="note-pre"><b>先补一点背景：RNN 的“单元”为什么可以跨请求拼批。</b>
+<p>循环神经网络（RNN、LSTM）处理一个序列时，每一步都调用同一个“单元”：输入当前 token 和一个固定大小的隐藏状态，输出新的隐藏状态。不管处理的是第 3 个 token 还是第 300 个，这一步的计算完全相同，张量形状也完全相同（第 2.1 节的 LSTM 对比）。所以不同请求、处在不同位置的单元可以直接拼成一批。</p>
+</div>
+<p><b>RNN 的细粒度批处理。</b>论文特别提到 BatchMaker（EuroSys 2018）：它是一个 RNN 推理服务系统，以 RNN 单元为粒度做调度和批处理。请求到达后，BatchMaker 把它的计算图拆成一个个单元，按单元调度，并把相同的单元拼批执行。因为 RNN 单元的计算与位置无关，新请求可以随时加入正在执行的批，完成的请求也可以随时离开，不用等整批结束。从思想上说，这已经是“迭代级调度”在 RNN 上的版本。</p>
+<p>但 BatchMaker 没法用在 Transformer 上。对 Transformer 来说，处理一个 token 的子图（一个“单元”）在每个位置 \(t\) 都要用一组不同长度的 key 和 value，所以位置不同的单元就是不同的单元，整张图里有 \(L\) 种互不相同的单元（\(L\) 是输入和生成的 token 总数）。在论文图 10 的负载里，\(L\) 从 33 到 640 不等，同一时刻恰好有相同单元可以拼批的概率很低，BatchMaker 会退化为基本不拼批的串行执行。BatchMaker 也不支持需要模型并行和流水线并行的大模型。</p>
+<p>作者借这个对比说明了 Orca 的设计原则：BatchMaker 致力于找出并对齐<b>可以拼批的单元</b>；Orca 的原则是<b>每读一遍模型参数，就做尽可能多的计算</b>。依据是，对大模型来说，从 GPU 显存读参数是端到端执行时间的主要瓶颈。所以 Orca 用迭代级调度和选择性批处理，在一次读参数的过程中处理所有“准备好”的 token，不管这些 token 的计算能不能拼批（非注意力算子能，注意力不能）。</p>
+<p><b>专门的 Transformer 执行引擎。</b>FasterTransformer、LightSeq、TurboTransformers、EET 等都是为 Transformer 优化的推理引擎，但它们都作为 Triton、TensorFlow Serving 等服务系统的后端，把调度交给服务系统层，因而沿用按请求调度。Orca 提出更细的调度粒度，而这在现有系统里不改变调度器与引擎之间的协作机制是做不到的。这些引擎里只有 FasterTransformer 支持分布式执行；Megatron-LM 和 DeepSpeed 虽然也能分布式执行，但主要为训练优化。</p>
+<p><b>服务系统与执行引擎的接口。</b>Triton、Clipper 等通用服务系统把“处理客户端请求、调度引擎”抽象成一层，把服务层和执行层分开设计和实现，这有很多好处。但作者发现，这两层之间流行的接口对 GPT 这样具有多迭代特性的模型限制太大。Orca 因此把调度器和引擎紧密集成，简化了两项技术的实现。作者承认这放弃了抽象分离的好处，并把“设计一个既支持这两项技术、又不破坏抽象分离的通用接口”留作未来工作。</p>
+<p><b>结论。</b>论文的结论可以这样概括：迭代级调度让调度器按迭代而不是按请求与执行引擎交互，选择性批处理让处理不同位置 token 的任意请求也能拼批，而后者是让批处理和迭代级调度同时成立的关键。基于这两项技术的分布式服务系统 Orca，在相同延迟下的吞吐量比当时最先进的系统高一个数量级。</p>
+<div class="note-warn"><b>回头看“接口”这一点：</b>后来的发展基本印证了作者的判断。今天的主流推理引擎（vLLM、SGLang、TGI 等）都把调度器做进了引擎内部；Triton 这样的通用服务系统如果要支持连续批处理，也是由 TensorRT-LLM 后端自己在引擎内部完成按迭代组批（in-flight batching），而不是由 Triton 的通用调度器来做。</div>
+<p class="note-links"><a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=13" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://www.usenix.org/system/files/osdi22-yu.pdf#page=14" target="_blank" rel="noopener">§8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>Orca 的两项技术里，迭代级调度几乎原样成了行业标准，选择性批处理的思想也被保留下来；而它为了让这两项技术跑起来而做的几个具体决定，后来被一一改掉。把这两部分分开看，最能理解 Orca 之后的推理系统是怎么演化的。</p>
+
+<h4 id="n-impact-1">成了标准的部分</h4>
+<ul>
+  <li><b>按迭代组批，也就是连续批处理。</b>vLLM、SGLang、TensorRT-LLM、Hugging Face 的 TGI 等主流引擎都以它为基础调度方式。名字各不相同：TensorRT-LLM 的文档把它叫 in-flight batching，并注明它也叫 continuous batching 或 iteration-level batching；TGI 的 README 把“对到达的请求做连续批处理”列为核心功能（TGI 仓库已于 2026-03-21 归档，进入维护模式）。“连续批处理”这个名字的流行，很大程度上来自 Anyscale 2023-06-22 的博客，它把 Orca 称为已知最早解决这一问题的工作，并在单张 A100-40GB、OPT-13B 上测得：连续批处理加上 vLLM 的显存优化，相对朴素的静态批处理吞吐量最高 23 倍。</li>
+  <li><b>线性层按 token 摊平、注意力按请求处理。</b>TensorRT-LLM 的文档写明，in-flight batching 要求输入张量是“打包的”、没有填充，初始阶段的序列和生成阶段的序列可以在同一批里处理，这就是选择性批处理里 \([\sum_i L_i, H]\) 的做法。注意力这边，“每个请求一个内核再拼起来”演变成了“一个内核按请求划分线程块”的变长注意力内核（PagedAttention、FlashAttention varlen、FlashInfer）。</li>
+  <li><b>调度器与引擎紧密集成。</b>见上一节末尾。</li>
+</ul>
+
+<h4 id="n-impact-2">被改掉的部分</h4>
+<div class="dia">
+  <div class="dia-title">示意图：Orca 留下的问题，分别被哪些工作接手</div>
+  <div class="dia-flow"><span class="dia-box enc">Orca（2022）<small>迭代级调度 + 选择性批处理</small></span><span class="dia-arrow">→ K/V 按 max_tokens 预留，浪费显存 →</span><span class="dia-box act">vLLM（2023）<small>分页按需分配 + 抢占</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">Orca（2022）</span><span class="dia-arrow">→ 整段输入和生成混在一次迭代，生成停顿、流水线气泡 →</span><span class="dia-box act">Sarathi-Serve（2024）<small>分块预填充 + 按 token 预算组批</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">Orca（2022）</span><span class="dia-arrow">→ 初始阶段与增量阶段在同一批 GPU 上互相干扰 →</span><span class="dia-box act">DistServe 等（2024）<small>把两个阶段拆到不同的 GPU 上</small></span></div>
+  <div class="dia-note">本站整理。</div>
+</div>
+<ul>
+  <li><b>K/V 显存管理。</b>Orca 一接纳请求就按 <code>max_tokens</code> 预留连续的 K/V 空间，并靠这一点避免死锁。vLLM 把 KV 缓存切成固定大小的块、按需分配，显存不够时再用换出或重算把请求请出去，从而不必预留；它在论文里把 Orca 作为主要对照，并认为两者是互补关系：正是 Orca 让同时在跑的请求变多，显存管理才成了新的瓶颈。见 <a href="vllm.html#n-9">vLLM 精读 §9</a>。</li>
+  <li><b>一次迭代的大小。</b>Orca 的批大小上限按请求数计，新请求的整段输入和其他请求的单个生成 token 混在同一次迭代里，这一步可能很长，正在生成的请求都会卡住。早期的 vLLM 为了吞吐优先做新请求的初始阶段（初始阶段和增量阶段分开成不同的迭代），同样有卡顿。Sarathi-Serve 把长输入切成等大的块，每次迭代先放所有生成 token、再按 token 预算捎带一块输入，同时解决了卡顿和流水线气泡，见 <a href="sarathi-serve.html#n-4-1">Sarathi-Serve 精读 §4.1</a>。</li>
+  <li><b>两个阶段放在同一组 GPU 上。</b>初始阶段吃算力、增量阶段吃显存带宽，放在同一批 GPU 上会互相干扰，也没法分别选并行方式。DistServe、Mooncake 等干脆把两个阶段放到不同的 GPU 上，见 <a href="distserve.html#n-2-2">DistServe 精读 §2.2</a> 和 <a href="mooncake.html">Mooncake 精读</a>。</li>
+  <li><b>调度策略。</b>Orca 只做不抢占的先来先服务；后来的引擎普遍支持抢占，也出现了优先级、公平性、前缀缓存感知（SGLang 的 RadixAttention）等更复杂的调度策略。</li>
+</ul>
+
+<h4 id="n-impact-3">Orca 本身</h4>
+<p>Orca 一直没有开源。作者所在的 FriendliAI 把它发展成了商用推理引擎。FriendliAI 2023-09-27 的博客称，它的引擎源自 Orca 论文，并称其 “iteration batching（也叫 continuous batching）” 受美国和韩国专利保护（这是公司的说法，博客没有给出专利号）。Crunchbase 2025-08-28 的报道援引 Byung-Gon Chun 的话说“我们发明了连续批处理”。这些都是公司方面的表述；从学术上看，可以确定的是 Orca 是最早系统地提出并实现 Transformer 迭代级调度的论文，而按单元调度 RNN 的想法更早见于 BatchMaker。</p>
+<p>还有一个可以查证的细节：Orca 参考文献 [34] 的 GPU 任务调度工作 Nimble（NeurIPS 2020），作者是 Woosuk Kwon、Gyeong-In Yu、Eunji Jeong 和 Byung-Gon Chun。Woosuk Kwon 后来在 UC Berkeley 主导了 vLLM，首尔大学 SPL 实验室的主页也把他列为实验室校友。Orca 和 vLLM 这两篇推理服务的奠基论文，第一作者曾在同一个实验室合作过。</p>
+<p>想看迭代级调度与分块预填充的时间轴对比、可交互的架构图和配套简答题，见<a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、论文本身。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Gyeong-In Yu</b>（第一作者）<div class="aff">Seoul National University（论文署名）</div>首尔大学 Software Platform Lab（SPL）主页列出：2023 年获首尔大学计算机科学与工程博士，现任 FriendliAI CTO。此前是 Parallax（EuroSys 2019）、Nimble（NeurIPS 2020）的作者之一。</div>
+  <div class="author-card"><b>Joo Seong Jeong</b><div class="aff">Seoul National University（论文署名）</div>SPL 主页列出：2022 年获首尔大学博士，后任 Qualcomm AI Research（首尔）软件工程师。Parallax 的作者之一。</div>
+  <div class="author-card"><b>Geon-Woo Kim</b><div class="aff">FriendliAI 与 Seoul National University（论文署名）</div>本站未找到可查证的其他公开信息。</div>
+  <div class="author-card"><b>Soojeong Kim</b><div class="aff">FriendliAI（论文署名）</div>SPL 主页列出：2022 年获首尔大学博士，后任 Google Korea 软件工程师。分布式训练系统 Parallax（EuroSys 2019）的第一作者。</div>
+  <div class="author-card senior"><b>Byung-Gon Chun</b>（通讯作者）<div class="aff">首尔大学计算机科学与工程系教授；FriendliAI 创始人兼 CEO</div>SPL 实验室负责人。UC Berkeley 计算机博士（2007）、斯坦福计算机硕士（2002）。此前先后在 ICSI（博士后）、Intel Research Berkeley、Yahoo! Research、微软、Facebook 做研究（SPL 主页）。2021 年创立 FriendliAI（Crunchbase）。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：Semantic Scholar 按标题查到被引 1,010 次，其中高影响力引用 103 次（2026-10-20 快照；这篇论文没有 arXiv 编号，书架页的自动统计不会覆盖它）。</li>
+  <li><b>发表</b>：OSDI 2022（第 16 届 USENIX 操作系统设计与实现研讨会，2022 年 7 月 11–13 日，美国 Carlsbad），论文集第 521–538 页，开放获取。</li>
+  <li><b>开源 / 采用</b>：Orca 本身未开源，由 FriendliAI 商用。它提出的迭代级调度以“连续批处理 / in-flight batching”的名字成为 vLLM、SGLang、TensorRT-LLM、TGI 等引擎的基础调度方式（见上文“后来怎么样了”）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="vllm.html">vLLM / PagedAttention 精读</a>：接着 Orca 解决 K/V 显存的预留浪费，并以复现的 Orca 为主要对照。</li>
+  <li><a href="sarathi-serve.html">Sarathi-Serve 精读</a>：分块预填充与按 token 预算组批，解决 Orca 式混合批的生成停顿和流水线气泡。</li>
+  <li><a href="distserve.html">DistServe 精读</a>：把初始阶段和增量阶段拆到不同 GPU 上；<a href="mooncake.html">Mooncake 精读</a>：以 KV 缓存为中心的拆分式部署。</li>
+  <li><a href="sglang.html">SGLang 精读</a>：RadixAttention 与前缀缓存感知的调度；<a href="megatron-lm.html">Megatron-LM 精读</a>：Orca 用到的层内（张量）并行。</li>
+  <li>旧版路线：<a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca / Sarathi-Serve 结构拆解</a> · <a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理计算特征</a> · <a href="../legacy/tracks/ai-infra/03-vllm.html">vLLM 结构拆解</a> · <a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, Byung-Gon Chun. Orca: A Distributed Serving System for Transformer-Based Generative Models. OSDI 2022, pp. 521–538（<a href="https://www.usenix.org/conference/osdi22/presentation/yu" target="_blank" rel="noopener">USENIX 论文页</a>，开放获取）。论文没有采用允许转载的知识共享许可证，所以本页没有使用任何原图，所有图都是本站按自己的理解重新绘制的示意图，并标注了对应原图在 PDF 中的位置。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

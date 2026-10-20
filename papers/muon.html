@@ -1,0 +1,945 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muon 规模化（Moonlight）精读</title>
+<meta name="description" content="Moonshot AI 技术报告 Muon is Scalable for LLM Training（arXiv 2502.16982）的逐节精读：Muon 的正交化更新与 Newton–Schulz 迭代、放大时必须补上的权重衰减与按形状对齐的更新 RMS、基于 ZeRO-1 的分布式 Muon、“约 2 倍算力效率”的测法，以及 Moonlight 16B-A3B 和后来的 MuonClip。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/collectives.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="muon">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · 技术报告（arXiv 2025-02）</div>
+  <h1>Muon 优化器能扩展到大语言模型训练</h1>
+  <p class="en-title">Muon is Scalable for LLM Training</p>
+  <div class="paper-authors">Jingyuan Liu<sup>1</sup>, Jianlin Su<sup>1</sup>, Xingcheng Yao<sup>2</sup>, Zhejun Jiang<sup>1</sup>, Guokun Lai<sup>1</sup>, Yulun Du<sup>1</sup>, Yidao Qin<sup>1</sup>, Weixin Xu<sup>1</sup>, Enzhe Lu<sup>1</sup>, Junjie Yan<sup>1</sup>, Yanru Chen<sup>1</sup>, Huabin Zheng<sup>1</sup>, Yibo Liu<sup>1</sup>, Shaowei Liu<sup>1</sup>, Bohong Yin<sup>1</sup>, Weiran He<sup>1</sup>, Han Zhu<sup>1</sup>, Yuzhi Wang<sup>1</sup>, Jianzhou Wang<sup>1</sup>, Mengnan Dong<sup>1</sup>, Zheng Zhang<sup>1</sup>, Yongsheng Kang<sup>1</sup>, Hao Zhang<sup>1</sup>, Xinran Xu<sup>1</sup>, Yutao Zhang<sup>1</sup>, Yuxin Wu<sup>1</sup>, Xinyu Zhou<sup>1,*</sup>, Zhilin Yang<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Moonshot AI（月之暗面）　<sup>2</sup>UCLA　<sup>*</sup>通讯作者</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2502.16982" target="_blank" rel="noopener">arXiv 2502.16982 ↗</a>
+    <a class="pill" href="https://arxiv.org/pdf/2502.16982" target="_blank" rel="noopener">技术报告（arXiv 预印本，未见正式发表）↗</a>
+    <a class="pill" href="https://github.com/MoonshotAI/Moonlight" target="_blank" rel="noopener">Code: MoonshotAI/Moonlight ↗</a>
+    <a class="pill" href="https://huggingface.co/moonshotai/Moonlight-16B-A3B" target="_blank" rel="noopener">权重: Moonlight-16B-A3B ↗</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>1,549</b><span>GitHub star（MoonshotAI/Moonlight，截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文在 arXiv 上采用 CC BY-NC-ND 4.0 许可（不允许演绎），所以本页不转载原图：图都是本站自己画的示意图，或者根据论文给出的数字和拟合公式重画的简图，旁边附有原图链接。标“推算”的数字是本站根据论文数据算出来的，标“读图”的是从原图上估读的近似值，都不是论文原话。本页依据 arXiv 第 1 版（2025-02-24，截至 2026-10-20 也是唯一版本），并对照了官方仓库 MoonshotAI/Moonlight 的代码。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>训练一个大语言模型，本质上是反复做同一件事：用一批数据算出损失对每个参数的梯度，再由<b>优化器</b>决定怎样根据梯度去改参数。过去几年，几乎所有大模型用的优化器都是 AdamW。它稳定、好调，但有两点让人不满意：第一，它要为每个参数额外保存两份状态，显存开销是参数本身的好几倍；第二，它对每个数字单独做缩放，完全不理会“这一组数字本来是一个矩阵”这件事。</p>
+<p>2024 年 12 月，Keller Jordan 等人在 NanoGPT 训练速度竞赛里推广了一个叫 <b>Muon</b> 的优化器。它的做法是：先像普通的动量 SGD 那样把梯度做滑动平均，再把这个“动量矩阵”<b>正交化</b>，也就是保留它的方向结构、但把各个方向上的放大倍数统一成 1，然后用结果去更新权重。它在小模型上明显比 AdamW 收敛得快。但当时没人知道，它在几十亿参数、上万亿 token 的规模上是否还有优势，也没有一个能在大集群上高效运行的分布式实现。</p>
+<p>这份来自月之暗面（Moonshot AI，Kimi 背后的公司）的技术报告回答了这些问题。作者发现，要把 Muon 放大，必须补上两样东西：一是像 AdamW 那样加<b>权重衰减</b>，否则权重和每层输出的数值会越长越大；二是按矩阵的形状调整每个矩阵的更新幅度，让所有矩阵的“更新 RMS”保持一致，并且和 AdamW 的典型值（约 0.2）对齐，这样为 AdamW 调好的学习率和权重衰减就能原样拿来用。工程上，他们在 ZeRO-1 的基础上实现了<b>分布式 Muon</b>，优化器状态比分布式 AdamW 少一份，通信量最多多 25%。实验上，399M 到 1.5B 的稠密模型做出的 scaling law 显示：要达到同样的验证损失，Muon 只需要 AdamW 约 52% 的训练算力，这就是标题之外最常被引用的“约 2 倍算力效率”。他们还用 Muon 从头训练了一个总参数 16B、激活参数 3B 的 MoE 模型 <b>Moonlight</b>（5.7T token），开源了权重、中间检查点和一个 Muon 参考实现。</p>
+<div class="dia">
+  <div class="dia-title">示意图：这篇报告在 Muon 这条线上的位置</div>
+  <div class="dia-flow"><span class="dia-box">SGD + 动量<small>梯度做滑动平均，按原样更新</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">Muon（Keller Jordan，2024-12）<small>动量矩阵正交化；小模型上快，规模未验证</small></span><span class="dia-arrow">→</span><span class="dia-box enc">本文（2025-02）<small>＋权重衰减　＋按形状对齐更新 RMS（0.2）　＋分布式实现</small></span><span class="dia-arrow">→</span><span class="dia-box act">Moonlight 16B-A3B<small>5.7T token，开源权重与中间检查点</small></span><span class="dia-arrow">→</span><span class="dia-box pred">MuonClip / Kimi K2（2025-07）<small>再加 QK-Clip，1T 参数、15.5T token</small></span></div>
+  <div class="dia-note">本站示意图。最后一格不属于本文，在“后来怎么样了”一节讲。</div>
+</div>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>AdamW 为什么要存两份状态？Muon 只存一份，它的“正交化”到底在做什么？</li>
+  <li>不做奇异值分解，怎样用几次矩阵乘法近似求出正交化的结果？为什么 Muon 的系数故意不收敛到 1？</li>
+  <li>为什么小模型上不需要、放大之后却必须加权重衰减？</li>
+  <li>为什么同一个 Muon 更新，在不同形状的矩阵上大小不一样？0.2 这个数是从哪来的？</li>
+  <li>ZeRO-1 是按元素切分优化器状态的，而 Muon 需要整个矩阵，二者怎么兼容？通信多了多少？</li>
+  <li>“约 2 倍算力效率”是在什么模型、什么算力范围、和什么样的 AdamW 比出来的？别人复现时得到了多少？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2502.16982" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么想换掉 AdamW，Muon 还差什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>大模型训练很贵，而优化器决定了同样的算力能把模型训练到多好。AdamW 是事实上的标准，新优化器层出不穷，Muon 是其中在小模型上表现最亮眼的一个。那么，把 Muon 用到几十亿参数、上万亿 token 的训练上，还有哪些问题没有解决？这篇报告打算解决哪几个？</div>
+
+<div class="note-pre"><b>先补一点背景：优化器在做什么，AdamW 为什么要存两份状态。</b>
+<p><b>SGD。</b>最简单的优化器是随机梯度下降：每一步用一小批数据算出梯度 \(g\)，然后让参数沿梯度的反方向走一小步，\(W \leftarrow W-\eta g\)，其中 \(\eta\) 是学习率。它的问题是每一批数据算出的梯度都带有很大的随机噪声，走起来左摇右晃。</p>
+<p><b>动量。</b>改进办法是不直接用当前梯度，而是用梯度的滑动平均：\(m \leftarrow \mu m + g\)，再用 \(m\) 去更新。\(\mu\) 一般取 0.9 或 0.95。可以把它想成一个滚下山的球：它带着惯性，偶尔一两步的噪声推不动它，而持续一致的方向会越滚越快。动量需要为每个参数多存一个数（\(m\)）。</p>
+<p><b>Adam。</b>Adam 在动量之外又维护了梯度平方的滑动平均 \(v\)，然后用 \(m/\sqrt{v}\) 来更新：</p>
+<div class="formula">$$m_t=\beta_1 m_{t-1}+(1-\beta_1)g_t,\qquad v_t=\beta_2 v_{t-1}+(1-\beta_2)g_t^2,\qquad W_t=W_{t-1}-\eta\,\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}$$</div>
+<p>这里的乘方、除法都是逐个元素做的，\(\hat m,\hat v\) 是对初始阶段偏小做的修正。除以 \(\sqrt{v}\) 的效果是：每个参数都按“自己梯度的典型大小”被归一化，梯度一直很大的参数步子不会太大，梯度一直很小的参数步子也不会太小。所以 Adam 的每一步更新，每个元素的大小都在同一个量级上，和梯度本身的绝对大小基本无关。代价是每个参数要存两个数：\(m\) 和 \(v\)。</p>
+<p><b>AdamW。</b>AdamW 在 Adam 上加了“解耦的权重衰减”：每一步先把权重整体乘以 \((1-\eta\lambda)\)，也就是往 0 拉一点，再加上 Adam 的更新。\(\lambda\) 一般取 0.1。它和“在损失里加 L2 正则”的区别在于，衰减不经过 \(\sqrt{v}\) 的归一化，所以对所有参数的拉力是均匀的。</p>
+<p><b>显存账。</b>用混合精度训练时，每个参数通常要存：bf16 的参数和梯度各 2 字节，fp32 的“主权重”4 字节（真正被优化器修改的是这份高精度副本），再加上优化器状态。AdamW 的 \(m\)、\(v\) 各 4 字节，Muon 只有一个动量，4 字节。<a href="zero.html#n-3-1">ZeRO 精读的 §3.1</a> 详细讲了这笔账。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：每个参数要占多少字节（混合精度，推算）</div>
+  <div class="dia-row"><span class="lbl">AdamW：16 字节</span><div class="dia-track"><span class="dia-seg w" style="flex:2">参数 2</span><span class="dia-seg cmp" style="flex:2">梯度 2</span><span class="dia-seg oth" style="flex:4">fp32 主权重 4</span><span class="dia-seg kv" style="flex:4">一阶矩 m 4</span><span class="dia-seg res" style="flex:4">二阶矩 v 4</span></div></div>
+  <div class="dia-row"><span class="lbl">Muon：12 字节</span><div class="dia-track"><span class="dia-seg w" style="flex:2">参数 2</span><span class="dia-seg cmp" style="flex:2">梯度 2</span><span class="dia-seg oth" style="flex:4">fp32 主权重 4</span><span class="dia-seg kv" style="flex:4">动量 M 4</span><span class="dia-seg" style="flex:4;color:var(--text-3)">（省掉的 4）</span></div></div>
+  <div class="dia-out">推算：按 ZeRO 论文的记账方式，假设主权重和优化器状态都用 fp32。优化器自己的状态（蓝色和斜纹）从 8 字节降到 4 字节，这就是论文说的“Muon 的额外显存是 AdamW 的一半”。</div>
+  <div class="dia-note">实际训练里，嵌入层、输出头和归一化层的少量参数仍然用 AdamW（见 §2.2），所以整个模型的节省略少于这个比例。用了 ZeRO-1 之后，主权重和优化器状态还会再被平均分到数据并行组的每张卡上（§2.3）。</div>
+</div>
+
+<p>论文的引言先交代背景：训练有能力的大模型极其耗费算力，所以优化器的效率直接影响成本。Adam 和 AdamW 是大规模训练的标准选择，近年也有不少工作声称能超过 AdamW。其中，Jordan 等人提出的 Muon 用 Newton–Schulz 迭代把梯度动量正交化后再更新矩阵参数，在小规模语言模型训练中效果很好。但 Muon 的原作者在博客里列出过几个当时还没有答案的问题，本文要回答的正是其中三个：</p>
+<ol>
+  <li>基于矩阵正交化的优化器，怎样有效地扩展到几十亿参数、上万亿 token 的训练？</li>
+  <li>怎样在分布式环境下计算这种近似正交化？</li>
+  <li>它能不能在预训练和监督微调（SFT）等不同训练阶段都适用？</li>
+</ol>
+<p>对应地，报告的贡献分三条。第一是<b>分析</b>：找出权重衰减对 Muon 的可扩展性至关重要，并提出按参数调整更新幅度的规则；有了这两点，Muon 可以“开箱即用”，不必重新调超参数，训练也更稳定。第二是<b>分布式实现</b>：在 ZeRO-1 风格的切分上实现 Muon，显存最优、通信开销小，而且不改变算法的数学性质。第三是 <b>scaling law 验证</b>：和精心调过的 AdamW 比较，Muon 只需要约 52% 的训练算力就能达到相同的效果。在此基础上，他们发布了用 Muon 训练的 16B MoE 模型 Moonlight，连同实现和中间检查点。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“约 2 倍算力效率”说的是<b>达到同样损失所需的训练 FLOPs</b>，不是同样硬件上每秒能跑多少步。Muon 每一步其实比 AdamW 稍慢（多了矩阵乘法和通信），只是慢得不多（§2.3）。</li>
+  <li>“开箱即用、不需要调超参数”的意思是：可以直接沿用为 AdamW 调好的学习率和权重衰减。Muon 自己仍有动量系数、迭代步数等超参数，只是作者发现它们用默认值就行。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · Muon 原始博客：<a href="https://kellerjordan.github.io/posts/muon/" target="_blank" rel="noopener">kellerjordan.github.io/posts/muon ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2.1 背景：Muon 是什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Muon 每一步具体怎么更新权重？“正交化”一个矩阵是什么意思，为什么这样做会让训练更快？正交化通常要做奇异值分解，在 GPU 上很慢，Muon 用什么办法绕过去？论文还给了一个更抽象的视角：把优化器看成“在某种范数约束下的最速下降”，从这个视角看 Muon 和 Adam 的区别在哪里？</div>
+
+<h4 id="n-2-1">2.1.1 更新规则：先算动量，再正交化</h4>
+<div class="note-pre"><b>先补一点背景：奇异值分解，以及“正交化”一个矩阵。</b>
+<p>任何一个 \(A\times B\) 的矩阵 \(M\) 都可以写成 \(M=U\Sigma V^{\top}\)，这叫<b>奇异值分解</b>（SVD）。其中 \(U\)、\(V\) 的列都是互相垂直的单位向量，\(\Sigma\) 是对角矩阵，对角线上的非负数 \(\sigma_1\ge\sigma_2\ge\dots\) 叫<b>奇异值</b>。几何上，\(M\) 作用在一个向量上，相当于三步：先用 \(V^{\top}\) 转一下方向，再沿各个坐标轴分别拉伸 \(\sigma_i\) 倍，最后用 \(U\) 再转一下。所以单位圆（高维里是单位球）经过 \(M\) 会变成一个椭圆（椭球），椭圆的各个半轴长度就是奇异值。</p>
+<p>“正交化”就是把所有奇异值都换成 1，得到 \(O=UV^{\top}\)。它保留了“输入方向 \(v_i\) 被送到输出方向 \(u_i\)”这层对应关系，只是不再对任何方向放大或缩小。论文写的是一个等价的公式：</p>
+<div class="formula">$$(MM^{\top})^{-1/2}M=\big(U\Sigma^{2}U^{\top}\big)^{-1/2}\,U\Sigma V^{\top}=U\Sigma^{-1}U^{\top}U\Sigma V^{\top}=UV^{\top}$$</div>
+<p>（这里假设矩阵满秩；不满秩时，奇异值为 0 的方向保持为 0。）</p>
+</div>
+<p>Muon 只用于可以写成矩阵的参数，比如注意力的投影矩阵和前馈层的权重。在第 \(t\) 步，给定当前权重 \(W_{t-1}\)、动量系数 \(\mu\)、学习率 \(\eta_t\) 和损失 \(\mathcal L_t\)，它的更新规则是（原文式 1）：</p>
+<div class="formula">$$M_t=\mu M_{t-1}+\nabla\mathcal L_t(W_{t-1}),\qquad O_t=\mathrm{NewtonSchulz}(M_t),\qquad W_t=W_{t-1}-\eta_t\,O_t$$</div>
+<p>第一步和动量 SGD 一样，\(M_0\) 是零矩阵。第二步用 Newton–Schulz 迭代近似求出 \(M_t\) 的正交化结果 \(U V^{\top}\)。第三步用它更新权重。注意动量这里没有乘 \((1-\mu)\)：因为正交化会把矩阵的整体大小完全抹掉，只留下方向结构，所以动量乘不乘常数都没有区别。</p>
+<div class="dia">
+  <div class="dia-title">示意图：正交化保留方向、抹平放大倍数</div>
+<svg class="dg" viewBox="0 0 640 260" role="img" aria-label="正交化把动量矩阵的椭圆变回单位圆，方向不变" style="--dg-min:600px">
+<text x="150" y="22" class="t-c t-b">动量矩阵 M</text>
+<text x="150" y="40" class="t-c t-sm">把单位圆压成细长的椭圆</text>
+<line x1="63.4" y1="190.0" x2="236.6" y2="90.0" style="stroke:var(--text-3);stroke-dasharray:3 3"/>
+<line x1="120.0" y1="88.0" x2="180.0" y2="192.0" style="stroke:var(--text-3);stroke-dasharray:3 3"/>
+<circle cx="150" cy="140" r="32" style="fill:none;stroke:var(--text-3);stroke-width:1.2;stroke-dasharray:5 4"/>
+<ellipse cx="150" cy="140" rx="96.0" ry="9.6" transform="rotate(-30 150 140)" style="fill:none;stroke:var(--c-pred);stroke-width:2.6"/>
+<text x="240.6" y="82.0" class="t-sm">u₁ 方向 ×3</text>
+<text x="186.0" y="192.0" class="t-sm">u₂ 方向 ×0.3</text>
+<text x="470" y="22" class="t-c t-b">正交化后 O = UVᵀ</text>
+<text x="470" y="40" class="t-c t-sm">单位圆还是单位圆，只转了方向</text>
+<line x1="383.4" y1="190.0" x2="556.6" y2="90.0" style="stroke:var(--text-3);stroke-dasharray:3 3"/>
+<line x1="440.0" y1="88.0" x2="500.0" y2="192.0" style="stroke:var(--text-3);stroke-dasharray:3 3"/>
+<circle cx="470" cy="140" r="32" style="fill:none;stroke:var(--text-3);stroke-width:1.2;stroke-dasharray:5 4"/>
+<ellipse cx="470" cy="140" rx="32.0" ry="32.0" transform="rotate(-30 470 140)" style="fill:none;stroke:var(--c-enc);stroke-width:2.6"/>
+<text x="560.6" y="82.0" class="t-sm">u₁ 方向 ×1</text>
+<text x="506.0" y="192.0" class="t-sm">u₂ 方向 ×1</text>
+<path class="edge enc" d="M268,140 L372,140"/>
+<text x="320" y="122" class="t-c t-sm">Newton–Schulz</text>
+<text x="320" y="160" class="t-c t-xs">≈ 求 UVᵀ</text>
+<text x="150" y="248" class="t-c t-xs">虚线圆 = 输入的单位圆</text>
+<text x="470" y="248" class="t-c t-xs">实际 5 步迭代后各方向约 ×0.7，见下一张图</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>左边是一个奇异值为 3 和 0.3 的动量矩阵 \(M\) 把单位圆（虚线）变成的细长椭圆：沿 \(u_1\) 方向拉长 3 倍，沿 \(u_2\) 方向压缩到 0.3 倍。右边是正交化后的 \(UV^{\top}\)：两条主轴的方向 \(u_1\)、\(u_2\) 没变，但两个方向的放大倍数都变成了 1，单位圆还是单位圆。用左边的矩阵更新，权重几乎只沿 \(u_1\) 改变；用右边的矩阵更新，两个方向改变得一样多。本站示意图，论文没有对应的原图。</div>
+</div>
+<p>为什么要这样做？原作者在博客里给的观察是：Transformer 的矩阵参数，用动量 SGD 或 Adam 算出来的更新矩阵往往<b>条件数很大</b>，也就是最大的几个奇异值远大于其余的，更新几乎是低秩的，被少数几个方向主导。举个例子，如果动量矩阵的奇异值是 10、1、0.1，那么动量 SGD 在第三个方向上走的步子只有第一个方向的 1%。正交化之后，三个方向的步子一样大。作者推测，那些在梯度里很弱、却对学习有用的“稀有方向”因此得到了足够的更新。论文的说法是：正交化让更新矩阵在各个方向上“同等对待”，防止权重只沿少数几个主导方向学习。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“正交化”针对的是每一步的<b>更新矩阵</b>，不是权重本身。Muon 不要求权重是正交矩阵，权重在训练中可以长成任何样子。另外，“稀有方向更重要”是原作者明确标为推测的直觉，本文 §3.4 的奇异值谱分析是对这个直觉的间接验证，不是证明。</div>
+
+<h4 id="n-2-2">2.1.2 Newton–Schulz 迭代：不做 SVD 也能近似求 \(UV^{\top}\)</h4>
+<div class="note-pre"><b>先补一点背景：为什么不直接做 SVD，矩阵多项式怎样作用在奇异值上。</b>
+<p>直接对每个参数矩阵做 SVD 太慢：SVD 是一个串行性很强的迭代算法，在 GPU 上并行效率差，通常还需要 fp32 精度。而 GPU（尤其是张量核心）最擅长的是大矩阵乘法，还能用 bf16 跑。所以理想的做法是只用矩阵乘法来近似 \(UV^{\top}\)。</p>
+<p>关键的观察是：如果 \(X=U\,\mathrm{diag}(s)\,V^{\top}\)，那么 \(XX^{\top}X=U\,\mathrm{diag}(s^3)\,V^{\top}\)，\((XX^{\top})^2X=U\,\mathrm{diag}(s^5)\,V^{\top}\)。也就是说，用 \(X\) 和 \(XX^{\top}\) 拼出来的“奇次多项式”，不会改变 \(U\) 和 \(V\)，只会把每个奇异值 \(s\) 单独代入同一个标量多项式。于是，只要找一个标量函数 \(f\)，让它反复作用后能把 (0, 1] 之间的任何数都推到 1 附近，就能用矩阵乘法近似出 \(UV^{\top}\)。</p>
+</div>
+<p>Muon 的做法（原文式 2）是先把动量矩阵按 Frobenius 范数归一化，\(X_0=M_t/\lVert M_t\rVert_F\)。因为 Frobenius 范数不小于最大的奇异值，这样能保证所有奇异值都落在 (0, 1] 里。然后迭代 \(N\) 步：</p>
+<div class="formula">$$X_k=a X_{k-1}+b\,(X_{k-1}X_{k-1}^{\top})X_{k-1}+c\,(X_{k-1}X_{k-1}^{\top})^{2}X_{k-1},\qquad\text{每个奇异值经历 } s\mapsto f(s)=as+bs^{3}+cs^{5}$$</div>
+<p>经典的牛顿–舒尔茨迭代用的是三次多项式 \(f(s)=1.5s-0.5s^3\)，它能精确收敛到 1，但在 0 附近的斜率只有 1.5：一个很小的奇异值每步只放大 1.5 倍，要很多步才能长到 1。Keller Jordan 选的系数是 \(a=3.4445,\ b=-4.7750,\ c=2.0315\)，在 0 附近的斜率是 3.4445，小奇异值每步放大三倍多。代价是这个多项式<b>不精确收敛到 1</b>：本站推算，\(f(1)\approx0.70\)，唯一的不动点在 0.868 附近而且是不稳定的，迭代下去奇异值会在大约 0.68–1.13 之间来回振荡。原作者认为这种不精确对训练没有坏处，用来换取更少的迭代步数是值得的。本文沿用了同样的系数，并取 \(N=5\)。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一个奇异值在 5 步迭代中怎么变（Muon 系数 vs 经典三次系数，推算）</div>
+<svg class="dg" viewBox="0 0 640 340" role="img" aria-label="Newton–Schulz 迭代中奇异值随步数的变化：Muon 系数与经典三次系数对比" style="--dg-min:600px">
+<rect x="80" y="66.8" width="510" height="73.0" style="fill:var(--c-enc-bg);opacity:.75"/>
+<rect x="84" y="12" width="18" height="10" style="fill:var(--c-enc-bg)"/>
+<text x="108" y="17" class="t-xs">浅蓝带 = 0.68–1.13：起点 σ₀ ≥ 0.02 的奇异值，5 步后都落在这里（推算）</text>
+<line x1="80" y1="250" x2="590" y2="250" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="80" y1="250" x2="80" y2="34" style="stroke:var(--text-3);stroke-width:1.2"/>
+<text x="80.0" y="266" class="t-c t-xs">0</text>
+<text x="182.0" y="266" class="t-c t-xs">1</text>
+<text x="284.0" y="266" class="t-c t-xs">2</text>
+<text x="386.0" y="266" class="t-c t-xs">3</text>
+<text x="488.0" y="266" class="t-c t-xs">4</text>
+<text x="590.0" y="266" class="t-c t-xs">5</text>
+<text x="335" y="284" class="t-c t-sm">迭代步数 k</text>
+<text x="72" y="250.0" class="t-r t-xs">0</text>
+<text x="72" y="169.2" class="t-r t-xs">0.5</text>
+<text x="72" y="88.5" class="t-r t-xs">1</text>
+<text x="24" y="145" class="t-c t-sm" transform="rotate(-90 24 145)">某个奇异值的大小</text>
+<line x1="80" y1="88.5" x2="590" y2="88.5" style="stroke:var(--text-2);stroke-dasharray:6 4"/>
+<text x="86" y="80.5" class="t-xs">精确正交化的目标 = 1</text>
+<path d="M80.0,249.5 L182.0,248.3 L284.0,244.3 L386.0,230.2 L488.0,183.3 L590.0,70.6" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2"/>
+<circle cx="80.0" cy="249.5" r="2.6" style="fill:var(--c-tgt)"/>
+<circle cx="182.0" cy="248.3" r="2.6" style="fill:var(--c-tgt)"/>
+<circle cx="284.0" cy="244.3" r="2.6" style="fill:var(--c-tgt)"/>
+<circle cx="386.0" cy="230.2" r="2.6" style="fill:var(--c-tgt)"/>
+<circle cx="488.0" cy="183.3" r="2.6" style="fill:var(--c-tgt)"/>
+<circle cx="590.0" cy="70.6" r="2.6" style="fill:var(--c-tgt)"/>
+<path d="M80.0,246.4 L182.0,237.8 L284.0,208.2 L386.0,119.0 L488.0,95.0 L590.0,130.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+<circle cx="80.0" cy="246.4" r="2.6" style="fill:var(--c-enc)"/>
+<circle cx="182.0" cy="237.8" r="2.6" style="fill:var(--c-enc)"/>
+<circle cx="284.0" cy="208.2" r="2.6" style="fill:var(--c-enc)"/>
+<circle cx="386.0" cy="119.0" r="2.6" style="fill:var(--c-enc)"/>
+<circle cx="488.0" cy="95.0" r="2.6" style="fill:var(--c-enc)"/>
+<circle cx="590.0" cy="130.6" r="2.6" style="fill:var(--c-enc)"/>
+<path d="M80.0,201.5 L182.0,103.1 L284.0,120.0 L386.0,93.5 L488.0,132.3 L590.0,75.6" style="fill:none;stroke:var(--c-act);stroke-width:2.2"/>
+<circle cx="80.0" cy="201.5" r="2.6" style="fill:var(--c-act)"/>
+<circle cx="182.0" cy="103.1" r="2.6" style="fill:var(--c-act)"/>
+<circle cx="284.0" cy="120.0" r="2.6" style="fill:var(--c-act)"/>
+<circle cx="386.0" cy="93.5" r="2.6" style="fill:var(--c-act)"/>
+<circle cx="488.0" cy="132.3" r="2.6" style="fill:var(--c-act)"/>
+<circle cx="590.0" cy="75.6" r="2.6" style="fill:var(--c-act)"/>
+<path d="M80.0,88.5 L182.0,136.8 L284.0,70.1 L386.0,133.6 L488.0,73.9 L590.0,137.5" style="fill:none;stroke:var(--c-reg);stroke-width:2.2"/>
+<circle cx="80.0" cy="88.5" r="2.6" style="fill:var(--c-reg)"/>
+<circle cx="182.0" cy="136.8" r="2.6" style="fill:var(--c-reg)"/>
+<circle cx="284.0" cy="70.1" r="2.6" style="fill:var(--c-reg)"/>
+<circle cx="386.0" cy="133.6" r="2.6" style="fill:var(--c-reg)"/>
+<circle cx="488.0" cy="73.9" r="2.6" style="fill:var(--c-reg)"/>
+<circle cx="590.0" cy="137.5" r="2.6" style="fill:var(--c-reg)"/>
+<path d="M80.0,246.4 L182.0,244.7 L284.0,242.0 L386.0,238.0 L488.0,232.1 L590.0,223.2" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:6 4"/>
+<circle cx="80.0" cy="246.4" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="182.0" cy="244.7" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="284.0" cy="242.0" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="386.0" cy="238.0" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="488.0" cy="232.1" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="590.0" cy="223.2" r="2.6" style="fill:var(--c-pred)"/>
+<path d="M80.0,201.5 L182.0,179.5 L284.0,151.0 L386.0,120.0 L488.0,97.1 L590.0,89.1" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;stroke-dasharray:2 3"/>
+<circle cx="80.0" cy="201.5" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="182.0" cy="179.5" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="284.0" cy="151.0" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="386.0" cy="120.0" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="488.0" cy="97.1" r="2.6" style="fill:var(--c-pred)"/>
+<circle cx="590.0" cy="89.1" r="2.6" style="fill:var(--c-pred)"/>
+<line x1="40" y1="300" x2="66" y2="300" style="stroke:var(--c-tgt);stroke-width:2.4"/>
+<text x="72" y="300" class="t-xs">Muon 系数，σ₀ = 0.003 → 1.11</text>
+<line x1="340" y1="300" x2="366" y2="300" style="stroke:var(--c-enc);stroke-width:2.4"/>
+<text x="372" y="300" class="t-xs">Muon 系数，σ₀ = 0.022 → 0.74</text>
+<line x1="40" y1="315" x2="66" y2="315" style="stroke:var(--c-act);stroke-width:2.4"/>
+<text x="72" y="315" class="t-xs">Muon 系数，σ₀ = 0.3 → 1.08</text>
+<line x1="340" y1="315" x2="366" y2="315" style="stroke:var(--c-reg);stroke-width:2.4"/>
+<text x="372" y="315" class="t-xs">Muon 系数，σ₀ = 1 → 0.70</text>
+<line x1="40" y1="330" x2="66" y2="330" style="stroke:var(--c-pred);stroke-width:2.4;stroke-dasharray:6 4"/>
+<text x="72" y="330" class="t-xs">经典三次系数，σ₀ = 0.022 → 0.17</text>
+<line x1="340" y1="330" x2="366" y2="330" style="stroke:var(--c-pred);stroke-width:2.4;stroke-dasharray:2 3"/>
+<text x="372" y="330" class="t-xs">经典三次系数，σ₀ = 0.3 → 1.00</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是迭代步数 \(k\)，纵轴是某一个奇异值经过 \(k\) 步之后的大小。四条实线用 Muon 的系数 (3.4445, −4.7750, 2.0315)，起点分别是 0.003、0.022、0.3、1；两条橙色的虚线和点线用经典三次系数 (1.5, −0.5)。浅蓝色的带子是 0.68–1.13：起点不低于 0.02 的奇异值，5 步后都落在这里。σ₀ = 0.022 是特意挑的：一个 2048 维、奇异值完全平均的矩阵按 Frobenius 范数归一化后，每个奇异值约为 \(1/\sqrt{2048}\approx0.022\)。全部数字由本站按两个多项式迭代算出，论文没有这张图。</div>
+</div>
+<p>从图上能读出三件事。第一，用 Muon 的系数，初始值在 0.02 以上的奇异值，5 步之后全部落进 0.68–1.13 这条带里，彼此相差不到 1.7 倍；而经典三次系数从 0.022 出发 5 步只到 0.17。第二，Muon 的系数不追求收敛到 1，所以结果是“近似正交”：同一矩阵的各个方向大小相近但不完全相等。第三，特别小的奇异值（比如 0.003）5 步之后还没有稳定下来，所以如果动量矩阵有大量极小的奇异值，实际得到的更新会比理想的 \(UV^{\top}\) 小一些（推算）。</p>
+<p><b>算力开销。</b>对一个 \(m\times n\) 的矩阵（\(m\le n\)），每一步迭代要做三次矩阵乘法，约 \(4m^2n+2m^3\) 次浮点运算。原作者给过一个上界：Newton–Schulz 的额外计算不超过前向加反向计算量的 \(Tm/B\) 倍，其中 \(T\) 是迭代步数，\(B\) 是每一步的 token 数。按 Moonlight 的配置推算：隐藏维度 2048，后期每步 4096 条 × 8192 token ≈ 3,355 万 token，稠密矩阵的额外计算约为 \(5\times2048/3.36\times10^7\approx0.03\%\)；专家矩阵每个专家平均只处理 6/64 的 token，额外计算约 0.2%。这说明 Muon 的 FLOPs 开销几乎可以忽略，真正的工程难点在分布式（§2.3）。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>论文说要把系数调到“让多项式在 1 附近有不动点”，但按这组系数，\(f(1)\approx0.70\)，不动点 0.868 处的导数约为 −1.58，迭代并不会停在那里，而是在一个区间里振荡（推算）。官方代码的注释也承认它输出的不是 \(UV^{\top}\)，而是 \(US'V^{\top}\)，\(S'\) 的对角元散布在 1 附近。§2.2 的“更新 RMS”计算都按理想的 \(UV^{\top}\) 推导，论文说实际监测到的值和理论值接近。</div>
+
+<h4 id="n-2-3">2.1.3 另一个视角：范数约束下的最速下降</h4>
+<div class="note-pre"><b>先补一点背景：“在某个范数下的最速下降”。</b>
+<p>把优化器的每一步看成这样一个问题：允许这一步的改动 \(\Delta W\) 的“大小”不超过 \(\eta\)，在这个限制下，选一个让损失下降最多的改动。只看一阶近似，损失的下降量是梯度和改动的内积 \(\langle G,\Delta W\rangle\)：</p>
+<div class="formula">$$\Delta W^{\star}=\arg\max_{\lVert\Delta W\rVert\le\eta}\ \langle G,\Delta W\rangle$$</div>
+<p>答案取决于用什么范数来衡量“大小”：</p>
+<ul>
+  <li>用 Frobenius 范数（把矩阵当成一长串数字，算欧氏长度），答案是 \(\eta\,G/\lVert G\rVert_F\)，也就是归一化的梯度下降。</li>
+  <li>用“所有元素绝对值的最大值”，答案是 \(\eta\,\mathrm{sign}(G)\)：每个元素只看正负号、走同样大的一步。如果把 Adam 的两个滑动平均都去掉（\(\beta_1=\beta_2=0\)）并忽略 \(\epsilon\)，\(m/\sqrt v\) 就变成 \(g/|g|=\mathrm{sign}(g)\)，正是这个答案；所以可以把 Adam 理解为这种范数的一个动态调整版本。</li>
+  <li>用<b>谱范数</b>（最大的奇异值，也就是矩阵作为线性变换能把向量拉长的最大倍数），答案是 \(\eta\,UV^{\top}\)。证明只需一行：当 \(\lVert O\rVert_2\le1\) 时，\(\langle G,O\rangle=\sum_i\sigma_i\,u_i^{\top}Ov_i\le\sum_i\sigma_i\)，而 \(O=UV^{\top}\) 正好取到等号。</li>
+</ul>
+</div>
+<p>论文借用了 Bernstein 和 Newhouse 的这个视角：Muon 和 Adam 的区别，可以看成是用了不同的范数来约束每一步的大小。Adam 对应的是从“逐元素取最大值”那类范数动态调整出来的约束；Muon 如果精确地求出 \(UV^{\top}\)，对应的就是谱范数约束；由于 Newton–Schulz 只是近似，实际对应的是 \(p\) 很大的 Schatten-\(p\) 范数（Schatten-\(p\) 范数是把奇异值当成向量取 \(p\) 范数，\(p\to\infty\) 时就是谱范数）。论文的论点是：神经网络的权重是作用在隐藏向量上的线性算子，而隐藏空间（至少在局部）可以看成欧氏空间，所以衡量权重改动大小最自然的方式是算子范数，也就是谱范数。从这个意义上说，Muon 的约束比 Adam 的更合理。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这个视角解释的是“Muon 的更新方向从哪里来”，它本身并不证明 Muon 收敛更快。Muon 好不好用，最终还是要看 §3 的实验。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">2.2 放大 Muon：权重衰减与更新幅度</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>原版 Muon 在小模型上好用，为什么模型一变大、token 一变多，优势就缩小了？作者找到的第一个原因是没有权重衰减，第二个原因是 Muon 的更新幅度会随矩阵形状变化。这一节先分别解释这两个问题，再说明作者怎样用一个系数 0.2 把 Muon 的更新幅度和 AdamW 对齐，从而让 Muon 直接复用 AdamW 的超参数。</div>
+
+<h4 id="n-3-1">2.2.1 权重衰减：不加的话，权重会一直长大</h4>
+<div class="note-pre"><b>先补一点背景：bf16 的精度。</b>
+<p>大模型训练普遍用 bf16（brain float 16）做矩阵乘法和存激活。它有 1 位符号、8 位指数、7 位尾数：指数位和 fp32 一样多，所以能表示的数值范围和 fp32 一样大；但尾数只有 7 位，相邻两个可表示数之间的相对间距约为 \(2^{-8}\) 到 \(2^{-7}\)，也就是只有两到三位有效十进制数字。数值越大，相邻两个可表示数之间的<b>绝对</b>间距越大；一个大数加上一个小得多的数，结果可能直接被舍入回原来的大数。<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解页</a>有各种低精度格式的对照。</p>
+</div>
+<p>作者观察到，把 Muon 用在更大的模型、更多的 token 上时，它相对 AdamW 的优势会缩小。进一步检查发现，权重的 RMS 和各层输出的 RMS 在训练中一直增长，最后超出了 bf16 能精确表示的范围，作者认为这可能损害模型的性能。他们的解决办法很直接：给 Muon 加上和 AdamW 一样的解耦权重衰减（原文式 3）：</p>
+<div class="formula">$$W_t=W_{t-1}-\eta_t\big(O_t+\lambda W_{t-1}\big)$$</div>
+<p>为什么 Muon 尤其需要权重衰减？原因在于正交化。不管梯度本身是大是小，\(O_t\) 的大小都是固定的（各奇异值约为 1），所以每一步都往权重上加一个大小基本不变的矩阵。没有衰减时，没有任何机制把权重往回拉，权重的范数会随着步数一直累积。加了衰减之后，每一步先把权重缩小 \(\eta\lambda\) 的比例，权重越大缩得越多，于是会涨到一个“每步缩掉的量等于每步加进来的量”的平衡点为止。这个平衡大约在 \(1/(\eta\lambda)\) 步之后建立：按 Moonlight 的峰值学习率 \(4.2\times10^{-4}\) 和 \(\lambda=0.1\) 推算，约为 2.4 万步。AdamW 的更新同样是“归一化”过的（§1），这也是为什么大模型训练里 AdamW 几乎总配着 0.1 左右的权重衰减。</p>
+<div class="dia">
+  <div class="dia-title">示意图：权重衰减给权重的大小设了一个平衡点</div>
+<svg class="dg" viewBox="0 0 640 290" role="img" aria-label="示意：没有权重衰减时权重 RMS 一直上涨，有权重衰减时停在平衡点" style="--dg-min:560px">
+<line x1="70" y1="200" x2="600" y2="200" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="70" y1="200" x2="70" y2="30" style="stroke:var(--text-3);stroke-width:1.2"/>
+<text x="335" y="222" class="t-c t-sm">训练步数 →</text>
+<text x="26" y="115" class="t-c t-sm" transform="rotate(-90 26 115)">权重的 RMS →</text>
+<path d="M70.0,179.6 L78.8,174.6 L87.7,170.6 L96.5,166.9 L105.3,163.4 L114.2,160.1 L123.0,156.8 L131.8,153.6 L140.7,150.5 L149.5,147.4 L158.3,144.4 L167.2,141.4 L176.0,138.5 L184.8,135.6 L193.7,132.7 L202.5,129.9 L211.3,127.1 L220.2,124.3 L229.0,121.6 L237.8,118.8 L246.7,116.1 L255.5,113.4 L264.3,110.8 L273.2,108.1 L282.0,105.5 L290.8,102.9 L299.7,100.3 L308.5,97.7 L317.3,95.1 L326.2,92.5 L335.0,90.0 L343.8,87.5 L352.7,84.9 L361.5,82.4 L370.3,79.9 L379.2,77.5 L388.0,75.0 L396.8,72.5 L405.7,70.1 L414.5,67.6 L423.3,65.2 L432.2,62.8 L441.0,60.3 L449.8,57.9 L458.7,55.5 L467.5,53.1 L476.3,50.7 L485.2,48.4 L494.0,46.0 L502.8,43.6 L511.7,41.3 L520.5,38.9 L529.3,36.6 L538.2,34.3 L547.0,31.9 L555.8,29.6 L564.7,27.3 L573.5,25.0 L582.3,22.7 L591.2,20.4 L600.0,18.1" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+<path d="M70.0,179.6 L78.8,173.6 L87.7,168.1 L96.5,163.0 L105.3,158.3 L114.2,153.9 L123.0,149.8 L131.8,146.0 L140.7,142.5 L149.5,139.3 L158.3,136.3 L167.2,133.5 L176.0,130.9 L184.8,128.5 L193.7,126.3 L202.5,124.2 L211.3,122.3 L220.2,120.5 L229.0,118.9 L237.8,117.3 L246.7,115.9 L255.5,114.6 L264.3,113.4 L273.2,112.3 L282.0,111.2 L290.8,110.3 L299.7,109.4 L308.5,108.6 L317.3,107.8 L326.2,107.1 L335.0,106.4 L343.8,105.8 L352.7,105.2 L361.5,104.7 L370.3,104.2 L379.2,103.8 L388.0,103.3 L396.8,102.9 L405.7,102.6 L414.5,102.3 L423.3,101.9 L432.2,101.7 L441.0,101.4 L449.8,101.1 L458.7,100.9 L467.5,100.7 L476.3,100.5 L485.2,100.3 L494.0,100.1 L502.8,100.0 L511.7,99.8 L520.5,99.7 L529.3,99.6 L538.2,99.5 L547.0,99.4 L555.8,99.3 L564.7,99.2 L573.5,99.1 L582.3,99.0 L591.2,98.9 L600.0,98.9" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<line x1="70" y1="98.0" x2="600" y2="98.0" style="stroke:var(--c-enc);stroke-dasharray:4 4"/>
+<line x1="70" y1="252" x2="96" y2="252" style="stroke:var(--c-pred);stroke-width:2.5"/>
+<text x="102" y="252" class="t-sm">不加权重衰减：每步都往上加一点，没有东西把它往回拉</text>
+<line x1="70" y1="272" x2="96" y2="272" style="stroke:var(--c-enc);stroke-width:2.5"/>
+<text x="102" y="272" class="t-sm">加权重衰减：涨到“每步缩掉的 = 每步加进来的”就停（虚线 = 平衡点）</text>
+<line x1="186.6" y1="200" x2="186.6" y2="192" style="stroke:var(--text-2)"/>
+<text x="186.6" y="186" class="t-c t-xs">约 1/(ηλ) 步</text>
+<text x="76" y="34" class="t-xs">示意，不是论文数据</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是训练步数，纵轴是某个权重矩阵的 RMS。橙线是不加权重衰减的情形：每一步加进来的更新大小固定，权重的 RMS 只涨不跌。蓝线是加了权重衰减的情形：涨到一定程度后，每步衰减掉的部分正好抵消新加的更新，曲线变平；变平所需的步数量级是 \(1/(\eta\lambda)\)。这是本站根据式 3 画的定性示意，曲线形状不是论文数据。论文原图 2 画的是验证损失，见下文。</div>
+</div>
+<p>作者用一个 800M 参数的模型验证了这一点。按 §3.2 的 scaling law，这个规模的“算力最优”训练量约为 20B token，他们特意训练了 100B token，大约是最优量的 5 倍（推算：表 2 中 822M 模型的最优 token 数是 20.76B，100/20.76 ≈ 4.8）。<a href="https://arxiv.org/html/2502.16982#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>比较了三条验证损失曲线：AdamW、不加权重衰减的原版 Muon、加了权重衰减的 Muon。结果是：原版 Muon 在训练初期收敛得最快；但随着训练进行，一部分权重长得过大，它的优势逐渐消失；加了权重衰减的 Muon 在“过度训练”的后半程损失最低，同时低于原版 Muon 和 AdamW。所以作者把更新规则改成了式 3。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>图 2 里两种 Muon 的差距不大：原图右侧小图画的是两者验证损失的差，纵轴范围只有 ±0.02（读图），而且每种设置只跑了一次。它说明的是“趋势会反转”，不是“差距很大”。</li>
+  <li>论文没有给这次实验用的 \(\lambda\) 值；Moonlight 正式训练用的是 0.1。</li>
+  <li>“超出 bf16 的高精度范围”是论文的原话，但论文没有展开具体机制。上面 bf16 背景框里的解释是本站的理解：数值越大、绝对精度越差，小的更新和差异更容易被舍入吃掉。</li>
+  <li>给 Muon 加权重衰减并不是本文独有的想法。论文脚注说明，Muon 原作者那边同期也加入了权重衰减并看到了改进。</li>
+</ul></div>
+
+<h4 id="n-3-2">2.2.2 更新的大小随矩阵形状变化（引理 1）</h4>
+<div class="note-pre"><b>先补一点背景：什么是更新 RMS，为什么它重要。</b>
+<p>一个矩阵的 RMS（均方根）是把所有元素平方、取平均、再开根号，可以理解为“一个典型元素有多大”。<b>更新 RMS</b> 就是每一步加到权重上的那个矩阵（不含学习率）的 RMS。它决定了每一步权重相对改变多少：更新太小，这一层几乎学不动；更新太大，训练容易不稳定。如果同一个模型里不同矩阵的更新 RMS 差好几倍，那么一个全局学习率不可能同时适合所有矩阵。</p>
+<p>AdamW 的更新是 \(m/\sqrt{v}\)，逐元素归一化，所以它的更新 RMS 和矩阵形状无关。论文脚注说它的理论值在 1 左右，由于 \(\beta_1&lt;\beta_2\) 和 \(\epsilon&gt;0\)，实际通常小于 1；作者实测在 0.2–0.4 之间。这个范围可以这样理解（推算）：如果某个元素的梯度主要是均值为 0 的噪声，那么 \(m\) 是噪声的滑动平均，方差只剩原来的 \((1-\beta_1)/(1+\beta_1)\)，而 \(v\) 约等于噪声的方差，于是</p>
+<div class="formula">$$\mathrm{RMS}\Big(\frac{m}{\sqrt v}\Big)\approx\sqrt{\frac{1-\beta_1}{1+\beta_1}}\approx0.23\qquad(\beta_1=0.9)$$</div>
+<p>本站用模拟验证过，纯噪声时这个值约为 0.23；梯度里有稳定的信号时，这个值会往 1 升。大模型训练中梯度以噪声为主，所以 AdamW 的实测更新 RMS 落在 0.2–0.4，是说得通的。</p>
+</div>
+<p>Muon 就不一样了。论文的引理 1 说：对一个形状为 \([A,B]\) 的满秩矩阵，Muon 更新（理想的 \(UV^{\top}\)）的 RMS 是 \(\sqrt{1/\max(A,B)}\)。证明比附录里写的还可以更短：\(UV^{\top}\) 有 \(\min(A,B)\) 个奇异值、每个都是 1，所以它所有元素的平方和（Frobenius 范数的平方）等于 \(\min(A,B)\)；除以元素个数 \(AB\) 再开方，就得到</p>
+<div class="formula">$$\mathrm{RMS}(UV^{\top})=\sqrt{\frac{\lVert UV^{\top}\rVert_F^2}{AB}}=\sqrt{\frac{\min(A,B)}{AB}}=\frac{1}{\sqrt{\max(A,B)}}$$</div>
+<p>作者在训练中监测了 Muon 的实际更新 RMS，发现它通常接近这个理论值。问题在于，同一个模型里矩阵的形状差别很大，导致更新幅度不一致：</p>
+<ul>
+  <li><b>矩阵很“宽”时更新太小。</b>比如前馈层的大矩阵，\(\max(A,B)\) 很大，更新 RMS 很小，这一层学得太慢，限制了模型的表达能力。</li>
+  <li><b>矩阵很“小”时更新太大。</b>比如把 GQA 或 MLA 里每个注意力头的矩阵当成独立参数分别正交化，\(\max(A,B)\) 很小，更新 RMS 很大，训练会不稳定。</li>
+</ul>
+<p>两种情况都会让性能变差。作者的办法是把每个矩阵的 Muon 更新乘以 \(\sqrt{\max(A,B)}\)，正好抵消引理 1 的影响，使所有矩阵的更新 RMS 都等于 1。论文脚注指出，Muon 原作者的实现是乘以 \(\sqrt{\max(1,A/B)}\)，如果所有矩阵的第二维都相同，它和本文的做法只差一个全局常数；同期也有其他工作讨论过类似的缩放问题。</p>
+
+<h4 id="n-3-3">2.2.3 对齐 AdamW：再乘 0.2</h4>
+<p>Muon 只管矩阵参数。实际训练中，RMSNorm 的缩放参数、输出头（LM head）和词嵌入这些参数仍然交给 AdamW。作者希望两类参数共用同一套学习率 \(\eta\) 和权重衰减 \(\lambda\)，否则就要分别调两套超参数。既然 AdamW 的更新 RMS 实测在 0.2–0.4，就把 Muon 的更新 RMS 也调到这个范围。最终的更新规则是（原文式 4）：</p>
+<div class="formula">$$W_t=W_{t-1}-\eta_t\Big(0.2\cdot O_t\cdot\sqrt{\max(A,B)}+\lambda W_{t-1}\Big)$$</div>
+<p>这样一来，每个矩阵的更新 RMS 都约为 0.2，和 AdamW 处在同一水平。作者强调，有了这个调整，Muon 可以直接复用为 AdamW 调好的学习率和权重衰减，这正是“开箱即用”的含义。下图用 Moonlight 里几种真实的矩阵形状，算出缩放前后的更新 RMS。</p>
+<div class="dia">
+  <div class="dia-title">示意图：缩放前后的 Muon 更新 RMS（Moonlight 的几种矩阵形状，推算）</div>
+<svg class="dg" viewBox="0 0 640 300" role="img" aria-label="不同形状矩阵的 Muon 原始更新 RMS 与缩放之后的 RMS" style="--dg-min:600px">
+<rect x="410.0" y="46" width="160.0" height="206" style="fill:var(--c-pred-bg);opacity:.8"/>
+<text x="490.0" y="36" class="t-c t-xs">AdamW 实测更新 RMS 约 0.2–0.4（论文）</text>
+<text x="240" y="62" class="t-r t-sm">第 1 层稠密 FFN</text>
+<text x="240" y="79" class="t-r t-xs">[2048×11264]</text>
+<rect x="250" y="54" width="7.5" height="12" style="fill:var(--text-3)"/>
+<text x="263.5" y="60" class="t-xs">0.0094</text>
+<rect x="250" y="70" width="160.0" height="12" style="fill:var(--c-enc)"/>
+<text x="416.0" y="76" class="t-xs">0.2（乘以 21.2）</text>
+<text x="240" y="112" class="t-r t-sm">注意力 q 投影</text>
+<text x="240" y="129" class="t-r t-xs">[2048×3072]</text>
+<rect x="250" y="104" width="14.4" height="12" style="fill:var(--text-3)"/>
+<text x="270.4" y="110" class="t-xs">0.0180</text>
+<rect x="250" y="120" width="160.0" height="12" style="fill:var(--c-enc)"/>
+<text x="416.0" y="126" class="t-xs">0.2（乘以 11.1）</text>
+<text x="240" y="162" class="t-r t-sm">专家 FFN / o 投影</text>
+<text x="240" y="179" class="t-r t-xs">[2048×1408 等]</text>
+<rect x="250" y="154" width="17.7" height="12" style="fill:var(--text-3)"/>
+<text x="273.7" y="160" class="t-xs">0.0221</text>
+<rect x="250" y="170" width="160.0" height="12" style="fill:var(--c-enc)"/>
+<text x="416.0" y="176" class="t-xs">0.2（乘以 9.1）</text>
+<text x="240" y="212" class="t-r t-sm">若把 MLA 上投影按头切开</text>
+<text x="240" y="229" class="t-r t-xs">[512×256]</text>
+<rect x="250" y="204" width="35.4" height="12" style="fill:var(--text-3)"/>
+<text x="291.4" y="210" class="t-xs">0.0442</text>
+<rect x="250" y="220" width="160.0" height="12" style="fill:var(--c-enc)"/>
+<text x="416.0" y="226" class="t-xs">0.2（乘以 4.5）</text>
+<line x1="250" y1="46" x2="250" y2="264" style="stroke:var(--text-3)"/>
+<text x="250" y="276" class="t-c t-xs">0</text>
+<text x="330" y="276" class="t-c t-xs">0.1</text>
+<text x="410" y="276" class="t-c t-xs">0.2</text>
+<text x="490" y="276" class="t-c t-xs">0.3</text>
+<text x="570" y="276" class="t-c t-xs">0.4</text>
+<rect x="40" y="290" width="22" height="10" style="fill:var(--text-3)"/>
+<text x="68" y="295" class="t-xs">原始 Muon 更新：RMS = 1/√max(A,B)（引理 1）</text>
+<rect x="340" y="290" width="22" height="10" style="fill:var(--c-enc)"/>
+<text x="368" y="295" class="t-xs">乘以 0.2·√max(A,B) 之后（式 4）</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是 Moonlight 里的一种矩阵（形状取自官方发布的模型配置：隐藏维度 2048，第 1 层稠密前馈的中间维度 11264，专家前馈 1408，MLA 的 KV 压缩维度 512）。灰色短条是原始 Muon 更新的 RMS，按引理 1 等于 \(1/\sqrt{\max(A,B)}\)，从 0.0094 到 0.044 相差近 5 倍，而且都比 AdamW 的 0.2–0.4（浅橙色区域）小一个数量级。蓝色条是乘以 \(0.2\sqrt{\max(A,B)}\) 之后的结果：全部等于 0.2，括号里是各自的乘数。最后一行是一个假想情形：如果把 MLA 的上投影按头切成 512×256 的小矩阵分别正交化。数字由本站按公式计算。</div>
+</div>
+<p>为什么是 0.2 而不是 0.4？附录 A 的表 8 做了一组小规模实验：把 Muon 的更新 RMS 分别控制在 0.05、0.1、0.2、0.4、0.8，和 AdamW 一起训练 2000 步（约 2B token），比较损失和两类权重矩阵的 RMS：</p>
+<div class="table-wrap"><table>
+  <tr><th>优化器</th><th class="num">AdamW</th><th class="num">Muon 0.05</th><th class="num">Muon 0.1</th><th class="num">Muon 0.2</th><th class="num">Muon 0.4</th><th class="num">Muon 0.8</th></tr>
+  <tr><td>训练损失</td><td class="num">3.512</td><td class="num">3.355</td><td class="num">3.239</td><td class="num">3.198</td><td class="num">3.199</td><td class="num">3.386</td></tr>
+  <tr><td>验证损失</td><td class="num">3.679</td><td class="num">3.503</td><td class="num">3.374</td><td class="num">3.325</td><td class="num">3.314</td><td class="num">3.543</td></tr>
+  <tr><td>注意力 Q 权重 RMS</td><td class="num">1.01e-2</td><td class="num">5.74e-3</td><td class="num">8.44e-3</td><td class="num">1.57e-2</td><td class="num">2.95e-2</td><td class="num">7.23e-2</td></tr>
+  <tr><td>MLP 权重 RMS</td><td class="num">1.25e-2</td><td class="num">8.01e-3</td><td class="num">1.27e-2</td><td class="num">2.35e-2</td><td class="num">4.51e-2</td><td class="num">8.73e-2</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 8（附录 A）。</p>
+<p>0.2 和 0.4 的表现几乎一样，而且明显好于其他取值；这和“AdamW 的更新 RMS 在 0.2–0.4”这一经验观察吻合。作者最终取了 0.2。表里还能看出一个规律：更新 RMS 每翻一倍，2000 步后权重的 RMS 也大致翻一倍，说明在训练早期，权重的大小主要由累积的更新决定。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（MoonshotAI/Moonlight 的 examples/toy_train.py）</span>
+<ul>
+  <li>代码把式 4 实现为“调整学习率”：<code>adjusted_lr = lr * 0.2 * sqrt(max(A, B))</code>，再用它乘以 Newton–Schulz 的输出；权重衰减用的是没有调整过的 <code>lr</code>，即 \(W\leftarrow W(1-\eta\lambda)\)，和式 4 一致。</li>
+  <li>代码默认使用 <b>Nesterov 动量</b>（<code>nesterov=True</code>）：送进 Newton–Schulz 的是 \(g+\mu M_t\)，而不是论文式 1 里的 \(M_t\)。这沿用了原作者的推荐。</li>
+  <li>Newton–Schulz 在 bf16 下计算：先把“高”矩阵转置成“宽”的（行数不多于列数），按 Frobenius 范数归一化（分母加 \(10^{-7}\)），迭代 5 步。</li>
+  <li>维度不是 2 的参数，以及名字里含 <code>embed_tokens</code> 和 <code>lm_head</code> 的矩阵，都交给代码里内置的 AdamW；两部分共用同一个 <code>lr</code> 和 <code>wd</code>（默认 0.1）。</li>
+</ul></div>
+
+<h4 id="n-3-4">2.2.4 其他超参数</h4>
+<p>Muon 还有两个可调的超参数：Newton–Schulz 的迭代步数 \(N\) 和动量系数 \(\mu\)。作者发现 \(N=10\) 比 \(N=5\) 的正交化结果更精确，但并不能带来更好的模型，所以为了效率取 \(N=5\)。动量系数调来调去也没有稳定的收益，于是沿用原作者的 0.95。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2 ↗</a> · <a href="https://arxiv.org/html/2502.16982#A1" target="_blank" rel="noopener">附录 A（引理 1 证明与表 8）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">2.3 分布式 Muon：把它装进 ZeRO-1</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>大模型训练离不开分布式：模型和优化器状态被切分到成百上千张卡上。最常用的 ZeRO-1 是把优化器状态按元素平均切开，每张卡只更新自己那一段。这对逐元素计算的 AdamW 毫无问题，但 Muon 必须看到整个矩阵才能做正交化。作者怎样在不破坏 ZeRO-1 的前提下做到这一点？代价是多少显存、多少通信、多少延迟？</div>
+
+<div class="note-pre"><b>先补一点背景：数据并行、ZeRO-1 和三种集合通信。</b>
+<p><b>数据并行</b>是把同一个模型复制到多张卡上，每张卡处理不同的数据，算完梯度后把所有卡的梯度加起来（平均），再各自做同样的更新。这样做每张卡都要存一整份优化器状态，非常浪费。<b>ZeRO-1</b> 的办法是把优化器状态（fp32 主权重、动量等）平均切成 \(N_d\) 份，第 \(i\) 张卡只保存、只更新第 \(i\) 份。为此一步训练里的通信变成两段：先用 <b>reduce-scatter</b> 把梯度求和、同时把结果切开，每张卡只拿到自己那一段的完整梯度；更新完自己那段参数后，再用 <b>all-gather</b> 把各段参数拼回来，让每张卡都有完整的新参数。详细推导见 <a href="zero.html#n-5-1">ZeRO 精读 §5.1</a>。下面的小工具可以选 “Reduce-Scatter” 和 “All-Gather”，一步步看数据怎么流动。</p>
+<div data-widget="collectives" data-ranks="4"></div>
+<p>本文还用到一个 <b>gather</b>：把分散在几张卡上的几段数据收集起来，拼成完整的一份。</p>
+<p><b>Megatron-LM 的多种并行。</b>Megatron-LM 同时支持张量并行（TP，把一个矩阵切到几张卡上）、流水线并行（PP，把不同层放到不同卡上）、专家并行（EP，把 MoE 的不同专家放到不同卡上）和数据并行（DP）。在这种组合下，ZeRO-1 的切分只需要在数据并行组内部进行，通信也只在数据并行组内部发生，而不必跨越整个集群。张量并行和流水线并行见 <a href="megatron-lm.html#n-3">Megatron-LM 精读 §3</a>。</p>
+</div>
+
+<h4 id="n-4-1">2.3.1 为什么不能直接套用 ZeRO-1</h4>
+<p>ZeRO-1 对 AdamW 很高效，是因为 AdamW 的更新是逐元素算的：一个元素的新值只取决于它自己的梯度、\(m\)、\(v\)，所以每张卡拿着自己那一段，独立算完就行。Muon 不一样：Newton–Schulz 迭代需要完整的梯度（动量）矩阵。而 ZeRO-1 把所有参数首尾相接排成一条、再平均切开，切分边界并不会对齐矩阵的边界，一个矩阵可能被切成两段分在两张卡上。所以原版 ZeRO-1 不能直接用于 Muon。</p>
+
+<h4 id="n-4-2">2.3.2 算法 1：多出来的两步</h4>
+<p>作者提出的分布式 Muon 保留了 ZeRO-1 在数据并行组上切分优化器状态的做法，只比 ZeRO-1 版的 AdamW 多两个操作：</p>
+<ol>
+  <li><b>DP gather</b>：对本卡负责的那一段参数（模型的 \(1/N_d\)），把它所属矩阵在其他卡上的那部分梯度收集过来，拼成完整的梯度矩阵。</li>
+  <li><b>计算完整更新</b>：对完整矩阵做 Newton–Schulz 迭代，然后丢掉不属于本卡的部分，只用本卡那一段去更新参数。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：分布式 Muon 的一步（DP = 4，按论文算法 1）</div>
+<svg class="dg" viewBox="0 0 960 420" role="img" aria-label="分布式 Muon：在 ZeRO-1 的扁平分片上，只有跨分片的矩阵需要额外收集梯度" style="--dg-min:860px">
+<text x="80" y="22" class="t-b">一组数据并行（DP = 4）的 4 张卡；所有矩阵参数首尾相接排成一条，再平均切成 4 段</text>
+<rect x="80.0" y="44" width="205.0" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="182.5" y="53" class="t-c t-sm">卡 0 负责的一段（1/4 的优化器状态）</text>
+<rect x="285.0" y="44" width="205.0" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="387.5" y="53" class="t-c t-sm">卡 1 负责的一段（1/4 的优化器状态）</text>
+<rect x="490.0" y="44" width="205.0" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="592.5" y="53" class="t-c t-sm">卡 2 负责的一段（1/4 的优化器状态）</text>
+<rect x="695.0" y="44" width="205.0" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/>
+<text x="797.5" y="53" class="t-c t-sm">卡 3 负责的一段（1/4 的优化器状态）</text>
+<g class="enc"><rect class="box" x="81" y="70" width="138" height="34" rx="4"/></g>
+<text x="150" y="87" class="t-c t-b">W₁</text>
+<g class="pred"><rect class="box" x="221" y="70" width="138" height="34" rx="4"/></g>
+<text x="290" y="87" class="t-c t-b">W₂</text>
+<g class="enc"><rect class="box" x="361" y="70" width="128" height="34" rx="4"/></g>
+<text x="425" y="87" class="t-c t-b">W₃</text>
+<g class="enc"><rect class="box" x="491" y="70" width="203" height="34" rx="4"/></g>
+<text x="592" y="87" class="t-c t-b">W₄</text>
+<g class="enc"><rect class="box" x="696" y="70" width="203" height="34" rx="4"/></g>
+<text x="798" y="87" class="t-c t-b">W₅</text>
+<line x1="285.0" y1="62" x2="285.0" y2="118" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+<line x1="490.0" y1="62" x2="490.0" y2="118" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+<line x1="695.0" y1="62" x2="695.0" y2="118" style="stroke:var(--text);stroke-width:2;stroke-dasharray:5 3"/>
+<text x="285.0" y="132" class="t-c t-xs">分片边界</text>
+<text x="290" y="150" class="t-c t-sm" style="fill:var(--c-pred)">W₂ 跨在卡 0 和卡 1 之间：两张卡各有它的一半</text>
+<text x="690" y="150" class="t-c t-sm">W₁、W₃、W₄、W₅ 整块落在某一张卡里</text>
+<g class=""><rect class="box" x="40" y="215" width="128" height="104" rx="8"/></g>
+<text x="104.0" y="233" class="t-c t-b">① reduce-scatter</text>
+<text x="104.0" y="257" class="t-c t-sm">梯度（fp32）</text>
+<text x="104.0" y="275" class="t-c t-sm">每张卡拿到自己那段</text>
+<text x="104.0" y="293" class="t-c t-sm">的完整梯度</text>
+<path class="edge" d="M170,267 L188,267"/>
+<g class=""><rect class="box" x="190" y="215" width="128" height="104" rx="8"/></g>
+<text x="254.0" y="233" class="t-c t-b">② 更新动量</text>
+<text x="254.0" y="257" class="t-c t-sm">用本地那份</text>
+<text x="254.0" y="275" class="t-c t-sm">动量 m（1/4）</text>
+<path class="edge" d="M320,267 L338,267"/>
+<g class="enc"><rect class="box" x="340" y="215" width="128" height="104" rx="8"/></g>
+<text x="404.0" y="233" class="t-c t-b">③ DP gather</text>
+<text x="404.0" y="257" class="t-c t-sm">只为跨片矩阵</text>
+<text x="404.0" y="275" class="t-c t-sm">收齐另一半（bf16）</text>
+<path class="edge" d="M470,267 L488,267"/>
+<g class="enc"><rect class="box" x="490" y="215" width="128" height="104" rx="8"/></g>
+<text x="554.0" y="233" class="t-c t-b">④ Newton–Schulz</text>
+<text x="554.0" y="257" class="t-c t-sm">对完整矩阵</text>
+<text x="554.0" y="275" class="t-c t-sm">算正交化更新</text>
+<path class="edge" d="M620,267 L638,267"/>
+<g class="enc"><rect class="box" x="640" y="215" width="128" height="104" rx="8"/></g>
+<text x="704.0" y="233" class="t-c t-b">⑤ 丢掉不归自己的</text>
+<text x="704.0" y="257" class="t-c t-sm">那部分，只用本地</text>
+<text x="704.0" y="275" class="t-c t-sm">一段更新参数</text>
+<path class="edge" d="M770,267 L788,267"/>
+<g class=""><rect class="box" x="790" y="215" width="128" height="104" rx="8"/></g>
+<text x="854.0" y="233" class="t-c t-b">⑥ all-gather</text>
+<text x="854.0" y="257" class="t-c t-sm">参数（fp32）</text>
+<text x="854.0" y="275" class="t-c t-sm">每张卡拿回</text>
+<text x="854.0" y="293" class="t-c t-sm">完整的新参数</text>
+<text x="480" y="345" class="t-c t-sm">蓝框 = 比 ZeRO-1 版 AdamW 多出来的两步；①②⑤⑥ 和 ZeRO-1 版 AdamW 一样</text>
+<text x="480" y="365" class="t-c t-xs">对 W₂，卡 0 和卡 1 都要各算一遍完整的 Newton–Schulz，然后各留各的一半；对其他矩阵，③ 什么都不用传</text>
+<text x="480" y="385" class="t-c t-xs">按论文算法 1 画的示意图；分片和矩阵的大小只是示意</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>上半部分是一组数据并行的 4 张卡。所有矩阵参数排成一条（W₁ 到 W₅），再平均切成 4 段，每张卡负责一段的优化器状态。W₂ 正好跨在卡 0 和卡 1 的分界上，这两张卡各有它的一半；其他矩阵都完整地落在某一张卡里。下半部分是一步更新的 6 个操作，蓝框 ③④ 是 Muon 比 ZeRO-1 版 AdamW 多出来的，⑤ 里“丢掉不归自己的部分”也是新的。对 W₂，卡 0 和卡 1 都要把另一半收过来、各自算一遍完整的 Newton–Schulz，再各留各的一半，所以这里有少量重复计算。本站示意图，对应原文<a href="https://arxiv.org/html/2502.16982#alg1" target="_blank" rel="noopener">算法 1 ↗</a>。</div>
+</div>
+<p>按算法 1 逐行走一遍：</p>
+<ol>
+  <li>对完整梯度 \(G\) 在数据并行组内做 reduce-scatter，每张卡得到自己那一段的、已经求和的梯度 \(g\)。</li>
+  <li>用本卡保存的那一段动量 \(m\) 和动量系数 \(\mu\) 更新动量，得到 \(g'\)。这一步和 AdamW 一样是逐元素的。</li>
+  <li>DP gather：把 \(g'\) 在数据并行组内收集成完整矩阵 \(G\)。</li>
+  <li>对完整矩阵算 Muon 更新 \(U=\mathrm{NewtonSchulz}(G)\)。</li>
+  <li>丢掉 \(U\) 中不属于本卡的部分，只留本卡那一段 \(u\)，按式 4 更新本卡那一段参数 \(p\)。</li>
+  <li>把更新后的 \(p'\) 在数据并行组内 all-gather，拼成完整参数 \(P\)。</li>
+</ol>
+<p>算法最后还返回 \(\sqrt{\mathrm{mean}(u^2)}\)，也就是本卡那一段的更新 RMS，用于日志记录，方便监测 §2.2 里说的更新幅度。</p>
+
+<h4 id="n-4-3">2.3.3 代价：显存、通信、延迟</h4>
+<p><b>显存。</b>Muon 只有一个动量缓冲区，AdamW 有两个（\(m\) 和 \(v\)），所以分布式 Muon 额外占用的优化器显存是分布式 AdamW 的一半（第 1 节的示意图）。</p>
+<p><b>通信。</b>论文按“每个参数元素要传几个字节”来算。分布式 AdamW 每步要做一次 fp32 的梯度 reduce-scatter（4 字节）和一次 fp32 的参数 all-gather（4 字节），共 8。分布式 Muon 多了一次 DP gather，而且 Newton–Schulz 只需要 bf16 精度，所以 gather 也用 bf16（2 字节），最坏情况下共 4 + 2 + 4 = 10，是 AdamW 的 1.25 倍。论文进一步指出，额外的 gather 只涉及每张卡自己负责的那一段参数所在的矩阵，所以它的通信量少于一次完整的 reduce-scatter 或 all-gather。总的来说，分布式 Muon 的通信量是分布式 AdamW 的 \((1,\ 1.25]\) 倍；论文说实际训练中通常接近下界 1。如果还开了张量并行，被 TP 切开的矩阵还要在 TP 组内再做一次 bf16 的 gather（论文脚注）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每个参数元素每步要传的字节数（论文 §2.3 的分析）</div>
+  <div class="dia-row"><span class="lbl">分布式 AdamW：8</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">reduce-scatter 梯度 fp32：4</span><span class="dia-seg w" style="flex:4">all-gather 参数 fp32：4</span><span class="dia-seg" style="flex:2"></span></div></div>
+  <div class="dia-row"><span class="lbl">分布式 Muon 上界：10</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">reduce-scatter 梯度 fp32：4</span><span class="dia-seg cmp" style="flex:2">gather bf16：2</span><span class="dia-seg w" style="flex:4">all-gather 参数 fp32：4</span></div></div>
+  <div class="dia-row"><span class="lbl">分布式 Muon 实际</span><div class="dia-track"><span class="dia-seg kv" style="flex:4">reduce-scatter：4</span><span class="dia-seg cmp" style="flex:0.4"></span><span class="dia-seg w" style="flex:4">all-gather：4</span><span class="dia-seg" style="flex:1.6"></span></div></div>
+  <div class="dia-out">上界 10 / 8 = 1.25 倍；论文称实际接近 1 倍，但没有给出测量数据。</div>
+  <div class="dia-note"><b>怎么看：</b>每一行的长度代表一步训练里每个参数元素在数据并行组内要传输的字节数。绿色是 Muon 多出来的 DP gather：最坏情况是每个元素都要以 bf16 收集一次（2 字节）；论文说实际只需要为跨分片的矩阵补收一小部分，所以第三行的绿色只画了一小段（示意）。本站示意图。</div>
+</div>
+<p><b>延迟。</b>分布式 Muon 的端到端延迟比分布式 AdamW 大，因为多了通信，还要跑 Newton–Schulz。论文认为这不是大问题：一是只需要约 5 步迭代；二是优化器本身的耗时和模型前向、反向相比可以忽略，通常只占 1%–3%。此外还可以用工程手段继续压低延迟，比如让 gather 和计算重叠、让优化器的 reduce-scatter 和参数的 gather 重叠。作者说，在他们的集群上训练大模型时，分布式 Muon 相对 AdamW 没有明显的额外延迟，并表示会向开源的 Megatron-LM 提交实现。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 公开代码（Megatron-LM PR #1428）</span>
+<p>作者随论文发布了一个 Megatron-LM 的概念验证 PR（<a href="https://github.com/NVIDIA/Megatron-LM/pull/1428" target="_blank" rel="noopener">NVIDIA/Megatron-LM#1428 ↗</a>）。在它的 <code>muon.py</code> 里，为了实现简单，第 ③ 步是把整个 bucket 的 bf16 动量在数据并行组内完整 all-gather 一遍，再由每张卡对与自己那段有重叠的矩阵做 Newton–Schulz；遇到被张量并行切开的矩阵，还会在 TP 组内再 all-gather 一次。按论文的记账，这相当于“每个元素多传 2 字节”的上界情形，而不是论文说的接近下界的实现。这个 PR 后来没有被合并，于 2026-01-29 关闭（GitHub 记录）。</p></div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“通信是 AdamW 的 1–1.25 倍”是按字节数做的理论分析，“没有明显额外延迟”是一句定性描述。论文没有给出集群规模、并行配置、每步耗时或 MFU 之类的测量数据。</li>
+  <li>“显存是 AdamW 的一半”指的是优化器的动量缓冲区。fp32 主权重、bf16 参数和梯度两者都一样要存，所以整卡显存的节省远小于一半（第 1 节的推算是 16 → 12 字节）。</li>
+  <li>跨分片的矩阵会在两张（或更多）卡上重复做 Newton–Schulz。由于 Newton–Schulz 的计算量本来就很小（§2.1.2），这点重复可以接受；但如果数据并行组很大、每张卡分到的段很短，跨分片的矩阵会变多，重复计算和 gather 的量都会上升。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S2.SS3" target="_blank" rel="noopener">英文原文 §2.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">3.1 实验：怎样让各个矩阵的更新 RMS 一致</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>§2.2 提出要让所有矩阵的更新 RMS 一致，并且和 AdamW 对齐。具体实现有几种选择：可以按模型的隐藏维度统一缩放，可以把每次的更新直接归一化，也可以按矩阵形状调整学习率。它们效果有没有差别？作者为什么最后选了“按形状调整学习率”？</div>
+<p>作者比较了三种控制 Muon 更新 RMS 的方法：</p>
+<ol>
+  <li><b>基线（Baseline）</b>：所有矩阵统一乘以 \(0.2\sqrt{H}\)，\(H\) 是模型的隐藏维度（原文式 5）。因为大多数矩阵有一维等于 \(H\)，这能让大部分矩阵和 AdamW 对齐，但对“另一维比 \(H\) 大”的矩阵就不准了。</li>
+  <li><b>更新归一化（Update Norm）</b>：把 Newton–Schulz 的输出直接除以它自己的 RMS 再乘 0.2，让每个矩阵的更新 RMS 严格等于 0.2（原文式 6）。</li>
+  <li><b>按形状调整学习率（Adjusted LR）</b>：每个矩阵乘以 \(0.2\sqrt{\max(A,B)}\)，也就是式 4（原文式 7）。</li>
+</ol>
+<p>实验专门关注训练早期，因为作者在更大规模上发现，更新幅度不一致带来的异常往往很早就出现。他们用 §3.2 的 800M 模型，并做了一个刻意放大问题的改动：把 SwiGLU 前馈层换成普通的两层 MLP，让前馈矩阵的形状从 \([H,2.6H]\) 变成 \([H,4H]\)，两个维度差得更大。训练计划是 20B token，在第 4B token 时评估：</p>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th class="num">训练损失</th><th class="num">验证损失</th><th class="num">q 投影权重 RMS</th><th class="num">MLP 权重 RMS</th></tr>
+  <tr><td>基线（统一乘 \(0.2\sqrt H\)）</td><td class="num">2.734</td><td class="num">2.812</td><td class="num">3.586e-2</td><td class="num">2.52e-2</td></tr>
+  <tr><td>更新归一化</td><td class="num">2.72</td><td class="num">2.789</td><td class="num">4.918e-2</td><td class="num">5.01e-2</td></tr>
+  <tr><td>按形状调整学习率</td><td class="num">2.721</td><td class="num">2.789</td><td class="num">3.496e-2</td><td class="num">4.89e-2</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 1。q 投影的形状是 \([H,H]\)，MLP 是 \([H,4H]\)。</p>
+<p>论文从表里读出了三点，下面连同原因一起讲（第一点的原因是本站结合第二点推出来的，论文只说两种方法都更好）：</p>
+<ul>
+  <li><b>两种方法都比基线好</b>，验证损失从 2.812 降到 2.789。原因是基线对 MLP 矩阵算错了：它的 \(\max(A,B)=4H\)，原始更新 RMS 是 \(1/\sqrt{4H}\)，乘以 \(0.2\sqrt H\) 之后只有 0.1，比目标少了一半，MLP 学得偏慢。</li>
+  <li><b>MLP 权重的 RMS 在两种方法下都约是基线的两倍</b>（5.01e-2、4.89e-2 对 2.52e-2）。这正好对应 \(\sqrt{4H}/\sqrt{H}=2\)：两种方法给 MLP 的更新是基线的两倍大，权重也就长到约两倍。</li>
+  <li><b>q 投影权重的 RMS 只在“更新归一化”下变大</b>。对 \([H,H]\) 的矩阵，按形状调整与基线的乘数相同（\(\sqrt{\max(H,H)}/\sqrt H=1\)），所以权重 RMS 和基线相近（3.496e-2 对 3.586e-2）；而更新归一化总是把更新强行拉到 0.2，q 投影的权重 RMS 因此也变大，和它的 MLP 差不多（4.918e-2）。如果 Newton–Schulz 的输出正好等于理论值，更新归一化和基线对 \([H,H]\) 矩阵给出的更新应该完全一样；实际却不一样，本站推断这是因为 Newton–Schulz 的实际输出 RMS 比理论值略小（§2.1.2 的推算也指向这一点），更新归一化把它“补”到了 0.2。</li>
+</ul>
+<p>两种方法的损失几乎一样，作者选了“按形状调整学习率”，论文给的理由只有一句：它的成本更低。本站的理解是：它的缩放系数只取决于矩阵形状，可以预先算好；而更新归一化每一步都要对每个矩阵额外算一次 RMS。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这组实验只训练到 4B token，每种设置一次；损失的差别是 0.02 量级。它支持的是“基线那种只看隐藏维度的缩放会让宽矩阵学得慢”，并不能区分两种改进方法谁更好。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">3.2 Muon 的 scaling law：“约 2 倍”是怎么测出来的</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个优化器在某个模型上快一点，不代表模型变大之后还快。要判断 Muon 是否真的比 AdamW 更省算力，需要在一系列规模上分别训练、拟合出“损失随算力变化”的曲线再比较。作者是怎样设计这组实验的？AdamW 基线调得够不够认真？“52% 的算力”是在曲线的哪里读出来的？</div>
+<div class="note-pre"><b>先补一点背景：scaling law、算力最优和 PF-days。</b>
+<p><b>Scaling law</b> 指的是：在模型结构和数据固定时，训练结束后的损失 \(L\) 和训练算力 \(C\) 之间近似满足幂律 \(L\approx kC^{-\alpha}\)，在双对数坐标下是一条直线。训练 Transformer 的算力通常按 \(C\approx6ND\) 估算，\(N\) 是参数量，\(D\) 是训练 token 数（前向约 \(2ND\)，反向约 \(4ND\)）。</p>
+<p><b>算力最优</b>（compute-optimal）是说：给定算力 \(C\)，可以选“大模型少训练”或“小模型多训练”，其中存在一个让损失最低的 \(N\) 与 \(D\) 的搭配。Chinchilla 的经验是每个参数约 20 个 token。比较两个优化器时，通常在每个算力档位都用算力最优的配置，再比较两条曲线。</p>
+<p><b>PF-days</b> 是算力单位：1 PFLOP/s 的机器跑一天，等于 \(10^{15}\times86400=8.64\times10^{19}\) 次浮点运算。</p>
+</div>
+
+<h4 id="n-6-1">3.2.1 实验怎么设计</h4>
+<p>为了和 AdamW 公平比较，作者用 Llama 结构的一系列稠密模型做 scaling law 实验。论文强调“建一个强基线”在优化器研究里至关重要，所以先为 AdamW 做了网格搜索：在多个算力档位下，按 \(C=6ND\) 改变模型大小和 token 数，找出损失最低的 \(N\)、\(D\) 搭配；固定这个搭配后，再搜索学习率和批大小；整个过程重复两三轮，逐步缩小搜索范围（附录 B，原文图 5 画了每个算力档位下损失关于 token 数、学习率、批大小的“碗形”曲线）。搜索得到的经验关系如下（附录 B 表 9，\(C\) 以 FLOPs 计）：</p>
+<div class="formula">$$N(C)=0.0483\,C^{0.511},\quad D(C)=3.448\,C^{0.489},\quad \eta(C)=0.0127\,C^{-0.0575},\quad B(C)=0.00652\,C^{0.414}$$</div>
+<p>注意 \(N\) 和 \(D\) 的指数几乎各占一半，说明算力加倍时模型和数据应该差不多同比例增长，这和 Chinchilla 的结论一致；而且两个系数的乘积正好是 \(1/6\)，和 \(C=6ND\) 自洽（推算）。论文用的 5 个模型如下（原文表 2，后两列为推算）。本站核对过，它们的参数量和 token 数与上面的经验关系基本吻合：</p>
+<div class="table-wrap"><table>
+  <tr><th>非嵌入参数</th><th class="num">头数 / 层数</th><th class="num">隐藏维度</th><th class="num">训练 token</th><th class="num">学习率</th><th class="num">批大小（8K 样本）</th><th class="num">token / 参数（推算）</th><th class="num">算力 PF-days（推算）</th></tr>
+  <tr><td>399M</td><td class="num">12 / 12</td><td class="num">1536</td><td class="num">8.92B</td><td class="num">9.503e-4</td><td class="num">96</td><td class="num">22.4</td><td class="num">0.25</td></tr>
+  <tr><td>545M</td><td class="num">14 / 14</td><td class="num">1792</td><td class="num">14.04B</td><td class="num">9.143e-4</td><td class="num">128</td><td class="num">25.8</td><td class="num">0.53</td></tr>
+  <tr><td>822M</td><td class="num">16 / 16</td><td class="num">2048</td><td class="num">20.76B</td><td class="num">8.825e-4</td><td class="num">160</td><td class="num">25.3</td><td class="num">1.19</td></tr>
+  <tr><td>1.1B</td><td class="num">18 / 18</td><td class="num">2304</td><td class="num">28.54B</td><td class="num">8.561e-4</td><td class="num">192</td><td class="num">25.9</td><td class="num">2.18</td></tr>
+  <tr><td>1.5B</td><td class="num">20 / 20</td><td class="num">2560</td><td class="num">38.91B</td><td class="num">8.305e-4</td><td class="num">256</td><td class="num">25.9</td><td class="num">4.05</td></tr>
+</table></div>
+<p class="w-note">前 6 列来自原文表 2；算力按 \(6ND\) 估算，\(N\) 用不含嵌入的参数量。</p>
+<p>关键的一点是：<b>Muon 直接复用了为 AdamW 找到的最优超参数</b>（模型大小、token 数、学习率、批大小都一样），没有为 Muon 单独调。作者的理由是 §2.2 已经把 Muon 的更新 RMS 和 AdamW 对齐了。</p>
+
+<h4 id="n-6-2">3.2.2 结果：两条拟合曲线</h4>
+<p>两种优化器各自拟合出损失随算力变化的幂律（原文表 3，损失是 8K 序列长度上的语言模型损失）：</p>
+<div class="formula">$$L_{\text{Muon}}=2.506\times C^{-0.052},\qquad L_{\text{AdamW}}=2.608\times C^{-0.054}$$</div>
+<p>论文正文没有写 \(C\) 的单位，但原文图 1(a) 和图 3 的横轴标的是 PFLOP/s-days，本站按这个单位重画了两条曲线：</p>
+<div class="dia">
+  <div class="dia-title">简图：按原文表 3 的拟合公式重画的两条曲线（C 以 PF-days 计）</div>
+<svg class="dg" viewBox="0 0 640 330" role="img" aria-label="按论文表 3 的公式重画的 Muon 与 AdamW 拟合曲线" style="--dg-min:600px">
+<rect x="286.9" y="30" width="180.5" height="230" style="fill:var(--surface-2)"/>
+<text x="377.2" y="42" class="t-c t-xs">5 个实验模型覆盖的算力范围（推算）</text>
+<line x1="80" y1="260" x2="600" y2="260" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="80" y1="260" x2="80" y2="30" style="stroke:var(--text-3);stroke-width:1.2"/>
+<line x1="80.0" y1="260" x2="80.0" y2="265" style="stroke:var(--text-3)"/>
+<text x="80.0" y="276" class="t-c t-xs">0.01</text>
+<line x1="228.6" y1="260" x2="228.6" y2="265" style="stroke:var(--text-3)"/>
+<text x="228.6" y="276" class="t-c t-xs">0.1</text>
+<line x1="377.1" y1="260" x2="377.1" y2="265" style="stroke:var(--text-3)"/>
+<text x="377.1" y="276" class="t-c t-xs">1</text>
+<line x1="525.7" y1="260" x2="525.7" y2="265" style="stroke:var(--text-3)"/>
+<text x="525.7" y="276" class="t-c t-xs">10</text>
+<text x="340" y="296" class="t-c t-sm">训练算力 C（PFLOP/s-days，对数刻度）</text>
+<text x="72" y="260.0" class="t-r t-xs">2.0</text>
+<text x="72" y="183.3" class="t-r t-xs">2.5</text>
+<text x="72" y="106.7" class="t-r t-xs">3.0</text>
+<text x="72" y="30.0" class="t-r t-xs">3.5</text>
+<text x="26" y="145" class="t-c t-sm" transform="rotate(-90 26 145)">验证集 LM 损失（8K 长度）</text>
+<path d="M80.0,53.9 L86.5,56.7 L93.0,59.4 L99.5,62.2 L106.0,64.9 L112.5,67.6 L119.0,70.3 L125.5,73.0 L132.0,75.7 L138.5,78.4 L145.0,81.0 L151.5,83.7 L158.0,86.3 L164.5,88.9 L171.0,91.5 L177.5,94.1 L184.0,96.6 L190.5,99.2 L197.0,101.7 L203.5,104.2 L210.0,106.7 L216.5,109.2 L223.0,111.7 L229.5,114.2 L236.0,116.6 L242.5,119.1 L249.0,121.5 L255.5,123.9 L262.0,126.3 L268.5,128.7 L275.0,131.1 L281.5,133.4 L288.0,135.8 L294.5,138.1 L301.0,140.5 L307.5,142.8 L314.0,145.1 L320.5,147.4 L327.0,149.6 L333.5,151.9 L340.0,154.1 L346.5,156.4 L353.0,158.6 L359.5,160.8 L366.0,163.0 L372.5,165.2 L379.0,167.4 L385.5,169.6 L392.0,171.7 L398.5,173.9 L405.0,176.0 L411.5,178.1 L418.0,180.2 L424.5,182.3 L431.0,184.4 L437.5,186.5 L444.0,188.5 L450.5,190.6 L457.0,192.6 L463.5,194.7 L470.0,196.7 L476.5,198.7 L483.0,200.7 L489.5,202.7 L496.0,204.6 L502.5,206.6 L509.0,208.6 L515.5,210.5 L522.0,212.4 L528.5,214.4 L535.0,216.3 L541.5,218.2 L548.0,220.1 L554.5,221.9 L561.0,223.8 L567.5,225.7 L574.0,227.5 L580.5,229.4 L587.0,231.2 L593.5,233.0 L600.0,234.8" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+<line x1="430" y1="62" x2="456" y2="62" style="stroke:var(--c-pred);stroke-width:2.5"/>
+<text x="462" y="62" class="t-sm">AdamW：2.608 · C^−0.054</text>
+<path d="M80.0,78.4 L86.5,81.0 L93.0,83.5 L99.5,86.1 L106.0,88.6 L112.5,91.1 L119.0,93.6 L125.5,96.0 L132.0,98.5 L138.5,100.9 L145.0,103.4 L151.5,105.8 L158.0,108.2 L164.5,110.6 L171.0,113.0 L177.5,115.3 L184.0,117.7 L190.5,120.0 L197.0,122.4 L203.5,124.7 L210.0,127.0 L216.5,129.3 L223.0,131.6 L229.5,133.9 L236.0,136.1 L242.5,138.4 L249.0,140.6 L255.5,142.8 L262.0,145.1 L268.5,147.3 L275.0,149.4 L281.5,151.6 L288.0,153.8 L294.5,155.9 L301.0,158.1 L307.5,160.2 L314.0,162.4 L320.5,164.5 L327.0,166.6 L333.5,168.7 L340.0,170.7 L346.5,172.8 L353.0,174.9 L359.5,176.9 L366.0,178.9 L372.5,181.0 L379.0,183.0 L385.5,185.0 L392.0,187.0 L398.5,189.0 L405.0,190.9 L411.5,192.9 L418.0,194.9 L424.5,196.8 L431.0,198.7 L437.5,200.7 L444.0,202.6 L450.5,204.5 L457.0,206.4 L463.5,208.2 L470.0,210.1 L476.5,212.0 L483.0,213.8 L489.5,215.7 L496.0,217.5 L502.5,219.3 L509.0,221.2 L515.5,223.0 L522.0,224.8 L528.5,226.5 L535.0,228.3 L541.5,230.1 L548.0,231.8 L554.5,233.6 L561.0,235.3 L567.5,237.1 L574.0,238.8 L580.5,240.5 L587.0,242.2 L593.5,243.9 L600.0,245.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<line x1="430" y1="80" x2="456" y2="80" style="stroke:var(--c-enc);stroke-width:2.5"/>
+<text x="462" y="80" class="t-sm">Muon：2.506 · C^−0.052</text>
+<line x1="466.6" y1="195.6" x2="424.5" y2="195.6" style="stroke:var(--text);stroke-width:1.5;marker-end:url(#ah)"/>
+<circle cx="466.6" cy="195.6" r="3.5" style="fill:var(--c-pred)"/>
+<circle cx="420.5" cy="195.6" r="3.5" style="fill:var(--c-enc)"/>
+<text x="600" y="171.6" class="t-r t-xs">AdamW 用 4 PF-days 达到 2.420</text>
+<text x="414.5" y="213.6" class="t-r t-xs">Muon 只要 1.96 PF-days（49%，推算）</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是训练算力（对数刻度），纵轴是验证集损失。橙线是 AdamW，蓝线是 Muon，都是直接用表 3 的公式画的，没有实验点。灰色区域是 5 个实验模型实际覆盖的算力范围（0.25–4 PF-days，推算），区域外的部分是外推。黑色箭头从 AdamW 在 4 PF-days 处的损失水平向左平移，碰到蓝线的位置就是 Muon 达到同样损失所需的算力：约 1.96 PF-days，即 49%（推算）。对应的原图是<a href="https://arxiv.org/html/2502.16982#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>和<a href="https://arxiv.org/html/2502.16982#S0.F1" target="_blank" rel="noopener">图 1(a) ↗</a>，原图有实验点。</div>
+</div>
+<p>论文的结论是：在算力最优的设置下，Muon 只需要 AdamW 约 52% 的训练 FLOPs 就能达到同样的性能，原文图 1(a) 上标注的是 “0.519× FLOPs”。\(1/0.519\approx1.93\)，这就是摘要里的“约 2 倍算力效率”。</p>
+
+<h4 id="n-6-3">3.2.3 把“约 2 倍”拆开看</h4>
+<p>用表 3 的两个公式可以把“同样损失下的算力比”写成一个式子（推算）：令 \(L_{\text{Muon}}(C_M)=L_{\text{AdamW}}(C_A)\)，解出</p>
+<div class="formula">$$\frac{C_M}{C_A}=\Big(\frac{2.506}{2.608}\Big)^{1/0.052}\,C_A^{\,0.054/0.052-1}\approx0.464\times C_A^{\,0.0385}$$</div>
+<p>这个式子说明了几件论文没有明说的事：</p>
+<ul>
+  <li><b>比值不是常数。</b>因为 AdamW 的指数（0.054）比 Muon 的（0.052）稍大，AdamW 的曲线下降得稍快，两条线在右边慢慢靠拢。按公式推算，在 0.25 PF-days 处比值约 0.44，在 4 PF-days 处约 0.49，在 10 PF-days 处约 0.51，在 100 PF-days 处约 0.55。图 1(a) 标的 0.519 接近这个范围的上端，但用三位小数的公式在实验范围内算不出精确的 0.519，可能是因为原图用的是未四舍五入的拟合值，也可能是在别的位置读的。</li>
+  <li><b>推算对指数非常敏感。</b>两个指数只差 0.002，而它们都只给到三位小数。本站试过把两个指数各自在 ±0.0005 内变动，4 PF-days 处的比值会在 0.48–0.50 之间变化，外推得越远误差越大。所以“比值随算力增大而缓慢上升”只是这组拟合的形状，不能当成可靠的预测。</li>
+  <li><b>“2 倍”量的是 FLOPs，不是时间。</b>它比较的是达到同样损失所需的 \(6ND\) 训练算力，没有计入 Newton–Schulz 和额外通信的开销（§2.3 说这部分占比很小），也不是在同一台机器上测的墙钟时间。</li>
+  <li><b>“2 倍”来自稠密小模型。</b>实验模型最大 1.5B、最多 4 PF-days，结构是 Llama 式稠密模型，数据是 Moonshot 的私有语料；后面的 Moonlight 是 MoE，训练 5.7T token，算力约 890 PF-days（推算：\(6\times2.24\text{B}\times5.7\text{T}\approx7.7\times10^{22}\) FLOPs），是 scaling law 实验最大点的 200 多倍。Moonlight 那一级规模上没有做同样的曲线，只有一个同配置的 AdamW 对照（§3.3）。</li>
+</ul>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“Muon 复用 AdamW 的最优超参数”这一点要两面看。一方面，基线 AdamW 是逐档精调过的，Muon 反而没有单独调，这对 AdamW 有利，作者据此认为 Muon 的优势没有被高估。另一方面，模型大小和 token 数的搭配是为 AdamW 选的“算力最优”，Muon 自己的最优搭配可能不同，所以严格说比较的是“在 AdamW 的最优点上，两个优化器谁更好”。另外，每个点只训练一次，论文没有给误差范围。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2502.16982#A2" target="_blank" rel="noopener">附录 B（AdamW 基线的超参数搜索）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">3.3 用 Muon 预训练 Moonlight</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>小模型的 scaling law 只是间接证据。真正把 Muon 用到一个现代架构的大模型上，训练几万亿 token，会怎样？作者用 DeepSeek-V3 的小号架构训练了 Moonlight，并留了一个只换成 AdamW、其他完全相同的对照模型。这一节交代模型、数据、训练流程，以及和对照模型、和其他公开模型的比较。</div>
+
+<h4 id="n-7-1">3.3.1 模型结构</h4>
+<div class="note-pre"><b>先补一点背景：MoE 和 MLA。</b>
+<p><b>混合专家（MoE）</b>把前馈层换成很多个小前馈网络（专家），每个 token 只由路由器挑出其中几个来处理。这样模型的总参数可以很大，但每个 token 实际用到的“激活参数”很少，计算量只和激活参数成正比。<b>多头潜在注意力（MLA）</b>是 DeepSeek 提出的注意力结构，它先把 key 和 value 压缩到一个低维的潜在向量，再按头展开，从而大幅减少推理时的 KV 缓存。这两种结构的细节见 <a href="deepseek-v3.html#n-2-1">DeepSeek-V3 精读 §2.1</a>。</p>
+</div>
+<p>为了在当代架构上检验 Muon，作者采用 DeepSeek-V3 技术报告中的“deepseek-v3-small”架构从头预训练。选它是因为这个架构表现强、而且 DeepSeek 公布了它的结果可以作为参照。模型共有 15.29B 参数、其中每个 token 激活 2.24B；算上嵌入层是 16B 总参数、3B 激活参数，这就是 “Moonlight-16B-A3B” 这个名字的由来。（推算核对：官方配置的词表 163,840、隐藏维度 2048，嵌入层和不共享的输出头合计约 0.67B，2.24 + 0.67 ≈ 2.9B，15.29 + 0.67 ≈ 16.0B。）官方配置里的其他关键数字：27 层，第 1 层是稠密前馈层，其余每层 64 个路由专家加 2 个共享专家，每个 token 选 6 个专家。</p>
+<p>附录 C 列出了相对 DeepSeek-V3 的几处小改动，它们与优化器无关，但读者复现时需要知道：</p>
+<ul>
+  <li><b>不用多 token 预测（MTP）。</b>作者的实验里 MTP 对预训练没有明显好处，为了简单就去掉了。</li>
+  <li><b>改了无辅助损失负载均衡的偏置更新。</b>DeepSeek-V3 用 \(b_i\leftarrow b_i+u\cdot\mathrm{sign}(e_i)\) 调整每个专家的偏置（\(e_i\) 是该专家的负载偏离），本文改成 \(b_i\leftarrow b_i+u\cdot(\mathrm{sign}(e_i)-\overline{\mathrm{sign}(e)})\)，减去所有专家符号的平均值，用来控制偏置整体的大小，同时不改变 top-k 的选择结果（因为所有偏置同时平移不影响排序）。</li>
+  <li><b>门控缩放因子取 2.446。</b>DeepSeek-V2-Lite 不用这个因子，DeepSeek-V3 用 2.5。作者用一段模拟程序（原文图 6）估算出 2.446，目的是让 MoE 层输出的 RMS 和稠密模型相近：程序随机生成 64 个专家的打分，取最大的 6 个、归一化成权重 \(p\)，计算 \(1/\sqrt{\sum p^2}\) 的平均值。</li>
+</ul>
+
+<h4 id="n-7-2">3.3.2 数据与训练流程</h4>
+<p>预训练数据的细节见 Kimi 团队的另一份报告（论文引用的 Team, 2025），预训练阶段最大上下文长度为 8K。训练分三个阶段，权重衰减始终为 0.1：</p>
+<div class="dia">
+  <div class="dia-title">示意图：Moonlight 的预训练流程（数字来自原文 §3.3）</div>
+  <div class="dia-row"><span class="lbl">学习率</span><div class="dia-track"><span class="dia-seg cmp" style="flex:2.2">预热</span><span class="dia-seg kv" style="flex:51.7">余弦衰减：4.2e-4 → 4.2e-5（33B → 5.2T token）</span><span class="dia-seg w" style="flex:5">冷却</span></div></div>
+  <div class="dia-row"><span class="lbl">批大小（8K 样本）</span><div class="dia-track"><span class="dia-seg oth" style="flex:4.2">2048</span><span class="dia-seg kv" style="flex:54.7">4096（200B token 之后）</span></div></div>
+  <div class="dia-row"><span class="lbl">对照与开源</span><div class="dia-track"><span class="dia-seg res" style="flex:12">0 → 1.2T：表 4、表 6 的对照点</span><span class="dia-seg oth" style="flex:46.9">1.2T → 5.7T：只有 Muon 版继续训练</span></div></div>
+  <div class="dia-out">预热：前 2K 步学习率线性升到 4.2e-4（0 → 33B token）。冷却：5.2T → 5.7T，学习率在 100 步内回升到 1e-4，再在 500B token 内线性降到 0，只用质量最高的数学、代码和推理数据。</div>
+  <div class="dia-note"><b>怎么看：</b>三条横条共用同一根“token 数”轴，长度大致按 token 数画，但预热段和第一段批大小被放大了，否则看不见。第三条标出 1.2T 这个位置：表 4 的 Muon / AdamW 对照和表 6 的 SFT 实验都用这里的中间检查点，那时学习率还没衰减到最低、也没有经过冷却。本站示意图。</div>
+</div>
+<p>前两个阶段的无辅助损失偏置更新率是 1e-3，冷却阶段设为 0。官方仓库后来补充的中间检查点说明（<code>Moonlight_intermediate_checkpoints.pdf</code>）给了更具体的步数：第 2K 到 12K 步批大小为 2048，第 12K 到 42K 步为 4096，并同时公开了 Muon 版和 AdamW 版（Moonlight-A）在这些步数上的检查点。按每个样本 8K token 推算，12K 步约 201B token，正好对应正文的 “200B 之后加倍”；42K 步约 1.21T token，正好是表 4 的 1.2T。</p>
+
+<h4 id="n-7-3">3.3.3 1.2T token 处的对照：只换优化器</h4>
+<p>先看最干净的比较。作者在 1.2T token 处，把 Moonlight 和两个“同架构、训练量相近”的模型对比：一个是 DeepSeek 报告里的 DeepSeek-V3-Small（AdamW，1.33T token），另一个是作者自己训练的 <b>Moonlight-A</b>：除了把优化器换成 AdamW，其他训练设置和 Moonlight 完全相同。两者都用 1.2T token 处的中间检查点。下图把表 4 中 Moonlight 与 Moonlight-A 的分差画了出来：</p>
+<div class="dia">
+  <div class="dia-title">简图：同架构、同数据、同为 1.2T token 时，Muon 减 AdamW 的分差</div>
+<svg class="dg" viewBox="0 0 640 354" role="img" aria-label="同一架构、同样数据和 1.2T token 时，Muon 训练的 Moonlight 与 AdamW 训练的 Moonlight-A 的分差" style="--dg-min:560px">
+<text x="20" y="18" class="t-sm t-b">基准</text>
+<text x="200" y="18" class="t-c t-sm t-b">AdamW → Muon</text>
+<text x="360" y="18" class="t-c t-sm t-b">Muon − AdamW（分）</text>
+<line x1="316" y1="36" x2="316" y2="308" style="stroke:var(--border);stroke-width:1"/>
+<text x="316" y="28" class="t-c t-xs">-2</text>
+<line x1="360" y1="36" x2="360" y2="308" style="stroke:var(--border);stroke-width:1.5"/>
+<text x="360" y="28" class="t-c t-xs">0</text>
+<line x1="404" y1="36" x2="404" y2="308" style="stroke:var(--border);stroke-width:1"/>
+<text x="404" y="28" class="t-c t-xs">+2</text>
+<line x1="448" y1="36" x2="448" y2="308" style="stroke:var(--border);stroke-width:1"/>
+<text x="448" y="28" class="t-c t-xs">+4</text>
+<line x1="492" y1="36" x2="492" y2="308" style="stroke:var(--border);stroke-width:1"/>
+<text x="492" y="28" class="t-c t-xs">+6</text>
+<line x1="536" y1="36" x2="536" y2="308" style="stroke:var(--border);stroke-width:1"/>
+<text x="536" y="28" class="t-c t-xs">+8</text>
+<text x="20" y="50" class="t-sm">MMLU</text>
+<text x="96" y="50" class="t-xs">英文</text>
+<text x="200" y="50" class="t-c t-mono">60.2 → 60.4</text>
+<rect x="360.0" y="43" width="4.4" height="14" style="fill:var(--c-enc)"/>
+<text x="370.4" y="50" class="t-xs">+0.2</text>
+<text x="20" y="74" class="t-sm">MMLU-pro</text>
+<text x="96" y="74" class="t-xs">英文</text>
+<text x="200" y="74" class="t-c t-mono">26.8 → 28.1</text>
+<rect x="360.0" y="67" width="28.6" height="14" style="fill:var(--c-enc)"/>
+<text x="394.6" y="74" class="t-xs">+1.3</text>
+<text x="20" y="98" class="t-sm">BBH</text>
+<text x="96" y="98" class="t-xs">英文</text>
+<text x="200" y="98" class="t-c t-mono">45.3 → 43.2</text>
+<rect x="313.8" y="91" width="46.2" height="14" style="fill:var(--c-pred)"/>
+<text x="307.8" y="98" class="t-r t-xs">-2.1</text>
+<text x="20" y="122" class="t-sm">TriviaQA</text>
+<text x="96" y="122" class="t-xs">英文</text>
+<text x="200" y="122" class="t-c t-mono">57.4 → 58.1</text>
+<rect x="360.0" y="115" width="15.4" height="14" style="fill:var(--c-enc)"/>
+<text x="381.4" y="122" class="t-xs">+0.7</text>
+<text x="20" y="146" class="t-sm">HumanEval</text>
+<text x="96" y="146" class="t-xs">代码</text>
+<text x="200" y="146" class="t-c t-mono">29.3 → 37.2</text>
+<rect x="360.0" y="139" width="173.8" height="14" style="fill:var(--c-enc)"/>
+<text x="539.8" y="146" class="t-xs">+7.9</text>
+<text x="20" y="170" class="t-sm">MBPP</text>
+<text x="96" y="170" class="t-xs">代码</text>
+<text x="200" y="170" class="t-c t-mono">49.2 → 52.9</text>
+<rect x="360.0" y="163" width="81.4" height="14" style="fill:var(--c-enc)"/>
+<text x="447.4" y="170" class="t-xs">+3.7</text>
+<text x="20" y="194" class="t-sm">GSM8K</text>
+<text x="96" y="194" class="t-xs">数学</text>
+<text x="200" y="194" class="t-c t-mono">43.8 → 45.0</text>
+<rect x="360.0" y="187" width="26.4" height="14" style="fill:var(--c-enc)"/>
+<text x="392.4" y="194" class="t-xs">+1.2</text>
+<text x="20" y="218" class="t-sm">MATH</text>
+<text x="96" y="218" class="t-xs">数学</text>
+<text x="200" y="218" class="t-c t-mono">16.1 → 19.8</text>
+<rect x="360.0" y="211" width="81.4" height="14" style="fill:var(--c-enc)"/>
+<text x="447.4" y="218" class="t-xs">+3.7</text>
+<text x="20" y="242" class="t-sm">CMath</text>
+<text x="96" y="242" class="t-xs">数学</text>
+<text x="200" y="242" class="t-c t-mono">57.8 → 60.2</text>
+<rect x="360.0" y="235" width="52.8" height="14" style="fill:var(--c-enc)"/>
+<text x="418.8" y="242" class="t-xs">+2.4</text>
+<text x="20" y="266" class="t-sm">C-Eval</text>
+<text x="96" y="266" class="t-xs">中文</text>
+<text x="200" y="266" class="t-c t-mono">57.2 → 59.9</text>
+<rect x="360.0" y="259" width="59.4" height="14" style="fill:var(--c-enc)"/>
+<text x="425.4" y="266" class="t-xs">+2.7</text>
+<text x="20" y="290" class="t-sm">CMMLU</text>
+<text x="96" y="290" class="t-xs">中文</text>
+<text x="200" y="290" class="t-c t-mono">58.2 → 58.8</text>
+<rect x="360.0" y="283" width="13.2" height="14" style="fill:var(--c-enc)"/>
+<text x="379.2" y="290" class="t-xs">+0.6</text>
+<text x="20" y="328" class="t-xs">数字取自原文表 4（两者都是 1.2T token 处的中间检查点，学习率还没退火）；差值为推算。</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个基准，中间一列是 Moonlight-A（AdamW）到 Moonlight（Muon）的分数，右边的条形是两者之差：蓝色表示 Muon 更高，橙色表示 AdamW 更高。11 项里 10 项 Muon 更高；差距最大的是代码（HumanEval +7.9、MBPP +3.7）和数学（MATH +3.7），BBH 则是 AdamW 高 2.1 分。对应<a href="https://arxiv.org/html/2502.16982#S3.T4" target="_blank" rel="noopener">原文表 4 ↗</a>。</div>
+</div>
+<p>论文的解读是：作为 AdamW 基线，Moonlight-A 本身就比同类公开模型强（比如 MMLU 60.2，而 DeepSeek-V3-Small 是 53.3），说明基线没有被故意做弱；Moonlight 又明显好于 Moonlight-A，证明 Muon 在这个规模上依然有效。作者特别指出 Muon 在数学和代码上优势尤其明显，并请研究社区进一步研究这个现象。</p>
+
+<h4 id="n-7-4">3.3.4 训练完 5.7T token 之后：和公开模型横向比较</h4>
+<p>Moonlight 训练完全部 5.7T token（包括冷却阶段）后，作者把它和规模相近的公开模型比较（原文表 5）：</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th class="num">Llama3.2-3B</th><th class="num">Qwen2.5-3B</th><th class="num">DSV2-Lite</th><th class="num">Moonlight</th></tr>
+  <tr><td>激活 / 总参数（不含嵌入）</td><td class="num">2.81B / 2.81B</td><td class="num">2.77B / 2.77B</td><td class="num">2.24B / 15.29B</td><td class="num">2.24B / 15.29B</td></tr>
+  <tr><td>训练 token</td><td class="num">9T</td><td class="num">18T</td><td class="num">5.7T</td><td class="num">5.7T</td></tr>
+  <tr><td>优化器</td><td class="num">AdamW</td><td class="num">未公开</td><td class="num">AdamW</td><td class="num">Muon</td></tr>
+  <tr><td>MMLU</td><td class="num">54.7</td><td class="num">65.6</td><td class="num">58.3</td><td class="num">70.0</td></tr>
+  <tr><td>MMLU-pro</td><td class="num">25.0</td><td class="num">34.6</td><td class="num">25.5</td><td class="num">42.4</td></tr>
+  <tr><td>BBH</td><td class="num">46.8</td><td class="num">56.3</td><td class="num">44.1</td><td class="num">65.2</td></tr>
+  <tr><td>TriviaQA</td><td class="num">59.6</td><td class="num">51.1</td><td class="num">65.1</td><td class="num">66.3</td></tr>
+  <tr><td>HumanEval</td><td class="num">28.0</td><td class="num">42.1</td><td class="num">29.9</td><td class="num">48.1</td></tr>
+  <tr><td>MBPP</td><td class="num">48.7</td><td class="num">57.1</td><td class="num">43.2</td><td class="num">63.8</td></tr>
+  <tr><td>GSM8K</td><td class="num">34.0</td><td class="num">79.1</td><td class="num">41.1</td><td class="num">77.4</td></tr>
+  <tr><td>MATH</td><td class="num">8.5</td><td class="num">42.6</td><td class="num">17.1</td><td class="num">45.3</td></tr>
+  <tr><td>CMath</td><td class="num">–</td><td class="num">80.0</td><td class="num">58.4</td><td class="num">81.1</td></tr>
+  <tr><td>C-Eval</td><td class="num">–</td><td class="num">75.0</td><td class="num">60.3</td><td class="num">77.2</td></tr>
+  <tr><td>CMMLU</td><td class="num">–</td><td class="num">75.0</td><td class="num">64.3</td><td class="num">78.2</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 5。TriviaQA 由作者对所有模型用完整测试集重新测过。</p>
+<p>Moonlight 在大多数基准上领先；和它结构相同、训练 token 数也相同的 DeepSeek-V2-Lite 被拉开很大差距（MMLU 70.0 对 58.3）；训练数据多得多的稠密模型 Qwen2.5-3B（18T token）在 GSM8K 上仍略高（79.1 对 77.4）。附录 E 的表 10 还和训练算力更大的 7–9B 模型做了比较：在 8 项里，Moonlight 除 TriviaQA 外都超过 Llama3.1-8B（15T token）；但 Qwen2.5-7B（18T token）除 TriviaQA 外都比 Moonlight 高（比如 MMLU 74.2 对 70.0，HumanEval 57.9 对 48.1）。原文图 1(b) 把各模型画在“训练 FLOPs–MMLU”平面上，Moonlight（5.7T，约 \(7.7\times10^{22}\) FLOPs，推算）落在当时的帕累托前沿之外；作者注明其他模型的 FLOPs 和分数取自 OLMo 2 的论文。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>表 5 和图 1(b) <b>不是</b>优化器的对照实验。这些模型的训练数据、分词器、数据配比、后期冷却数据都不同，而 Moonlight 的冷却阶段专门用了最高质量的数学、代码和推理数据。所以 Moonlight 领先 DeepSeek-V2-Lite 12 分 MMLU，不能理解为“Muon 带来了 12 分”。真正只改了优化器的比较只有表 4（1.2T token 处，Muon 比 AdamW 在 MMLU 上只高 0.2 分）。另外，“3B 模型”这个说法也要小心：Moonlight 每个 token 只激活约 3B 参数，但总参数 16B，存放权重所需的显存和 16B 稠密模型相当。</div>
+
+<h4 id="n-7-5">3.3.5 训练稳定性（附录 D）</h4>
+<p>附录 D 记录了训练过程中的几个现象，对后来的 Kimi K2 很重要：</p>
+<ul>
+  <li><b>没有损失尖峰。</b>整个训练过程很平稳，损失和梯度范数都没有出现尖峰（原文图 7 的 (a)(b) 把 Moonlight 和 Moonlight-A 的曲线画在一起）。</li>
+  <li><b>最大注意力 logit 在涨。</b>作者监测了“整个全局批次里最大的那一个注意力 logit”（softmax 之前的 \(q^{\top}k/\sqrt d\)）。损失和梯度都平稳的同时，某些层的这个值在训练初期一路上升，超过了 100；而 AdamW 在控制这个指标上表现得更好。为了判断问题有多严重，他们又统计了“一个批次里超过 100 的 logit 所占比例”，这个比例一直很低（约 \(10^{-4}\)），而且随着训练进行，最大 logit 会逐渐回落。</li>
+  <li><b>对 RMSNorm 的缩放参数也要做权重衰减。</b>作者强调这一点对稳定性至关重要，因为它能防止每一层的输出 RMS 过大。这和常见做法（不对归一化层的参数做权重衰减）不同。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：注意力 logit 太大为什么危险。</b>
+<p>注意力权重是对 logit 做 softmax 得到的。logit 很大时，softmax 会变得极其“尖锐”：几乎全部权重压在一个 token 上，其他位置的梯度接近 0，模型等于失去了在这一步调整注意力分布的能力；数值上也更容易溢出或丢失精度。logit 等于 query 和 key 的内积，而 query、key 又由权重矩阵 \(W_q\)、\(W_k\) 算出，所以这两个矩阵的奇异值一变大，logit 就会成倍增长。</p>
+</div>
+<p>在 Moonlight 的规模上，这个现象还只是一个“值得注意”的指标；到了 1T 参数的 Kimi K2，它变成了必须解决的不稳定问题，详见“后来怎么样了”。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a> · <a href="https://arxiv.org/html/2502.16982#A3" target="_blank" rel="noopener">附录 C（架构改动）↗</a> · <a href="https://arxiv.org/html/2502.16982#A4" target="_blank" rel="noopener">附录 D（训练稳定性）↗</a> · <a href="https://arxiv.org/html/2502.16982#A5" target="_blank" rel="noopener">附录 E（与更大模型比较）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">3.4 奇异值谱：Muon 训练出的权重更“均匀”吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>§2.1 的直觉是：Muon 让更新在各个方向上同等对待，所以权重矩阵能在更多方向上学到东西。这个直觉能不能在训练出来的权重上直接看到？作者用“SVD 熵”来衡量一个矩阵的奇异值分布是否均匀，比较了 Muon 和 AdamW 训练出的权重。</div>
+<div class="note-pre"><b>先补一点背景：SVD 熵。</b>
+<p>把一个矩阵的奇异值平方 \(\sigma_i^2\) 归一化成一个概率分布 \(p_i=\sigma_i^2/\sum_j\sigma_j^2\)（它的含义是“第 \(i\) 个方向占了矩阵总能量的多少”），再算这个分布的熵并除以最大可能的熵 \(\log n\)：</p>
+<div class="formula">$$H(\sigma)=-\frac{1}{\log n}\sum_{i=1}^{n}p_i\log p_i,\qquad p_i=\frac{\sigma_i^2}{\sum_{j}\sigma_j^2}$$</div>
+<p>结果在 0 到 1 之间：所有奇异值一样大时等于 1；能量几乎全集中在一个方向上时接近 0。它衡量的是“这个矩阵有效地用到了多少个方向”。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：三种奇异值分布的 SVD 熵（n = 4，推算）</div>
+<svg class="dg" viewBox="0 0 640 210" role="img" aria-label="三种奇异值分布及其 SVD 熵" style="--dg-min:560px">
+<text x="115" y="20" class="t-c t-sm t-b">平坦：4 个方向一样强</text>
+<rect x="50" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="63" y="162" class="t-c t-xs">σ₁</text>
+<rect x="86" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="99" y="162" class="t-c t-xs">σ₂</text>
+<rect x="122" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="135" y="162" class="t-c t-xs">σ₃</text>
+<rect x="158" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="171" y="162" class="t-c t-xs">σ₄</text>
+<line x1="44" y1="150" x2="196" y2="150" style="stroke:var(--text-3)"/>
+<text x="115" y="184" class="t-c t-sm">SVD 熵 H = 1.00</text>
+<text x="320" y="20" class="t-c t-sm t-b">逐个减半</text>
+<rect x="255" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="268" y="162" class="t-c t-xs">σ₁</text>
+<rect x="291" y="100.0" width="26" height="50.0" style="fill:var(--c-enc)"/>
+<text x="304" y="162" class="t-c t-xs">σ₂</text>
+<rect x="327" y="125.0" width="26" height="25.0" style="fill:var(--c-enc)"/>
+<text x="340" y="162" class="t-c t-xs">σ₃</text>
+<rect x="363" y="137.5" width="26" height="12.5" style="fill:var(--c-enc)"/>
+<text x="376" y="162" class="t-c t-xs">σ₄</text>
+<line x1="249" y1="150" x2="401" y2="150" style="stroke:var(--text-3)"/>
+<text x="320" y="184" class="t-c t-sm">SVD 熵 H = 0.52</text>
+<text x="525" y="20" class="t-c t-sm t-b">一个方向独大</text>
+<rect x="460" y="50.0" width="26" height="100.0" style="fill:var(--c-enc)"/>
+<text x="473" y="162" class="t-c t-xs">σ₁</text>
+<rect x="496" y="140.0" width="26" height="10.0" style="fill:var(--c-enc)"/>
+<text x="509" y="162" class="t-c t-xs">σ₂</text>
+<rect x="532" y="140.0" width="26" height="10.0" style="fill:var(--c-enc)"/>
+<text x="545" y="162" class="t-c t-xs">σ₃</text>
+<rect x="568" y="140.0" width="26" height="10.0" style="fill:var(--c-enc)"/>
+<text x="581" y="162" class="t-c t-xs">σ₄</text>
+<line x1="454" y1="150" x2="606" y2="150" style="stroke:var(--text-3)"/>
+<text x="525" y="184" class="t-c t-sm">SVD 熵 H = 0.12</text>
+<text x="320" y="204" class="t-c t-xs">推算：按论文 §3.4 的公式，n = 4。熵越接近 1，奇异值越平均；越接近 0，越是被一两个方向主导。</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每组四根柱子是一个矩阵的 4 个奇异值。左边四个方向一样强，熵等于 1；中间每个方向比前一个弱一半，熵约 0.52；右边一个方向独大，熵只有 0.12。论文图 4 里各组权重的平均熵大致在 0.7–0.98 之间（读图），Muon 和 AdamW 的差距远没有这里夸张，但方向一致。本站示意图。</div>
+</div>
+<p>作者在 1.2T token 的预训练过程中，取多个检查点，把权重矩阵分成六组（注意力的 q/o 投影、k/v 投影、路由专家、共享专家、路由器、第一层稠密前馈），每组算平均 SVD 熵（专家太多，只抽了 64 个里的 3 个）。<a href="https://arxiv.org/html/2502.16982#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>显示：在所有检查点、所有六组里，Muon 训练出的权重 SVD 熵都高于 AdamW；差距最大的是路由器的权重，作者据此认为 MoE 模型可能从 Muon 中获益更多。附录 F 又把 1.2T 检查点上每一个权重矩阵的奇异值分布逐一画了出来（原文图 9、图 10），超过 90% 的矩阵在 Muon 下的 SVD 熵更高，奇异值分布更平坦。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>SVD 熵更高只说明 Muon 训练出的权重“用到了更多方向”，这和 Muon 的设计直觉一致；但它是相关性的证据，不能说明“熵更高”就是模型更好的原因。另外，“MoE 从 Muon 中获益更多”是从路由器熵差最大推出来的推测，论文没有做稠密模型和 MoE 之间的对照实验。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3.SS4" target="_blank" rel="noopener">英文原文 §3.4 ↗</a> · <a href="https://arxiv.org/html/2502.16982#A6" target="_blank" rel="noopener">附录 F ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">3.5 监督微调：Muon 在 SFT 阶段还有用吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>预训练之后通常还要做监督微调（SFT）：用人工整理的“指令—回答”数据把基座模型调成能对话的助手。Muon 的优势能不能延续到 SFT？如果预训练用的是 AdamW（现存的绝大多数开源模型都是），改用 Muon 做 SFT 有没有好处？</div>
+<p>作者做了一个 2×2 的交叉实验：把 1.2T token 处的 Moonlight（Muon 预训练）和 Moonlight-A（AdamW 预训练），分别用 Muon 和 AdamW 在开源的 tulu-3-sft-mixture 数据集上微调两轮（数据长度 4K，学习率从 \(5\times10^{-5}\) 线性降到 0）：</p>
+<div class="table-wrap"><table>
+  <tr><th>预训练 → SFT</th><th class="num">MMLU（0-shot CoT）</th><th class="num">HumanEval</th><th class="num">MBPP</th><th class="num">GSM8K（5-shot）</th></tr>
+  <tr><td><b>Muon → Muon</b></td><td class="num"><b>55.7</b></td><td class="num"><b>57.3</b></td><td class="num"><b>55.6</b></td><td class="num"><b>68.0</b></td></tr>
+  <tr><td>AdamW → Muon</td><td class="num">55.3</td><td class="num">53.7</td><td class="num">55.5</td><td class="num">62.1</td></tr>
+  <tr><td>Muon → AdamW</td><td class="num">50.2</td><td class="num">52.4</td><td class="num">55.2</td><td class="num">64.9</td></tr>
+  <tr><td>AdamW → AdamW</td><td class="num">52.0</td><td class="num">53.1</td><td class="num">55.2</td><td class="num">64.6</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 6。</p>
+<p>预训练和 SFT 都用 Muon 的组合在四项上全部最好。但两个“交叉”组合没有表现出明显优势：AdamW 预训练的模型改用 Muon 微调，MMLU 高了（55.3 对 52.0），GSM8K 却低了（62.1 对 64.6）；Muon 预训练的模型改用 AdamW 微调，MMLU 甚至低于全 AdamW 组合（50.2 对 52.0）。作者的总结是：Muon 的好处在 SFT 阶段可以延续，但前提是预训练也用 Muon；优化器不一致时，用 Muon 做 SFT 没有明显优势。</p>
+<p>他们又在一个公开的 AdamW 预训练模型上验证：用 tulu-3-sft-mixture（打包到 8K 长度，学习率从 \(2\times10^{-5}\) 余弦降到 \(2\times10^{-6}\)）微调 Qwen2.5-7B 基座模型（原文表 7）：</p>
+<div class="table-wrap"><table>
+  <tr><th>Qwen2.5-7B 的 SFT 优化器</th><th class="num">MMLU</th><th class="num">HumanEval</th><th class="num">MBPP</th><th class="num">GSM8K</th></tr>
+  <tr><td>Adam</td><td class="num">71.4</td><td class="num">79.3</td><td class="num">71.9</td><td class="num">89.8</td></tr>
+  <tr><td>Muon</td><td class="num">70.8</td><td class="num">77.4</td><td class="num">71.6</td><td class="num">85.8</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 7。</p>
+<p>论文说两者“相当”，但仔细看，Muon 在四项上都略低，GSM8K 低了 4 分。作者由此得出结论：要充分发挥 Muon，最好在预训练阶段就用它，而不是只在 SFT 阶段用。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这两组实验都是每种组合只跑一次，评测项目只有四个，几个百分点的差别可能落在评测波动之内；HumanEval 只有 164 道题，1 分大约对应不到 2 道题（推算）。“预训练和微调最好用同一种优化器”目前是一个经验观察，论文在讨论部分把它列为有待理解的问题。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3.SS5" target="_blank" rel="noopener">英文原文 §3.5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">3.6 结果的份量：哪些结论站得住，条件是什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上面各节的数字分别是在什么条件下得到的、和什么比、匹配了什么？把它们放在一起看，哪些结论证据比较扎实，哪些需要打折扣，哪些论文根本没有披露？</div>
+<p><b>“约 2 倍算力效率”。</b>它是在 399M–1.5B 的 Llama 式稠密模型、0.25–4 PF-days 的算力范围内，比较两条拟合曲线得到的“同样验证损失所需 FLOPs 之比”。匹配的是：同一私有数据、同一模型结构、同一组为 AdamW 网格搜索出来的模型大小、token 数、学习率和批大小。AdamW 基线逐档精调过，Muon 没有单独调，这一点对 AdamW 有利。没有匹配、也没有披露的是：每个点跑了几次、拟合的误差范围、AdamW 的 \(\beta_2\) 等细节超参数。按论文公式推算，这个比值随算力缓慢变大（§3.2.3），所以把它外推到大得多的规模要谨慎。</p>
+<p><b>别人测出来是多少。</b>2025 年 9 月，Wen、Hall、Ma、Liang 发表了一项系统的优化器比较（<a href="https://arxiv.org/abs/2509.02046" target="_blank" rel="noopener">Fantastic Pretraining Optimizers and Where to Find Them ↗</a>）：对每个优化器都做了大范围超参数搜索，模型从 0.1B 到 1.2B，数据量从 1 倍到 8 倍 Chinchilla 最优。他们的结论是：Muon、SOAP 这类基于矩阵的优化器确实最快，但相对精调过的 AdamW，加速比从 0.1B 模型的约 1.4 倍降到 1.2B 模型的约 1.1 倍；而且在 8 倍 Chinchilla 以上的数据量下，Muon 会被 SOAP 和 Kron 超过。他们认为很多“2 倍”的说法反映的是基线没调好，并特别指出本文只考察了约 1 倍 Chinchilla 的区间。同年 5 月 Essential AI 的 <a href="https://arxiv.org/abs/2505.02222" target="_blank" rel="noopener">Practical Efficiency of Muon for Pretraining ↗</a> 则在最多 4B 参数的模型上发现，Muon 在“算力–时间”的权衡上比 AdamW 更优，尤其在大批量（超过临界批大小）时更能保住数据效率。两项研究的设置、数据和调参方式都和本文不同，不能直接相减，但它们共同说明：Muon 的优势是真实的，幅度则强烈依赖于基线调得多好、模型多大、训练多久。</p>
+<p><b>Moonlight 对 Moonlight-A。</b>这是全文唯一在大规模上“只换优化器”的对照：同架构、同数据、同训练流程，比较 1.2T token 处的中间检查点（学习率尚未衰减到最低，没有冷却）。11 项基准里 Muon 赢 10 项，代码和数学的差距最大。但每个模型只训练了一次；基准多为几百到一千多道题的小测试集，单次评测本身就有几分的波动；而且 AdamW 版直接沿用了 Muon 版的学习率和权重衰减（它们本来就是按 AdamW 的规律定的，所以这对 AdamW 未必不利，但论文没有说 Moonlight-A 是否单独调过）。论文没有给出 5.7T 全程的 AdamW 对照。</p>
+<p><b>Moonlight 对其他公开模型。</b>表 5、表 10 和图 1(b) 是跨团队、跨数据的横向比较，数据、配比、冷却阶段都不同，DeepSeek-V3-Small 的分数直接取自 DeepSeek 的报告，图 1(b) 里其他模型的 FLOPs 取自 OLMo 2 的论文。它们说明 Moonlight 是一个有竞争力的模型，不能说明多出来的分数有多少来自优化器。</p>
+<p><b>分布式 Muon 的开销。</b>“通信是 AdamW 的 1–1.25 倍”是按字节数做的分析，“没有明显额外延迟”是定性描述。论文没有披露 GPU 型号、卡数、并行配置、每步耗时、MFU，也没有给出优化器步骤实际占用的时间。“优化器耗时通常只占前向反向的 1%–3%”同样没有附测量条件。</p>
+<p><b>SFT 结论。</b>两组实验各四个基准、每种组合一次；“预训练和微调最好用同一种优化器”是一个有意思的观察，但证据量还很小。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">4–5 讨论与结论</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者认为接下来还有哪些问题值得做？全文的结论是什么？</div>
+<p>讨论部分列了三个方向：</p>
+<ul>
+  <li><b>把所有参数都纳入 Muon。</b>目前嵌入层、输出头和归一化参数仍由 AdamW 负责，两种优化器混用虽然能工作，但并不优雅。怎样让 Muon 统一优化全部参数，是一个值得研究的问题。</li>
+  <li><b>推广到一般的 Schatten 范数。</b>Muon 可以理解为谱范数下的最速下降（§2.1.3）。谱范数只是 Schatten-\(p\) 范数在 \(p\to\infty\) 时的特例，换成其他 \(p\) 也许能得到更好的优化器。</li>
+  <li><b>理解并解决“预训练–微调不匹配”。</b>用 AdamW 预训练的模型用 Muon 微调效果不理想，反过来也一样（§3.5）。这使得现存的大量 AdamW 预训练检查点很难享受到 Muon 的好处，需要从理论上弄清原因。</li>
+</ul>
+<p>结论重述了全文：通过加入权重衰减和按形状调整更新幅度，Muon 被成功用于一个 3B/16B 参数、训练 5.7T token 的 MoE 模型；结果表明它可以替代 AdamW 成为大规模 LLM 训练的标准优化器，在训练效率和模型性能上都有明显优势。作者开源了实现、Moonlight 模型和中间检查点，希望推动可扩展优化方法的研究。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.16982#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2502.16982#S5" target="_blank" rel="noopener">§5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这份报告发布后，Muon 在不到一年里从“小模型速通比赛里的技巧”变成了好几个前沿开源大模型的默认优化器。下面按时间讲最直接的几条后续。</p>
+
+<h4 id="n-impact-1">MuonClip：Kimi K2 怎样压住注意力 logit</h4>
+<div class="note-pre"><b>先补一点背景：QK-Norm 和 logit soft-cap 为什么不够用。</b>
+<p>控制注意力 logit 过大，常见的办法有两种。<b>logit soft-cap</b> 是在 softmax 之前把 logit 用一个平滑函数压到某个上限以内；但它只是事后截断，\(q^{\top}k\) 本身仍然可以继续长大。<b>QK-Norm</b> 是在算内积之前先对 query 和 key 做归一化，从源头上限制 logit；但 MLA 在推理时不会把每个头的 key 完整地算出来（它缓存的是压缩后的潜在向量），所以没法对 key 做这种归一化。</p>
+</div>
+<p>2025 年 7 月，月之暗面发布了 <a href="https://arxiv.org/abs/2507.20534" target="_blank" rel="noopener">Kimi K2 技术报告 ↗</a>：一个总参数 1T、激活 32B 的 MoE 模型，结构与 DeepSeek-V3 类似（MLA + 超稀疏 MoE）。报告写明 K2 沿用了本文的 Muon、权重衰减和“一致的更新 RMS”缩放，并引用本文的结论作为选用 Muon 的理由。但规模放大后，§3.3.5 里那个“最大注意力 logit 在涨”的现象变成了真正的问题：他们用原版 Muon 训练一个中等规模的 MoE（激活 9B、总参数 53B），最大 logit 很快超过 1000，导致明显的损失尖峰，偶尔还会发散。报告认为这种现象在 Muon 下比在 AdamW 下更常见。</p>
+<p>他们的解决办法叫 <b>QK-Clip</b>：每做完一步 Muon 更新，就检查每个注意力头在这一批数据前向时出现过的最大 logit \(S^h_{\max}\)；如果它超过阈值 \(\tau\)，就把这个头的 query 和 key 投影权重缩小，使下一步的 logit 回到阈值附近。这个检查不改变当前这一步的前向和反向计算，只是把最大 logit 当作一个信号，来决定对权重增长踩多重的刹车。</p>
+<div class="formula">$$\gamma_h=\min\Big(1,\ \frac{\tau}{S^h_{\max}}\Big),\qquad W^h_{q}\leftarrow\sqrt{\gamma_h}\,W^h_{q},\qquad W^h_{k}\leftarrow\sqrt{\gamma_h}\,W^h_{k}$$</div>
+<p>两边各乘 \(\sqrt{\gamma_h}\)，内积就正好乘以 \(\gamma_h\)。只有少数头会出现 logit 爆炸，所以裁剪是按头分别做的，尽量少干预训练。对 MLA，只缩放每个头独有的部分：不带位置编码的 query、key 分量各乘 \(\sqrt{\gamma_h}\)，每个头独有的带 RoPE 的 query 分量乘 \(\gamma_h\)，所有头共享的 RoPE key 分量不动，以免影响其他头。把权重衰减、更新 RMS 对齐和 QK-Clip 合在一起，就叫 <b>MuonClip</b>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：MuonClip 的一步（按 Kimi K2 报告的算法 1）</div>
+  <div class="dia-flow"><span class="dia-box enc">① Muon 更新<small>动量 → Newton–Schulz → 乘 \(0.2\sqrt{\max(n,m)}\) → 加权重衰减</small></span><span class="dia-arrow">→</span><span class="dia-box">② 取出每个头的 \(S^h_{\max}\)<small>前向时已经算过，不需要额外前向</small></span><span class="dia-arrow">→</span><span class="dia-box pred">③ 若 \(S^h_{\max}&gt;\tau\)<small>K2 取 \(\tau=100\)</small></span><span class="dia-arrow">→</span><span class="dia-box reg">④ 只缩放这个头的 \(W_q\)、\(W_k\)<small>系数 \(\sqrt{\tau/S^h_{\max}}\)；共享的 RoPE key 不动</small></span></div>
+  <div class="dia-note"><b>怎么看：</b>①是本文的 Muon（式 4）；②–④是 K2 新加的 QK-Clip，在每步更新之后执行，只作用于 logit 超标的那几个头。本站示意图。</div>
+</div>
+<p>效果：K2 用 \(\tau=100\) 的 MuonClip 预训练了 15.5T token，报告称全程没有一次损失尖峰；最大 logit 一开始很快涨到 100 并被压在那里，大约训练到 30% 的步数之后才自然回落到稳定的范围。在小规模（激活 0.5B、总参数 3B）上用更激进的 \(\tau=30\) 做对照，损失曲线几乎不受影响。报告附录还给了一个解释为什么 Muon 更容易出现 logit 爆炸的假说：Muon 的更新所有奇异值都相等、有效秩很高，更新的奇异向量更容易和权重已有的奇异向量对齐，使 \(W_q\)、\(W_k\) 的奇异值不断累加；而 logit 取决于 \(W_qW_k^{\top}\)，增长会被平方放大。报告还引用本文 §3.4 的结论（Muon 训练出的权重 SVD 熵更高）作为佐证。K2 的 SFT 和强化学习阶段也用 Muon，理由正是本文 §3.5 的发现：Muon 预训练的检查点用 Muon 微调效果最好。之后的 Kimi Linear 技术报告在对比实验中也使用了 MuonClip，见本站 <a href="kimi-linear.html">Kimi Linear 精读</a>和<a href="../legacy/tracks/ai-infra/20-kimi-linear.html">拆解页</a>。</p>
+
+<h4 id="n-impact-2">谁在用：从开源模型到 PyTorch</h4>
+<ul>
+  <li><b>GLM-4.5（智谱，2025-08）。</b><a href="https://arxiv.org/abs/2508.06471" target="_blank" rel="noopener">技术报告 ↗</a>写明：除词嵌入、偏置和 RMSNorm 权重外，所有参数都用 Muon，Newton–Schulz 迭代 5 步，动量 0.95，并把更新 RMS 缩放到 0.2，也就是直接采用了本文的配方。他们观察到 Muon 能加快收敛，并且能承受更大的批大小。</li>
+  <li><b>PyTorch 2.9。</b>PyTorch 从 2.9 版起内置 <code>torch.optim.Muon</code>（2.8 版的文档里还没有）。它的 <code>adjust_lr_fn</code> 参数提供两种选择：<code>"original"</code> 按 Muon 原作者的方式缩放，<code>"match_rms_adamw"</code> 按本文的 \(0.2\sqrt{\max(A,B)}\) 缩放，默认是前者。</li>
+  <li><b>DeepSeek-V4（2026-04）。</b><a href="https://arxiv.org/abs/2606.19348" target="_blank" rel="noopener">技术报告 ↗</a>说明 V4 对大部分模块使用 Muon，并“按照本文”加了权重衰减（0.1）、Nesterov 动量和更新 RMS 缩放（目标 0.18），嵌入层、输出头、RMSNorm 和 mHC 的部分参数仍用 AdamW。不同之处有两点：一是用 10 步“混合” Newton–Schulz，前 8 步用本文的快速系数，后 2 步换成 (2, −1.5, 0.5) 让奇异值精确收敛到 1（正好对应 §2.1.2 说的“快速系数不收敛到 1”）；二是 V4 的注意力结构可以直接对 query 和 KV 做 RMSNorm，所以不需要 QK-Clip。见 <a href="../legacy/tracks/ai-infra/23-deepseek-v4.html#c-muon">DeepSeek-V4 拆解页 §3.3</a>。</li>
+  <li><b>NVIDIA 的统计。</b>NVIDIA 在 2026-04 的技术博客里称 Muon 已被用于训练 Kimi K2 和 GLM-5 等开源模型。</li>
+</ul>
+
+<h4 id="n-impact-3">分布式实现的后续：不再切开矩阵</h4>
+<p>本文的分布式方案是“仍按元素切分，跨分片的矩阵临时收齐”。后来的实现大多走向另一条路：干脆不切开矩阵，而是把整个矩阵分配给某一张卡。</p>
+<ul>
+  <li><b>Megatron Core。</b>作者提交的概念验证 PR 没有被合并（2026-01-29 关闭）。NVIDIA 后来在 Megatron Core 中加入了 Muon 和一个<b>按层分配</b>的分布式优化器：每张卡负责若干个完整的层，因而能直接对完整矩阵做正交化，代价是各卡负责的参数量不同，参数 all-gather 要支持不等长的数据。NVIDIA 博客（2026-04-22）给出的数字是：在 256 张 GB300 上训练 Kimi K2 结构（MXFP8），AdamW 为每卡 1,051 TFLOP/s，Muon 为 1,080，其中 51 是 Newton–Schulz 本身的计算；只算模型部分是 1,029，比 AdamW 低约 2%（推算）。这是厂商报告的单次测量。</li>
+  <li><b>DeepSeek-V4 的“Muon ZeRO”。</b>对稠密参数，限制 ZeRO 的切分规模，用背包算法把完整矩阵分给各卡、让负载大致均衡，再把每张卡的桶填充到一样大以便做 reduce-scatter，填充带来的显存开销通常低于 10%；对 MoE 参数，把所有专家的矩阵展平后填充，保证切分时不会切开任何一个矩阵。它还利用“Newton–Schulz 在 bf16 下依然稳定”这一点，把 MoE 梯度用随机舍入压成 bf16 再同步，通信量减半。</li>
+  <li><b>Dion。</b>Ahn 等人（2025-04）提出 <a href="https://arxiv.org/abs/2504.05295" target="_blank" rel="noopener">Dion ↗</a>，用对动量缓冲区做摊销的幂迭代代替 Newton–Schulz，不需要重建完整矩阵，天然兼容权重分片，还可以只做低秩的正交化更新来进一步省通信。</li>
+</ul>
+<p>截至 2026-10-20，本文仍只有 arXiv 第 1 版，本站没有查到正式发表的会议或期刊版本。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面。论文共 28 位作者，27 位署名 Moonshot AI，1 位署名 UCLA。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Jingyuan Liu</b>（第一作者）<div class="aff">Moonshot AI（论文署名）</div>同月发布的 <a href="moba.html">MoBA</a>（块稀疏注意力）也是他参与的工作。</div>
+  <div class="author-card"><b>Jianlin Su（苏剑林）</b><div class="aff">Moonshot AI（论文署名）</div>RoFormer（旋转位置编码 RoPE）的第一作者，见本站 <a href="roformer.html">RoFormer 精读</a>。个人博客“科学空间”写了大量优化器推导，Kimi 官方介绍 Moonlight 时链接了他的两篇 Muon 文章（见“延伸阅读”）。</div>
+  <div class="author-card"><b>Xingcheng Yao</b><div class="aff">UCLA（论文署名）</div>论文中唯一署名在 Moonshot AI 之外的作者。</div>
+  <div class="author-card"><b>Yuxin Wu（吴育昕）</b><div class="aff">Moonshot AI；个人主页称在月之暗面做基础模型</div>此前在 Google Brain 和 Facebook AI Research 工作；Detectron2 的作者之一，Group Normalization（ECCV 2018，最佳论文荣誉提名）和 MoCo（CVPR 2020）的作者；本科清华大学，硕士卡内基梅隆大学（据个人主页）。</div>
+  <div class="author-card senior"><b>Xinyu Zhou（周昕宇）</b>（通讯作者）<div class="aff">Moonshot AI（论文署名）</div></div>
+  <div class="author-card senior"><b>Zhilin Yang（杨植麟）</b><div class="aff">Moonshot AI（论文署名）；个人主页称在创业</div>2019 年获卡内基梅隆大学博士学位（导师 Ruslan Salakhutdinov 与 William Cohen），本科清华大学；曾在 Meta AI 和 Google Brain 工作；XLNet、Transformer-XL、HotpotQA 的作者（据个人主页）。</div>
+</div>
+<p class="w-note">其余作者：Zhejun Jiang、Guokun Lai、Yulun Du、Yidao Qin、Weixin Xu、Enzhe Lu、Junjie Yan、Yanru Chen、Huabin Zheng、Yibo Liu、Shaowei Liu、Bohong Yin、Weiran He、Han Zhu、Yuzhi Wang、Jianzhou Wang、Mengnan Dong、Zheng Zhang、Yongsheng Kang、Hao Zhang、Xinran Xu、Yutao Zhang，均署名 Moonshot AI。</p>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>代码</b>：<a href="https://github.com/MoonshotAI/Moonlight" target="_blank" rel="noopener">MoonshotAI/Moonlight</a> 有 1,549 个 star（截至 2026-10-20），MIT 许可，仓库创建于 2025-02-22。仓库里是技术报告、一个单机版 Muon 的参考实现（<code>examples/toy_train.py</code>）和中间检查点的下载说明；分布式实现以 Megatron-LM 的 PR 形式发布，未被合并。</li>
+  <li><b>权重</b>：Hugging Face 上的 <a href="https://huggingface.co/moonshotai/Moonlight-16B-A3B" target="_blank" rel="noopener">Moonlight-16B-A3B</a> 和 <a href="https://huggingface.co/moonshotai/Moonlight-16B-A3B-Instruct" target="_blank" rel="noopener">Moonlight-16B-A3B-Instruct</a>（MIT 许可，8K 上下文）。Muon 版和 AdamW 版（Moonlight-A）在 2K–42K 步之间的中间检查点通过仓库里的说明文档提供下载链接；这让外部研究者可以直接比较两种优化器训练出的权重。</li>
+  <li><b>采用</b>：Kimi K2（MuonClip）、GLM-4.5、DeepSeek-V4 等模型的技术报告都引用本文并采用了它的权重衰减与更新 RMS 缩放；PyTorch 2.9 的 <code>torch.optim.Muon</code> 内置了本文的缩放方式作为选项（见“后来怎么样了”）。</li>
+  <li><b>发表</b>：arXiv 技术报告（2025-02-24 提交，只有第 1 版）；截至 2026-10-20 未查到会议或期刊发表记录。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li>Muon 的原始介绍：Keller Jordan，<a href="https://kellerjordan.github.io/posts/muon/" target="_blank" rel="noopener">Muon: An optimizer for hidden layers in neural networks ↗</a>（2024-12），以及代码仓库 <a href="https://github.com/KellerJordan/Muon" target="_blank" rel="noopener">KellerJordan/Muon ↗</a>。</li>
+  <li>苏剑林的两篇中文博客（Kimi 官方介绍页列出）：<a href="https://kexue.fm/archives/10592" target="_blank" rel="noopener">Muon 优化器赏析：从向量到矩阵的本质跨越 ↗</a>、<a href="https://kexue.fm/archives/10739" target="_blank" rel="noopener">Muon 续集：为什么我们选择尝试 Muon？ ↗</a></li>
+  <li>本站精读：<a href="zero.html">ZeRO</a>（ZeRO-1 的切分与通信，分布式 Muon 的基础）、<a href="megatron-lm.html">Megatron-LM</a>（张量并行）、<a href="deepseek-v3.html">DeepSeek-V3</a>（Moonlight 采用的 MLA + MoE 架构）、<a href="roformer.html">RoFormer</a>（第二作者的代表作）、<a href="kimi-linear.html">Kimi Linear</a>（用 MuonClip 训练）、<a href="moba.html">MoBA</a>（同一团队同月发布的块稀疏注意力）。</li>
+  <li>旧版结构拆解：<a href="../legacy/tracks/ai-infra/16-zero-fsdp.html">ZeRO / FSDP</a>、<a href="../legacy/tracks/ai-infra/07-megatron.html">Megatron</a>、<a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3</a>、<a href="fp8-formats.html">FP8 格式（含 bf16 对照）</a>、<a href="kimi-linear.html">Kimi Linear（MuonClip 的后续使用）</a>、<a href="../legacy/tracks/ai-infra/23-deepseek-v4.html#c-muon">DeepSeek-V4 的 Muon</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2502.16982" target="_blank" rel="noopener">arXiv:2502.16982</a>。原文采用 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a> 许可，不允许演绎，因此本页没有使用原文的任何图片；所有图都是本站自己画的示意图，或根据论文给出的数字、拟合公式和官方模型配置重新计算、重新绘制的简图，每张图都附有原图链接。表格中的数字摘自原文表格，用于评论与说明。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

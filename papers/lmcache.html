@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LMCache 精读</title>
+<meta name="description" content="LMCache（arXiv 2510.09665，芝加哥大学 / Tensormesh）的逐节精读：KV 缓存为什么要离开 GPU、分页布局为什么让搬运变慢、256 token 分块与逐层流水、vLLM 的 KV connector 接口、控制器 API、实验数字的分量，以及同期的 Strata 与 SGLang HiCache。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+<script defer src="../assets/js/widgets/roofline.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="kv-tiering">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · arXiv 预印本（技术报告，2025）</div>
+  <h1>LMCache：面向企业级大模型推理的高效 KV 缓存层</h1>
+  <p class="en-title">LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference</p>
+  <div class="paper-authors">Yuhan Liu<sup>1,2,*</sup>, Jiayi Yao<sup>1,2,*</sup>, Yihua Cheng<sup>1,*</sup>, Yuwei An<sup>1</sup>, Xiaokun Chen<sup>1</sup>, Shaoting Feng<sup>1,2</sup>, Yuyang Huang<sup>1,2</sup>, Samuel Shen<sup>1</sup>, Rui Zhang<sup>1</sup>, Kuntai Du<sup>1</sup>, Junchen Jiang<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Tensormesh Inc.　<sup>2</sup>University of Chicago（芝加哥大学）　<sup>*</sup>共同一作　（按 arXiv v2 署名；v1 的作者顺序和单位标注不同，见“作者”一节）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2510.09665" target="_blank" rel="noopener">arXiv 2510.09665 ↗</a>
+    <a class="pill" href="https://arxiv.org/html/2510.09665v2" target="_blank" rel="noopener">技术报告 v2（截至 2026-10 未见正式发表）↗</a>
+    <a class="pill" href="https://github.com/LMCache/LMCache" target="_blank" rel="noopener">Code: LMCache/LMCache ↗</a>
+    <a class="pill" href="https://docs.lmcache.ai/" target="_blank" rel="noopener">文档 ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">结构拆解：KV 缓存分层存储</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>12.1k</b><span>GitHub star（LMCache/LMCache，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文以 CC BY 4.0 许可发布，所以原图直接放在讲到它的地方，并说明这张图怎么看；原图没画到的概念，用本站画的示意图补上。标“推算”的数字是本站根据论文数据或公开的模型配置算出来的，标“读图”的数字是从原图上估读的，都不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型处理一段输入时，会为每个 token、在每一层算出一对向量，叫 key 和 value，合起来称为 <b>KV 缓存</b>。之后生成每一个新 token，都要回头读这些向量。传统的推理系统把 KV 缓存当作一次请求内部的临时数据：它只放在 GPU 显存里，请求结束后很快就被新请求的数据覆盖掉。</p>
+<p>这几年大模型的用法变了。多轮对话每一轮都要把之前的对话历史重新送进模型；文档问答和检索增强生成（RAG）会让许多问题反复带上同一份文档；编程智能体的上下文动辄几万 token，每一步只在末尾追加一点。在这些场景里，大量输入的开头和以前的某个请求一模一样。如果当时算出的 KV 缓存还留着，就可以直接拿来用，省掉“把输入重新读一遍”（prefill）的时间和 GPU。麻烦在于，这些值得留下的 KV 缓存太大，显存根本装不下，只能挪到 CPU 内存、本地磁盘甚至远端存储里，用的时候再搬回 GPU。另一个需求来自 <b>PD 分离</b>：prefill 和 decode 放在不同的 GPU 上跑，KV 缓存必须从一组 GPU 传到另一组。</p>
+<p>LMCache 是芝加哥大学 Junchen Jiang 组（后来成立了公司 Tensormesh）开发的开源“KV 缓存层”。它插在推理引擎（vLLM、SGLang）和各种存储、网络之间，负责把 KV 缓存从引擎里取出来，存到不同层级的设备上，需要时搬回 GPU，或者在两个引擎之间传送。这篇论文是一份系统报告，重点不是一个新算法，而是三件工程上的事：怎么把搬运做快（把小页拼成大块再传、让传输和计算重叠），怎么和变化飞快的推理引擎解耦（作者推动进 vLLM 的 KV connector 接口），以及怎么让上层系统直接管理 KV 缓存（查找、迁移、钉住、压缩等控制接口）。在作者的实验里，vLLM 加上 LMCache 在多轮问答和文档分析负载上，同样首 token 延迟下的吞吐最高达到原来的十几倍；论文最后还总结了一些企业部署中的经验。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>KV 缓存为什么要离开 GPU 显存？“跨请求复用”和“PD 分离”分别需要它做什么？</li>
+  <li>一个 token 的 KV 缓存有多大？一份几万 token 的文档要占多少空间、搬一次要多久？</li>
+  <li>CPU 内存和网卡的带宽并不低，为什么以前的系统搬 KV 搬得很慢？分页布局和“小块传输”是什么关系？</li>
+  <li>LMCache 用了哪些办法让搬运变快，每一种各自消除了哪一种浪费？</li>
+  <li>它怎么接进 vLLM 而不需要改 vLLM 的代码？上层的路由器怎么知道 KV 缓存存在哪台机器的哪一层？</li>
+  <li>什么时候“从别处加载 KV”反而比“重新算一遍”更慢？</li>
+  <li>15 倍、400 Gbps 这些数字是在什么条件下、和谁比出来的，能说明多少问题？</li>
+  <li>同期的 Strata 和 SGLang HiCache 走了一条怎样不同的路线？</li>
+</ul>
+<p><b>版本说明。</b>本页按 arXiv v2（2025-12-05）讲解。v1（2025-10-08）的摘要、章节组织和一部分实验与 v2 不同：v2 新增了第 2 节的使用统计和第 8.3 节的多模型真实 trace 实验，把第 9 节改写成七条经验；v1 里一些部署细节（例如把数据搬运放进单独进程可以消除 5%–10% 的延迟开销）在 v2 中被删掉了。需要时本页会指出。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：KV 缓存为什么要离开 GPU</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KV 缓存原本是为了加速“一次请求内部”的生成而发明的，所以一直放在 GPU 显存里、随请求生灭。现在出现了哪两种需求，迫使它离开 GPU？要让这件事真正可用，推理系统需要多出哪些能力？作者认为现有系统缺了什么，LMCache 提供了什么？</div>
+
+<div class="note-pre"><b>先补一点背景：KV 缓存从哪来、有多大。</b>
+<p>大模型生成文字是“接龙”：每一步根据前面所有 token 预测下一个 token。每一层的注意力在处理当前 token 时，要拿它的 query 去和之前每个 token 的 key 比相似度，再用这些相似度把之前每个 token 的 value 加权平均。之前那些 token 的 key 和 value 在它们自己被处理时就已经算过了，所以系统把它们存下来，下一步直接读，这就是 KV 缓存（详细推导见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。</p>
+<p>处理一个请求分两个阶段。<b>prefill</b> 把整段输入一次性算完，生成所有输入 token 的 KV 缓存和第一个输出 token；它是大矩阵乘法，主要消耗 GPU 的算力。<b>decode</b> 之后每一步只算一个新 token，但要读一遍全部 KV 缓存；它主要消耗显存带宽。用户看到第一个字之前要等的时间叫 <b>TTFT</b>（time to first token），基本由 prefill 决定；之后相邻两个字之间的间隔叫 <b>ITL</b>（inter-token latency）。</p>
+<p>每个 token 的 KV 缓存有多大，可以直接从模型配置算出来：</p>
+<div class="formula">$$\text{每 token 的 KV 字节数}=\underbrace{2}_{\text{K 和 V}}\times n_{\text{layer}}\times n_{\text{kv}}\times d_{\text{head}}\times\underbrace{b}_{\text{每个数的字节}}$$</div>
+<p>这里 \(n_{\text{layer}}\) 是层数，\(n_{\text{kv}}\) 是 KV 头数（这些模型都用分组查询注意力 GQA，KV 头比 query 头少），\(d_{\text{head}}\) 是每个头的维度，BF16 时 \(b=2\)。以 Llama-3.1-8B 为例：\(2\times32\times8\times128\times2=131{,}072\) 字节，即每个 token 128 KiB。论文实验用到的几个模型（推算，按公开的 config.json，KV 按 BF16 存）：</p>
+<div class="table-wrap"><table>
+<tr><th>模型</th><th class="num">层数</th><th>KV 头 × 维度</th><th class="num">每 token KV</th><th class="num">1 万 token 的 KV</th></tr>
+<tr><td>Llama-3.1-8B</td><td class="num">32</td><td>8 × 128</td><td class="num">128 KiB</td><td class="num">1.31 GB</td></tr>
+<tr><td>Qwen2.5-Coder-32B、Qwen3-32B</td><td class="num">64</td><td>8 × 128</td><td class="num">256 KiB</td><td class="num">2.62 GB</td></tr>
+<tr><td>Qwen3-Coder-480B-A35B</td><td class="num">62</td><td>8 × 128</td><td class="num">248 KiB</td><td class="num">2.54 GB</td></tr>
+<tr><td>Llama-3.1-70B、Qwen2.5-72B</td><td class="num">80</td><td>8 × 128</td><td class="num">320 KiB</td><td class="num">3.28 GB</td></tr>
+</table></div>
+<p>也就是说，一份 1 万 token 的文档（大约十几页 PDF），在 70B 模型上对应 3 GB 以上的 KV 缓存。一张 80 GB 的 H100 扣掉模型参数之后，只能放下有限几份这样的文档。想动手算其他模型，可以用第 8.7 节里的计算器。</p>
+</div>
+
+<p>作者先指出，KV 缓存原本的用途很窄：它只在一次请求内部使用，帮助 decode 阶段跳过对输入的重复计算。于是每个请求都由一个推理引擎实例独立处理，计算和数据搬运全都发生在这个实例的 GPU 和显存里。这个“一个请求、一个实例、一块显存”的假设，正在被两个趋势打破。</p>
+
+<div class="note-pre"><b>先补一点背景：前缀缓存与 PD 分离。</b>
+<p><b>前缀缓存（prefix caching）。</b>同一个 token 在不同上下文里的 KV 缓存是不同的，因为从第二层起每层的输入都混入了它前面的内容。所以只有当两个请求<b>从第一个 token 起完全相同</b>时，这段相同开头（前缀）的 KV 缓存才能共用。vLLM 用“链式哈希”识别前缀：把 token 按块切开，每块的哈希值由前一块的哈希和本块的 token 一起算出，两个请求某一块的哈希相同，就说明从开头到这一块都相同；SGLang 用一棵基数树做同样的事（见 <a href="sglang.html#n-3-3">SGLang 精读 §3.3</a>）。这两种做法都只在 GPU 显存里缓存。显存满了，最久没用的块就被淘汰，下次再遇到同样的前缀只能重算。</p>
+<p><b>PD 分离。</b>prefill 吃算力、decode 吃带宽，放在同一张 GPU 上会互相干扰：一个长 prefill 插进来，所有正在 decode 的请求都要停下来等。PD 分离把两个阶段放到两组 GPU 上，prefill 算完后把 KV 缓存传给 decode 那一组（见 <a href="distserve.html#n-3-3">DistServe 精读 §3.3</a> 和 <a href="mooncake.html#n-3">Mooncake 精读 §3</a>）。这就要求 KV 缓存能被高效地从一个引擎“拿出来”，再“塞进”另一个引擎。</p>
+</div>
+
+<p>第一个趋势是<b>跨请求缓存</b>：把 KV 缓存保存到比请求寿命更长的地方（例如更便宜的下层存储），后面的请求只要前缀相同，就不必重算。第二个趋势是 <b>PD 分离</b>：prefill GPU 产出的 KV 缓存必须传给 decode GPU。两者都要求 KV 缓存能离开产生它的那块显存。作者还用自己项目的使用统计说明，用户存下的 KV 缓存总量增长很快，远超 GPU 显存能装下的量（第 2 节详细讲）。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/usecases.png" alt="原文图 2：LMCache 的两种用法" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>左图是<b>上下文缓存</b>（跨请求复用）：请求 1 和请求 2 进入左边的推理引擎，请求 3 进入右边的引擎；橙色箭头表示 KV 缓存从引擎流进下面的 LMCache，再被取回给后来的请求使用，取回的目标既可以是同一个引擎，也可以是另一个引擎。右图是 <b>PD 分离</b>（跨引擎传输）：多个 prefill 引擎算出的 KV 缓存经由 LMCache 交给多个 decode 引擎，再由 decode 引擎输出结果。两种用法共用同一个缓存层，这是论文的出发点。</figcaption></figure>
+
+<p>要让这两件事落地，推理引擎必须支持几种它原来没有的操作：在一次正常推理中把 KV 缓存<b>取出来</b>（extract），在后续请求需要时<b>装回去</b>（reload），把取出的 KV 缓存<b>持久地存起来</b>（store），以及在分布式的多个引擎之间<b>传送</b>（transfer）。作者强调，这些操作要真正有用，必须同时满足两个条件：一是够快，否则搬运本身的时间就把省下的计算吃掉了；二是能跟上 vLLM、SGLang 这类引擎的快速迭代，否则每次引擎升级都要重写一遍。</p>
+<p>论文列出三项贡献：</p>
+<ol>
+  <li><b>高度优化的搬运性能。</b>把存取操作批量化，让存取与 GPU 计算流水重叠（例如算第 \(i\) 层时加载第 \(i+1\) 层）；不按推理引擎自己的小页大小传输，而是按可配置的、比页大得多的“块”传输，把设备之间的带宽跑满；在不同存储层之间搬运时尽量不多拷贝。</li>
+  <li><b>和推理引擎之间的标准接口。</b>作者统计，2025 年平均每周有 15–20 个新的开源权重模型发布，推理引擎为了支持新模型和新硬件，经常改动显存里 KV 缓存的布局。LMCache 设计了一个模块化的 KV connector 接口，把自己和引擎内部实现解耦。</li>
+  <li><b>灵活的 KV 缓存管理接口。</b>把 KV 缓存作为一种新的数据对象暴露出来，提供定位、移动、钉住、压缩等 API，让路由器、调度器这样的上层组件做出“知道 KV 在哪”的决策，例如把请求路由到已经存有它前缀的实例。</li>
+</ol>
+<p>LMCache 支持的存储层级包括 CPU 内存、本地磁盘、远端磁盘和 Redis，支持的网络包括以太网、RDMA 和 NVLink。作者称，在本地前缀缓存、分布式前缀复用和 PD 分离几种场景下，LMCache 相对开源框架自带的 KV 缓存机制和商业推理 API，吞吐最高提高 15 倍、延迟至少降低一半。</p>
+<div class="note-warn"><b>读的时候要注意的几点：</b>
+<ul>
+  <li>“第一个、也是最高效的开源 KV 缓存方案”是作者的自我定位，“第一个”要看怎么算：vLLM 在 2023 年就能把 KV 块换出到 CPU 内存（<a href="vllm.html#n-4-5">vLLM 精读 §4.5</a>），Mooncake 在 2025 年开源了跨机器的 KV 缓存池 Mooncake Store。LMCache 项目始于 2024 年 5 月，它的特点在于把“分层存储、跨引擎传输、管理接口”做成了一个独立于引擎的通用层。</li>
+  <li>引言里的“延迟至少降低 2 倍”和后文的数字对不上：第 8.2 节 QPS=1 时 TTFT 降低 1.9–8.1 倍，第 8.5 节 PD 分离的平均 TTFT 降低 1.53–1.84 倍，都有低于 2 倍的情况。摘要的“最高 15 倍”在 v2 正文里能找到的最大值是第 8.2 节的 14 倍。第 8 节会逐项说明这些倍数的条件。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 动机与真实使用数据：存下来的 KV 远超显存，而且被反复使用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者凭什么说 KV 缓存“必须”离开 GPU？他们的证据来自 LMCache 自己的用户统计。这些统计具体量了什么，说明了什么，又不能说明什么？在此基础上，作者把业界“把 KV 搬出 GPU”的需求归成哪两类？</div>
+
+<h4 id="n-2-1">2.1 KV 缓存：一种“模型原生”的知识表示</h4>
+<p>作者先换了一个角度看 KV 缓存：它记录了到目前为止每一对 token 之间的注意力信息，可以看作模型自己能直接读的一种知识表示。一份文档读一遍，就留下一份它的 KV 缓存；以后的问题只要以这份文档开头，模型就能“直接回忆”而不必重读。上下文越来越长、人们越来越喜欢给推理加上背景知识，于是在不同用户请求之间共享 KV 缓存就越来越流行。</p>
+
+<h4 id="n-2-2">2.2 真实使用数据</h4>
+<p>论文的证据来自用户自愿开启的使用统计（usage tracker）。第一组数据在引言里，是 LMCache 本身的增长：</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/intro_usage.svg" alt="原文图 1：LMCache 的用户数、存储的 KV 量与镜像拉取次数" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>三个小图都做了归一化（以第一个时间段为 1），不给绝对数。上图横轴是 30 天里每 6 天一段，纵轴是用户数：从 1.00 涨到 4.24、7.19、8.86，最后一段跳到 23.21。中图是同一时期用户存下的 KV 缓存总量：1.00、0.96、2.40、3.91、5.57。下图横轴是 80 天里每 10 天一段，纵轴是 Docker 镜像的拉取次数，从 1.00 平稳涨到约 1.5（读图）；论文没有说明这是每段的次数还是累计次数。这张图说明的是“用的人越来越多、存的 KV 越来越多”，属于项目热度的证据，而不是性能证据。</figcaption></figure>
+<p>第二组数据说明存下的 KV 有多少放不进显存。图 3 按周统计用户新存下的 KV 缓存字节数，并分成“放得进 GPU 显存的部分”和“超出显存的部分”。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/non_gpu_size_v1.svg" alt="原文图 3：每周新增 KV 缓存量，GPU 与非 GPU 部分" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>横轴是连续 5 周，纵轴是这一周新增存储的 KV 缓存字节数（T = 10<sup>12</sup> 字节）。绿色是放得进 GPU 显存的部分，蓝色是超出显存、只能放在别处的部分。读图：五周的新增量约为 9T、7T、15T、25T、33T，前四周绿色都只有 1T 左右或更少，第五周约 6.5T。结论：绝大部分值得存的 KV 缓存都在显存之外，而且总量在快速增长。</figcaption></figure>
+<p>为了体会这个差距，可以做一个粗算（推算）。Llama-3.1-8B 跑在一张 80 GB 的 H100 上，参数占 16 GB；按 vLLM 默认的 90% 显存利用率、忽略激活值，大约剩 56 GB 给 KV 缓存，按每 token 128 KiB 能放约 43 万个 token，也就是 21 份第 8.2 节实验里那种 2 万 token 的文档。同一台机器上给 LMCache 的 500 GB CPU 内存，能放约 380 万个 token，即 190 份左右，大约是显存的 9 倍。用户数一多、会话一长，只靠显存缓存就留不住几份文档。</p>
+<p>第三组数据说明这些存在显存外的 KV 确实会被用到。作者定义了“每 token 平均复用次数”：被复用的 token 数除以全部存下的 token 数，只统计显存之外的部分。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/average_reuse_per_token_v2.svg" alt="原文图 4：每 token 平均复用次数" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>左图是使用量前 10 名的用户，横轴是周，纵轴是每 token 平均复用次数。读图：从第 1 周几乎为 0，涨到第 4 周约 0.45、第 5 周约 1.1，意思是到第 5 周，存在显存外的每个 token 平均被取回用了一次以上。右图是最近一周所有用户的分布（累积分布函数 CDF）：横轴是复用次数，纵轴是“复用次数不超过这个值的用户比例”。曲线在 0 附近陡升，说明一半左右的用户几乎没有复用；论文给出的数字是超过 19% 的用户平均复用 1.5 次以上，少数用户能到 5–8 次。</figcaption></figure>
+
+<h4 id="n-2-3">2.3 两种把 KV 搬出 GPU 的场景</h4>
+<p>从这两个趋势（显存外的 KV 越来越多、它们被复用的次数也越来越多），作者得出结论：需要一个高效的层，专门负责把 KV 缓存搬出、搬回 GPU。业界已经存在两种这样的场景：</p>
+<ul>
+  <li><b>上下文缓存（跨请求复用）</b>：把一次请求的 KV 缓存片段保存下来，给之后共享同一前缀的请求使用。典型例子是文档分析（同一份文档或文档片段被多次提问）和带固定系统提示或长开场白的多轮对话。它直接减少 prefill 的计算，从而降低 TTFT 和每个请求消耗的 GPU 时间。</li>
+  <li><b>PD 分离（跨引擎传输）</b>：prefill 和 decode 放在不同的 GPU 或节点上，decode 不再被 prefill 打断，尾延迟随之降低，代价是 KV 缓存必须跨机传输。</li>
+</ul>
+<p>两种场景都受同一个问题限制：缺少一个能高效地把 KV 缓存从 GPU 取出、装回的库。下一节讲为什么这件事难。</p>
+<div class="note-warn"><b>这些统计能说明什么、不能说明什么：</b>
+<ul>
+  <li>数据来自自愿开启统计的 LMCache 用户，样本本身就偏向“有复用需求、愿意装缓存层”的人，不能代表所有推理负载的复用程度。</li>
+  <li>全部是归一化值或相对值，没有给出用户数、请求数、模型分布的绝对量；时间窗口只有 5 周（图 1 为 30 天和 80 天）。“前 10 名用户”的平均值也会被少数大用户主导。</li>
+  <li>“放得进 / 放不进 GPU 显存”是怎么判定的，论文没有给出定义。这组数据更适合理解为“趋势在增长”的定性证据。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 挑战与已有方案：搬 KV 难在哪里</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>CPU 内存、SSD 和网卡的带宽都不低，把 KV 缓存搬来搬去为什么会慢？作者归纳了三个互相关联的挑战：分页布局下的 I/O 效率、推理引擎变化太快、缺少管理接口。此外，市面上已经有不少推理框架和存储系统，它们为什么不够？</div>
+
+<div class="note-pre"><b>先补一点背景：存储层级，以及“一次传多大”为什么决定带宽。</b>
+<p>KV 缓存能待的地方可以排成一个层级：越往下容量越大、单位容量越便宜，但离 GPU 越远，带宽越低、延迟越高。下面的示意图把每一层到 GPU 的带宽画在对数刻度上。</p>
+<div class="dia">
+  <div class="dia-title">示意图：KV 缓存可以存放的几层存储，以及它们到 GPU 的带宽</div>
+  <svg class="dg" viewBox="0 0 760 318" role="img" aria-label="存储层级与到 GPU 的带宽" style="--dg-min:640px">
+    <g class="enc"><rect class="box" x="20" y="24" width="210" height="46" rx="8"/></g>
+    <text x="32" y="40" class="t-b">GPU 显存（HBM）</text>
+    <text x="32" y="59" class="t-xs">H100 每卡 80 GB；显存自身带宽</text>
+    <rect x="250" y="36" width="398" height="22" rx="4" style="fill:var(--c-enc)"/>
+    <text x="656" y="47" class="t-sm">3.35 TB/s</text>
+    <g class="act"><rect class="box" x="20" y="84" width="210" height="46" rx="8"/></g>
+    <text x="32" y="100" class="t-b">CPU 内存（DRAM）</text>
+    <text x="32" y="119" class="t-xs">单机数百 GB 到 TB 级</text>
+    <rect x="250" y="96" width="247" height="22" rx="4" style="fill:var(--c-act)"/>
+    <text x="505" y="107" class="t-sm">PCIe 5.0 x16 ≈ 64 GB/s（单向峰值）</text>
+    <g class="tgt"><rect class="box" x="20" y="144" width="210" height="46" rx="8"/></g>
+    <text x="32" y="160" class="t-b">本地 SSD</text>
+    <text x="32" y="179" class="t-xs">TB 级</text>
+    <rect x="250" y="156" width="162" height="22" rx="4" style="fill:var(--c-tgt)"/>
+    <text x="420" y="167" class="t-sm">单盘 NVMe 约每秒数 GB（典型量级，非论文数据）</text>
+    <g class="pred"><rect class="box" x="20" y="204" width="210" height="46" rx="8"/></g>
+    <text x="32" y="220" class="t-b">远端存储</text>
+    <text x="32" y="239" class="t-xs">Redis、Mooncake、S3、NFS 等</text>
+    <rect x="250" y="210" width="194" height="13" rx="3" style="fill:var(--c-pred);opacity:.45"/>
+    <text x="452" y="217" class="t-xs">128 Gbps ≈ 16 GB/s（第 8.7 节的上限）</text>
+    <rect x="250" y="230" width="112" height="13" rx="3" style="fill:var(--c-pred)"/>
+    <text x="370" y="237" class="t-xs">15 Gbps ≈ 1.9 GB/s（第 8.4 节的远端服务器）</text>
+    <line x1="250" y1="268" x2="690" y2="268" style="stroke:var(--text-3);stroke-width:1.2"/>
+    <line x1="250" y1="264" x2="250" y2="272" style="stroke:var(--text-3)"/><text x="250" y="282" class="t-c t-xs">0.1</text>
+    <line x1="338" y1="264" x2="338" y2="272" style="stroke:var(--text-3)"/><text x="338" y="282" class="t-c t-xs">1</text>
+    <line x1="426" y1="264" x2="426" y2="272" style="stroke:var(--text-3)"/><text x="426" y="282" class="t-c t-xs">10</text>
+    <line x1="514" y1="264" x2="514" y2="272" style="stroke:var(--text-3)"/><text x="514" y="282" class="t-c t-xs">100</text>
+    <line x1="602" y1="264" x2="602" y2="272" style="stroke:var(--text-3)"/><text x="602" y="282" class="t-c t-xs">1000</text>
+    <line x1="690" y1="264" x2="690" y2="272" style="stroke:var(--text-3)"/><text x="690" y="282" class="t-c t-xs">10000</text>
+    <text x="470" y="304" class="t-c t-sm">到 GPU 的带宽（GB/s，对数刻度，每格 10 倍）</text>
+  </svg>
+  <div class="dia-note">H100 显存带宽为 NVIDIA 官方规格；PCIe 5.0 x16 单向 64 GB/s 引自 Strata 论文 §5.1；15 Gbps 与 32–128 Gbps 是本文实验里的网络设置；SSD 一行只是常见量级。从显存到远端存储，带宽相差三个数量级以上，所以“放在哪一层”直接决定“取回来要多久”。</div>
+</div>
+<p>在 CPU 和 GPU 之间搬数据，一般调用 <code>cudaMemcpyAsync</code>，由 GPU 上专门的拷贝引擎（DMA 引擎）完成，可以和计算内核同时进行。但每发起一次拷贝都有固定开销：CPU 要准备参数、驱动要排队、完成后要发信号。Strata 论文用排队论里的<b>利特尔定律</b>把这件事说得很清楚：设同时在途的传输有 \(C\) 个、每次传 \(S\) 字节、每次耗时 \(L\)，那么能达到的吞吐是 \(X=C\cdot S/L\)。在途传输数 \(C\) 受 CPU 线程数和驱动队列限制，延迟 \(L\) 里有一大块是固定开销，于是最现实的办法是把每次传输的大小 \(S\) 做大。每次只传几十 KB，固定开销占了大头，带宽就跑不满。</p>
+</div>
+
+<h4 id="n-3-1">3.1 挑战一：分页显存让 I/O 变成大量小传输</h4>
+<p>早期保存和传输 KV 缓存的做法，是直接用 PyTorch 的序列化（<code>torch.save</code> / <code>torch.load</code>）或简单的张量拷贝，速度通常不到 1 GB/s。这些方法对 KV 缓存这种大数据结构开销很大，也不支持和各种存储设备之间的零拷贝，CPU 和 GPU 之间会多出额外的数据拷贝。</p>
+<p>vLLM、SGLang 这类高吞吐引擎让事情更难。它们用分页的方式管理 KV 缓存（PagedAttention，见 <a href="vllm.html#n-4-1">vLLM 精读 §4.1</a>）：显存被切成许多固定大小的小页，一个请求的 KV 缓存分散在不连续的页上。在 vLLM 里，一页是“16 个 token、一层”的 KV，大小通常在 16–64 KB；论文举例说 Llama-3.1-8B 的一页是 62.5 KB（按模型配置推算是 16 × 8 × 128 × 2 × 2 字节 = 64 KiB，量级一致）。分页对批处理和显存利用率很有好处，但对搬运很不友好：因为页不连续，搬走一个请求的 KV 缓存就要发起成千上万次小传输。</p>
+<p>举个例子（推算）：Llama-3.1-8B 上一份 1 万 token 的文档，每层有 10,000 ÷ 16 = 625 页，32 层一共 20,000 页。如果一页一次传输，就是两万次 64 KB 的拷贝。如果开了张量并行，KV 头被分到几张卡上，每张卡上的一页还会更小（例如 70B 模型用 4 卡并行时，每卡只存 2 个 KV 头，一页只有 16 KiB）。</p>
+<p>小传输跑不满带宽，有现成的测量为证。论文引用了 UCCL 团队的数据（原文表 1）：两台 AMD GPU 节点之间用 8 张 400 Gbps 的 Broadcom Thor-2 网卡相连，传输消息越小，实际吞吐越低。</p>
+<div class="dia">
+  <div class="dia-title">原文表 1 的数据：单条消息的大小 vs 实际传输吞吐（RCCL，两台 AMD GPU 节点）</div>
+  <svg class="dg" viewBox="0 0 720 258" role="img" aria-label="消息大小与传输吞吐">
+    <text x="90" y="30" class="t-r t-sm">64 KB</text><rect x="100" y="20" width="32" height="20" rx="3" style="fill:var(--c-enc)"/><text x="140" y="30" class="t-sm">4 GB/s</text>
+    <text x="210" y="30" class="t-sm" style="fill:var(--c-pred)">← vLLM 的一页（16 token、一层）约 64 KB</text>
+    <text x="90" y="64" class="t-r t-sm">256 KB</text><rect x="100" y="54" width="104" height="20" rx="3" style="fill:var(--c-enc)"/><text x="212" y="64" class="t-sm">13 GB/s</text>
+    <text x="90" y="98" class="t-r t-sm">1 MB</text><rect x="100" y="88" width="240" height="20" rx="3" style="fill:var(--c-enc)"/><text x="348" y="98" class="t-sm">30 GB/s</text>
+    <text x="420" y="98" class="t-sm" style="fill:var(--c-pred)">← 逐层加载时，一块中的一层约 1 MB</text>
+    <text x="90" y="132" class="t-r t-sm">10 MB</text><rect x="100" y="122" width="368" height="20" rx="3" style="fill:var(--c-enc)"/><text x="476" y="132" class="t-sm">46 GB/s</text>
+    <text x="90" y="166" class="t-r t-sm">16 MB</text><rect x="100" y="156" width="392" height="20" rx="3" style="fill:var(--c-enc)"/><text x="500" y="166" class="t-sm">49 GB/s</text>
+    <text x="90" y="200" class="t-r t-sm">100 MB</text><rect x="100" y="190" width="392" height="20" rx="3" style="fill:var(--c-enc)"/><text x="500" y="200" class="t-sm">49 GB/s</text>
+    <text x="100" y="236" class="t-sm" style="fill:var(--c-pred)">LMCache 默认一块（256 token × 32 层，Llama-3.1-8B）约 32 MB：已在跑满的区间</text>
+  </svg>
+  <div class="dia-note">柱长与吞吐成正比，数值来自原文表 1（论文引自 UCCL 团队 2025 年的博客）。红字的页大小和块大小是本站按 Llama-3.1-8B 配置推算的。从 64 KB 到 16 MB，同一条链路的实际吞吐相差 12 倍：一页一页地传，只能用到约 8% 的带宽。</div>
+</div>
+<p>按这个表推算：把 70B 模型上 1 万 token 的 KV 缓存（3.28 GB）用 64 KB 的消息传，按 4 GB/s 要约 0.8 秒；用 16 MB 以上的消息传，按 49 GB/s 只要约 0.07 秒。论文还引用了另一组测量（来自 Strata）：在 CPU 和 GPU 之间，单次传输要到 1–2 MB 才能用到 PCIe 5.0 理论带宽的 75%–80%。</p>
+
+<h4 id="n-3-2">3.2 挑战二：推理引擎变化太快</h4>
+<p>新模型和新加速器发布得非常频繁，作者引用的统计是 2025 年平均每 4 天就有一个重要的大模型发布。推理引擎为了支持它们，必须跟着快速迭代，而每次改动往往会改变显存分配方式，进而改变 KV 缓存的格式。例如 vLLM 换了一个新的注意力内核，产出的 KV 缓存维度排列不同了，KV 缓存库就得跟着改，把新格式翻译成自己能处理的格式。如果缓存库直接依赖引擎内部的数据结构，维护负担会大到跟不上。</p>
+
+<h4 id="n-3-3">3.3 挑战三：缺少管理接口</h4>
+<p>当 KV 缓存成了推理后端里的“一等公民”，除了推理引擎本身，很多组件和运维团队都需要根据 KV 缓存的位置和状态做决策。比如<b>路由器</b>负责把请求分给多个推理实例中的一个，它需要知道哪个实例的 CPU 内存里已经存有这个请求前缀的 KV 缓存，才能把请求送过去。没有统一的接口来定位、淘汰、钉住或压缩缓存，上层模块就只能盲目决策，结果是缓存利用率低、重复存储、淘汰行为不可预测。</p>
+<p>论文举了两个用户需求的例子（企业名均未披露）：一家金融公司在 2025 年初要求能<b>显式钉住</b>经常被访问的金融文档的 KV 缓存，让热门上下文总能快速取到；一家做智能体的公司要求一组 API，能找到某段内容对应的 KV 缓存、把它压缩，再把压缩后的结果传到其他节点。</p>
+
+<h4 id="n-3-4">3.4 已有方案为什么不够</h4>
+<p>作者把已有方案分成五类：</p>
+<ul>
+  <li><b>推理部署框架</b>：vLLM Production Stack（2025 年 1 月发布）、NVIDIA Dynamo、AIBrix、llm-d、SGLang OME、KServe 等，主要解决在 Kubernetes 上部署推理引擎，支持按负载或按前缀命中来路由请求。论文指出其中 vLLM Production Stack、Dynamo、llm-d 和 KServe 的 KV 缓存功能就是用 LMCache 实现的，所以它们和 LMCache 是上下游关系，不是竞争关系。</li>
+  <li><b>引擎自带的 KV 缓存</b>：vLLM、SGLang 自带把 KV 缓存从 GPU 卸载到 CPU 的功能，但面向单机，缺少跨节点传输的优化，也不支持多级存储。第 8 节会和它们比较。</li>
+  <li><b>KV 缓存存储层</b>：Mooncake、Redis、InfiniStore、3FS 提供分布式对象存储或缓存，但缺一个在推理引擎和这些存储之间高效搬运大量小张量的“胶水层”，或者和某一个推理框架绑得太紧。</li>
+  <li><b>闭源实现</b>：Fireworks AI、Together AI 等商业 API 内部也做了前缀缓存，但只能在它们自己的服务里用。</li>
+  <li><b>研究原型</b>：前缀缓存、PD 分离、KV 压缩方向有大量开源原型，但多数基于 HuggingFace Transformers 这类研究用框架，离生产可用有距离，也不会跟着 vLLM、SGLang 一起演进。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：这个组之前做过什么。</b>
+<p>LMCache 不是凭空出现的。同一个组此前有两篇相关的论文。<b>CacheGen</b>（SIGCOMM 2024，第一作者 Yuhan Liu）研究怎样通过网络把 KV 缓存流式传给 GPU：它把 KV 缓存量化、编码成更小的比特流，用有损压缩换传输时间，并根据带宽调整压缩率。<b>CacheBlend</b>（EuroSys 2025 最佳论文，第一作者 Jiayi Yao）研究 RAG 场景下“不是前缀”的复用：几个检索出来的文档片段各自的 KV 缓存被拼在一起时，片段之间的注意力没有算过，CacheBlend 只挑一小部分 token 重算来修补，从而在几乎不损失质量的前提下复用非前缀的 KV。第 9 节作者自己说，LMCache 最初（2024 年 5 月）就是作为把这些研究放进去的统一原型框架而设计的，后来才因为工业需求转向性能和稳定性。</p>
+</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 系统总览：一层夹在引擎和存储之间的缓存</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LMCache 在整个推理系统里处在什么位置？一个请求的 KV 缓存是怎么被存进去、取出来的？上层的路由器又怎么查到“哪些 token 的 KV 缓存存在哪里”？</div>
+<p>LMCache 的定位是一层统一的、高性能的 KV 缓存层：上面接 vLLM、SGLang 这样的推理引擎，下面接各种存储和网络设备，中间负责 KV 缓存的存储、移动和显式管理。它的目标是让前缀缓存和 PD 分离在企业规模下真正可用，同时不被引擎的快速演进拖累。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/lmcache_arch.png" alt="原文图 5：LMCache 的位置" loading="lazy" style="max-height:300px"></div>
+<figcaption><b>原文图 5。怎么看：</b>三层结构。最上面是推理引擎（vLLM、SGLang），最下面是存储后端（Mooncake、Redis、InfiniStore 等），中间的青色方块是 LMCache。向下的箭头表示 KV 缓存从引擎存进后端，向上的箭头表示取回。这张图要传达的是“解耦”：引擎和存储都可以换，中间这一层不变。</figcaption></figure>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/e2e_system_diagram.png" alt="原文图 6：LMCache 端到端系统" loading="lazy"></div>
+<figcaption><b>原文图 6。怎么看：</b>中间灰色大框是一个 LMCache 实例，右边还有另一个实例，说明可以有很多个。推理引擎（上方，内含调度器 Scheduler 和模型执行器 Model Runner）通过 <b>KV Connector</b> 接入 LMCache：其中 <b>Token Processor</b> 判断哪些 token 已经存过，<b>GPU Connector</b> 负责在显存和 LMCache 之间实际拷贝，<b>Cache Engine</b> 是实例的核心，<b>Event Manager</b> 管理异步的加载事件，<b>LMCache Worker</b> 和右上方的 <b>Cache Controller</b> 通信。左边放大的虚线框是 <b>Storage Manager</b>：它下面有本地后端（Local）、PD 后端、点对点后端（P2P）和远端后端（Remote）四类；<b>Memory Allocator</b> 管 GPU、CPU、SSD 上的空间，<b>Transfer Channel</b> 管 NVLink、RDMA、TCP 三种传输。右上角的 Router（路由器）和开发者都通过 Cache Controller 查询和操作缓存。</figcaption></figure>
+<p>论文用三条路径把这些组件串起来。</p>
+<p><b>存（Store）。</b>新请求先经过 KV connector，它准备好元数据：分好词的输入 token，以及这些 token 的 KV 缓存在显存中所在页的地址。然后 token processor 算出有多少新 token 还没存进后端、需要存。最后 storage manager 通过 transfer channel 把这些新 token 的 KV 缓存写进后端。</p>
+<p><b>取（Retrieve）。</b>当请求需要从后端加载 KV 缓存时，同样先由 KV connector 准备元数据，token processor 找出后端里有多少个与它前缀匹配的 token。接着 event manager 查看这个请求 ID 以前是否见过：如果见过，说明之前查找时已经把地址记下来了，直接交给 GPU connector 把 KV 缓存拷回显存；event manager 还会按第 5.2 节的方式发起逐层的异步加载。如果没见过，就交给 storage manager 去查这些 KV 缓存在 CPU 内存里的地址。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一次“取”的路径（命中 CPU 内存时）</div>
+  <div class="dia-flow"><span class="dia-box">KV connector<small>准备 token 与显存页地址</small></span><span class="dia-arrow">→</span><span class="dia-box reg">token processor<small>按块算链式哈希，数出能命中的前缀 token 数</small></span><span class="dia-arrow">→</span><span class="dia-box act">event manager<small>这个请求见过吗？见过就直接用记下的地址</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box tgt">storage manager<small>没见过：查块在 CPU 内存里的地址</small></span><span class="dia-arrow">→</span><span class="dia-box enc">GPU connector<small>块 → GPU 缓冲区 → 拆回各层的页（可逐层异步）</small></span><span class="dia-arrow">→</span><span class="dia-box">引擎只 prefill 未命中的后缀</span></div>
+  <div class="dia-note">token processor 的“链式哈希”出自 LMCache 代码（<code>lmcache/v1/token_database.py</code>：每块的键由前缀哈希链算出），论文正文没有展开。本站的理解：“见过这个请求”通常意味着调度器之前已经为它查过一次命中（vLLM 的文档说明第 6 节的 <code>get_num_new_matched_tokens</code> 对同一请求可能被调用多次），这时不必重复查找。</div>
+</div>
+<p><b>查找（Lookup）。</b>路由器这类上层组件想知道某些 token 的 KV 缓存是否存在，就去问 cache controller。controller 维护一个 token 池，记录后端里当前存着的所有 token；每当某个 LMCache 实例存入或淘汰了 KV 缓存，实例里的 LMCache worker 就把新状态报告给 controller，所以这个 token 池总是最新的。第 7 节会详细讲 controller 的接口。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 性能优化：把小页拼成大块、让搬运藏在计算后面、少拷贝</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在真实部署里，KV 缓存的搬运遇到三个具体问题：引擎的页太小，跑不满带宽；搬运要和推理同时进行，容易互相拖累；数据在多个存储设备之间复制会浪费空间和时间。LMCache 分别用什么办法解决？每个办法的代价是什么？</div>
+<p>作者把这三个问题归纳为：（1）主流引擎按页管理 KV 缓存，在 vLLM 里一页是“16 个 token、一层”，对 Llama、Qwen、GPT-OSS 等常见模型大约 20–63 KB，这么小的单位传不满带宽；（2）KV 缓存的传输经常要和推理同时进行，如果传输和计算放在同一个 CUDA 流上，传输会让推理停下来；而且每次调用拷贝函数都要消耗 CPU 时间，层数和页数一多，这部分 CPU 开销相当可观；（3）大量请求不断产生 KV 缓存，如果在每个存储设备上都复制一份，既浪费空间，又因为拷贝而拖慢推理。作者说这些都是开源和企业部署中吃过亏才总结出来的。</p>
+
+<h4 id="n-5-1">5.1 批量化操作：按块而不是按页传输</h4>
+<p><b>可配置的块大小。</b>LMCache 不按页传输，而是把<b>多层的多个页</b>拼成一个更大的块（chunk），默认每块 256 个 token，块大小可以根据 I/O 速度调整。拼接借助一块中转用的“流式 GPU 缓冲区”完成。存的时候，先用一个自定义的 CUDA 内核把散落在分页显存里的 KV 缓存拷进连续的缓冲区，再由 DMA 引擎把整块卸载到下层存储（例如 CPU 内存）；取的时候反过来，先由 DMA 引擎把整块从存储层拷进缓冲区，再由 CUDA 内核把它拆回各层的页。</p>
+<div class="dia">
+  <div class="dia-title">示意图：从散落的页到一个连续的块（以 Llama-3.1-8B 为例）</div>
+  <svg class="dg" viewBox="0 0 900 270" role="img" aria-label="分页 KV 拼成块的过程" style="--dg-min:720px">
+    <text x="20" y="18" class="t-b">① GPU 显存：每层一个页池，页散落各处</text>
+    <text x="20" y="53" class="t-sm">第 1 层</text>
+    <rect class="tk off" x="80" y="44" width="18" height="18"/><rect class="tk enc" x="102" y="44" width="18" height="18"/><rect class="tk off" x="124" y="44" width="18" height="18"/><rect class="tk off" x="146" y="44" width="18" height="18"/><rect class="tk enc" x="168" y="44" width="18" height="18"/><rect class="tk off" x="190" y="44" width="18" height="18"/><rect class="tk off" x="212" y="44" width="18" height="18"/><rect class="tk enc" x="234" y="44" width="18" height="18"/><rect class="tk off" x="256" y="44" width="18" height="18"/><rect class="tk enc" x="278" y="44" width="18" height="18"/><rect class="tk off" x="300" y="44" width="18" height="18"/>
+    <text x="20" y="85" class="t-sm">第 2 层</text>
+    <rect class="tk enc" x="80" y="76" width="18" height="18"/><rect class="tk off" x="102" y="76" width="18" height="18"/><rect class="tk off" x="124" y="76" width="18" height="18"/><rect class="tk off" x="146" y="76" width="18" height="18"/><rect class="tk off" x="168" y="76" width="18" height="18"/><rect class="tk enc" x="190" y="76" width="18" height="18"/><rect class="tk enc" x="212" y="76" width="18" height="18"/><rect class="tk off" x="234" y="76" width="18" height="18"/><rect class="tk off" x="256" y="76" width="18" height="18"/><rect class="tk off" x="278" y="76" width="18" height="18"/><rect class="tk enc" x="300" y="76" width="18" height="18"/>
+    <text x="20" y="117" class="t-sm">第 3 层</text>
+    <rect class="tk off" x="80" y="108" width="18" height="18"/><rect class="tk off" x="102" y="108" width="18" height="18"/><rect class="tk enc" x="124" y="108" width="18" height="18"/><rect class="tk enc" x="146" y="108" width="18" height="18"/><rect class="tk off" x="168" y="108" width="18" height="18"/><rect class="tk off" x="190" y="108" width="18" height="18"/><rect class="tk off" x="212" y="108" width="18" height="18"/><rect class="tk off" x="234" y="108" width="18" height="18"/><rect class="tk enc" x="256" y="108" width="18" height="18"/><rect class="tk enc" x="278" y="108" width="18" height="18"/><rect class="tk off" x="300" y="108" width="18" height="18"/>
+    <text x="190" y="142" class="t-c t-sm">⋮</text>
+    <text x="20" y="167" class="t-sm">第 32 层</text>
+    <rect class="tk off" x="80" y="158" width="18" height="18"/><rect class="tk enc" x="102" y="158" width="18" height="18"/><rect class="tk off" x="124" y="158" width="18" height="18"/><rect class="tk off" x="146" y="158" width="18" height="18"/><rect class="tk off" x="168" y="158" width="18" height="18"/><rect class="tk off" x="190" y="158" width="18" height="18"/><rect class="tk enc" x="212" y="158" width="18" height="18"/><rect class="tk enc" x="234" y="158" width="18" height="18"/><rect class="tk off" x="256" y="158" width="18" height="18"/><rect class="tk off" x="278" y="158" width="18" height="18"/><rect class="tk enc" x="300" y="158" width="18" height="18"/>
+    <path class="edge enc" d="M328,110 L396,110"/>
+    <text x="362" y="96" class="t-c t-xs">聚拢内核</text>
+    <g class="act"><rect class="box" x="400" y="50" width="200" height="112" rx="8"/></g>
+    <text x="500" y="68" class="t-c t-b">② 流式 GPU 缓冲区</text>
+    <rect class="tk enc" x="412" y="96" width="11" height="18"/><rect class="tk enc" x="423" y="96" width="11" height="18"/><rect class="tk enc" x="434" y="96" width="11" height="18"/><rect class="tk enc" x="445" y="96" width="11" height="18"/>
+    <rect class="tk enc" x="456" y="96" width="11" height="18"/><rect class="tk enc" x="467" y="96" width="11" height="18"/><rect class="tk enc" x="478" y="96" width="11" height="18"/><rect class="tk enc" x="489" y="96" width="11" height="18"/>
+    <rect class="tk enc" x="500" y="96" width="11" height="18"/><rect class="tk enc" x="511" y="96" width="11" height="18"/><rect class="tk enc" x="522" y="96" width="11" height="18"/><rect class="tk enc" x="533" y="96" width="11" height="18"/>
+    <rect class="tk enc" x="544" y="96" width="11" height="18"/><rect class="tk enc" x="555" y="96" width="11" height="18"/><rect class="tk enc" x="566" y="96" width="11" height="18"/><rect class="tk enc" x="577" y="96" width="11" height="18"/>
+    <text x="434" y="128" class="t-c t-xs">层 1</text><text x="478" y="128" class="t-c t-xs">层 2</text><text x="522" y="128" class="t-c t-xs">层 3</text><text x="566" y="128" class="t-c t-xs">… 层 32</text>
+    <text x="500" y="148" class="t-c t-xs">连续的一段，大小固定</text>
+    <path class="edge enc" d="M604,106 L676,106"/>
+    <text x="640" y="92" class="t-c t-xs">DMA 整块拷贝</text>
+    <g class="tgt"><rect class="box" x="680" y="50" width="200" height="112" rx="8"/></g>
+    <text x="780" y="68" class="t-c t-b">③ CPU 内存中的一个块</text>
+    <rect class="tk enc" x="695" y="96" width="170" height="18"/>
+    <text x="780" y="132" class="t-c t-xs">256 token × 全部 32 层</text>
+    <text x="780" y="148" class="t-c t-xs">约 32 MB（推算）</text>
+    <text x="20" y="208" class="t-sm">存：页 → 缓冲区 → 块；取：块 → 缓冲区 → 拆回各层的页。缓冲区只是中转站，大小固定。</text>
+    <text x="20" y="232" class="t-sm">一页 = 16 token × 1 层 ≈ 64 KB；一块 = 每层 16 页 × 32 层 = 512 页 ≈ 32 MB：单次传输放大约 512 倍（推算）。</text>
+    <text x="20" y="256" class="t-xs">图中每层只画了 4 页作示意；真实的一块在每层包含 16 页，而且这些页在显存里的位置由分页分配器决定，通常不相邻。</text>
+  </svg>
+  <div class="dia-note">本站示意图。对照第 3.1 节的表 1：64 KB 的传输只能跑出 4 GB/s，32 MB 已经落在跑满带宽的区间。代价是多了一次显存内部的拷贝（页 ↔ 缓冲区），但显存内部带宽是 TB/s 级，这次拷贝远比跨 PCIe 的传输便宜。</div>
+</div>
+<p>按块传输还顺带减少了 CPU 的开销：原来每一页都要单独调用一次拷贝函数，现在一块只要一次。对一份 1 万 token 的 Llama-3.1-8B 文档，大约是“两万次小拷贝”变成“40 次大拷贝”（推算：10,000 ÷ 256 ≈ 39.1，向上取整）。</p>
+<p><b>并行的存取操作。</b>LMCache 能同时在多个存储层级上存取：本机的 CPU 内存或磁盘、远端的 CPU 内存或磁盘，以及对象存储（如 S3）。实际负载里经常需要同时做几件事，例如把一个热门上下文的 KV 缓存从 GPU 移到 CPU 内存的同时，把一个冷门上下文从 CPU 内存挪到本地磁盘。为了让每条链路都忙起来，LMCache 的存取 API 可以同时接收多个源设备和目标设备，在不同的链路上并发搬运；如果链路是全双工的（例如 PCIe 两个方向可以同时传），读和写还能同时进行。</p>
+<p><b>decode 阶段延迟写出。</b>decode 阶段每生成一个 token 就多出一份 KV 缓存。如果每个 token 一产生就写出去，会变成极其频繁的小写入。LMCache 先把它们攒在缓冲里，凑满一个块（默认 256 个 token）再批量写出，降低写入频率和 I/O 开销。</p>
+
+<h4 id="n-5-2">5.2 计算与 I/O 重叠</h4>
+<p><b>逐层流水。</b>模型是一层一层算的，第 \(i\) 层的注意力只需要第 \(i\) 层的 KV 缓存。所以不必等全部层的 KV 缓存都加载完才开始算：LMCache 给计算和数据搬运分配不同的 CUDA 流，在算第 1 层之前先把第 1 层的 KV 缓存加载进 GPU 缓冲区、拆回分页显存；第 1 层开始计算的同时，第 2 层的 KV 缓存在另一个流上异步加载并拆页，依此类推。论文特别说明，第 2 层的加载要等第 1 层的 KV 缓存已经放进正确的分页位置之后才开始，所以只需要一块“一层 KV 缓存大小”的固定缓冲区，就能让传输和计算重叠。</p>
+<div class="dia">
+  <div class="dia-title">示意图：先全部加载再计算 vs 逐层流水（假设每层加载时间 ≈ 每层计算时间）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td colspan="10" class="gsub">① 不流水：4 层的 KV 全部加载完，才开始算</td></tr>
+    <tr><td class="lbl">拷贝流（加载）</td><td class="p">L1</td><td class="p">L2</td><td class="p">L3</td><td class="p">L4</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">计算流</td><td></td><td></td><td></td><td></td><td class="r" style="color:#fff">L1</td><td class="r" style="color:#fff">L2</td><td class="r" style="color:#fff">L3</td><td class="r" style="color:#fff">L4</td><td></td></tr>
+    <tr><td colspan="10" class="gsub">② 逐层流水：算第 i 层时加载第 i+1 层</td></tr>
+    <tr><td class="lbl">拷贝流（加载）</td><td class="p">L1</td><td class="p">L2</td><td class="p">L3</td><td class="p">L4</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">计算流</td><td></td><td class="r" style="color:#fff">L1</td><td class="r" style="color:#fff">L2</td><td class="r" style="color:#fff">L3</td><td class="r" style="color:#fff">L4</td><td></td><td></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图。浅红 = 加载某一层的 KV，蓝 = 计算某一层。理想情况下，流水只多出“加载第一层”的那一格。如果每层的加载比计算慢（例如上下文很长、新 token 很少，或者带宽很低），计算流就会在每层之间等待，加载重新变成瓶颈——这正是后来 Strata 着重处理的情况（见“后来怎么样了”）。</div>
+</div>
+<p><b>异步计算与预取。</b>很多时候，从调度器接收一个请求，到真正要用它的 KV 缓存进行计算，中间有一段空档。例如一个能命中缓存的请求到达时，引擎正忙着处理别的请求，它只能在队列里等。LMCache 利用这段空闲，把排队请求的 KV 缓存从较慢的层级预先搬到较快的层级（例如从远端磁盘搬到本地 CPU 内存，或直接搬进 GPU 显存）。等它真正开始计算时，KV 缓存已经在快的那一层，加载延迟大大缩短。预取的目标层级可以由用户按延迟要求和资源约束配置。</p>
+
+<h4 id="n-5-3">5.3 尽量少拷贝</h4>
+<p><b>零拷贝与引用计数。</b>朴素的实现在每一步搬运时都会新复制一份数据，尤其是在多种存储设备之间。LMCache 只保留必需的副本：当同一份 KV 缓存要同时写到多个目的地时（例如从本地 CPU 内存同时写到本地磁盘和远端对象存储），它不为每个目的地复制一份，而是给这份共享数据的<b>引用计数</b>加一；每完成一次读或写，计数减一；计数归零时才释放这块内存。这和操作系统、以及 vLLM 自己对共享 KV 块用的引用计数是同一个思路（<a href="vllm.html#n-4-4">vLLM 精读 §4.4</a>），论文把它类比为操作系统中的计数机制。</p>
+<p><b>动态卸载。</b>这是 LMCache 和 vLLM 显存管理结合得最紧的一处，需要先明白 vLLM 的“空闲页”是什么。vLLM 开启前缀缓存后，一个请求结束时它占的页并不会立刻被清空，而是进入<b>空闲页池</b>：这些页里的 KV 缓存仍然有效，如果后来的请求前缀命中，还能直接拿来用；只有当新请求需要分配页、而池里没有别的空页时，最久没被用过的页才会被拿去覆盖。换句话说，空闲页按“最近最少使用”（LRU）的顺序排队，排在最前面的最先被覆盖，里面的 KV 缓存也就最先丢失。</p>
+<p>如果想让这些即将丢失的 KV 缓存在 CPU 内存里留一份，最简单的办法是把所有空闲页都复制到 CPU，但这会浪费大量带宽和内存。LMCache 只复制<b>即将被覆盖的那一小段</b>，用三个指针管理：</p>
+<ul>
+  <li><b>起始指针</b>：空闲页区域在显存中的开头，也就是下一个会被分配出去的位置；</li>
+  <li><b>当前指针</b>：已经复制到 CPU 内存的进度；</li>
+  <li><b>结束指针</b>：计划复制的范围的末尾。</li>
+</ul>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/dynamic_offloading.svg" alt="原文图 7：动态卸载的四种状态" loading="lazy"></div>
+<figcaption><b>原文图 7。怎么看：</b>每一行是同一个空闲页池在不同时刻的状态，最左边是最久未用（最先被覆盖）的页，右上角的箭头标着“Least recently used”。灰色是计划要复制、还没复制的页，绿色是已经复制到 CPU 内存的页，橙色是刚被新请求分配走的页，蓝色是暂时不管的其余空闲页。(a) 状态 1，初始化：起始指针和当前指针重合，两指针到结束指针之间是待复制区。(b) 状态 2，进行中：当前指针向右移动，它左边的页都已复制。(c) 状态 3，新请求到达：新请求从左端拿走了几页（橙色），起始指针随之右移；为了保证以后的请求仍有足够的“已备份”空页可用，结束指针也向右移动同样的页数。(d) 状态 4，稳定：当前指针追上结束指针，计划内的页都复制完了。</figcaption></figure>
+<p>这个设计有一个明确的权衡。如果一个请求要分配的页超过了当前指针（也就是要覆盖还没备份完的页），分配就必须等待，直到当前指针向右移得足够远。所以“复制窗口”（结束指针减起始指针）的大小决定了两件事的取舍：窗口小，多余的复制少，但分配时更容易被卡住；窗口大，分配几乎不会被卡住，但要复制更多可能永远不会被覆盖的页。论文举的例子是：只备份 1 页、而某个请求需要 3 页时，它要等当前指针和结束指针再前进 2 页；如果备份了 3 页，同一个请求可以立即继续，代价是复制比例更高。作者说同样的策略原则上可以推广到 CPU 和 GPU 之外的其他层级，但目前没有实现。</p>
+<div class="note-warn"><b>读这一节时容易忽略的地方：</b>
+<ul>
+  <li>这一节的各项优化都没有单独的消融实验。块大小（256）取多大最好、零拷贝省了多少、动态卸载的窗口该设多大、分配停顿出现得多频繁，论文都没有给出数据；第 8.6 节只有“块传输 vs 页传输”的带宽对比和一张异步计算的时间线。</li>
+  <li>块越大，单次传输越高效，但匹配粒度越粗：一个请求的前缀只有凑满整块才能命中，不足一块的尾巴要么重算、要么另行处理。Strata 论文测过页大小从 1 增加到 1024 时命中率下降、TTFT 变差，这个代价在块上同样存在。</li>
+  <li>逐层流水能藏住的只是“和计算一样长”的那部分加载时间。如果命中的前缀很长、需要新算的 token 很少，计算时间太短，加载就藏不住了。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 标准接口：KV connector 怎样把缓存层和推理引擎解耦</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>推理引擎每周都在变，LMCache 怎样做到“引擎内部怎么改都不影响我”？作者和 vLLM 团队一起设计的 KV connector 接口，在调度器和模型执行两侧各提供了哪些钩子？一个请求从进入调度器到算完，会依次触发哪些调用？</div>
+<p>作者再次强调，2025 年平均每周有 15–20 个新模型发布，支持新架构常常要大改推理引擎，例如加入滑动窗口注意力或多头潜在注意力（MLA，见 <a href="deepseek-v3.html">DeepSeek-V3 精读</a>）。这些改动经常改变 KV 缓存在引擎内部的管理方式，LMCache 不可能每次都临时打补丁。于是 LMCache 引入了标准化的 <b>KV connector</b> 接口，把 KV 缓存管理和引擎后端解耦。论文特别说明：这个 API 由 LMCache 团队发起设计，但实现和维护是 LMCache 与 vLLM 两个团队的共同工作。</p>
+
+<div class="note-pre"><b>先补一点背景：vLLM 的“调度器—执行器”分离，以及分段 CUDA Graph。</b>
+<p>vLLM 新版（V1）把推理拆成两类进程。<b>调度器</b>只做决策：每一步决定哪些请求参与计算、每个请求这一步要算多少个 token、给它们分配哪些 KV 页。<b>worker（模型执行器）</b>只做执行：按调度结果把模型跑一遍。前缀缓存是调度器里的一等公民：如果一个请求有 1 万个 token 已经在缓存里，调度器就只让 worker 计算剩下的部分。</p>
+<p><b>CUDA Graph</b> 是一种减少 CPU 开销的技术：先把一整串 GPU 内核的启动“录”下来，以后一次性“回放”，省掉每个内核单独启动的开销。代价是录好的图是固定的，不能在中间插入 Python 代码或等待别的事件。vLLM 采用“分段”CUDA Graph：只录非注意力部分，注意力单独执行。正因为注意力不在图里，才能在每一层注意力前后插入钩子，比如“等第 \(i\) 层的 KV 加载完”或“开始保存第 \(i\) 层的 KV”。</p>
+</div>
+
+<p><b>设计目标</b>有四条：<b>最大灵活性</b>，尽可能支持各种 KV 缓存操作；<b>贴合 vLLM 的设计方向</b>，包括严格的调度器—worker 分离、前缀缓存作为一等公民、分段 CUDA Graph；<b>对“树外”连接器友好</b>，第三方的连接器不用改 vLLM 的代码就能接入；<b>接口层零额外开销</b>，例如不在 API 层引入进程间通信。</p>
+<p>为了符合 vLLM 的分离原则，接口分成两组。<b>调度器侧</b>：连接器报告的额外命中 token 被当作普通的前缀缓存命中，直接影响调度决策（如果 LMCache 里有命中，这个请求需要新 prefill 的 token 数就变少了）。<b>模型执行侧</b>：在模型执行前后、以及每层注意力计算前后加钩子，既支持整体一次性卸载，也支持逐层卸载。</p>
+<div class="table-wrap"><table>
+<tr><th>位置</th><th>论文表 2 中的名字</th><th>作用</th><th>vLLM 主分支中对应的方法（2026-10-20 核对）</th></tr>
+<tr><td>调度器</td><td><code>get_num_new_matched_tokens</code></td><td>返回 LMCache 后端里命中的 token 数；也可以返回“暂不确定”，让 vLLM 先把这个请求放回等待队列、去处理别的请求</td><td><code>get_num_new_matched_tokens(request, num_computed_tokens)</code>，返回值第一项为 None 时表示“需要更多时间”</td></tr>
+<tr><td>调度器</td><td><code>update_state_after_alloc</code></td><td>页分配好之后，标记这个请求的哪些页需要从外部后端加载</td><td>同名</td></tr>
+<tr><td>调度器</td><td><code>build_connector_meta</code></td><td>为这一步构造传输所需的元数据，包括 KV 页在显存中的地址</td><td>同名</td></tr>
+<tr><td>执行器</td><td><code>start_load_kv</code></td><td>在推理开始前启动加载</td><td>同名</td></tr>
+<tr><td>执行器</td><td><code>wait_load_kv</code></td><td>在第 \(i\) 层计算前等这一层的 KV 到位</td><td><code>wait_for_layer_load(layer_name)</code></td></tr>
+<tr><td>执行器</td><td><code>start_store_kv</code></td><td>计算后开始把新产生的 KV 存出去</td><td><code>save_kv_layer(layer_name, kv_layer, attn_metadata)</code></td></tr>
+<tr><td>执行器</td><td><code>wait_store_kv</code></td><td>同步，确认某一层已经存完</td><td><code>wait_for_save()</code>（每步调用一次）</td></tr>
+</table></div>
+<p class="w-note">左边三列按原文表 2 改写；最右一列是本站对照 vLLM 仓库 <code>vllm/distributed/kv_transfer/kv_connector/v1/base.py</code> 的结果。论文表里的函数名和签名是简化写法，执行器侧几个方法的实际名字不同，调度器侧的名字一致。</p>
+<p>把这些串起来，一个请求的流程是这样的。请求进入调度器后，调度器先调用 <code>get_num_new_matched_tokens</code> 问 LMCache 后端里命中了多少 token。LMCache 可以返回“暂时没有结果”，让 vLLM 把这个请求放回等待队列、先处理别的请求，从而让这个请求的 I/O 和别的请求的计算重叠（这就是第 5.2 节“异步计算与预取”在接口上的落脚点）。接着 <code>update_state_after_alloc</code> 根据命中信息，决定 vLLM 的每一页是否需要从外部后端加载；如果命中的 token 数大于零，再调用 <code>build_connector_meta</code> 准备加载或存储所需的元数据。</p>
+<p>请求到了执行器，在逐层流水的模式下，先调用 <code>start_load_kv</code> 开始把第一层的 KV 加载进显存；每一层计算之前调用 <code>wait_load_kv</code> 等这一层加载完成，并启动下一层的加载；每一层计算之后，先调用 <code>wait_store_kv</code> 等上一层存完，再调用 <code>start_store_kv</code> 开始存这一层新产生的 KV。在不流水的模式下，第一层计算之前用 <code>start_load_kv</code> 阻塞式地把全部 KV 缓存一次加载进对应的分页地址；这一轮调度的计算结束后，再用 <code>start_store_kv</code> 同步地把新 KV 存出去。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个请求触发的 connector 调用（逐层模式）</div>
+  <div class="dia-flow"><b style="width:86px">调度器</b><span class="dia-box reg">get_num_new_matched_tokens<small>命中多少？可答“稍后再问”</small></span><span class="dia-arrow">→</span><span class="dia-box reg">update_state_after_alloc<small>哪些页要从外部加载</small></span><span class="dia-arrow">→</span><span class="dia-box reg">build_connector_meta<small>打包页地址等元数据</small></span></div>
+  <div class="dia-flow"><b style="width:86px">执行器</b><span class="dia-box enc">start_load_kv<small>开始加载第 1 层</small></span><span class="dia-arrow">→</span><span class="dia-box">对每一层 i：<small>等第 i 层到位 → 启动第 i+1 层加载 → 第 i 层注意力 → 等第 i−1 层存完 → 开始存第 i 层</small></span><span class="dia-arrow">→</span><span class="dia-box enc">本步结束<small>同步剩余的存储</small></span></div>
+  <div class="dia-note">本站示意图，按论文第 6 节的文字描述绘制。调度器侧的三个调用只改变“这个请求还要算多少 token、哪些页要加载”，不碰 GPU；执行器侧的钩子插在注意力前后，所以依赖“注意力不进 CUDA Graph”。</div>
+</div>
+<p><b>影响。</b>论文写作时，这套 API 在 vLLM 里已经上线六个多月，被 NVIDIA Dynamo、Red Hat 的 llm-d、字节跳动的 AIBrix 和 vLLM Production Stack 等开源项目采用，还有多家公司基于它写了自己的私有连接器。本站核对（2026-10-20）：vLLM 主分支注册的连接器包括 <code>LMCacheConnectorV1</code>、<code>LMCacheMPConnector</code>、<code>NixlConnector</code>、<code>MooncakeConnector</code>、<code>MooncakeStoreConnector</code>、<code>HF3FSKVConnector</code>、<code>FlexKVConnectorV1</code>，以及 vLLM 自己的 <code>OffloadingConnector</code> 和 <code>SimpleCPUOffloadConnector</code> 等，说明这个接口确实成了各家 KV 传输和存储方案接入 vLLM 的公共入口。</p>
+<div class="note-warn"><b>容易误解的一点：</b>“解耦”指的是 LMCache 不必依赖 vLLM 的内部数据结构，而不是说 LMCache 完全不受引擎变化影响。新的注意力变体（滑动窗口、MLA、混合注意力与线性注意力的混合模型）会改变“每个 token 存什么、存多少”，连接器两边仍然要适配；接口的作用是把适配工作限定在连接器内部，并让 vLLM 负责保证这些钩子的语义稳定。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 控制器接口：让上层系统知道 KV 在哪、能主动管理它</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>当系统里有很多个推理实例、每个实例都有自己的 GPU、CPU 内存和磁盘时，谁来记录“哪段 token 的 KV 缓存存在哪个实例的哪一层”？上层的路由器、运维人员和应用程序可以通过哪些接口查询和操作 KV 缓存？这些接口能支撑哪些具体的优化？</div>
+<p>LMCache 作为分布式缓存系统运行，核心是一个中心化的 <b>KV 缓存控制器</b>，负责全局元数据、缓存操作和请求路由。它分两层：一个独立运行的<b>控制器管理进程</b>，作为全局协调点；以及和每个 LMCache 实例部署在一起的 <b>worker</b>，负责本地操作，或者代表本实例向管理进程发起全局请求。接口也分两类：<b>外部 API</b> 给用户和运维直接调用，由管理进程处理并在必要时分派给各个 worker；<b>内部 API</b> 给各个实例的 worker 主动向管理进程上报或查询。</p>
+<div class="table-wrap"><table>
+<tr><th>类别</th><th>接口</th><th>作用</th></tr>
+<tr><td>内部</td><td><code>batched_admit</code> / <code>batched_evict</code></td><td>实例把“存入了哪些块 / 淘汰了哪些块”批量报告给管理进程</td></tr>
+<tr><td>内部</td><td><code>batched_p2p_lookup</code></td><td>实例本地未命中时，问管理进程哪个同伴实例有这些块，返回（实例、设备、命中块数）列表</td></tr>
+<tr><td>外部</td><td><code>lookup(tokens)</code></td><td>查询这段 token 的 KV 缓存在全局的分布：哪个实例、哪种设备、命中多少 token</td></tr>
+<tr><td>外部</td><td><code>move(src, dst, tokens)</code></td><td>把这段 token 的 KV 缓存从一个（实例、设备）迁移到另一个</td></tr>
+<tr><td>外部</td><td><code>clear(tokens, inst_id, device)</code></td><td>清除某个实例某种设备上的这段 KV 缓存</td></tr>
+<tr><td>外部</td><td><code>pin</code> / <code>unpin</code></td><td>把这段 KV 缓存钉在某个位置，不被淘汰；或解除</td></tr>
+<tr><td>外部</td><td><code>compress</code> / <code>decompress</code></td><td>用指定方法压缩或解压某个位置上的这段 KV 缓存</td></tr>
+</table></div>
+<p class="w-note">按原文表 3 改写。</p>
+<p>论文用几个例子说明这些接口怎么用：</p>
+<ul>
+  <li><b>感知 KV 缓存的路由。</b>路由器希望把请求送到命中率最高的实例。各实例通过 <code>batched_admit</code> / <code>batched_evict</code> 把自己的存入和淘汰决策报告给管理进程，管理进程汇总成一份全局的内存视图。路由器调用 <code>lookup(tokens)</code> 时，管理进程直接查这份视图，返回（实例、设备、命中 token 数）的列表。</li>
+  <li><b>KV 缓存迁移。</b>某个实例要缩容下线，或者需要负载均衡时，它持有的 KV 缓存可以通过 <code>move</code> 迁到别的实例：管理进程把请求派给源实例，源实例和目标实例建立连接（如果还没有），再把指定 token 的 KV 缓存从源设备传到目标位置。</li>
+  <li><b>点对点共享。</b>一个实例本地未命中时，它的 worker 用 <code>batched_p2p_lookup</code> 问管理进程，得到哪些同伴持有这些块、各持有几块，然后比如从命中块数最多的同伴那里拉取。</li>
+  <li><b>清除。</b>切换模型或回收内存时，应用可以调用 <code>clear</code>，管理进程把操作派给对应实例，由它的 worker 删除指定设备上的那段 KV 缓存。</li>
+  <li>压缩 / 解压、钉住 / 解除钉住这几个接口，论文没有给出具体的应用例子，只说用户可以按需调用；第 3.3 节金融公司“钉住热门文档”的需求就对应 <code>pin</code>。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：感知 KV 缓存的路由与点对点共享</div>
+  <div class="dia-flow"><span class="dia-box enc">实例 A 的 LMCache worker</span><span class="dia-arrow">— batched_admit / evict →</span><span class="dia-box reg">控制器管理进程<small>全局视图：哪段 token 的 KV 在哪个实例、哪种设备</small></span><span class="dia-arrow">← batched_admit / evict —</span><span class="dia-box enc">实例 B 的 LMCache worker</span></div>
+  <div class="dia-flow"><span class="dia-box act">路由器</span><span class="dia-arrow">— lookup(tokens) →</span><span class="dia-box reg">控制器管理进程</span><span class="dia-arrow">→ [(A, CPU, 9,216), (B, 磁盘, 2,048)] →</span><span class="dia-box act">把请求发给实例 A</span></div>
+  <div class="dia-flow"><span class="dia-box enc">实例 B 本地未命中</span><span class="dia-arrow">— batched_p2p_lookup →</span><span class="dia-box reg">控制器管理进程</span><span class="dia-arrow">→ “A 有 36 块” →</span><span class="dia-box enc">B 直接从 A 的 CPU 内存拉取</span></div>
+  <div class="dia-note">本站示意图，返回值中的数字是虚构的例子。路由时“命中最多”并不总是最优：命中最多的实例可能正忙。Mooncake 的调度器就同时考虑命中长度和实例负载（见 <a href="mooncake.html#n-6-1">Mooncake 精读 §6.1</a>）；LMCache 只提供查询能力，具体的路由策略由上层决定。</div>
+</div>
+<div class="note-warn"><b>这一节没有回答的问题：</b>中心化的管理进程是否会成为瓶颈或单点故障？全局视图和各实例真实状态之间的延迟有多大，查到“有”而去拉时已经被淘汰怎么办？论文都没有讨论，也没有给出控制器本身的性能数据。v1 里曾提到“取回出错时，LMCache 会报告哪些部分读成功了，保证推理引擎不因读失败而崩溃、生成结果仍然正确”，v2 删去了这段。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 实验：快多少，在什么条件下快</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LMCache 在单机 CPU 卸载、集中式远端存储和 PD 分离三种场景下，分别比谁快、快多少？“快”指的是首 token 延迟、字间延迟还是吞吐？这些收益来自哪个部件？什么时候从远端加载反而不如重算？这些数字能说明多少问题？</div>
+
+<h4 id="n-8-1">8.1 实验是怎么设计的</h4>
+<div class="table-wrap"><table>
+<tr><th>场景（原文表 4）</th><th>单机 / 多机</th><th>网络</th><th>对应的真实用法</th></tr>
+<tr><td>CPU Offload</td><td>单机</td><td>不涉及</td><td>单机把 KV 卸载到 CPU 内存</td></tr>
+<tr><td>Central Storage</td><td>单机（另有一台存储服务器）</td><td>以太网</td><td>集中式存储服务器</td></tr>
+<tr><td>PD</td><td>单机</td><td>NVLink</td><td>PD 分离</td></tr>
+</table></div>
+<ul>
+  <li><b>模型</b>：Llama-3.1-8B-Instruct、Sao10K L3 8B、Llama-3.1-70B-Instruct、Qwen2.5-Coder-32B-Instruct、Qwen3-Coder-480B-A35B-Instruct-FP8、Qwen2.5-72B-Instruct；第 8.8 节另用 Qwen3-32B。</li>
+  <li><b>数据</b>：模拟的多轮问答、LongBench 里的长文问答（TriviaQA），以及 vLLM 官方压测脚本的随机数据。</li>
+  <li><b>硬件</b>：GMI Cloud 提供的 8×H100 服务器；每个模型用“能启动它的最少 H100 张数”（具体张数论文没列）。远端存储实验用同样多的 GPU，外加一台用 CPU 内存存 KV 的集中式存储服务器。PD 分离实验里 prefill 实例和 decode 实例各用同样多的 GPU，二者通过 NVLink 相连，也就是在同一台机器里。第 8.7 节换成了 B200。</li>
+  <li><b>指标</b>：TTFT（即 prefill 延迟）和 ITL（相邻两个输出 token 的平均间隔）；分析部件时分别报告各部分的耗时。</li>
+  <li><b>对照</b>：LMCache 版本 v0.3.6。对照组是 <b>Basic vLLM</b>（vLLM v0.10.2，默认开启前缀缓存，但只在显存里缓存，所以只能留住一小部分）；<b>Basic vLLM CPU Offloading</b>（vLLM v0.11.0 自带的 CPU 卸载实现）；以及两家商业服务 <b>Commercial #1、#2</b>（提供为用户预留 GPU、运行用户自选模型的专属端点，于 9 月 10 日测试，名字未披露）。</li>
+</ul>
+<div class="note-pre"><b>先补一点背景：怎么读“延迟—请求速率”曲线。</b>
+<p>第 8 节的大部分图是同一种画法：横轴是每秒到达的请求数（QPS），纵轴是 TTFT 或 ITL。请求少的时候，系统游刃有余，延迟低而且平稳；请求速率接近系统的处理能力时，请求开始排队，延迟突然急剧上升。曲线“拐弯”的位置就是系统能稳定承受的最高请求速率。所以看这类图，主要看两件事：低负载时的延迟高低（单个请求有多快），以及<b>哪条曲线拐得更靠右</b>（能扛多大的负载）。论文说的“同样 TTFT 下吞吐高 N 倍”，指的是在某个 TTFT 水平上，两条曲线横坐标之比；“高 QPS 时 TTFT 低 N 倍”，则往往是对手已经过载、在排长队时的比值，这种倍数主要反映排队时间，不能理解成单个请求快了 N 倍。（详细的例子见 <a href="vllm.html#n-6-1">vLLM 精读 §6.1</a>。）</p>
+</div>
+
+<h4 id="n-8-2">8.2 单机 CPU 卸载：多轮文档问答</h4>
+<p>负载模拟“用聊天机器人分析文档”：每个请求默认含 1 万个 token，由一份文档（大约 12 页 PDF）作为上下文，加上一个不重复的短问题；Llama-3.1-8B 的请求改为 2 万 token（作者的理由是小模型通常能处理更多更长的请求）。输出是一个最多 100 token 的简短回答。会话开始时有 40 个用户，之后按设定的速率（QPS）不断有新用户加入。LMCache 最多可以用 500 GB CPU 内存存 KV。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_single_node.svg" alt="原文图 8：单机 CPU 卸载的 TTFT 与 ITL" loading="lazy"></div>
+<figcaption><b>原文图 8。怎么看：</b>五列是五个模型（Llama3.1-8B、Llama3.1-70B、Qwen2.5-72B-Instruct、Qwen2.5-Coder-32B、Qwen3-Coder-480B），上排是 TTFT（秒），下排是 ITL（秒），横轴都是 QPS。绿色实线是 LMCache，红色虚线是只在显存里缓存的 vLLM，蓝色点线是 vLLM 自带的 CPU 卸载，橙色和浅粉色是两家商业服务。看点：红线和橙线在 QPS 1 附近就冲出图框，说明它们几乎每次都要重新 prefill 1–2 万 token，很快过载；蓝线比它们能多扛一些，但在 70B 上 TTFT 停在 3.5 秒左右的高位；绿线在大部分 QPS 下都贴着底部（8B 上约 0.2 秒），直到右端才上翘。Qwen3-Coder-480B 一列只有红、绿两条，因为 vLLM 自带的 CPU 卸载在这个模型上跑不起来，两家商业服务也不支持部署这个模型。</figcaption></figure>
+<p>论文报告的结果：在低负载（QPS = 1）时，LMCache 的 TTFT 比各对照组小 1.9–8.1 倍；在同样 TTFT 下，LMCache 能处理的请求速率（即吞吐）是五个模型上最强对照组的 2.3–14 倍；QPS = 1 时，ITL 比最强对照组小 7%–92%。ITL 也变好，是因为对照组在第一个 token 之前要花很长时间 prefill，后面的生成被排在 prefill 后面，字间间隔随之拉长。</p>
+<p>作者对收益来源的解释是：和只用显存的 vLLM 比，LMCache 能卸载到 CPU 内存，能存的 KV 多得多，命中率因此高得多（第 2 节的推算是 9 倍左右的容量差）；和 vLLM 自带的 CPU 卸载比，后者按“每层、每 16 个 token”传输，用不满加载带宽，而 LMCache 按块加载、用了高性能的加载内核。和商业服务的比较是黑盒的，作者从结果推测：#1 没有把 KV 卸载到二级存储的机制，#2 大概有，但性能仍不如 LMCache。</p>
+
+<h4 id="n-8-3">8.3 用真实 trace 的长度分布回放</h4>
+<p>这组实验按两家企业（F 和 G）真实请求的<b>输入、输出长度分布</b>生成负载。因为拿不到 F 公司的私有模型，作者用五个公开模型回放 F 的 trace，另外用 Llama-3.1-70B 回放 G 的分布。原始 trace 持续好几天，为了能在一小时内跑完，作者把它在时间上压缩了。LMCache 最多用 500 GB CPU 内存，对照组是开启显存前缀缓存的最新版 vLLM。</p>
+<figure class="paper-fig"><div class="imgs"><img src="lmcache/fig/fig_real_trace.svg" alt="原文图 9：F 公司 trace 上三个模型的结果" loading="lazy"><img src="lmcache/fig/fig_real_trace_part_2.svg" alt="原文图 10：F 公司 trace 上另两个模型与 G 公司 trace 的结果" loading="lazy"></div>
+<figcaption><b>原文图 9（左）与图 10（右）。怎么看：</b>每一行是一个模型，左列 TTFT、右列 ITL，横轴 QPS；绿色是 LMCache，红色是 vLLM。左图三行依次是 Llama 3.1 70B、Qwen 2.5 72B、Qwen3 Coder 480B FP8（F 公司分布）；右图前两行是 Qwen 2.5 Coder 32B 和 Sao10K L3 8B（F 公司分布），最后一行是 Llama 3.1 70B（G 公司分布）。注意各子图纵轴范围差别很大：Qwen 2.5 72B 的红线在 QPS 接近 4 时 TTFT 达到 140 秒左右，这已经是严重排队的状态。</figcaption></figure>
+<p>论文报告：高 QPS 时，LMCache 的 TTFT 比 vLLM 低 3.7–6.8 倍，ITL 低 19%–58%（图 9 的三个模型为 4.4–6.6 倍和 34%–58%，图 10 的三组为 3.7–6.8 倍和 19%–44%）。从图上看，低 QPS 时两条线基本重合，差距是在 vLLM 开始过载后拉开的。</p>
+<div class="note-warn"><b>这组“真实 trace”实验真实到什么程度：</b>v2 的描述是按 F、G 两家公司请求的“输入和输出 token 的分布”生成负载，没有说明请求之间的前缀共享关系（谁和谁共享哪段上下文、隔多久再次出现）是否保留。而前缀缓存的收益几乎完全取决于这种共享关系。v1 对同一实验的描述不同：说 trace 包含到达时间和真实的多轮对话输入，后续轮次复用前面的历史，平均输入约 4K token，只用 Sao10K 一个模型回放，并做了随机采样；v1 的结论是 QPS 2–5 时 LMCache 仍好 25%，QPS 6 时好 49%。两个版本的设置和结论幅度差别不小，读者应以“在某种接近真实的长度分布下”来理解 v2 的数字。</div>
+
+<h4 id="n-8-4">8.4 集中式远端存储</h4>
+<p>这组实验把 KV 缓存存到一台集中式的远端服务器（用 CPU 内存存储），它和 GPU 机器之间的带宽只有 15 Gbps。数据用 LongBench 中的 TriviaQA，按 vLLM 官方压测脚本以泊松过程产生请求。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_remote_backend.svg" alt="原文图 11：远端存储后端的 TTFT 与 ITL" loading="lazy"></div>
+<figcaption><b>原文图 11。怎么看：</b>四列是四个模型（Llama3.1-70B、Qwen2.5-72B-Instruct、Qwen2.5-Coder-32B、Qwen3-Coder-480B），上排 TTFT、下排 ITL，横轴 QPS。绿色 LMCache（远端后端），红色 vLLM，蓝色点线 Commercial #1。看拐点：红、蓝线大多在 QPS 1–1.5 附近冲出图框，绿线在 Qwen2.5-72B 上能撑到 QPS 2.5–3。例外是 Qwen2.5-Coder-32B 一列：横轴只到 1.0，三条线的 TTFT 都在 1–2 秒，而且 Commercial #1 的 ITL 在 QPS 0.5 和 0.75 时比 LMCache 还低。</figcaption></figure>
+<p>论文报告：在同样 TTFT 下，LMCache 带远端后端比 vLLM 的吞吐高 1.3–3 倍，原因是远端后端能存的 KV 远比 CPU 内存多，命中率更高。作者同时提醒：远端后端的带宽低得多，加载延迟比从 CPU 内存加载大，<b>当输入上下文较短或模型较小时，prefill 本身很快，加载延迟甚至可能超过 prefill</b>（第 8.7 节会演示），所以 KV 在远端时，需要自适应地决定是加载还是重算。</p>
+
+<h4 id="n-8-5">8.5 PD 分离</h4>
+<p>这组实验和 vLLM 原生的 PD 分离比，负载是 vLLM 官方压测脚本的随机输入输出：输入 8K token、输出 200 token。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_pd_cdf.svg" alt="原文图 12：PD 分离下 TTFT 与 ITL 的分布" loading="lazy"></div>
+<figcaption><b>原文图 12。怎么看：</b>四列是四个模型（Llama3-8B、Llama3-70B、Qwen-32B、Qwen-72B）。上排横轴是 TTFT，下排横轴是 ITL，纵轴都是累积分布（CDF，曲线上一点表示“延迟不超过这个值的请求所占比例”）；下排纵轴只画了 0.95 到 1.00，专门看最慢的 5% 请求。绿色是 LMCache，红色虚线是 vLLM 原生 PD 分离。曲线越靠左越好、越陡说明延迟越稳定。看点：绿线几乎是一条竖线，所有请求的 TTFT 都差不多；红线在 70B、72B 上有一个平台，读图约 45% 的请求在 0.6–0.7 秒内拿到首 token，其余的要等到 1.1–1.5 秒（70B）或更久，像是有一部分请求被前面请求的 KV 传输挡住了（这是本站的解读，论文没有分析）。</figcaption></figure>
+<p>论文报告：LMCache 的平均 TTFT 低 1.53–1.84 倍，平均 ITL 低 1.12–1.66 倍，尾延迟明显更好。（正文说图中展示的是 P95 TTFT，但图本身画的是完整的 CDF。）</p>
+<p>差别来自 KV 的传输方式。LMCache 在 prefill 端把分块 prefill 产生的每一块 KV 先拷到 prefill 实例显存里的缓冲区，再整块传到 decode 实例对应的缓冲区，收到后再拷进 decode 实例的分页显存。vLLM 原生的 PD 分离则用 NIXL 的内存拷贝函数，直接把 prefill 端的分页 KV 发到 decode 端：输入是 prefill 端各页的地址和 decode 端的目标地址。当这些页在 prefill 端的显存里分散存放时，传输就变成一页一页地进行，带宽用不满——也就是第 3.1 节说的问题。</p>
+
+<h4 id="n-8-6">8.6 拆开看：收益来自哪里</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_pd_breakdown.svg" alt="原文图 14：PD 分离的延迟分解" loading="lazy" style="max-height:260px"></div>
+<figcaption><b>原文图 14。怎么看：</b>两根横条是同一个请求在两种 PD 分离实现下的端到端耗时分解：橙色 prefill，粉色 decode，绿色 KV 传输。LMCache 总共 3.68 秒，vLLM 原生 4.47 秒。prefill 和 decode 两段在两边几乎一样长（读图约 1.7 秒和 1.8 秒），差别全在最后的绿色段：vLLM 原生的传输约 0.9 秒（读图），LMCache 的传输细得几乎看不见。论文没有说明这是哪个模型、哪个请求。</figcaption></figure>
+<p><b>PD 分离。</b>上图说明，prefill 和 decode 的计算时间两边相同，vLLM 原生方案以更细的粒度传 KV，带宽用不满，传输时间明显更长；LMCache 的传输更高效，端到端延迟因此下降。</p>
+<p><b>CPU 卸载的加载带宽。</b>原文表 5 直接对比从 CPU 内存加载 KV 时实际达到的带宽：LMCache 为 400 Gbps，vLLM 原生 CPU 卸载为 88 Gbps。原因同样是传输粒度：原生实现一页一页搬，LMCache 一块一块搬；每次传输都会触发一次 CUDA 内存拷贝，事先要准备元数据、事后要发完成信号，这些固定开销摊到每次拷贝上，块越大摊得越薄，有效带宽就越高。换算一下（推算）：400 Gbps 即 50 GB/s，约为 PCIe 5.0 x16 单向峰值 64 GB/s 的 78%，和第 3.1 节“1–2 MB 以上的传输能用到 75%–80%”一致；88 Gbps 即 11 GB/s，约 17%。以 Llama-3.1-8B 的一份 2 万 token 文档（2.62 GB）为例，前者约 52 毫秒，后者约 238 毫秒。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_async.svg" alt="原文图 13：异步加载与同步加载的时间线" loading="lazy"></div>
+<figcaption><b>原文图 13。怎么看：</b>纵轴是 12 个请求（编号 0–11），横轴是时间（秒，论文未标单位）。橙色是 prefill，粉色是 decode，绿色是加载 KV。上图是 LMCache 的异步模式：请求 0–3 的加载和请求 4、5 的 prefill 同时进行，加载条看起来更长，是因为几个请求同时在加载、分摊带宽；全部请求约 10.8 秒（读图）结束。下图是同步模式（图里标为 vLLM，Sync IO）：每个请求的加载只能一个接一个进行，加载期间其他计算都停下来，结束时间约 16 秒（读图）。这张图截自一次更长运行的中间段，用来示意。</figcaption></figure>
+<p><b>异步计算。</b>论文报告：开启请求异步化之后，prefill / decode 计算可以和 KV 加载重叠，端到端延迟降低 1.46 倍。这对应第 6 节里 <code>get_num_new_matched_tokens</code> 可以返回“稍后再问”、让 vLLM 先算别的请求的机制。</p>
+
+<h4 id="n-8-7">8.7 敏感性：什么时候加载不如重算</h4>
+<p>“从别处加载 KV”并不总比“重新 prefill”快。加载的耗时和 token 数成正比：每个 token 的 KV 字节数固定，带宽固定。重算的耗时却比线性增长得更快：除了和长度成正比的矩阵乘法，注意力的计算量和长度的平方成正比。把两者都除以 token 数 \(T\)，比较“每个 token 的平均成本”，就能看出交叉点：</p>
+<div class="formula">$$\underbrace{\frac{s_{\text{kv}}}{B}}_{\text{加载：每 token 恒定}}\quad\text{vs.}\quad\underbrace{\frac{2N+2\,n_{\text{layer}}\,T\,d_{\text{model}}}{F_{\text{eff}}}}_{\text{重算：每 token 随 }T\text{ 增长}}$$</div>
+<p>这里 \(s_{\text{kv}}\) 是每 token 的 KV 字节数，\(B\) 是加载带宽，\(N\) 是参数量（每个 token 过一遍模型约需 \(2N\) 次浮点运算），\(n_{\text{layer}}\)、\(d_{\text{model}}\) 是层数和隐藏维度，\(F_{\text{eff}}\) 是 GPU 实际达到的算力。左边是常数，右边随上下文长度 \(T\) 线性增长，所以存在一个交叉长度：比它短，重算更划算；比它长，加载更划算。带宽 \(B\) 越低，左边越大，交叉点越往后推。</p>
+<p>代入一个例子（推算，假设 \(F_{\text{eff}}\approx400\) TFLOP/s，约为 H100 BF16 峰值的 40%）：Llama-3.1-8B 每 token 的线性部分是 \(2N\approx16\) GFLOP，约 40 微秒。用 LMCache 从 CPU 内存加载（50 GB/s），每 token 128 KiB 只要约 2.6 微秒，远比重算便宜；改用第 8.4 节那种 15 Gbps（1.875 GB/s）的远端，每 token 要约 70 微秒，在短上下文时<b>比重算还慢</b>。注意力那一项每 token 约 \(2\times32\times4096\times T\approx2.6\times10^{5}\,T\) FLOP，要等它补上 30 微秒的差距，\(T\) 大约要到 4.6 万 token。这个例子正好解释了作者在第 8.4 节的提醒：模型小、上下文短、链路慢时，加载可能得不偿失。模型越大，每字节 KV 对应的计算越多（70B 每 token 约 140 GFLOP 对 320 KiB，每字节对应的计算量约为 8B 的 3.5 倍），加载就越早划算。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_diff_lengths.svg" alt="原文图 15：不同上下文长度下加载与 prefill 的延迟" loading="lazy" style="max-height:340px"></div>
+<figcaption><b>原文图 15。怎么看：</b>横轴是上下文长度（千 token），纵轴是延迟（秒）。蓝色实线是在 B200 上直接 prefill 的耗时，橙、红、青三条虚线分别是以 32、64、128 Gbps 网络带宽从远端加载 KV 的耗时。加载线是直线（与长度成正比），prefill 线向上弯（注意力是二次的）。橙线和蓝线在约 256K 处相交：更短时 32 Gbps 的加载比 prefill 慢，更长时更快；64 和 128 Gbps 的两条线在所有测试长度上都低于 prefill。读图：128K 时 prefill 约 6 秒、32 Gbps 加载约 10 秒；256K 时两者都约 18–20 秒。</figcaption></figure>
+<p>论文的结论是：KV 加载应该是自适应的，低带宽时只有上下文长度超过交叉点、加载比 prefill 快时才去加载。论文没有说明这组实验用的是哪个模型、多少张 B200。从图上的读数可以反推（读图 + 推算）：32 Gbps（4 GB/s）下 256K token 加载约 19.5 秒，相当于每 token 约 300 KB，和 70B 一级、8 个 KV 头的模型（每 token 320 KiB）对得上；但这只是推测。</p>
+<div class="dia">
+  <div class="dia-title">示意图：比较“每个 token 的平均成本”，交叉点一目了然</div>
+  <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="加载与重算的每 token 成本示意">
+    <line x1="70" y1="250" x2="660" y2="250" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <line x1="70" y1="250" x2="70" y2="24" style="stroke:var(--text-3);stroke-width:1.5"/>
+    <text x="365" y="276" class="t-c t-sm">上下文长度 →</text>
+    <text x="26" y="140" class="t-c t-sm" transform="rotate(-90 26 140)">每 token 的平均耗时 →</text>
+    <path d="M70,200 L650,60" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <path d="M70,120 L650,120" style="fill:none;stroke:var(--c-act);stroke-width:2.2;stroke-dasharray:7 4"/>
+    <path d="M70,212 L650,212" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2;stroke-dasharray:2 4"/>
+    <path d="M70,236 L650,236" style="fill:none;stroke:var(--c-enc);stroke-width:2.2;stroke-dasharray:9 3 2 3"/>
+    <circle cx="401" cy="120" r="5" style="fill:var(--c-act)"/>
+    <line x1="401" y1="125" x2="401" y2="250" style="stroke:var(--c-act);stroke-dasharray:3 3"/>
+    <text x="401" y="292" class="t-c t-xs" style="fill:var(--c-act)">交叉点（图 15 中约 256K token）</text>
+    <line x1="90" y1="38" x2="120" y2="38" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="128" y="38" class="t-sm" style="fill:var(--c-pred)">重算（prefill）：每 token 成本随长度上升</text>
+    <line x1="90" y1="58" x2="120" y2="58" style="stroke:var(--c-act);stroke-width:2.2;stroke-dasharray:7 4"/><text x="128" y="58" class="t-sm" style="fill:var(--c-act)">从远端加载 @32 Gbps：每 token 成本恒定</text>
+    <line x1="90" y1="78" x2="120" y2="78" style="stroke:var(--c-tgt);stroke-width:2.2;stroke-dasharray:2 4"/><text x="128" y="78" class="t-sm" style="fill:var(--c-tgt)">加载 @64 Gbps</text>
+    <line x1="90" y1="98" x2="120" y2="98" style="stroke:var(--c-enc);stroke-width:2.2;stroke-dasharray:9 3 2 3"/><text x="128" y="98" class="t-sm" style="fill:var(--c-enc)">加载 @128 Gbps</text>
+    <text x="236" y="146" class="t-c t-xs">左：重算更便宜</text>
+    <text x="560" y="104" class="t-c t-xs">右：加载更便宜</text>
+  </svg>
+  <div class="dia-note">本站示意图，只表达形状，不按比例。把原文图 15 的总耗时除以 token 数，加载变成水平线（高度 = 每 token 字节数 ÷ 带宽），重算变成上升的直线。水平线越低（带宽越高），交点越靠左；水平线低于重算线的起点时（64、128 Gbps），在所有长度上都是加载更快。</div>
+</div>
+<p>想自己换模型、换链路算一算，可以用下面的计算器（只显示 KV 部分）：它给出每 token 的 KV 字节数、一条请求的 KV 总量和经不同链路传输的时间，以及 prefill 的理想耗时。注意计算器里的 prefill 时间是按 GPU 峰值算力估的下限，真实 prefill 更慢，所以真实的交叉点会比计算器显示的更早到来。</p>
+<div data-widget="roofline" data-panel="kv"></div>
+
+<h4 id="n-8-8">8.8 接在 SGLang 上</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="lmcache/fig/fig_sglang.svg" alt="原文图 16：SGLang 上的结果" loading="lazy" style="max-height:480px"></div>
+<figcaption><b>原文图 16。怎么看：</b>Qwen3-32B，2 张 H100 张量并行。横轴是请求速率（4–16 QPS），三个子图从上到下是实际吞吐（QPS）、平均 TTFT、平均端到端延迟。红色点线是不卸载的 SGLang，蓝色虚线是 SGLang 自带的 CPU 卸载，绿色实线是 SGLang 接上 LMCache。看点：请求速率超过 8 QPS 后，红线的吞吐就停在约 8 QPS 不再上涨，TTFT 在 10 QPS 时跳到 1.4 秒；蓝、绿两条几乎重合，一直涨到 16 QPS；在最高的 14–16 QPS，蓝线的 TTFT 和端到端延迟略低于绿线（读图：16 QPS 时 TTFT 约 0.6 秒对 0.78 秒）。</figcaption></figure>
+<p>论文报告：在 SGLang 上，LMCache 比不卸载的 SGLang 吞吐更高、平均 TTFT 和端到端延迟更低，和 SGLang 自带的 CPU 卸载性能相当。作者补充说，SGLang 自带的方案缺少分布式存储后端，不能把数据分层卸载到本地磁盘、远端 CPU 或磁盘。这里的“SGLang 自带的 CPU 卸载”论文没有点名，指的应是 SGLang 的分层缓存 HiCache（见“后来怎么样了”）；值得注意的是，HiCache 后来也接上了 Mooncake、3FS 等远端后端。</p>
+
+<h4 id="n-8-9">8.9 结果的份量</h4>
+<p>把上面的实验放在一起，可以这样理解这些数字：</p>
+<ul>
+  <li><b>和谁比。</b>最大的倍数（2.3–14 倍、3.7–6.8 倍）都来自和“只在显存里缓存的 vLLM”比较，也就是“有 CPU 这一层”对“没有这一层”；它衡量的主要是<b>多出一层容量</b>带来的命中率差距，而不是 LMCache 的实现比别的分层缓存好多少。真正“同类相比”的只有三组：vLLM v0.11.0 自带的 CPU 卸载（这是 vLLM 的早期版本，作者自己指出它按每层每 16 token 传输）、vLLM 原生 PD 分离（基于 NIXL 逐页传输）、SGLang 自带的 CPU 卸载（结果是持平，高负载时略逊）。两家商业服务没有名字，内部实现、硬件和部署方式都未知，比较是黑盒的。同期的 Mooncake Store、NVIDIA Dynamo 的 KV 管理、TensorRT-LLM 的卸载功能、带远端后端的 SGLang HiCache 都没有出现在对比里。另外，作者是 LMCache 的开发者，也是 Tensormesh 的创始团队，对照组是由他们配置的。</li>
+  <li><b>硬件与规模。</b>主要实验在一台 8×H100 上完成，每个模型用的 GPU 张数没有列出；“PD 分离”的两个实例在同一台机器上通过 NVLink 相连，不涉及跨机网络；“远端存储”是一台用 CPU 内存存 KV 的服务器，链路 15 Gbps；敏感性实验换成了 B200。跨机、跨机架的大规模部署没有实验数据。</li>
+  <li><b>指标与负载。</b>CPU 卸载实验的负载是为前缀缓存量身定做的：每个请求 1–2 万 token 的文档加一个短问题，输出不超过 100 token，复用率高、prefill 占绝对主导。这正是 KV 缓存收益最大的情形；输出长、复用少、上下文短的负载，收益会小得多。“高 QPS 时 TTFT 低几倍”是对照组过载排队时的比值。第 8.2 节的多轮问答负载怎么定义 QPS（新用户加入的速率还是请求速率）写得不清楚。</li>
+  <li><b>有损还是无损。</b>实验里 LMCache 存取的是原样的 KV 缓存，不改变模型计算的内容，所以不涉及精度损失，论文也没有做质量评测。控制器里的压缩接口（以及同组的 CacheGen、CacheBlend）是有损的，但没有在本文实验中评估。</li>
+  <li><b>部件级的数字。</b>400 Gbps 对 88 Gbps 的加载带宽、1.46 倍的异步收益、3.68 秒对 4.47 秒的 PD 分解，都没有说明用的是哪个模型、多大的上下文、块多大。块大小、动态卸载窗口、零拷贝等设计都没有消融实验。</li>
+  <li><b>生产数据。</b>第 2 节的使用统计和第 9 节的企业经验（22%–32% 的 TTFT 改善、85% 到 45% 的命中率下降、50% 的命中率）都来自用户或客户，只给相对值或单个数字，统计方法、模型、时间段都没有披露，属于“作者转述的生产观察”，不是可复现的实验。</li>
+  <li><b>几处对不上的地方。</b>摘要的“最高 15 倍”在 v2 正文中找到的最大值是 14 倍；引言的“延迟至少降低 2 倍”与第 8.2、8.5 节低于 2 倍的数字矛盾；第 8.4 节“在所有 QPS 上都优于所有对照组”与图 11 中 Qwen2.5-Coder-32B 的 ITL 不符。这些不影响“分层缓存 + 大块传输有明显收益”这个定性结论，但具体倍数应按各小节的条件来读。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S8" target="_blank" rel="noopener">英文原文 §8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 真实部署的经验</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>LMCache 从研究原型变成被许多企业采用的框架，作者在这个过程中看到了哪些和“常识”不一样的现象？哪些是关于性能的，哪些是关于工程和社区的？</div>
+<p><b>从远端存储加载可以比 prefill 快。</b>过去人们普遍认为，把 KV 缓存放到远端存储，主要是为了用更便宜的设备换更高的命中率、降低存储成本，代价是推理延迟变高，因为从远端读比重算还慢。这个印象很大程度来自远端对象存储过去的低吞吐，例如 Amazon S3 的读取速度可以低到 100 MB/s。但远端存储的性能近年提升很大，例如 Amazon S3 Express 的吞吐从 100 MB/s 提高到接近 1 GB/s。作者的用户 C 公司用 LMCache 从自己的远端对象存储加载 KV 缓存，TTFT 比完整 prefill 低 22%–32%。作者的结论是：远端后端可以同时提高命中率和降低 TTFT。按第 8.7 节的分析，这件事成立的前提是上下文足够长、模型足够大，否则 1 GB/s 量级的带宽仍可能输给重算。</p>
+<p><b>截断上下文会大幅降低前缀命中率。</b>许多企业用户用滑动窗口处理超长输入：输入超过模型上下文窗口（或者显存装不下）时，只保留最近的那些 token。这样做的问题是，截断后的输入不再和之前缓存过的上下文共享前缀。作者用 F 公司的真实 trace 测得：只保留最新 token 的截断，让前缀缓存命中率从约 85% 降到约 45%。论文还引用了 Manus 团队关于智能体上下文工程的博客，那里也强调要避免动态增删上下文 token，因为这会让前缀 KV 缓存失效。</p>
+<div class="dia">
+  <div class="dia-title">示意图：为什么“只保留最近的 token”会让前缀缓存全部失效</div>
+  <div class="dia-row"><span class="lbl">第 1 轮（已缓存）</span><div class="cells"><span class="cell b">t1</span><span class="cell b">t2</span><span class="cell b">t3</span><span class="cell b">t4</span><span class="cell b">t5</span><span class="cell b">t6</span></div></div>
+  <div class="dia-row"><span class="lbl">第 2 轮（不截断）</span><div class="cells"><span class="cell b">t1</span><span class="cell b">t2</span><span class="cell b">t3</span><span class="cell b">t4</span><span class="cell b">t5</span><span class="cell b">t6</span><span class="cell">t7</span><span class="cell">t8</span></div></div>
+  <div class="dia-out">前 6 个 token 和第 1 轮完全相同，它们的 KV 直接复用，只需算 t7、t8。</div>
+  <div class="dia-row"><span class="lbl">第 2 轮（截断到 6 个）</span><div class="cells"><span class="cell c">t3</span><span class="cell c">t4</span><span class="cell c">t5</span><span class="cell c">t6</span><span class="cell">t7</span><span class="cell">t8</span></div></div>
+  <div class="dia-out">开头变成了 t3，和缓存里的 t1 对不上，前缀匹配长度为 0。t3–t6 虽然“内容”在缓存里，但缓存里的 KV 是在它们前面还有 t1、t2 的情况下算出来的，位置和上下文都变了，不能复用，6 个 token 全部重算。</div>
+  <div class="dia-note">本站示意图。绿色 = 命中，红色 = 内容相同却无法复用，灰色 = 新 token。每轮都截断时，几乎每一轮都要从头 prefill。这也是“上下文工程”建议只在末尾追加、不在中间删改的原因。</div>
+</div>
+<p><b>用户更喜欢容器化的代码。</b>推理规模越来越大，生产环境大多用 Kubernetes 管理 GPU 集群，所以通过 Docker 镜像部署 vLLM、SGLang 和 LMCache 已经是工业用户的标准做法。有意思的是，很多用户只用官方镜像，从不深入 LMCache 的源代码。</p>
+<p><b>生产中的命中率比预想的高。</b>客户在部署 LMCache 之前，往往没想到生产环境的前缀命中率会这么高，例如 G 公司达到了 50%。过去人们以为 KV 缓存只能复用固定的系统提示；但现代应用越来越多地出现“动态可复用的上下文”，比如编程助手和聊天应用里的对话历史、RAG 流程里的检索结果，这些模式显著提高了整体命中率。</p>
+<p><b>工业用户与学术用户。</b>LMCache 在 2024 年 5 月被设计成一个统一的原型框架，用来承载作者组的研究成果。但工业界当时最想要的是一个高效的 KV 卸载方案，因为 KV 缓存的规模和并发用户数都在增长。于是团队把重心转向性能、稳定性和兼容性。由于大多数公司不太关心定制注意力算法，团队降低了“方便集成特殊注意力机制（例如有选择地丢弃 token）”的 API 的优先级，这使得 LMCache 在学术界不那么受欢迎，因为研究者常常要改注意力机制来做原型。作者说下一步要设计更灵活的 API，兼顾两类用户。</p>
+<p><b>编程语言：灵活还是性能。</b>Python 一直是机器学习的事实标准语言，但业界的重心正从广泛兼容转向更高效率：很多公司在用 Rust 或 C++ 重写机器学习库，或者精心优化 Python 系统、把运行时开销藏起来。作者选择继续用 Python 并做针对性优化，理由是这样演进更快、社区贡献更多，性能仍能和用其他语言写的方案持平。（v1 补充说，性能关键的数据加载模块仍然用 CUDA 实现。）</p>
+<p><b>LMCache 现在是社区项目。</b>大约一年前，LMCache 只支持本地 CPU、本地磁盘和 Redis 三种后端，只能接 NVIDIA GPU 上的 vLLM。论文写作时，它又多支持了 8 种存储后端（NFS、WEKA、GPU-Direct Storage、Mooncake Store、NIXL、S3、InfiniStore、Valkey），4 类处理器（NVIDIA、AMD、昇腾、TPU），以及 vLLM 和 SGLang 两种引擎。作者说这些贡献都来自工业伙伴，他们主动把代码合并回主线，以免和最新版本分叉。</p>
+<div class="note-warn"><b>这一节的性质：</b>这些都是作者转述的经验和客户观察，大多只有一句话和一个数字，没有给出实验设置。“22%–32%”没有说明模型、上下文长度和存储带宽；“85% 降到 45%”没有说明截断窗口多长、模型窗口多大；“50% 命中率”没有说明是按 token 还是按请求统计。它们适合当作“值得在自己的负载上验证的假设”，不宜当作可比较的基准数字。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S9" target="_blank" rel="noopener">英文原文 §9 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 结论与展望：把 KV 缓存当作一种数据</h3>
+<p>论文的结论是：LMCache 不把 KV 缓存当作推理过程的副产品，而是当作一种一等数据结构，从而把一个个孤立地处理 token 的推理引擎，连成了一个由计算和存储组成的分布式系统。实验显示，相对开源基线和商业推理 API，它在多种负载和模型上都带来了明显的吞吐提升和延迟下降；在生产中，企业用它的 CPU 卸载、分层存储和 PD 分离功能，在万亿 token 规模的部署中保持低延迟、降低成本。作者还提到部署中发现的新机会，例如推荐系统里的 KV 缓存复用（v1 详细说过：一些公司用大模型对很长的用户上下文做 prefill、生成嵌入而不生成文字，同一用户的上下文被反复使用），以及在开放式聊天中使用有损压缩。</p>
+<p>展望部分，作者把 LMCache 放进一个更大的判断里：KV 缓存这样的“AI 原生数据”会越来越成为扩展大模型推理和智能体负载的基础，推理不再是一次次孤立的会话，而是一个持久的、感知缓存的计算网络。把 KV 缓存标准化成一种存储和通信的介质，是这一方向的基础设施。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2510.09665v2#S10" target="_blank" rel="noopener">英文原文 §10 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>LMCache 论文发表前后，“把 KV 缓存分层存起来”已经成了推理系统的一条主线。下面先说 LMCache 项目本身的发展，再用两个小节讲同期最重要的两项相关工作：Strata（OSDI 2026）和 SGLang HiCache。标“据项目博客”的条目是项目方自述，其余条目核对过对应的仓库、论文或第三方页面。</p>
+
+<h4 id="n-impact-1">LMCache 项目本身</h4>
+<ul>
+  <li><b>版本与仓库。</b>论文评测用的是 v0.3.6（2025-09-15 发布）；截至 2026-10-20，最新正式版本是 v0.5.6（2026-10-14 发布），仓库有 12,125 个 star、2,187 个 fork，Apache-2.0 许可，创建于 2024-05-28。</li>
+  <li><b>生态位置。</b>2025-09，NVIDIA Dynamo 宣布集成 LMCache 作为 KV 缓存层（据项目博客）；2025-10-30，PyTorch 官方博客宣布 LMCache 成为 PyTorch 生态项目；同月 Tensormesh 公司公开亮相（据公司页面）。vLLM 主分支里，<code>LMCacheConnectorV1</code> 之外又多了一个 <code>LMCacheMPConnector</code>（本站核对）。</li>
+  <li><b>多进程架构。</b>2026-04，LMCache 发布“多进程（MP）模式”：KV 缓存由一个独立于推理引擎的守护进程统一管理，同一台机器上的多个引擎进程（例如数据并行的多个 rank）共享同一个 KV 池，推理引擎崩溃时缓存也不会丢失（据项目博客与 README）。这和 v1 里“把数据搬运放进单独进程可以消除 5%–10% 的 CPU 争用开销、并让多个实例共享内存池”的经验一脉相承。</li>
+  <li><b>非前缀复用。</b>README 列出的功能里包括基于 CacheBlend 的非前缀复用：缓存的 KV 块出现在提示中任意位置也能复用，靠有选择地重算少量 token 恢复质量。这弥补了第 9 节截断例子里“前缀一变就全部失效”的短板，但它是有损的。</li>
+</ul>
+
+<h4 id="n-impact-2">Strata：把带宽跑满，让调度器知道“加载”也要时间</h4>
+<div class="note-pre"><b>先补一点背景：Strata 是谁做的、和 LMCache 什么关系。</b>
+<p>Strata（<a href="https://arxiv.org/abs/2508.18572" target="_blank" rel="noopener">arXiv 2508.18572</a>，2025-08 首发；正式发表于 <a href="https://www.usenix.org/conference/osdi26/presentation/xie-zhiqiang" target="_blank" rel="noopener">OSDI 2026</a>）的作者来自 Stanford、NVIDIA、上海交通大学、科罗拉多大学博尔德分校、CMU 和密歇根大学，第一作者 Zhiqiang Xie 也是 SGLang 的作者之一；LMCache 论文的作者 Yuwei An 同时是 Strata 的作者（Strata 中署名 CMU）。两篇论文互相引用：LMCache v2 用 Strata 的测量说明“1–2 MB 的传输才能用到 PCIe 5.0 的 75%–80%”，Strata 则把 vLLM + LMCache 当作主要对照组之一。Strata 实现在 SGLang 里，并部署在一家头部 AI 公司的生产环境。arXiv 版标注“under peer review”，本页的数字按 arXiv v1。</p>
+</div>
+<p><b>它看到的问题。</b>Strata 专门研究长上下文、以 prefill 为主的负载，指出了分层缓存的两个瓶颈，和 LMCache 第 3 节的判断一致，但往前多走了一步。第一是 <b>I/O 碎片化</b>：在 H200 上用 Llama-3.1-8B、页大小 32 时，加载 8,192 个 token 的 KV 只用到 PCIe 5.0 理论带宽的约 22%；在 CPU 与 GPU 之间带宽高 6 倍的 GH200 上，利用率更是低到约 5%。把页调大能改善传输，却会降低命中率：在 SGLang 上用 Mistral-24B 和 ShareGPT 测，页大小从 1 增加到 1024 时，平均 TTFT 和 P90 TTFT 分别最多变差 2 倍和 2.9 倍。第二是<b>调度器不知道加载要花时间</b>：现有系统默认“新 token 的 prefill 计算足以掩盖历史 KV 的加载”，但当缓存的上下文很长、新 token 很少时，这个假设不成立。他们在 LooGLE 数据集上用 Qwen2.5-14B 测得，SGLang 把 KV 卸载到 CPU 时，74% 的 prefill 时间卡在 KV 传输上，吞吐最多降到四分之一；即使换上他们优化过的 I/O，仍有最多 24% 的 prefill 时间在等加载。</p>
+<p><b>对策一：GPU 辅助 I/O。</b>LMCache 的办法是“把小页拼成大块再交给 DMA 引擎”，Strata 换了一个思路：不用 <code>cudaMemcpyAsync</code> 反复发起小拷贝，而是启动一个 CUDA 内核，让几千个 GPU 线程各自从源地址（显存或锁页的主机内存）读一小段数据进寄存器，再写到目的地址。按利特尔定律 \(X=C\cdot S/L\)，这一招把在途传输数 \(C\) 从 CPU 能维持的几十个提高到几千个，而且每个线程只需要 128 字节的粒度就能高效传输，不必再放大 \(S\)。因为搬运是 GPU 线程自己做的，顺便还能变换布局：GPU 里保持计算友好的“按层优先”布局，CPU 内存和磁盘上改用传输友好的“按页优先”布局（同一页的所有层连在一起），每个线程只需对偏移量多做一次算术。代价是占用 GPU 的计算资源。Strata 把 I/O 内核限制在很少的 SM 上：在 H200 上只用两个 1024 线程的线程块，就跑出接近 50 GB/s，对同时运行的 prefill 和 decode 的拖慢分别小于 5% 和 10%；默认用两个块做 CPU 到 GPU 的加载（关键路径），一个块做 GPU 到 CPU 的备份。从磁盘加载时，按页优先的布局让延迟最多降低 4 倍。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两种把散页搬过 PCIe 的办法</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box act">LMCache：先聚拢，再整块 DMA<small>GPU 内核把散页拷进连续缓冲区 → 拷贝引擎一次传 32 MB 量级的块</small></span></div>
+      <div class="dia-flow"><span class="dia-box">优点<small>传输交给专用拷贝引擎，不占 SM；单次传输大，固定开销被摊薄</small></span><span class="dia-box">代价<small>多一次显存内拷贝；匹配粒度变粗（整块才命中）</small></span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">Strata：GPU 线程直接搬<small>几千个线程直接读锁页主存、写进各层的页，顺手换布局</small></span></div>
+      <div class="dia-flow"><span class="dia-box">优点<small>页可以保持很小（命中率高），不需要中转缓冲区</small></span><span class="dia-box">代价<small>占用少量 SM，与计算内核有轻微干扰（论文测得 &lt; 5% / 10%）</small></span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图，依据 LMCache §5.1 与 Strata §4.2。两者都承认同一个事实：瓶颈不在链路带宽，而在“每次传输太小、次数太多”。</div>
+</div>
+<p><b>对策二：感知缓存的调度。</b>Strata 把 CPU 与 GPU 之间的带宽当作和算力、显存同等重要的资源来调度，分三步：</p>
+<ul>
+  <li><b>推迟“延迟命中”。</b>“延迟命中”（delay hit）是网络缓存里的概念：多个请求访问同一个对象，第一个请求的未命中还没处理完，后面的请求也跟着未命中。在推理里，几个共享同一份长文档的请求如果被放进同一批，会把同一段前缀重复 prefill 好几遍；异步调度器（提前准备下一批）让这种情况更常见。Strata 在 SGLang 的基数树里插入临时节点，标记“排队中”或“计算中”，后来的请求如果匹配到这些节点（超过 100 个 token），就推迟到下一轮、并排在队首，等前面的请求把这段 KV 算好再复用。</li>
+  <li><b>均衡组批。</b>组一批 prefill 时，估计每个请求的“要加载多少”和“要计算多少”，如果加入某个请求会让整批的加载量与计算量之比超过阈值（默认 100），就先把它放到次优先列表，优先挑能和已选请求共享上下文的请求；为防饿死，次优先请求保持原顺序，每次组批都从队首开始。</li>
+  <li><b>填气泡。</b>如果某一批仍然要等很久的加载，就先插入一批 decode 计算。decode 主要消耗显存带宽，加载主要消耗 PCIe 带宽，两者可以并行而几乎不争资源。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：不感知加载 vs 均衡组批 + 填气泡（时间从左到右）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td colspan="10" class="gsub">① 按到达顺序组批：请求 C、D 都要加载长上下文</td></tr>
+    <tr><td class="lbl">PCIe（加载）</td><td class="p">C</td><td class="p">C</td><td class="p">D</td><td class="p">D</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU（计算）</td><td class="q"></td><td class="q"></td><td class="q"></td><td class="q"></td><td class="r" style="color:#fff">C</td><td class="r" style="color:#fff">D</td><td class="r" style="color:#fff">F</td><td></td><td></td></tr>
+    <tr><td colspan="10" class="gsub">② 均衡组批 + 填气泡：C 与无需加载的 F 同批，等待期间插入 decode</td></tr>
+    <tr><td class="lbl">PCIe（加载）</td><td class="p">C</td><td class="p">C</td><td class="p">D</td><td class="p">D</td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU（计算）</td><td class="r" style="color:#fff">F</td><td class="r" style="color:#fff">dec</td><td class="r" style="color:#fff">C</td><td class="r" style="color:#fff">dec</td><td class="r" style="color:#fff">D</td><td></td><td></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图，仿照 Strata 图 7 的思路重画。浅红 = 加载，蓝 = 计算，斜纹 = GPU 空等。“dec”表示插进来的一批 decode。真实系统里逐层流水会让加载和计算部分重叠，这里为了看清“谁在等谁”做了简化。</div>
+</div>
+<p><b>结果与条件。</b>Strata 在 8×H200（每卡 PCIe 5.0 x16，1.6 TB 内存）和 GH200 上评测，模型为 Llama-3.1-8B、Qwen2.5-14B-Instruct-1M（单卡）和 Llama-3.1-70B（4 卡张量并行），数据为 LooGLE（平均输入 21,613 token）、NarrativeQA（54,797 token）、ReviewMT（17,708 token）和短上下文的 ShareGPT；CPU 内存给 1 TB 锁页内存，不使用磁盘。对照组是 vLLM v0.8.5 + LMCache v0.2.1（块 256、页 32）、TensorRT-LLM v0.17.0 自带的 CPU 卸载、SGLang v0.4.5，以及作者在 SGLang 上实现的一个“逐层重叠 + cudaMemcpyAsync”的分层缓存基线。在 LooGLE 上，同样 TTFT 下 Strata 的吞吐：Llama-8B 上是 SGLang 分层基线、vLLM + LMCache、TensorRT-LLM 的 3.2、2.6、1.9 倍；Qwen-14B 上是 3.9、2.1、1.9 倍；Llama-70B 上是 5、5、3.75 倍。预热好 CPU 缓存的 NarrativeQA 上，对 vLLM + LMCache 是 2.3–2.6 倍。短上下文的 ShareGPT 上与其他系统相当。消融显示，GPU 辅助 I/O 和调度分别把峰值吞吐提高到 2.3 倍和 1.8 倍；在 GH200 上，GPU 辅助 I/O 把实际带宽从 40 GB/s 提到 150 GB/s。</p>
+<div class="note-warn"><b>读 Strata 和 LMCache 的对比时要注意：</b>
+<ul>
+  <li>Strata 对比的是 LMCache v0.2.1（2025 年上半年的版本），而 LMCache 论文评测的是 v0.3.6，两者相差几个月的开发；两篇论文的数字都只是各自时间点的快照，不能直接说谁比谁快多少。</li>
+  <li>Strata 的 arXiv 摘要说“TTFT 最多低 5 倍”，OSDI 版摘要改成了“吞吐最多高 5 倍”；正文里的 5 倍是 Llama-70B 在 LooGLE 上“同 TTFT 下的吞吐”。</li>
+  <li>Strata 的场景是单机内 GPU 与 CPU 之间的加载，论文明确说它不研究跨机的分布式缓存池，可以和 Mooncake 这类传输引擎结合；LMCache 的重点则是跨引擎、跨机器和多种后端。两者解决的是同一问题的不同切面。</li>
+</ul></div>
+
+<h4 id="n-impact-3">SGLang HiCache：Strata 的思路进了 SGLang 主线</h4>
+<p>2025-09-10，Zhiqiang Xie 在 LMSYS 博客发布 <a href="https://lmsys.org/blog/2025-09-10-sglang-hicache/" target="_blank" rel="noopener">SGLang HiCache</a>，致谢中列出了 Strata 的几位作者，以及“来自 LMCache 的 Yuwei An”。HiCache 把 SGLang 的 RadixAttention 扩展成 <b>HiRadixTree</b>：这棵基数树充当跨层级的页表，记录每段 KV 在 GPU、CPU 内存还是外部存储里；一个缓存控制器负责在各层之间自动加载和备份。它的数据面就是 Strata 的两招：GPU 辅助的 I/O 内核（博客称 CPU 与 GPU 之间的吞吐最多提高 3 倍），以及 GPU 按层、主机按页的解耦布局（配合零拷贝，与存储层之间的吞吐最多提高 2 倍）。控制面上，命中 CPU 内存时逐层重叠加载；命中外部存储时，在请求排队期间预取，预取策略可选“尽力而为”“等预取完成”“超时即止”；写回下层的策略有直写、只备份热点的选择性直写和回写三种。</p>
+<p>和 LMCache 相比，HiCache 的存储后端接口非常窄：后端只需实现 <code>get(key)</code>、<code>exist(key)</code>、<code>set(key, value)</code> 三个函数，调度和同步都由中心的缓存控制器负责。博客发布时已接入 Mooncake、3FS、NIXL 和一个本地文件后端。博客引用的社区数据是：Novita AI 在 Qwen3-Coder-480B 的编程智能体场景（每个会话约 8 轮、超过 25K token）用 HiCache 加 3FS，平均 TTFT 降低 56%、吞吐翻倍、命中率从 40% 升到 80%；蚂蚁集团在 PD 分离部署的 DeepSeek-R1-671B 上用 HiCache 加 Mooncake，命中时 TTFT 比完整重算平均降低 84%；SGLang 团队自己测得吞吐最多 6 倍、TTFT 最多降低 80%。这些都是厂商或项目方的自述，条件不完全公开。</p>
+<p>回头看第 8.8 节：LMCache 论文里那条和 LMCache 持平、高负载时还略好的“SGLang 自带 CPU 卸载”曲线，指的应当就是 HiCache 的 CPU 内存这一层。两条路线在 2025 年下半年事实上汇合了：都承认“分页 + 小传输”是瓶颈，都做分层存储和预取，都支持 Mooncake、NIXL 等后端；不同在于 LMCache 是一个独立于引擎、同时服务 vLLM 和 SGLang 的外挂层，HiCache 则是 SGLang 内建的功能。</p>
+
+<h4 id="n-impact-4">还没有回答的问题</h4>
+<ul>
+  <li><b>存什么、存多久。</b>LMCache 论文几乎没有讨论淘汰策略。Mooncake 的期刊版报告过线上高峰期命中率跌到 20% 以下、靠分层存储和按语义淘汰在离线分析中把命中率从 27% 提到 52%（见 <a href="mooncake.html#n-impact-3">Mooncake 精读</a>），说明“存得下”之后，“该留哪些”才是难题。</li>
+  <li><b>模型结构在变。</b>MLA 等压缩 KV 的结构让每 token 的 KV 小得多，同样带宽能搬更长的前缀；混合了线性注意力的模型则有不能任意截断的递归状态，只能在存了快照的边界复用。拆解页整理了这些变化对分层缓存的影响，见 <a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html#c-new-models">KV 缓存分层存储 · 压缩 KV 与递归状态</a>。</li>
+  <li><b>独立的横向评测。</b>截至 2026-10，本站没有找到一份由第三方在同一硬件、同一负载下同时比较 LMCache、SGLang HiCache、Mooncake Store 和 Dynamo KV 管理的公开评测；现有数字都来自各项目自己的论文和博客。</li>
+</ul>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v2）。背景只列可公开查证的信息：作者主页、实验室与公司页面、论文署名。v1 的作者顺序是 Yihua Cheng、Yuhan Liu、Jiayi Yao（三人共同一作）在前，没有 Rui Zhang（v1 致谢中感谢他负责部署），Junchen Jiang 同时标注两个单位；LMCache 仓库 README 给出的引用格式仍按 v1 的顺序，以 Yihua Cheng 为第一作者。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Yuhan Liu</b>（共同一作）<div class="aff">Tensormesh；University of Chicago</div>CacheGen（SIGCOMM 2024）第一作者，研究 KV 缓存的压缩与网络流式传输。</div>
+  <div class="author-card"><b>Jiayi Yao</b>（共同一作）<div class="aff">Tensormesh；University of Chicago</div>CacheBlend（EuroSys 2025 最佳论文）第一作者，研究 RAG 场景下非前缀 KV 缓存的复用。</div>
+  <div class="author-card"><b>Yihua Cheng</b>（共同一作）<div class="aff">Tensormesh</div>Tensormesh 联合创始人兼 CTO；芝加哥大学计算机博士，北京大学本科；公司页面称他在读博期间创建了 LMCache 和 vLLM Production Stack；CacheGen、CacheBlend 合作者。</div>
+  <div class="author-card"><b>Yuwei An</b><div class="aff">Tensormesh</div>同时是 Strata（OSDI 2026，署名 CMU）的作者；SGLang HiCache 博客的致谢中以“来自 LMCache”列出。</div>
+  <div class="author-card"><b>Xiaokun Chen</b><div class="aff">Tensormesh</div></div>
+  <div class="author-card"><b>Shaoting Feng</b><div class="aff">Tensormesh；University of Chicago</div></div>
+  <div class="author-card"><b>Yuyang Huang</b><div class="aff">Tensormesh；University of Chicago</div>CacheGen 合作者。</div>
+  <div class="author-card"><b>Samuel Shen</b><div class="aff">Tensormesh</div></div>
+  <div class="author-card"><b>Rui Zhang</b><div class="aff">Tensormesh</div>v2 新增的作者；v1 致谢中感谢他负责 LMCache 的部署。</div>
+  <div class="author-card senior"><b>Kuntai Du</b><div class="aff">Tensormesh</div>Tensormesh 联合创始人兼首席科学家；2025 年获芝加哥大学计算机博士；Siebel Scholar；公司页面称他是 vLLM 核心贡献者；CacheGen、CacheBlend 合作者。</div>
+  <div class="author-card senior"><b>Junchen Jiang</b><div class="aff">Tensormesh；芝加哥大学计算机系副教授</div>2018 年加入芝加哥大学，主页显示目前处于创业休假；Tensormesh CEO 兼联合创始人。清华大学姚班本科，2017 年获 CMU 计算机博士（导师 Vyas Sekar 和 Hui Zhang），博士论文获 CMU 计算机学院博士论文奖；研究方向为网络系统与机器学习系统。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：arXiv 预印本（v1 2025-10-08，v2 2025-12-05），论文自称“报告”；截至 2026-10-20，Semantic Scholar 只收录了 arXiv 版本，本站没有查到正式发表的会议或期刊版本。</li>
+  <li><b>开源</b>：<a href="https://github.com/LMCache/LMCache" target="_blank" rel="noopener">LMCache/LMCache</a> 12,125 个 star、2,187 个 fork（截至 2026-10-20），Apache-2.0；2025-10-30 成为 <a href="https://pytorch.org/blog/lmcache-joins-pytorch-ecosystem/" target="_blank" rel="noopener">PyTorch 生态项目</a>。</li>
+  <li><b>采用</b>：论文称 vLLM Production Stack、NVIDIA Dynamo、llm-d、KServe 用 LMCache 实现 KV 缓存；vLLM 主分支内置 <code>LMCacheConnectorV1</code> 与 <code>LMCacheMPConnector</code>；作者推动的 KV connector 接口被 NIXL、Mooncake、3FS 等多种传输和存储方案用来接入 vLLM（本站 2026-10-20 核对 vLLM 仓库）。</li>
+  <li><b>商业化</b>：作者团队创办了 Tensormesh，2025-10 公开亮相；公司页面称 2026-05 完成 2,000 万美元融资，投资方包括 AMD Ventures、CoreWeave 和 NVentures。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="kvzip.html">KVzip</a></li>
+  <li><a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储（结构拆解）</a>：存储层级与加载路径的交互图、LMCache 与 Strata 的组件拆解、KV 传输计算器和简答题。</li>
+  <li><a href="vllm.html">vLLM 精读</a>：KV 缓存、PagedAttention、换出到 CPU，本文的出发点。</li>
+  <li><a href="sglang.html">SGLang 精读</a>：RadixAttention 与前缀缓存，HiCache 的前身。</li>
+  <li><a href="mooncake.html">Mooncake 精读</a>：以 KV 缓存为中心的分离式架构与跨机 KV 缓存池。</li>
+  <li><a href="distserve.html">DistServe 精读</a>：PD 分离、TTFT / TPOT 与 KV 传输开销。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MLA 如何压缩每 token 的 KV。</li>
+  <li><a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离（结构拆解）</a></li>
+  <li><a href="../legacy/tracks/ai-infra/04-sglang.html">SGLang / RadixAttention（结构拆解）</a></li>
+  <li><a href="../legacy/tracks/ai-infra/03-vllm.html">vLLM / PagedAttention（结构拆解）</a></li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>：prefill、decode、KV 缓存的入门。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。按 arXiv v2 讲解，并对照了 v1。数字与结论以原文为准：<a href="https://arxiv.org/abs/2510.09665" target="_blank" rel="noopener">arXiv:2510.09665</a>。文中的原图（原文图 1–16）取自该论文 arXiv HTML 版，论文以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布，版权归原作者（Yuhan Liu 等），本站未做修改；原文表 1–5 的数据以本站自己的表格或示意图重新呈现。其余图均为本站绘制的示意图。“后来怎么样了”一节引用的 Strata 数字来自 <a href="https://arxiv.org/abs/2508.18572" target="_blank" rel="noopener">arXiv:2508.18572</a>（CC BY 4.0）与 <a href="https://www.usenix.org/conference/osdi26/presentation/xie-zhiqiang" target="_blank" rel="noopener">OSDI 2026 会议页</a>，SGLang HiCache 的内容来自 <a href="https://lmsys.org/blog/2025-09-10-sglang-hicache/" target="_blank" rel="noopener">LMSYS 博客</a>，均未使用其原图。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

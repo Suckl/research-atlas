@@ -1,0 +1,1066 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoBA 精读</title>
+<meta name="description" content="月之暗面 MoBA（混合块注意力，NeurIPS 2025）的逐节精读：长上下文注意力的代价、把 MoE 的 top-k 路由搬到 KV 块上、当前块与块内因果、只用 FlashAttention 变长内核的实现、全注意力与 MoBA 的分阶段和分层混合、Llama-3.1-8B 续训到 100 万 token 的评测与速度数字的份量，以及和同一周发布的 NSA 的对照。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="moba">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · NeurIPS 2025</div>
+  <h1>MoBA：面向长上下文大模型的混合块注意力</h1>
+  <p class="en-title">MoBA: Mixture of Block Attention for Long-Context LLMs</p>
+  <div class="paper-authors">Enzhe Lu<sup>1</sup>, Zhejun Jiang<sup>1</sup>, Jingyuan Liu<sup>1</sup>, Yulun Du<sup>1</sup>, Tao Jiang<sup>1</sup>, Chao Hong<sup>1</sup>, Shaowei Liu<sup>1</sup>, Weiran He<sup>1</sup>, Enming Yuan<sup>1</sup>, Yuzhi Wang<sup>1</sup>, Zhiqi Huang<sup>1</sup>, Huan Yuan<sup>1</sup>, Suting Xu<sup>1</sup>, Xinran Xu<sup>1</sup>, Guokun Lai<sup>1</sup>, Yanru Chen<sup>1</sup>, Huabin Zheng<sup>1</sup>, Junjie Yan<sup>1</sup>, Jianlin Su<sup>1</sup>, Yuxin Wu<sup>1</sup>, Neo Y. Zhang<sup>1</sup>, Zhilin Yang<sup>1</sup>, Xinyu Zhou<sup>1,‡</sup>, Mingxing Zhang<sup>2,∗</sup>, Jiezhong Qiu<sup>3,‡</sup></div>
+  <div class="paper-affil"><sup>1</sup>Moonshot AI（月之暗面）　<sup>2</sup>清华大学　<sup>3</sup>之江实验室 / 浙江大学　<sup>‡</sup>共同通讯作者　<sup>∗</sup>脚注给出 Mingxing Zhang 的联系邮箱（以上按 arXiv v1 署名。NeurIPS 正式版把 Neo Y. Zhang 写作 Yutao Zhang，把 Jiezhong Qiu 的单位改为中国科学院杭州医学研究所，并把 Xinyu Zhou、Mingxing Zhang、Jiezhong Qiu 三人列为共同通讯作者）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2502.13189" target="_blank" rel="noopener">arXiv 2502.13189 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper_files/paper/2025/hash/19eae75beed66321d62272e794a9c2ac-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2025 ↗</a>
+    <a class="pill" href="https://github.com/MoonshotAI/MoBA" target="_blank" rel="noopener">Code: MoonshotAI/MoBA ↗</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>2,194</b><span>GitHub star（MoonshotAI/MoBA，截至 2026-10-20）</span></div>
+    <div><b>6.5× / 3.34×</b><span>100 万 token 预填充：注意力层前向 / 整个模型（原文图 2a、NeurIPS 版表 6）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这篇论文以 CC BY-NC-ND 许可发布，不允许转载改编原图，所以本页的图都是本站自绘的示意图，并附上原图链接；标“读图约值”的数字是本站从原图数据点读出的近似值，标“推算”的数字是本站根据论文数据或公开配置算出来的，都不是论文原话。正文以 arXiv v1 为准，NeurIPS 正式版改动的地方会单独指出。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型的上下文越来越长：一次读进几十万甚至上百万 token 的长文档、整个代码库，或者在推理时写出几万 token 的思维链。上下文变长以后，最贵的部分不再是模型的参数矩阵，而是注意力。因为每个位置都要和它之前的所有位置算一次相似度，注意力的计算量随长度按平方增长。按本站推算，一个 Llama-3.1-8B 规模的模型一次读入 100 万个 token 时，注意力约占全部计算量的 95%（§1 有算法）。所以要让长上下文便宜下来，就得让注意力少算。</p>
+<p>这篇来自月之暗面（Moonshot AI）的论文提出 <b>MoBA</b>（Mixture of Block Attention，混合块注意力）。它的做法可以用三句话说清。第一，把上下文按顺序切成长度为 \(B\) 的块。第二，每个 query 用自己和每一块“平均 key”的内积给块打分，只挑出分数最高的几块，此外自己所在的块总是被选中。第三，只在被选中的这些 token 上做一次普通的 softmax 注意力。打分不需要任何新参数，所以 MoBA 和全注意力可以随时互换：同一个模型可以某些层用 MoBA、某些层用全注意力，也可以训练到一半从一种换成另一种。作者把这个思路类比成混合专家（MoE）：每个 KV 块像一个“专家”，每个 query 像一个 token，门控决定它去找哪几个专家。实现上，作者把“选了同一块的 query”收集到一起，交给 FlashAttention 现成的变长内核去算，这和 MoE 把 token 分发给各个专家的做法如出一辙。</p>
+<p>论文的主要结果有三组。一是 5 个 5.68 亿到 21 亿参数的小模型从头训练：8K 长度上的语言模型损失和全注意力几乎重合；在 32K 序列最后 2K 个位置上，MoBA 的损失高约 4%–7%（推算），但差距随计算量增加在缩小。二是从 Llama-3.1-8B 出发续训到 100 万 token 上下文：各项基准与同样流程训练的全注意力模型接近，不过最能考验稀疏注意力的 RULER@128K 分数在 arXiv 版和 NeurIPS 版之间变了（§3.3）。三是速度：100 万 token 预填充时，注意力层快 6.5 倍，整个模型快 3.34 倍。论文还说 MoBA 已经用于支持 Kimi 的长上下文请求。</p>
+<p>巧的是，DeepSeek 的 NSA（原生稀疏注意力）比 MoBA 早两天发布。两者都“按块挑选 KV”，但在打分方式、GQA 组内是否共享选择、内核设计、训练方式上走了不同的路。本页在实验之后专门用一节把两者放在一起对照。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个 query 在 MoBA 里先给每块打分，再只看选中的块</div>
+  <svg class="dg" viewBox="0 0 960 236" role="img" aria-label="一个 query 在 MoBA 和全注意力下分别计算哪些 key" style="--dg-min:760px">
+    <text x="160" y="66" class="t-r t-sm">门控分数 sᵢ</text>
+    <text x="160" y="84" class="t-r t-xs">（q 与每块平均 key 的内积）</text>
+    <rect class="tk off" x="179.75" y="82" width="28" height="18"/>
+    <rect class="tk off" x="227.25" y="78" width="28" height="22"/>
+    <rect class="tk pred" x="274.75" y="46" width="28" height="54"/>
+    <rect class="tk off" x="322.25" y="85" width="28" height="15"/>
+    <rect class="tk off" x="369.75" y="75" width="28" height="25"/>
+    <rect class="tk off" x="417.25" y="80" width="28" height="20"/>
+    <rect class="tk pred" x="464.75" y="54" width="28" height="46"/>
+    <rect class="tk off" x="512.25" y="88" width="28" height="12"/>
+    <rect class="tk off" x="559.75" y="72" width="28" height="28"/>
+    <rect class="tk off" x="607.25" y="81" width="28" height="19"/>
+    <rect class="tk off" x="654.75" y="69" width="28" height="31"/>
+    <text x="288.75" y="38" class="t-c t-xs" style="fill:var(--c-pred)">第 1 高</text>
+    <text x="478.75" y="46" class="t-c t-xs" style="fill:var(--c-pred)">第 2 高</text>
+    <text x="716.25" y="90" class="t-c t-xs" style="fill:var(--c-act)">强制选中</text>
+    <text x="763.75" y="90" class="t-c t-xs">−∞</text>
+    <text x="811.25" y="90" class="t-c t-xs">−∞</text>
+    <text x="858.75" y="90" class="t-c t-xs">−∞</text>
+    <text x="906.25" y="90" class="t-c t-xs">−∞</text>
+    <line x1="170" y1="100" x2="930" y2="100" class="axis"/>
+    <text x="160" y="127" class="t-r t-sm">MoBA 实际计算</text>
+    <rect class="tk off" x="170" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="217.5" y="115" width="47.5" height="24"/>
+    <rect class="tk pred" x="265" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="312.5" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="360" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="407.5" y="115" width="47.5" height="24"/>
+    <rect class="tk pred" x="455" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="502.5" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="550" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="597.5" y="115" width="47.5" height="24"/>
+    <rect class="tk off" x="645" y="115" width="47.5" height="24"/>
+    <rect class="tk act" x="692.5" y="115" width="23.75" height="24"/>
+    <rect class="tk mask" x="716.25" y="115" width="213.75" height="24"/>
+    <text x="160" y="167" class="t-r t-sm">全注意力</text>
+    <rect class="tk enc" x="170" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="217.5" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="265" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="312.5" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="360" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="407.5" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="455" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="502.5" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="550" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="597.5" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="645" y="155" width="47.5" height="24"/>
+    <rect class="tk enc" x="692.5" y="155" width="23.75" height="24"/>
+    <rect class="tk mask" x="716.25" y="155" width="213.75" height="24"/>
+    <line x1="170" y1="192" x2="930" y2="192" class="axis"/>
+    <text x="193.75" y="205" class="t-c t-xs">块 1</text>
+    <text x="431.25" y="205" class="t-c t-xs">…</text>
+    <text x="716.25" y="205" class="t-c t-xs">块 12（query 所在）</text>
+    <text x="906.25" y="205" class="t-c t-xs">块 16</text>
+    <text x="550" y="224" class="t-c t-xs">上下文切成 16 块；这个 query 位于第 12 块的中间，斜纹是它之后的位置（未来，不可见）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>上下文被切成 16 块，这个 query 位于第 12 块的中间。第一行是门控分数：query 和每一个历史块的“平均 key”做内积，分数最高的两块（第 3、7 块，橙色）入选；自己所在的第 12 块不参与打分而是强制选中（绿色）；之后的块是未来，分数被设成 −∞。第二行是 MoBA 真正参与注意力的 token：两个入选的历史块，加上当前块里 query 之前的那一半。第三行是全注意力，作为对比：所有历史 token 都要算。这里 top-k = 3（含当前块）。本站示意图，对应 <a href="https://arxiv.org/html/2502.13189v1#S2.F1" target="_blank" rel="noopener">原文图 1(a) ↗</a>。</div>
+</div>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>长上下文下注意力为什么贵？贵在预填充还是解码？MoBA 省的是哪一部分？</li>
+  <li>MoBA 的“门控”到底算的是什么？为什么说它没有参数？它又是怎么学会挑块的？</li>
+  <li>为什么自己所在的块必须强制选中，块内还要加因果掩码？</li>
+  <li>它怎样只用现成的 FlashAttention 内核就实现了块稀疏注意力？</li>
+  <li>“效果和全注意力相当”“快 6.5 倍”这些数字各是在什么条件下测的？哪些地方要打折扣？</li>
+  <li>它和同一周发布的 NSA 有哪些本质区别？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：长上下文的代价，以及三条已有路线各差在哪</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上下文变长以后，注意力究竟贵到什么程度？为了省掉这部分计算，已有的方法大致分成三类：预先规定看哪里、推理时临时挑选、干脆换掉 softmax 注意力。作者认为它们各有什么不足？由此，作者想要的注意力机制应该满足哪些条件？</div>
+
+<div class="note-pre"><b>先补一点背景：注意力的计算量，预填充和解码各贵在哪里。</b>
+<p>先回忆注意力在算什么（更详细的讲解见本站 <a href="vllm.html#n-2-1">vLLM 精读 §2.1</a>）：第 \(t\) 个位置的 query 要和前面 \(t\) 个 key 各做一次内积，得到 \(t\) 个分数（称为 logit）；softmax 把它们变成和为 1 的权重；再用这些权重对 \(t\) 个 value 加权求和。设每个头的维度为 \(d\)、query 头数为 \(h\)，内积和加权求和各要约 \(2td\) 次浮点运算，所以第 \(t\) 个位置在一层里的注意力计算量约为 \(4thd\)。把所有位置加起来，长度为 \(N\) 的序列在一层里的注意力计算量约为</p>
+<div class="formula">$$\sum_{t=1}^{N}4\,t\,h\,d\;\approx\;2N^{2}hd$$</div>
+<p>它和 \(N^2\) 成正比。模型里其余的矩阵乘法（QKV 投影、输出投影、前馈网络）对每个 token 的计算量是固定的，约为“2 × 参数量”，整段序列加起来只和 \(N\) 成正比。所以序列越长，注意力在总计算量里的占比就越大。以 Llama-3.1-8B 为例（32 层，32 个 query 头，每头 128 维；除词表嵌入外约 70 亿参数，每个 token 的矩阵乘法约 150 亿次浮点运算，均为本站按公开配置推算）：</p>
+<div class="dia">
+  <div class="dia-title">示意图：预填充一整段输入时，注意力占全部计算量的比例（Llama-3.1-8B，推算）</div>
+  <div class="dia-row"><span class="lbl">8K token</span><div class="dia-track"><span class="dia-seg kv" style="flex:12.5">注意力 12.5%</span><span class="dia-seg w" style="flex:87.5">其余矩阵乘法 87.5%</span></div></div>
+  <div class="dia-row"><span class="lbl">128K token</span><div class="dia-track"><span class="dia-seg kv" style="flex:69.6">注意力 69.6%</span><span class="dia-seg w" style="flex:30.4">其余 30.4%</span></div></div>
+  <div class="dia-row"><span class="lbl">1M token</span><div class="dia-track"><span class="dia-seg kv" style="flex:94.8">注意力 94.8%</span><span class="dia-seg w" style="flex:5.2">5.2%</span></div></div>
+  <div class="dia-note">推算：注意力按 \(2N^2hd\times 32\) 层计（已考虑因果掩码只算一半）；其余部分按每 token 约 150 亿次浮点运算计。1M 时注意力约 \(2.9\times10^{17}\) 次，其余约 \(1.6\times10^{16}\) 次。这只是计算量的比例，实际耗时还取决于内核效率，但趋势相同：上下文越长，越是注意力说了算。</div>
+</div>
+<p>上面说的是<b>预填充</b>（prefill），也就是一次性读入整段输入的阶段；训练的前向计算与它相同，反向再多算大约两倍。<b>解码</b>阶段则不同：每生成一个 token，只需要用这一个新 token 的 query 去读全部历史的 K、V，计算量不大，但要把整份 KV 缓存从显存里读一遍。Llama-3.1-8B 用了 GQA（32 个 query 头共用 8 组 K、V），每个 token 的 KV 缓存为 \(2\times32\ \text{层}\times8\times128\times2\ \text{字节}=128\ \text{KB}\)，100 万个 token 就是约 128 GB（推算），一张 80 GB 的卡都放不下。MoBA 这篇论文主要对付的是前者，即预填充和训练的计算量；它不减少 KV 缓存的存储量，§3.3 还会看到，论文主表在生成阶段甚至切回了全注意力。</p>
+</div>
+
+<p>注意力既然这么贵，一个自然的问题是：每个 query 真的需要看全部历史吗？大量观察表明并不需要。softmax 之后，绝大多数权重集中在少数位置上，其余位置的权重接近零。作者把这称为注意力分数天然的稀疏性，还引用了一项神经科学研究作类比：人脑中与记忆存储相关的海马体区域，神经元之间的连接也是稀疏的。问题在于怎么利用这种稀疏性。论文把已有的做法分成三类，并逐一指出它们的不足。</p>
+<p><b>第一类：预先规定好看哪里。</b>最常见的是<b>滑动窗口注意力</b>（每个 query 只看最近的 \(w\) 个 token，Longformer 等采用）和<b>注意力汇聚点</b>（attention sink：StreamingLLM 发现模型习惯把大量注意力权重放在序列最开头的几个 token 上，于是固定保留开头几个 token，再加上最近的一个窗口）。这些结构简单、高效，但它们替模型做了决定：窗口以外、开头以外的内容一律看不到。对“在 50 万 token 的合同里找出某一条款”这类任务，答案可能藏在任何地方，固定结构就无能为力。作者的评价是这类方法“高度依赖任务”，会损害模型的通用性。</p>
+<p><b>第二类：推理时动态挑选。</b>Quest、MInference、RetrievalAttention 等方法拿一个已经用全注意力训练好的模型，在推理时根据当前的 query 临时挑出重要的 token 或块，只算这一部分（本站精读的 <a href="snapkv.html">SnapKV</a> 也属于这一类，它在预填充结束时挑出要保留的 KV）。它们能省推理的计算，但模型训练时仍是全注意力，所以把模型训练到百万 token 上下文的巨大开销一点也没省。这正是作者在意的地方：长上下文模型的训练成本本身就是瓶颈。</p>
+<p><b>第三类：换掉 softmax 注意力。</b>Mamba、RWKV、RetNet 等线性注意力或状态空间模型，把注意力替换成计算量随长度线性增长的结构。它们和标准 Transformer 差别很大：要么从头训练一个全新的模型，要么花很大代价把现有 Transformer“转换”过去；而且当时它们在复杂推理任务上的效果还缺少充分的证据。</p>
+<p>于是作者提出了一个要求很明确的问题：能不能设计一种注意力，<b>保留原有的 Transformer 框架</b>，遵循“<b>少结构</b>”（less structure）的原则，让模型自己决定看哪里，而不是由人预先规定？理想情况下，它还应该能在全注意力和稀疏注意力之间无缝切换。这样它既能直接接上现有的预训练模型，又能同时加速训练和推理，还不损失效果。</p>
+<p>MoBA 就是作者的答案：把 MoE 的思想用到注意力上。MoE 过去主要用在前馈层，用一个门控为每个 token 挑几个专家；MoBA 则为每个 query 挑几个历史 KV 块，再用这种方式组织计算来提速。下一节先把标准注意力和 MoE 门控讲清楚，再看 MoBA 怎么把两者接起来。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“少结构”是相对的。MoBA 仍然规定了不少结构：块必须是连续的一段、块长 \(B\) 固定、每个 query 选的块数 \(k\) 固定、自己所在的块必选。它去掉的只是“具体看哪几块”这一项人为规定。</li>
+  <li>“注意力天然稀疏”指的是训练好的模型里大多数权重很小，并不保证“按块挑”能挑对：重要的 token 可能分散在很多块里，块的平均分数也可能把单个重要 token 的信号冲淡（§2.2 有算例）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 方法（一）：标准注意力，与从 MoE 借来的门控（原文 §2、§2.1）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoBA 改的是注意力计算中的哪一步？它借用的 MoE 门控原本是怎么工作的？把“专家”换成“KV 块”之后，哪些地方能一一对应，哪些地方其实并不一样？这些不一样会直接影响后面对 MoBA 行为的理解。</div>
+<p>论文先写出单个 query 的标准注意力。设一个 query 向量 \(\mathbf q\in\mathbb R^{1\times d}\)，上下文里有 \(N\) 个 key 和 value，分别排成矩阵 \(\mathbf K,\mathbf V\in\mathbb R^{N\times d}\)：</p>
+<div class="formula">$$\mathrm{Attn}(\mathbf q,\mathbf K,\mathbf V)=\mathrm{Softmax}\big(\mathbf q\mathbf K^{\top}\big)\mathbf V$$</div>
+<p>\(\mathbf q\mathbf K^\top\) 是 \(N\) 个内积，也就是 \(N\) 个 logit；softmax 把它们变成和为 1 的权重，再对 \(N\) 个 value 加权平均。论文为了简洁省略了除以 \(\sqrt d\) 的缩放，也只写了单个头，多头注意力就是把很多个这样的单头结果拼起来。MoBA 要改的，正是“\(N\) 个 key 全部参与”这一点。</p>
+
+<div class="note-pre"><b>先补一点背景：MoE 的门控（路由器）是怎么工作的。</b>
+<p>混合专家（Mixture of Experts，MoE）最早用来把前馈网络（FFN）做大、又不增加每个 token 的计算量。做法是准备 \(E\) 个结构相同、参数不同的前馈网络，称为<b>专家</b>；再加一个很小的<b>路由器</b>（router，也叫门控网络），通常是一个线性层 \(W_g\)，它给每个 token 算出对每个专家的打分。然后只保留分数最高的 \(k\) 个专家（top-k），这个 token 只送给这 \(k\) 个专家计算，输出是它们结果的加权和，权重就是门控值：</p>
+<div class="formula">$$\mathbf y=\sum_{i\in\mathrm{TopK}}g_i\,E_i(\mathbf x),\qquad g=\mathrm{Softmax}(\mathbf x W_g)\ \text{（只保留前 }k\text{ 个）}$$</div>
+<p>因为输出里乘了 \(g_i\)，语言模型的损失可以经过 \(g_i\) 把梯度传回路由器的参数 \(W_g\)，路由器由此学会“什么样的 token 该去哪个专家”。DeepSeekMoE 等较新的 MoE 还有两个改进，MoBA 都借用了：一是<b>共享专家</b>，有一两个专家每个 token 都必须经过，不参与挑选；二是<b>细粒度专家</b>，把专家切得更小、数量更多，同时每个 token 选更多个，总计算量不变但可能的组合更多，效果更好。这两点在本站 <a href="deepseek-v3.html#n-2-2">DeepSeek-V3 精读 §2.1.2</a> 里有详细讲解。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：MoE 前馈层的路由，与 MoBA 的块路由</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">一个 token 的隐状态 x</span><span class="dia-arrow">→</span><span class="dia-box reg">路由器<small>可学习的线性层 + softmax</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box pred">top-k 个专家<small>另有共享专家必选</small></span><span class="dia-arrow">→</span><span class="dia-box act">Σ gᵢ · Eᵢ(x)<small>输出乘上门控值</small></span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">一个 query 向量 q</span><span class="dia-arrow">→</span><span class="dia-box reg">打分 sᵢ = q · k̄ᵢ<small>k̄ᵢ 为第 i 块 key 的平均，无参数</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box pred">top-k 个 KV 块<small>当前块必选（类似共享专家）</small></span><span class="dia-arrow">→</span><span class="dia-box act">Softmax(q K[I]ᵀ) V[I]<small>在选中 token 的并集上做一次 softmax</small></span></div>
+    </div>
+  </div>
+  <div class="dia-note"><b>怎么看：</b>左边是 MoE 前馈层，右边是 MoBA。两边的“打分—取 top-k—计算”一一对应，但 MoBA 的门控值只决定哪些 token 能参加 softmax，不乘到输出上，打分也没有可学习的参数。本站示意图。</div>
+</div>
+<p>对照上图，MoBA 的类比是这样的：每个 KV 块相当于一个专家；每个 query 相当于一个 token；“query 与这块有多相关”相当于路由分数；query 自己所在的块（下文称<b>当前块</b>）相当于共享专家，总是被选中；把上下文切得更细、每个 query 多选几块，相当于细粒度专家。</p>
+<p>但在类比之下，有三处本质的不同，后面理解 MoBA 的行为都要用到：</p>
+<ol>
+  <li><b>门控值不乘到输出上。</b>MoE 的输出是“专家输出 × 门控值”的和；MoBA 的门控值 \(g_i\) 只取 0 或 1，作用仅仅是“这块里的 token 能不能参加 softmax”。被选中的所有 token 放在一起做<b>一次</b> softmax，块与块之间谁更重要，由注意力权重本身决定。因此打分不在输出的计算路径上，损失的梯度传不到“打分”这一步。§2.2 会讲它为什么仍然能学会挑块。</li>
+  <li><b>“专家”不是固定的参数，而是上下文的一段。</b>每条序列、每一层的 KV 块都不一样，所以不存在“某个专家被训练得擅长什么”这回事。被挑选的是数据，不是参数。</li>
+  <li><b>没有负载均衡。</b>MoE 通常要用辅助损失或偏置项让各专家分到的 token 数大致均匀；MoBA 没有这样的机制，一个块可能被很多 query 选中，也可能没人选。这不影响计算结果，但会影响 GPU 上的效率（§2.3）。</li>
+</ol>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#S2.SS1" target="_blank" rel="noopener">§2.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">2.2 方法（二）：怎么切块、怎么打分、怎么不偷看未来（原文 §2.2）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoBA 具体怎样把上下文切块、给块打分、挑出要看的块？自回归模型不能偷看未来，块级的挑选在哪些地方会破坏这一点，MoBA 又是怎么补上的？此外，作者还讨论了三个设计选择：块切多细、能不能和全注意力混用、和滑动窗口及注意力汇聚点是什么关系。</div>
+
+<h4 id="n-3-1">2.2.1 分块、打分、取 top-k</h4>
+<p>MoBA 让每个 query 只看上下文中的一个子集 \(I\subseteq[N]\)（\([N]\) 表示 1 到 \(N\) 的全部位置）：</p>
+<div class="formula">$$\mathrm{MoBA}(\mathbf q,\mathbf K,\mathbf V)=\mathrm{Softmax}\big(\mathbf q\,\mathbf K[I]^{\top}\big)\,\mathbf V[I]$$</div>
+<p>\(\mathbf K[I]\) 表示只取 \(I\) 中那些位置的 key。和标准注意力相比，公式的形式完全一样，只是参与的 key 变少了。所以对被选中的 token 来说，MoBA 算的是精确的注意力，没有任何近似；“近似”只发生在“选谁”这一步。</p>
+<p>子集 \(I\) 按块来定。把长度为 \(N\) 的上下文切成 \(n\) 块，每块是 \(B=N/n\) 个连续的 token，第 \(i\) 块覆盖的位置是 \(I_i=[(i-1)B+1,\ iB]\)。每块有一个门控值 \(g_i\in\{0,1\}\)，所有被选中的块合起来就是 \(I=\bigcup_{g_i>0}I_i\)。门控值这样算：</p>
+<div class="formula">$$s_i=\big\langle \mathbf q,\ \mathrm{mean\_pool}(\mathbf K[I_i])\big\rangle,\qquad g_i=\begin{cases}1, &amp; s_i\in\mathrm{Topk}\big(\{s_j\mid j\in[n]\},\,k\big)\\[2pt] 0, &amp; \text{否则}\end{cases}$$</div>
+<p>逐项解释：\(\mathrm{mean\_pool}(\mathbf K[I_i])\) 是把第 \(i\) 块里 \(B\) 个 key 向量逐维取平均，得到一个和 key 同样大小的向量，下文记作 \(\bar{\mathbf k}_i\)；\(s_i\) 是 query 和它的内积，论文称为亲和度分数；\(\mathrm{Topk}\) 取所有块的分数里最大的 \(k\) 个。论文图 1(a) 的例子是 2 个 query、4 个块、\(k=2\)：路由器把第一个 query 分给第 1、2 块，把第二个 query 分给第 3、4 块，它们各自只和这两块里的 token 做注意力。</p>
+
+<div class="note-pre"><b>先补一点背景：块的“平均 key”打分，其实就是块内注意力 logit 的平均。</b>
+<p>内积对加法是线性的，所以</p>
+<div class="formula">$$s_i=\mathbf q\cdot\frac1B\sum_{j\in I_i}\mathbf k_j=\frac1B\sum_{j\in I_i}\mathbf q\cdot\mathbf k_j$$</div>
+<p>右边的 \(\mathbf q\cdot\mathbf k_j\) 正是全注意力里第 \(j\) 个位置的 logit。换句话说，MoBA 用“这一块里所有位置的 logit 的平均值”来代表这一块，挑平均 logit 最高的几块。这个等式是本站的推导，论文没有写出，但它能解释 MoBA 的三个性质：</p>
+<ul>
+  <li><b>不需要新参数。</b>打分直接用这一层已有的 query 和 key，所以 MoBA 层和全注意力层的参数完全相同，可以随时互相切换。</li>
+  <li><b>打分不直接受训练，却会跟着注意力一起变好。</b>top-k 是离散的选择，\(g_i\) 又不乘到输出上，所以损失对打分没有梯度。但 query 和 key 本身会通过被选中 token 上的注意力得到训练：模型为了让该看的 token 发挥作用，会把相关的 query 和 key 学得更“对得上”，这些位置的 logit 变大，所在块的平均 logit 也随之变大，下次就更容易被选中。打分器可以说是“搭便车”学会的。这也解释了为什么从全注意力模型续训 MoBA 很自然：全注意力训练出来的 query 和 key 已经让相关位置的 logit 偏高，块平均天然带有有用的信号。</li>
+  <li><b>平均会冲淡单个重要的 token。</b>这是它的主要弱点，下面用一个算例说明。</li>
+</ul>
+</div>
+<div class="dia">
+  <div class="dia-title">算例：块越大，单个关键 token 越容易被“平均”掉（本站构造的数字）</div>
+  <div class="dia-row"><span class="lbl">块 A：一根针</span><div class="dia-track"><span class="dia-seg oth" style="flex:20">其余 token 的 logit 都是 0</span><span class="dia-seg frag" style="flex:2">8</span><span class="dia-seg oth" style="flex:20">…</span></div></div>
+  <div class="dia-row"><span class="lbl">块 B：处处沾边</span><div class="dia-track"><span class="dia-seg w" style="flex:42">每个 token 的 logit 都是 0.05</span></div></div>
+  <div class="dia-out">块长 4096 时：块 A 的平均 logit = 8 ÷ 4096 ≈ 0.002，块 B = 0.05。门控选 B，漏掉了真正的“针”。</div>
+  <div class="dia-out">块长 64 时：块 A = 8 ÷ 64 = 0.125，块 B 仍是 0.05。门控选 A。</div>
+  <div class="dia-note"><b>怎么看：</b>在全注意力里，logit 为 8 的那个 token 会拿到绝大部分权重（它的指数权重是 logit 为 0 的位置的 \(e^8\approx2981\) 倍）；但在 MoBA 里，它能不能被看到，取决于它所在的块能不能入选。块越大，单个 token 对块平均的影响越小，越容易被一个“处处沾一点边”的块挤掉。后来的 FlashMoBA 用“信噪比”严格分析了这一点，结论同样是块要小（见文末）。数字为本站构造，只用于说明机制。</div>
+</div>
+<p>另外，从论文图 1(b) 可以看出，打分用的 query 和 key 是加过 RoPE 位置编码之后的。这一点会影响块平均里留下什么信息（见下面的补充）。</p>
+<div class="note-warn"><b>本站补充：RoPE 之后再取块平均，会留下什么。</b>RoPE（见本站 <a href="roformer.html">RoFormer 精读</a>）把 key 的每两维看成一个平面上的向量，按“位置 × 这两维的频率”旋转一个角度。频率最高的那几维每个 token 就转过约 1 弧度，在一个 4096 长的块里要转几百圈，块内不同位置的旋转方向五花八门，平均之后大多相互抵消；频率很低的维度在一个块内几乎不转，平均值基本保留。所以块的平均 key 里，主要剩下低频、对位置不敏感的那部分，打分更像在比较“内容是否相关”，而不是精确的相对位置。这是本站根据 RoPE 的定义做的推断，论文没有讨论。</div>
+
+<h4 id="n-3-2">2.2.2 因果性：不选未来的块；当前块必选，块内加因果掩码</h4>
+<p>自回归语言模型按“接龙”的方式生成：第 \(t\) 个位置的输出只能依赖第 1 到 \(t\) 个位置。训练时整段序列是并行计算的，靠因果掩码挡住未来的位置。块级的挑选在两个地方可能破坏这一点，MoBA 分别做了处理。</p>
+<p><b>第一，不能选未来的块。</b>如果一块整个都在 query 之后，它就完全是未来。MoBA 规定：用 \(\mathrm{pos}(\mathbf q)\) 表示 query 的位置，对所有满足 \(\mathrm{pos}(\mathbf q)&lt;i\times B\) 的块（也就是结尾在 query 之后的块），令 \(s_i=-\infty\)、\(g_i=0\)。注意这条规则同时把 query 自己所在的块也排除在打分之外，因为它的结尾也在 query 之后。</p>
+<p><b>第二，当前块要单独处理。</b>当前块里，一部分位置是过去，一部分是未来。如果像其他块一样拿它的平均 key 去打分，平均值里就混进了未来位置的 key（见下图）。这样一来，“要不要看这一块”这个决定本身就依赖了未来的信息：训练时模型可以借这条缝隙“偷看”后面的内容来降低损失，推理时却没有这些信息，训练和推理就对不上了。MoBA 的办法是：当前块不参与打分，而是<b>强制选中</b>（令 \(g_i=1\)），并在当前块内部加上普通的因果掩码，每个 query 只看块内自己及之前的位置。作者指出这样做还有一个好处：保证每个 query 总能看到紧挨着自己的局部上下文。从 MoE 的角度看，当前块相当于共享专家，是路由时额外加上的一条固定规则。</p>
+<div class="dia">
+  <div class="dia-title">示意图：为什么当前块不能用平均 key 打分</div>
+  <div class="dia-row"><span class="lbl">当前块的 8 个位置</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell c">4</span><span class="cell c">5</span><span class="cell c">6</span><span class="cell c">7</span><span class="cell c">8</span></div></div>
+  <div class="dia-out">query 在第 3 个位置：蓝色是它可以看的位置（之前和自己），橙色是未来。</div>
+  <div class="dia-row"><span class="lbl">若给当前块打分</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">k₁ k₂ k₃</span><span class="dia-seg res" style="flex:5">k₄ … k₈ 也进了平均值 → 泄漏未来</span></div></div>
+  <div class="dia-row"><span class="lbl">MoBA 的做法</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">强制选中，只看 k₁–k₃</span><span class="dia-seg oth" style="flex:5">因果掩码挡住</span></div></div>
+  <div class="dia-note">本站示意图，块长取 8 只是为了画得下。</div>
+</div>
+<p>两条规则合在一起，整体的选择模式如下图。图中每一行是一个 query（分别取自第 1 到第 8 块），每一列是一个 KV 块，\(k=3\)。</p>
+<div class="dia">
+  <div class="dia-title">示意图：块级的因果选择（k = 3：当前块 + 最多 2 个历史块）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="八个 query 各自选中的 KV 块示意" style="--dg-min:780px">
+    <text x="278" y="36" class="t-c t-xs">KV 块 1</text>
+    <text x="334" y="36" class="t-c t-xs">KV 块 2</text>
+    <text x="390" y="36" class="t-c t-xs">KV 块 3</text>
+    <text x="446" y="36" class="t-c t-xs">KV 块 4</text>
+    <text x="502" y="36" class="t-c t-xs">KV 块 5</text>
+    <text x="558" y="36" class="t-c t-xs">KV 块 6</text>
+    <text x="614" y="36" class="t-c t-xs">KV 块 7</text>
+    <text x="670" y="36" class="t-c t-xs">KV 块 8</text>
+    <text x="240" y="65" class="t-r t-sm">块 1 里的 q</text>
+    <rect class="tk act" x="250" y="50" width="28" height="30"/>
+    <rect class="tk mask" x="278" y="50" width="28" height="30"/>
+    <rect class="tk mask" x="306" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="362" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="418" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="474" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="530" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="586" y="50" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="50" width="56" height="30"/>
+    <text x="240" y="95" class="t-r t-sm">块 2 里的 q</text>
+    <rect class="tk pred" x="250" y="80" width="56" height="30"/>
+    <rect class="tk act" x="306" y="80" width="28" height="30"/>
+    <rect class="tk mask" x="334" y="80" width="28" height="30"/>
+    <rect class="tk mask" x="362" y="80" width="56" height="30"/>
+    <rect class="tk mask" x="418" y="80" width="56" height="30"/>
+    <rect class="tk mask" x="474" y="80" width="56" height="30"/>
+    <rect class="tk mask" x="530" y="80" width="56" height="30"/>
+    <rect class="tk mask" x="586" y="80" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="80" width="56" height="30"/>
+    <text x="240" y="125" class="t-r t-sm">块 3 里的 q</text>
+    <rect class="tk pred" x="250" y="110" width="56" height="30"/>
+    <rect class="tk pred" x="306" y="110" width="56" height="30"/>
+    <rect class="tk act" x="362" y="110" width="28" height="30"/>
+    <rect class="tk mask" x="390" y="110" width="28" height="30"/>
+    <rect class="tk mask" x="418" y="110" width="56" height="30"/>
+    <rect class="tk mask" x="474" y="110" width="56" height="30"/>
+    <rect class="tk mask" x="530" y="110" width="56" height="30"/>
+    <rect class="tk mask" x="586" y="110" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="110" width="56" height="30"/>
+    <text x="240" y="155" class="t-r t-sm">块 4 里的 q</text>
+    <rect class="tk pred" x="250" y="140" width="56" height="30"/>
+    <rect class="tk off" x="306" y="140" width="56" height="30"/>
+    <rect class="tk pred" x="362" y="140" width="56" height="30"/>
+    <rect class="tk act" x="418" y="140" width="28" height="30"/>
+    <rect class="tk mask" x="446" y="140" width="28" height="30"/>
+    <rect class="tk mask" x="474" y="140" width="56" height="30"/>
+    <rect class="tk mask" x="530" y="140" width="56" height="30"/>
+    <rect class="tk mask" x="586" y="140" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="140" width="56" height="30"/>
+    <text x="240" y="185" class="t-r t-sm">块 5 里的 q</text>
+    <rect class="tk off" x="250" y="170" width="56" height="30"/>
+    <rect class="tk pred" x="306" y="170" width="56" height="30"/>
+    <rect class="tk off" x="362" y="170" width="56" height="30"/>
+    <rect class="tk pred" x="418" y="170" width="56" height="30"/>
+    <rect class="tk act" x="474" y="170" width="28" height="30"/>
+    <rect class="tk mask" x="502" y="170" width="28" height="30"/>
+    <rect class="tk mask" x="530" y="170" width="56" height="30"/>
+    <rect class="tk mask" x="586" y="170" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="170" width="56" height="30"/>
+    <text x="240" y="215" class="t-r t-sm">块 6 里的 q</text>
+    <rect class="tk pred" x="250" y="200" width="56" height="30"/>
+    <rect class="tk off" x="306" y="200" width="56" height="30"/>
+    <rect class="tk off" x="362" y="200" width="56" height="30"/>
+    <rect class="tk off" x="418" y="200" width="56" height="30"/>
+    <rect class="tk pred" x="474" y="200" width="56" height="30"/>
+    <rect class="tk act" x="530" y="200" width="28" height="30"/>
+    <rect class="tk mask" x="558" y="200" width="28" height="30"/>
+    <rect class="tk mask" x="586" y="200" width="56" height="30"/>
+    <rect class="tk mask" x="642" y="200" width="56" height="30"/>
+    <text x="240" y="245" class="t-r t-sm">块 7 里的 q</text>
+    <rect class="tk off" x="250" y="230" width="56" height="30"/>
+    <rect class="tk off" x="306" y="230" width="56" height="30"/>
+    <rect class="tk pred" x="362" y="230" width="56" height="30"/>
+    <rect class="tk off" x="418" y="230" width="56" height="30"/>
+    <rect class="tk off" x="474" y="230" width="56" height="30"/>
+    <rect class="tk pred" x="530" y="230" width="56" height="30"/>
+    <rect class="tk act" x="586" y="230" width="28" height="30"/>
+    <rect class="tk mask" x="614" y="230" width="28" height="30"/>
+    <rect class="tk mask" x="642" y="230" width="56" height="30"/>
+    <text x="240" y="275" class="t-r t-sm">块 8 里的 q</text>
+    <rect class="tk pred" x="250" y="260" width="56" height="30"/>
+    <rect class="tk off" x="306" y="260" width="56" height="30"/>
+    <rect class="tk off" x="362" y="260" width="56" height="30"/>
+    <rect class="tk off" x="418" y="260" width="56" height="30"/>
+    <rect class="tk off" x="474" y="260" width="56" height="30"/>
+    <rect class="tk off" x="530" y="260" width="56" height="30"/>
+    <rect class="tk pred" x="586" y="260" width="56" height="30"/>
+    <rect class="tk act" x="642" y="260" width="28" height="30"/>
+    <rect class="tk mask" x="670" y="260" width="28" height="30"/>
+    <rect class="tk pred" x="722" y="62" width="18" height="16"/>
+    <text x="748" y="70" class="t-sm">被门控选中的历史块（每行最多 2 块）</text>
+    <rect class="tk act" x="722" y="100" width="9" height="16"/>
+    <rect class="tk mask" x="731" y="100" width="9" height="16"/>
+    <text x="748" y="108" class="t-sm">当前块：强制选中，块内只看 q 之前</text>
+    <rect class="tk mask" x="722" y="138" width="18" height="16"/>
+    <text x="748" y="146" class="t-sm">未来块：分数置为 −∞，不能选</text>
+    <rect class="tk off" x="722" y="176" width="18" height="16"/>
+    <text x="748" y="184" class="t-sm">没选中的历史块：这个 q 看不到</text>
+    <text x="722" y="226" class="t-xs">top-k = 3：当前块占 1 个名额，</text>
+    <text x="722" y="242" class="t-xs">历史块最多再选 2 个。</text>
+    <text x="722" y="262" class="t-xs">第 2、3 行可选的历史块不超过 2 个，</text>
+    <text x="722" y="278" class="t-xs">全部入选，结果与全注意力相同。</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>对角线上的绿色半格是当前块：强制选中，但块内只有 query 之前的部分可见（这里画成一半）。对角线右上方的斜纹是未来块。左下方是历史块，每行最多选 2 块（橙色），其余（灰色）这个 query 看不到。论文脚注说明了这一点：\(k=3\) 时每个 query 最多看 2 个历史块加上当前块。各行具体选哪几块是本站随意画的；真实情况下，同一块里的不同 query 可以选不同的块，不同的注意力头也各选各的。本站示意图，对应 <a href="https://arxiv.org/html/2502.13189v1#S2.F1" target="_blank" rel="noopener">原文图 1(a) ↗</a>。</div>
+</div>
+<p>这张图还揭示了一个容易被忽略的事实：<b>当可选的历史块不超过 \(k-1\) 个时，它们会全部入选，MoBA 就和全注意力完全相同</b>（图中第 2、3 行）。以 §3.3 的 8B 模型为例，块长 4096、\(k=12\)，一条序列只要不超过 \(12\times4096=49{,}152\) 个 token，任何 query 的历史块都不超过 11 个，MoBA 层的计算结果就和全注意力一模一样（推算，按官方代码的选块逻辑）。读 §3.3 的评测时，这一点非常关键。</p>
+
+<h4 id="n-3-3">2.2.3 三个设计选择：切多细、能否混用、与固定结构的关系</h4>
+<p><b>细粒度切块。</b>MoE 的经验是，把专家切得更细、每个 token 多选几个，在总计算量不变时效果更好。MoBA 想验证同样的规律在“上下文方向”上是否成立：保持 \(k\times B\)（每个 query 最多看的 token 数）不变，把块切得更小、同时选更多块。§3.1 的消融给出了答案。</p>
+<p><b>与全注意力混合。</b>MoBA 不增加也不减少任何参数，所以任何一层在任何时候都可以在 MoBA 和全注意力之间切换，换过去不需要重新初始化什么。论文用了两种混合方式：按训练阶段混合（先用 MoBA 训练、最后一段换回全注意力），和按层混合（某些层固定用全注意力）。把全注意力层换成滑动窗口层的类似想法，在 SimLayerKV 中研究过。§3.2 是相关实验。</p>
+<p><b>滑动窗口和注意力汇聚点都是 MoBA 的特例。</b>如果门控总是选最近的几块，MoBA 就成了按块滑动的窗口注意力；如果门控总是选第一块再加最近的几块，就成了注意力汇聚点的按块版本。作者据此认为 MoBA 的表达能力更强：只要换上特定的门控，它就能近似很多静态的稀疏结构。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“特例”是在门控可以任意指定的意义上说的。MoBA 实际用的是固定的、无参数的打分（块内平均 logit），它不能被“设定”成总选第一块；第一块会不会入选，取决于它的平均 logit 够不够高。所以这句话说的是“块选择这一族方法”比滑动窗口更一般，而不是说 MoBA 这个具体的门控一定能学出滑动窗口的行为。</li>
+  <li>当前块必选，但紧挨着的上一块并不必选。位于块开头的 query，当前块里只有寥寥几个位置可看，紧邻它的上一块要靠打分入选；所以“保证能看到局部上下文”只在块内成立，跨块边界时并没有保证。后面会看到，NSA 为此专门设了一个滑动窗口分支。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">2.3 方法（三）：只用现成的 FlashAttention 内核实现（原文 §2.3）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>块稀疏注意力在 GPU 上并不好写：每个 query 选的块都不一样，如果直接用一个大掩码去算，被掩掉的部分照样要算，等于没省；自己写专门的内核又费时费力。MoBA 怎样只用 FlashAttention 现成的接口就把它跑快？官方开源代码里又有哪些论文没有写明的细节？</div>
+
+<div class="note-pre"><b>先补一点背景：FlashAttention 的两件工具，在线 softmax 合并与变长批处理。</b>
+<p>FlashAttention（见本站 <a href="flashattention.html#n-3-2">FlashAttention 精读 §3.2</a>）把 key 分成小块依次处理，靠“在线 softmax”把各块的局部结果合并成精确的整体结果。它的核心是一个合并公式：对同一个 query，如果 key 被分成互不重叠的两组 A 和 B，分别算出了各自归一化后的输出 \(\mathbf o_A,\mathbf o_B\)，以及各自分数的 log-sum-exp（简称 LSE）</p>
+<div class="formula">$$\ell_A=\log\sum_{j\in A}e^{\mathbf q\cdot\mathbf k_j},\qquad \ell_B=\log\sum_{j\in B}e^{\mathbf q\cdot\mathbf k_j}$$</div>
+<p>那么在 A∪B 上做一次 softmax 的结果，可以直接由两部分拼出来：</p>
+<div class="formula">$$\ell=\log\big(e^{\ell_A}+e^{\ell_B}\big),\qquad \mathbf o=e^{\ell_A-\ell}\,\mathbf o_A+e^{\ell_B-\ell}\,\mathbf o_B$$</div>
+<p>直观地说，\(e^{\ell_A-\ell}\) 就是“A 组在全部注意力权重里占的份额”。FlashAttention 的接口会把每个 query 的 LSE 一起返回，所以分开算、再合并，结果和一次算完相同（只差浮点舍入）。</p>
+<p>第二件工具是<b>变长批处理</b>（varlen）：把很多条长度不同的序列首尾相接拼成一个长张量，再传一个累计长度数组 cu_seqlens 标出每条序列的起止位置，FlashAttention 就会在一次内核调用里对每条序列各自做注意力，序列之间互不可见。它本来是为了让不同长度的样本不必补齐，MoBA 把它借来做别的事。</p>
+</div>
+
+<p>论文把实现概括为五步：(1) 根据门控和因果掩码，确定每个 query 被分配到哪些 KV 块；(2) 按分配到的块重新排列 query 的顺序；(3) 对每个 KV 块和分给它的 query 计算注意力，这一步可以用变长 FlashAttention；(4) 把输出按原来的顺序排回去；(5) 一个 query 可能同时去了当前块和几个历史块，用在线 softmax 把这些部分结果合并起来。这正是 MoE 的套路：MoE 先把 token 按专家分组（dispatch），每个专家对自己那组 token 做一次稠密的矩阵乘，再把结果送回原位（combine）。MoBA 把“专家”换成了 KV 块，把“专家的前馈计算”换成了“在这一块上做注意力”。</p>
+<div class="dia">
+  <div class="dia-title">示意图：MoBA 官方实现的计算流程</div>
+  <svg class="dg" viewBox="0 0 960 372" role="img" aria-label="MoBA 官方实现的计算流程" style="--dg-min:800px">
+    <g class="enc"><rect class="box" x="20" y="20" width="120" height="64" rx="8"/><text x="80" y="43.5" class="t-c t-b">Q、K、V</text><text x="80" y="60.5" class="t-c t-sm">（已加 RoPE）</text></g>
+    <g class="reg"><rect class="box" x="170" y="20" width="235" height="64" rx="8"/><text x="287.5" y="35" class="t-c t-b">① 分块打分</text><text x="287.5" y="52" class="t-c t-sm">每块 K 取平均得 k̄ᵢ</text><text x="287.5" y="69" class="t-c t-sm">sᵢ = q · k̄ᵢ（FP32）</text></g>
+    <g class="reg"><rect class="box" x="435" y="20" width="235" height="64" rx="8"/><text x="552.5" y="35" class="t-c t-b">② 掩码 + top-k</text><text x="552.5" y="52" class="t-c t-sm">未来块、当前块置 −∞</text><text x="552.5" y="69" class="t-c t-sm">每个 q 再选 k−1 个历史块</text></g>
+    <g class="pred"><rect class="box" x="700" y="20" width="240" height="64" rx="8"/><text x="820" y="35" class="t-c t-b">③ 按（块，头）收集 query</text><text x="820" y="52" class="t-c t-sm">像 MoE 把 token 发给专家</text><text x="820" y="69" class="t-c t-sm">每个历史块凑成一个变长段</text></g>
+    <path class="edge" d="M140,52 H166"/>
+    <path class="edge" d="M405,52 H431"/>
+    <path class="edge" d="M670,52 H696"/>
+    <g class="act"><rect class="box" x="20" y="112" width="385" height="92" rx="8"/><text x="212.5" y="141" class="t-c t-b">④a 当前块注意力（必选）</text><text x="212.5" y="158" class="t-c t-sm">变长 FlashAttention：每个块当成一条独立序列，</text><text x="212.5" y="175" class="t-c t-sm">causal=True，块内只看自己之前的位置</text></g>
+    <path class="edge" d="M80,84 V108"/>
+    <text x="452" y="118" class="t-xs">③ 的结果（示意，一层里的一部分）</text>
+    <text x="600" y="142" class="t-r t-sm">历史块 2 · 头 1 ←</text>
+    <g class="pred"><rect class="box" x="610" y="132" width="36" height="20" rx="4"/><text x="628" y="142" class="t-c t-xs">q5</text></g>
+    <g class="pred"><rect class="box" x="652" y="132" width="36" height="20" rx="4"/><text x="670" y="142" class="t-c t-xs">q9</text></g>
+    <g class="pred"><rect class="box" x="694" y="132" width="36" height="20" rx="4"/><text x="712" y="142" class="t-c t-xs">q14</text></g>
+    <text x="600" y="167" class="t-r t-sm">历史块 4 · 头 1 ←</text>
+    <g class="pred"><rect class="box" x="610" y="157" width="36" height="20" rx="4"/><text x="628" y="167" class="t-c t-xs">q9</text></g>
+    <g class="pred"><rect class="box" x="652" y="157" width="36" height="20" rx="4"/><text x="670" y="167" class="t-c t-xs">q12</text></g>
+    <text x="600" y="192" class="t-r t-sm">历史块 4 · 头 2 ←</text>
+    <g class="pred"><rect class="box" x="610" y="182" width="36" height="20" rx="4"/><text x="628" y="192" class="t-c t-xs">q6</text></g>
+    <g class="pred"><rect class="box" x="652" y="182" width="36" height="20" rx="4"/><text x="670" y="192" class="t-c t-xs">q11</text></g>
+    <g class="pred"><rect class="box" x="694" y="182" width="36" height="20" rx="4"/><text x="712" y="192" class="t-c t-xs">q13</text></g>
+    <g class="pred"><rect class="box" x="736" y="182" width="36" height="20" rx="4"/><text x="754" y="192" class="t-c t-xs">q15</text></g>
+    <path class="edge" d="M820,84 V126"/>
+    <g class="act"><rect class="box" x="435" y="222" width="505" height="58" rx="8"/><text x="687.5" y="242.5" class="t-c t-b">④b 历史块注意力</text><text x="687.5" y="259.5" class="t-c t-sm">每个（块，头）一段：收集来的 query 对这块的 B 个 key，causal=False</text></g>
+    <path class="edge" d="M688,206 V218"/>
+    <g class="loss"><rect class="box" x="20" y="306" width="920" height="58" rx="8"/><text x="480" y="326.5" class="t-c t-b">⑤ 按 log-sum-exp（LSE）合并 ④a 与 ④b 的结果</text><text x="480" y="343.5" class="t-c t-sm">等价于在“当前块已出现的位置 ∪ 选中的历史块”上做一次普通的 softmax 注意力</text></g>
+    <path class="edge" d="M212,204 V302"/>
+    <path class="edge" d="M688,280 V302"/>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>第一行是路由：①给每块打分；②去掉未来块和当前块后取 top-(k−1)，因为当前块已经占了一个名额；③把选了同一块的 query 收集到一起。第二行左边是当前块的注意力，所有 query 都要算；右边的小方块示意③的结果：例如第 2 个历史块在第 1 个头上被 q5、q9、q14 选中，它们就组成一段，和这一块的 \(B\) 个 key 一起交给④b。⑤用上面的 LSE 公式把两部分合并。本站根据论文算法 1 和官方代码 moba_efficient.py 绘制，对应 <a href="https://arxiv.org/html/2502.13189v1#S2.F1" target="_blank" rel="noopener">原文图 1(b) ↗</a> 与 <a href="https://arxiv.org/html/2502.13189v1#alg1" target="_blank" rel="noopener">算法 1 ↗</a>。</div>
+</div>
+<p>论文的算法 1 把这个流程写成了伪代码，大致对应如下：先把 K、V 按块长 \(B\) 切开；对每块的 key 取平均得到 \(\bar{\mathbf K}\in\mathbb R^{n\times h\times d}\)，再与全部 query 相乘得到分数矩阵 \(\mathbf S=\mathbf Q\bar{\mathbf K}^\top\in\mathbb R^{N\times h\times n}\)；加上块级因果掩码后取 top-k，得到稀疏的“query→块”分配矩阵 \(\mathbf G\)；然后分别整理出当前块和历史块要算的 query、key、value，调用两次变长 FlashAttention（当前块 causal=True，历史块 causal=False）；最后用在线 softmax 合并。注意分数矩阵 \(\mathbf S\) 的形状里有头数 \(h\)：<b>每个头单独打分、单独选块</b>。</p>
+
+<h4 id="n-4-1">2.3.1 官方代码里论文没写的几个细节</h4>
+<p>官方仓库 MoonshotAI/MoBA 给出了两个实现：一个朴素实现（moba_naive.py），用完整的注意力掩码来算，便于理解和核对；一个高效实现（moba_efficient.py），README 称在 32K 长度、单头、块长 2048、top-3 的测试中比朴素实现快 40 倍。读高效实现（本站读的是 master 分支，最后一次提交在 2025-04），可以看到几处论文没有写明的细节：</p>
+<ul>
+  <li><b>两次 FlashAttention 调用是怎么拼的。</b>当前块那一次，cu_seqlens 直接取块的边界，于是每一块被当成一条独立的“序列”做因果注意力，块与块之间互不可见。历史块那一次，每一个“（块，头）”组合是一段：这一段的 query 是所有选了这块的 query（只取这一个头），key 和 value 是这一块的 \(B\) 个 token，不加因果掩码，因为整块都在这些 query 之前。没有任何 query 选中的（块，头）直接剔除。</li>
+  <li><b>top-k 里包含当前块。</b>代码先把 \(k\) 减 1，再在历史块里取 top-(k−1)。每条序列的最后一块不可能成为任何 query 的历史块，也被提前剔除。</li>
+  <li><b>打分用 FP32。</b>平均 key 和 query 都先转成 FP32 再做内积，注释说是为了让门控分数更准。代价是代码会一次性算出一个形状为“块数 × 头数 × 序列长”的完整分数矩阵。按 100 万 token、块长 4096（约 256 块）、32 个头推算，这个 FP32 矩阵单层就约 34 GB（推算），实际运行时必须把头切到多张卡上。后来的 FlashMoBA 正是把这一步改成了分块计算、不把完整矩阵写进显存（见文末）。</li>
+  <li><b>反向传播。</b>两部分都直接调用 FlashAttention 的变长反向内核，传入合并后的 LSE，得到 Q、K、V 的梯度。正如 §2.2 所说，打分这一步不在梯度路径上。</li>
+  <li><b>GQA 怎么处理。</b>在接入 Hugging Face 模型的包装函数里，K 和 V 先被复制到与 query 头数相同（repeat_interleave），再交给 MoBA。也就是说，即使模型用了 GQA（Llama-3.1-8B 是 32 个 query 头共用 8 组 K、V），<b>每个 query 头也各自打分、各自选块</b>，同一组里的 4 个头可能选中不同的块。复制本身也占显存：100 万 token 时，单层的 K、V 从约 4 GB 变成约 16 GB（推算，BF16）。§6 会说明这正是 MoBA 和 NSA 的一个关键区别。</li>
+  <li><b>解码。</b>包装函数在解码阶段（每次只来一个新 token）直接调用普通的 FlashAttention，代码注释写着分页注意力版本“待发布”。也就是说，开源版本只在预填充和训练时用 MoBA。README 还特别提醒：MoBA 需要继续训练才能发挥作用，不能直接套在现成的预训练模型上当作即插即用的稀疏注意力。</li>
+</ul>
+
+<h4 id="n-4-2">2.3.2 计算量：省了多少，打分本身又要花多少</h4>
+<p>设块长为 \(B\)、每个 query 选 \(k\) 块（含当前块）。一个处在序列后部的 query，要看 \(k-1\) 个完整的历史块，再加上当前块里平均一半的位置，所以大约看 \((k-\tfrac12)B\) 个 token，<b>与序列长度无关</b>。因此整条序列的注意力计算量正比于 \(N\cdot(k-\tfrac12)B\)，随 \(N\) <b>线性</b>增长；全注意力则正比于 \(N^2/2\)，随 \(N\) 平方增长。</p>
+<p>打分要让每个 query 和每块的平均 key 做一次内积，共 \(N\times n=N^2/B\) 次，仍是平方增长，只是除以了块长 \(B\)。以 8B 模型的配置推算（\(B=4096\)，\(k=12\)，\(N=2^{20}\)）：一个后部的 query 要看约 47,104 个 token，而打分只要 256 次内积，打分的计算量不到注意力本身的 1%。要到序列长约 3.9 亿 token，打分的计算量才会追上注意力本身（推算：每个 query 的注意力约 \(4d(k-\tfrac12)B\) 次运算、打分约 \(2dN/B\) 次，两者相等时 \(N\approx2(k-\tfrac12)B^2\)）。</p>
+<p>块的大小还决定了 GPU 能不能跑得快。块大时（比如 4096），每个历史块会被很多 query 选中，④b 里的每一段都是“很多个 query × 4096 个 key”的大矩阵乘，正好是 FlashAttention 擅长的形状。块小时（比如 128），段数暴增、每段又很小，内核调度和数据搬运的开销就会盖过省下来的计算。这解释了为什么论文的配置都用很大的块（512 到 4096，§3.4 的超长实验甚至用到约 16 万），也解释了为什么后来需要专门的内核来支持小块（见文末 FlashMoBA）。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>论文说实现“结合了 MoE 和 FlashAttention 的优化技术”，指的是上面这种“按块分组、再批量计算”的组织方式，不是说 MoBA 有一个像 MoE 那样可以学习的路由器。</li>
+  <li>论文说 MoBA 把复杂度降到了“次二次方”。严格地说，这要求块长 \(B\) 和块数 \(k\) 都固定：此时注意力部分线性增长，打分部分以 \(1/B\) 的系数平方增长。§3.4 的千万 token 实验为了保持稀疏度不变，让块长随序列长度成比例增大，这时 MoBA 的计算量仍然按平方增长，只是常数小了约 13 倍（推算）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S2.SS3" target="_blank" rel="noopener">英文原文 §2.3 ↗</a> · 官方代码：<a href="https://github.com/MoonshotAI/MoBA/blob/master/moba/moba_efficient.py" target="_blank" rel="noopener">moba_efficient.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">3 实验：效果差多少，快多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoBA 让每个 query 少看了很多 token，效果会不会变差？作者分四步回答：先用一组从头训练的小模型画缩放律，并做切块粒度的消融（§3.1）；再看 MoBA 和全注意力怎样混用（§3.2）；然后在真实规模上，从 Llama-3.1-8B 出发续训到 100 万 token，比各项基准（§3.3）；最后测速度（§3.4）。读每一组时都要问：比较的两边是不是只差注意力？测的长度有没有长到让稀疏真正起作用？</div>
+
+<h4 id="n-5-1">3.1 缩放律与消融：从头训练的小模型</h4>
+<div class="note-pre"><b>先补一点背景：缩放律、PFLOP/s-day 与“尾部损失”。</b>
+<p><b>缩放律</b>：在不同规模下训练一组模型，画出“验证集损失—训练计算量”的关系，通常近似一条幂律 \(L(C)=a\,C^{-b}\)。在双对数坐标里它是一条直线，指数 \(b\) 越大，增加计算量时损失降得越快。按 Chinchilla 的结论，计算量一定时，参数量和训练 token 数应同步增长（大约每个参数配 20 个 token），这样训练出的模型叫“计算最优”。计算量的单位 PFLOP/s-day 指“每秒 \(10^{15}\) 次浮点运算持续一天”，约 \(8.64\times10^{19}\) 次浮点运算。</p>
+<p><b>尾部损失</b>（trailing LM loss）：只统计序列最后一段位置（例如 32K 序列的最后 2K 个 token）上的损失，而且只统计真的长到这个长度的序列。为什么需要它？普通的验证损失是对所有位置取平均，而语料里短文档居多，每条序列前段的位置也占多数；预测这些位置几乎用不到远处的上下文，稀疏注意力在远处“漏看”的东西很难在平均损失里体现出来。最后 2K 个位置最依赖前面三万多个 token，最能暴露长上下文能力的差别。</p>
+</div>
+<p>第一组实验比较 8K 长度上的验证损失。5 个规模的模型分别用全注意力和 MoBA 从头训练，除注意力外所有超参数（学习率、批大小等）都相同。配置如下（原文表 1；最后两列为本站推算）：</p>
+<div class="table-wrap"><table>
+  <tr><th>参数量</th><th>头数</th><th>层数</th><th>隐藏维度</th><th>训练 token</th><th>块长</th><th>top-k</th><th>token / 参数（推算）</th><th>计算量 PFLOP/s-day（推算）</th></tr>
+  <tr><td>568M</td><td>14</td><td>14</td><td>1792</td><td>10.8B</td><td>512</td><td>3</td><td>19.0</td><td>0.43</td></tr>
+  <tr><td>822M</td><td>16</td><td>16</td><td>2048</td><td>15.3B</td><td>512</td><td>3</td><td>18.6</td><td>0.87</td></tr>
+  <tr><td>1.1B</td><td>18</td><td>18</td><td>2304</td><td>20.6B</td><td>512</td><td>3</td><td>18.7</td><td>1.57</td></tr>
+  <tr><td>1.5B</td><td>20</td><td>20</td><td>2560</td><td>27.4B</td><td>512</td><td>3</td><td>18.3</td><td>2.85</td></tr>
+  <tr><td>2.1B</td><td>22</td><td>22</td><td>2816</td><td>36.9B</td><td>512</td><td>3</td><td>17.6</td><td>5.38</td></tr>
+</table></div>
+<p>几点说明：五个模型的每头维度都是 128（隐藏维度 ÷ 头数）；每个模型的训练 token 数约为参数量的 18–19 倍，接近 Chinchilla 的计算最优比例；计算量按“6 × 参数量 × token 数”估算，忽略了注意力本身，只用来确定横轴的大致范围。NeurIPS 版把这张表的第一列改成了“不含嵌入层的参数量”，第一行写成 545M，其余四行不变，论文没有解释。</p>
+<p>MoBA 在这组实验里用块长 512、top-3：每个 query 最多看当前块和 2 个历史块，即最多 1,536 个 token。拟合出的缩放律几乎一样：全注意力为 \(L=2.622\,C^{-0.063}\)，MoBA 为 \(L=2.625\,C^{-0.063}\)（原文图 3c）。两者指数相同，系数只差 0.003，按公式算，在整个计算范围内损失差约 0.003，相对差约 0.1%（推算）。论文的表述是“验证损失的差距保持在 1e-3 量级之内”。</p>
+<div class="note-warn"><b>稀疏度的数字前后不一：</b>论文在这里先说稀疏度“最高 \(1-\frac{512\times3}{8192}=81.25\%\)”，同一段末尾又说“稀疏度最高 75%”。两者都是按“序列最后一个 query 少看了多少”来算的。如果把因果结构考虑进去，对所有位置取平均，MoBA 实际省掉的注意力计算约为 71%（推算，方法见 §3.5 的表）。</div>
+<p>第二组实验看长上下文。把序列长度从 8K 提到 32K，块长和 top-k 不变，于是每个 query 最多看的 1,536 个 token 只占 32K 的 4.7%（论文说稀疏度最高 95.31%）。评测指标换成 32K 序列最后 2K 个位置的尾部损失。拟合结果是：全注意力 \(L=1.464\,C^{-0.097}\)，MoBA \(L=1.546\,C^{-0.108}\)。MoBA 在全部 5 个规模上都略差，但它的指数更大（0.108 对 0.097），所以计算量越大，差距越小。把公式代入几个计算量，差距如下（推算）：</p>
+<div class="table-wrap"><table>
+  <tr><th>计算量（PFLOP/s-day）</th><th>全注意力尾部损失</th><th>MoBA 尾部损失</th><th>差距</th><th>相对差距</th></tr>
+  <tr><td>0.43（约为 568M 模型）</td><td>1.589</td><td>1.694</td><td>0.105</td><td>6.6%</td></tr>
+  <tr><td>1</td><td>1.464</td><td>1.546</td><td>0.082</td><td>5.6%</td></tr>
+  <tr><td>5.4（约为 2.1B 模型）</td><td>1.243</td><td>1.289</td><td>0.046</td><td>3.7%</td></tr>
+</table></div>
+<p>如果把两条幂律继续外推，它们要到约 142 PFLOP/s-day 才相交（推算），这大约是最大实验计算量的 26 倍。只用 5 个点拟合出的指数差（0.011）外推这么远，可靠性很低。所以本站不认为这能说明“规模更大时 MoBA 会追平全注意力”，只能说明在实验范围内差距在缩小。</p>
+<p>附录还把 32K 序列按位置每 2K 切一段，对每一段分别拟合缩放律（原文附录表 3，NeurIPS 版表 4）。规律很清楚：0–2K 位置两者几乎相同（系数 3.075 对 3.068，指数都是 0.078），越往后差距越大，30–32K 位置差距最大（1.546 对 1.464）。作者由此得出结论：稀疏注意力和全注意力之间的差距主要集中在尾部的位置。这符合直觉：靠前的位置离开头不远，MoBA 选中的 1,536 个 token 已经覆盖了大部分历史，开头 1.5K 个位置甚至完全等同于全注意力；越往后，被漏看的历史就越多。</p>
+<div class="note-warn"><b>图 3 的说明文字有个笔误：</b>arXiv 版图 3(b) 的标题写的是“最后 1K 个 token”，但同一张图的纵轴标签和附录表 3 都是“最后 2K”。NeurIPS 版已改为 2K。</div>
+
+<p>第三组是<b>细粒度切块</b>的消融：1.5B 模型、32K 长度，把上下文切成 8、16、32、64、128 块，对应选 2、4、8、16、32 块，保证 \(k\times B\) 都是 8,192（论文称稀疏度都是 75%）。下图是本站从原图数据点读出的约值。</p>
+<div class="dia">
+  <div class="dia-title">示意图：细粒度切块消融（1.5B 模型，32K 长度）</div>
+  <svg class="dg" viewBox="0 0 960 292" role="img" aria-label="细粒度切块消融：不同块数下的验证损失" style="--dg-min:760px">
+    <line x1="130" y1="198.33" x2="900" y2="198.33" class="grid-ln"/>
+    <text x="120" y="198.33" class="t-r t-xs">2.240</text>
+    <line x1="130" y1="158.75" x2="900" y2="158.75" class="grid-ln"/>
+    <text x="120" y="158.75" class="t-r t-xs">2.245</text>
+    <line x1="130" y1="119.17" x2="900" y2="119.17" class="grid-ln"/>
+    <text x="120" y="119.17" class="t-r t-xs">2.250</text>
+    <line x1="130" y1="79.58" x2="900" y2="79.58" class="grid-ln"/>
+    <text x="120" y="79.58" class="t-r t-xs">2.255</text>
+    <line x1="130" y1="40" x2="900" y2="40" class="grid-ln"/>
+    <text x="120" y="40" class="t-r t-xs">2.260</text>
+    <line x1="130" y1="230" x2="900" y2="230" class="axis"/>
+    <text transform="rotate(-90 34 135)" x="34" y="135" class="t-c t-xs">验证集 LM loss（读图约值）</text>
+    <line x1="150" y1="185.67" x2="880" y2="185.67" style="stroke:var(--c-enc);stroke-width:2;stroke-dasharray:6 4"/>
+    <text x="150" y="173.67" class="t-sm" style="fill:var(--c-enc)">全注意力 ≈ 2.242</text>
+    <polyline points="210,57.42 360,171.42 510,197.54 660,173.79 810,192" style="fill:none;stroke:var(--c-pred);stroke-width:1.5;stroke-dasharray:3 3"/>
+    <circle cx="210" cy="57.42" r="6" style="fill:var(--c-pred)"/>
+    <text x="220" y="45.42" class="t-sm" style="fill:var(--c-pred)">2.258</text>
+    <text x="210" y="246" class="t-c t-sm">2/8</text>
+    <text x="210" y="262" class="t-c t-xs">块 4096</text>
+    <text x="210" y="280" class="t-c t-xs">计算量 34%</text>
+    <circle cx="360" cy="171.42" r="6" style="fill:var(--c-pred)"/>
+    <text x="370" y="159.42" class="t-sm" style="fill:var(--c-pred)">2.243</text>
+    <text x="360" y="246" class="t-c t-sm">4/16</text>
+    <text x="360" y="262" class="t-c t-xs">块 2048</text>
+    <text x="360" y="280" class="t-c t-xs">计算量 39%</text>
+    <circle cx="510" cy="197.54" r="6" style="fill:var(--c-pred)"/>
+    <text x="520" y="185.54" class="t-sm" style="fill:var(--c-pred)">2.240</text>
+    <text x="510" y="246" class="t-c t-sm">8/32</text>
+    <text x="510" y="262" class="t-c t-xs">块 1024</text>
+    <text x="510" y="280" class="t-c t-xs">计算量 41%</text>
+    <circle cx="660" cy="173.79" r="6" style="fill:var(--c-pred)"/>
+    <text x="670" y="161.79" class="t-sm" style="fill:var(--c-pred)">2.243</text>
+    <text x="660" y="246" class="t-c t-sm">16/64</text>
+    <text x="660" y="262" class="t-c t-xs">块 512</text>
+    <text x="660" y="280" class="t-c t-xs">计算量 43%</text>
+    <circle cx="810" cy="192" r="6" style="fill:var(--c-pred)"/>
+    <text x="820" y="180" class="t-sm" style="fill:var(--c-pred)">2.241</text>
+    <text x="810" y="246" class="t-c t-sm">32/128</text>
+    <text x="810" y="262" class="t-c t-xs">块 256</text>
+    <text x="810" y="280" class="t-c t-xs">计算量 43%</text>
+    <text x="140" y="246" class="t-r t-xs">top-k / 块数</text>
+    <text x="140" y="280" class="t-r t-xs">（推算）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是五种切法（top-k / 块数，下方注明块长），纵轴是验证集 LM 损失，注意纵轴只覆盖 2.236–2.260 这一小段。橙点是 MoBA，蓝色虚线是全注意力。最粗的切法（8 块选 2 块，块长 4096）比全注意力高约 0.016；切到 32 块以上之后，MoBA 与全注意力的差距在 ±0.002 以内，有的甚至略低。最下一行“计算量”是本站推算的：考虑因果结构之后，每种切法实际计算的注意力占全注意力的比例。数值读自 <a href="https://arxiv.org/html/2502.13189v1#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a>，本站重画。</div>
+</div>
+<p>论文的结论是：块切得越细越好，最粗与较细的设置之间约有 1e-2 的差距；这说明细粒度切分是 MoE 一族方法的通用技巧，对 MoBA 同样有效。</p>
+<div class="note-warn"><b>“稀疏度相同”不等于“算的一样多”：</b>粗切法的当前块很大（4096），块内平均只能看到一半（约 2,048 个 token），而且必选的当前块占掉了 top-k 里的一个名额；细切法的当前块只有 256，剩下 31 个名额都是完整的历史块。按本站推算，对所有位置平均，8 块选 2 块的设置只计算了全注意力的 34%，128 块选 32 块的设置计算了 43%，多看了约四分之一的 token。所以细切法的优势里，有一部分来自“看得更多”，不全是“挑得更准”。不过 16 块（39%）与 128 块（43%）的计算量相差不大，损失也已经很接近，“块别太粗”这个结论本身是站得住的。</div>
+<p>NeurIPS 正式版还加了一个“帕累托前沿”实验（附录表 7）：8 亿参数的模型、32K 长度，固定 top-3，只改块数。块数为 4、8、32、128、512 时，验证损失分别为 2.48、2.48、2.47、2.53、2.60。这里 \(k\) 固定，块数越多块越短，每个 query 能看到的 token 就越少：32 块（块长 1,024，每个 query 最多看 3,072 个 token）时损失还和 4 块时一样，再往下就明显变差。作者据此认为 3/32 左右的比例是效率和长上下文能力之间的一个好平衡。正文说块数的范围是“16 到 256”，和表里的 4 到 512 对不上，本站以表为准；这张表也没有给出全注意力的对照值。</p>
+
+<h4 id="n-5-2">3.2 与全注意力混合：按阶段，或按层</h4>
+<div class="note-pre"><b>先补一点背景：按位置的损失，以及 SFT 的损失掩码。</b>
+<p><b>按位置的损失</b>（position-wise LM loss）：对验证集里的每个位置分别求平均损失，画成“位置—损失”曲线。越靠后的位置能利用的上下文越多，损失越低，Gemini 1.5 等报告都观察到曲线大致按幂律下降。比较两个模型时，主要看曲线的尾部有没有分开。</p>
+<p><b>SFT 的损失掩码</b>：监督微调（SFT）的数据是“提示 + 回答”，通常只在回答部分计算损失，提示部分的 token 不计损失（被“掩掉”）。在长上下文 SFT 里，提示往往有几万 token，回答只有几百 token，于是真正产生梯度信号的位置很少。</p>
+</div>
+<p><b>按阶段混合。</b>作者训练了三个 1.5B 模型，都是 32K 长度、300 亿（30B）token，MoBA 的块长 2048、top-3：(1) 全程全注意力；(2) 全程 MoBA；(3) 混合：前 90% 的 token 用 MoBA，最后 10% 换回全注意力。按位置的损失（原文图 5a）显示：全程 MoBA 在尾部位置的损失明显更高，混合方案几乎和全注意力重合。本站从原图读出的最后一个位置段（约 30K–32K）：全注意力约 1.307，混合约 1.313，全程 MoBA 约 1.361；在最开头的位置，三者都约为 2.80。作者还特别指出，从 MoBA 切到全注意力时，损失没有出现明显的尖峰。</p>
+<p>这个结果的意义在于训练成本，因为长上下文预训练里最贵的就是注意力。按本站推算，块长 2048、top-3 在 32K 长度下，MoBA 阶段的注意力计算量约为全注意力的 29%；前 90% 用 MoBA、最后 10% 用全注意力，注意力部分的总计算量约为全程全注意力的 36%，而最终的损失几乎一样。注意这只是注意力部分，模型其余部分的计算量不变，所以整个训练的节省要小一些；论文也没有报告实际的训练耗时。</p>
+<p><b>按层混合。</b>作者观察到，MoBA 在 SFT 阶段有时效果不好，损失偏高。他们猜测原因在于损失掩码：只有回答部分产生梯度，而在稀疏注意力下，回答位置的 query 只连到少数几个被选中的提示块，梯度只能沿这几条路流回提示部分，其余提示位置在这一层收不到来自回答的梯度，作者称之为“梯度稀疏”。解决办法是把最后几层换回全注意力，其余层仍用 MoBA。可以这样理解为什么换的是“最后几层”：最后几层用全注意力时，回答位置能直接看到全部提示位置，梯度也就能从回答流到每一个提示位置，再沿着残差连接一路往下传给前面的 MoBA 层。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两种混合方式</div>
+  <div class="dia-row"><span class="lbl">按阶段（训练进度）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:9">前 90% token：所有层都用 MoBA</span><span class="dia-seg kv" style="flex:1.6">后 10%：全</span></div></div>
+  <div class="dia-row"><span class="lbl">按层（32 层的 8B 模型）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:29">第 1–29 层：MoBA</span><span class="dia-seg kv" style="flex:4.5">30–32：全</span></div></div>
+  <div class="dia-note">绿色 = MoBA，蓝色 = 全注意力。第一行是本节 1.5B 实验的做法；第二行是 §3.3 中 Llama-8B-1M-MoBA 采用的配置（按比例画，最后一段略微放宽以便写字）。本站示意图。</div>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：按层混合时，换回全注意力的层数与 SFT 损失</div>
+  <svg class="dg" viewBox="0 0 960 276" role="img" aria-label="层间混合：最后几层用全注意力时的 SFT 损失" style="--dg-min:800px">
+    <text x="260" y="26" class="t-c t-sm t-b">(b) SFT 损失（全部位置）</text>
+    <line x1="80" y1="198.75" x2="440" y2="198.75" class="grid-ln"/>
+    <text x="72" y="198.75" class="t-r t-xs">1.08</text>
+    <line x1="80" y1="156.25" x2="440" y2="156.25" class="grid-ln"/>
+    <text x="72" y="156.25" class="t-r t-xs">1.10</text>
+    <line x1="80" y1="113.75" x2="440" y2="113.75" class="grid-ln"/>
+    <text x="72" y="113.75" class="t-r t-xs">1.12</text>
+    <line x1="80" y1="71.25" x2="440" y2="71.25" class="grid-ln"/>
+    <text x="72" y="71.25" class="t-r t-xs">1.14</text>
+    <line x1="80" y1="220" x2="440" y2="220" class="axis"/>
+    <line x1="80" y1="207.67" x2="440" y2="207.67" style="stroke:var(--c-enc);stroke-width:2;stroke-dasharray:6 4"/>
+    <text x="84" y="197.67" class="t-xs" style="fill:var(--c-enc)">全注意力 1.076</text>
+    <line x1="80" y1="61.05" x2="440" y2="61.05" style="stroke:var(--c-pred);stroke-width:2;stroke-dasharray:6 4"/>
+    <text x="436" y="73.05" class="t-r t-xs" style="fill:var(--c-pred)">全部 MoBA 1.145</text>
+    <polyline points="110,79.11 176.67,119.49 243.33,158.16 410,204.91" style="fill:none;stroke:var(--c-act);stroke-width:2"/>
+    <circle cx="110" cy="79.11" r="5" style="fill:var(--c-act)"/>
+    <text x="118" y="69.11" class="t-xs" style="fill:var(--c-act)">1.136</text>
+    <text x="110" y="234" class="t-c t-xs">1 层</text>
+    <circle cx="176.67" cy="119.49" r="5" style="fill:var(--c-act)"/>
+    <text x="184.67" y="109.49" class="t-xs" style="fill:var(--c-act)">1.117</text>
+    <text x="176.67" y="234" class="t-c t-xs">3 层</text>
+    <circle cx="243.33" cy="158.16" r="5" style="fill:var(--c-act)"/>
+    <text x="251.33" y="148.16" class="t-xs" style="fill:var(--c-act)">1.099</text>
+    <text x="243.33" y="234" class="t-c t-xs">5 层</text>
+    <circle cx="410" cy="204.91" r="5" style="fill:var(--c-act)"/>
+    <text x="418" y="194.91" class="t-xs" style="fill:var(--c-act)">1.077</text>
+    <text x="410" y="234" class="t-c t-xs">10 层</text>
+    <text x="740" y="26" class="t-c t-sm t-b">(c) SFT 尾部损失（32K 序列的最后 2K）</text>
+    <line x1="560" y1="186" x2="920" y2="186" class="grid-ln"/>
+    <text x="552" y="186" class="t-r t-xs">1.10</text>
+    <line x1="560" y1="152" x2="920" y2="152" class="grid-ln"/>
+    <text x="552" y="152" class="t-r t-xs">1.12</text>
+    <line x1="560" y1="118" x2="920" y2="118" class="grid-ln"/>
+    <text x="552" y="118" class="t-r t-xs">1.14</text>
+    <line x1="560" y1="84" x2="920" y2="84" class="grid-ln"/>
+    <text x="552" y="84" class="t-r t-xs">1.16</text>
+    <line x1="560" y1="50" x2="920" y2="50" class="grid-ln"/>
+    <text x="552" y="50" class="t-r t-xs">1.18</text>
+    <line x1="560" y1="220" x2="920" y2="220" class="axis"/>
+    <line x1="560" y1="209.12" x2="920" y2="209.12" style="stroke:var(--c-enc);stroke-width:2;stroke-dasharray:6 4"/>
+    <text x="564" y="199.12" class="t-xs" style="fill:var(--c-enc)">全注意力 1.086</text>
+    <line x1="560" y1="65.13" x2="920" y2="65.13" style="stroke:var(--c-pred);stroke-width:2;stroke-dasharray:6 4"/>
+    <text x="916" y="77.13" class="t-r t-xs" style="fill:var(--c-pred)">全部 MoBA 1.171</text>
+    <polyline points="590,68.19 656.67,137.21 723.33,183.28 890,208.44" style="fill:none;stroke:var(--c-act);stroke-width:2"/>
+    <circle cx="590" cy="68.19" r="5" style="fill:var(--c-act)"/>
+    <text x="598" y="58.19" class="t-xs" style="fill:var(--c-act)">1.169</text>
+    <text x="590" y="234" class="t-c t-xs">1 层</text>
+    <circle cx="656.67" cy="137.21" r="5" style="fill:var(--c-act)"/>
+    <text x="664.67" y="127.21" class="t-xs" style="fill:var(--c-act)">1.129</text>
+    <text x="656.67" y="234" class="t-c t-xs">3 层</text>
+    <circle cx="723.33" cy="183.28" r="5" style="fill:var(--c-act)"/>
+    <text x="731.33" y="173.28" class="t-xs" style="fill:var(--c-act)">1.102</text>
+    <text x="723.33" y="234" class="t-c t-xs">5 层</text>
+    <circle cx="890" cy="208.44" r="5" style="fill:var(--c-act)"/>
+    <text x="898" y="198.44" class="t-xs" style="fill:var(--c-act)">1.087</text>
+    <text x="890" y="234" class="t-c t-xs">10 层</text>
+    <text x="480" y="262" class="t-c t-xs">横轴：把最后几层换回全注意力（其余层仍是 MoBA）；绿色折线是层间混合模型，数值为本站从原图数据点读出的约值</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左图是 SFT 损失（对所有计损失的位置平均），右图是 32K 序列最后 2K 个位置上的尾部损失。蓝色虚线是全注意力，橙色虚线是所有层都用 MoBA，绿色折线是把最后 1、3、5、10 层换回全注意力的混合模型。换回的层越多，损失越接近全注意力：换 10 层时两张图都几乎追平；换 3 层时，大约补回了与全注意力差距的四成到一半（推算）。数值为本站从 <a href="https://arxiv.org/html/2502.13189v1#S3.F5" target="_blank" rel="noopener">原文图 5(b)(c) ↗</a> 的数据点读出的约值。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意：</b>“梯度稀疏”是作者的推测，论文没有做直接验证的实验（比如比较“提示也计损失”时 MoBA 的 SFT 表现）。另外，这组 SFT 实验用的模型规模和总层数论文都没有写，所以“换 3 层”在不同深度的模型里分量不同：在 32 层的 8B 模型里，3 层约占 9%。</div>
+
+<h4 id="n-5-3">3.3 真实规模：从 Llama-3.1-8B 续训到 100 万 token</h4>
+<div class="note-pre"><b>先补一点背景：位置插值，以及几个长上下文评测。</b>
+<p><b>位置插值</b>（Position Interpolation，PI）：Llama 用 RoPE 编码位置（见本站 <a href="roformer.html">RoFormer 精读</a>），模型只在训练长度以内的旋转角度上“见过世面”。要把上下文从 128K 扩得更长，PI 把新的位置编号按比例压缩回原来的范围，比如长度翻倍时，第 \(t\) 个位置按 \(t/2\) 来旋转，这样所有角度都落在模型熟悉的区间里，再配合一段续训，模型就能适应更长的上下文。</p>
+<p><b>大海捞针</b>（Needle in a Haystack）：在一篇很长的无关文本的某个深度插入一句关键信息，再问模型这句信息的内容；改变文本长度和插入深度，画成热力图。<b>RULER</b> 是一组更难的合成长上下文任务：多根针、多个问题、变量追踪、词频统计、长文问答等，可以指定长度（这里是 128K）。<b>LongBench</b> 是真实长文任务的合集，这里截断到 32K。<b>LooGLE</b> 是一个长文档理解评测。</p>
+</div>
+<p>为了便于别人核验，作者从公开的 Llama-3.1-8B 基座模型出发做长上下文续训（流程见下图，对应原文图 6）：先在 128K 长度上训练，再逐步扩到 256K、512K、1M，在 256K 阶段开始时使用位置插值。完成 1M 的续训后，再“打开” MoBA 训练 1000 亿（100B）token，块长 4096、top-12，最后 3 层保持全注意力，其余 29 层换成 MoBA。SFT 阶段同样从 32K 逐步增加到 1M。对照的全注意力模型 Llama-8B-1M-Full 走同样的流程，唯一的区别是全程使用全注意力。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两个 8B 模型的训练流程</div>
+  <div class="dia-flow"><span class="dia-box enc">Llama-3.1-8B 基座</span><span class="dia-arrow">→</span><span class="dia-box">续训 128K</span><span class="dia-arrow">→</span><span class="dia-box">256K<small>阶段开始时做位置插值</small></span><span class="dia-arrow">→</span><span class="dia-box">512K</span><span class="dia-arrow">→</span><span class="dia-box">1M</span></div>
+  <div class="dia-flow"><span class="dia-arrow">MoBA 版 →</span><span class="dia-box act">打开 MoBA 续训 100B token<small>块 4096、top-12；最后 3 层仍为全注意力</small></span><span class="dia-arrow">→</span><span class="dia-box act">SFT：32K → … → 1M</span><span class="dia-arrow">→</span><span class="dia-box act">Llama-8B-1M-MoBA</span></div>
+  <div class="dia-flow"><span class="dia-arrow">对照版 →</span><span class="dia-box enc">同样流程，全程全注意力</span><span class="dia-arrow">→</span><span class="dia-box enc">Llama-8B-1M-Full</span></div>
+  <div class="dia-note">根据原文 §3.3 正文整理，各阶段的 token 数正文没有给出。NeurIPS 版附录补充：训练用 128 台服务器、每台 8 张 H800（共 1,024 张）；全注意力版本跑完整个流程用了 30 多天；MoBA 版“复用了进入 1M 阶段之前的检查点”，因此训练时间显著缩短，但没有给出具体天数。本站示意图，对应 <a href="https://arxiv.org/html/2502.13189v1#S3.F6" target="_blank" rel="noopener">原文图 6 ↗</a>。</div>
+</div>
+<div class="note-warn"><b>正文与附录的描述不完全一致：</b>正文说“完成 1M 续训之后，再打开 MoBA 训练 100B token”；NeurIPS 版附录说 MoBA 版复用的是“进入 1M 阶段之前”的检查点。两种读法下，MoBA 版在 1M 长度上经历的训练不同（前者是先用全注意力训完 1M、再用 MoBA 训 100B；后者可能是直接用 MoBA 完成 1M 阶段），论文没有澄清。</div>
+<p>评测结果见下表。arXiv 版（表 2）只有一种推理配置：<b>预填充用 MoBA，生成时切回全注意力</b>，作者说这样效果更好。NeurIPS 正式版（表 1）增加了全程都用 MoBA 的配置（预填充和生成都用 MoBA，最后 3 层仍为全注意力）。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th>MoBA 预填充 + 全注意力生成</th><th>MoBA 预填充 + MoBA 生成（仅 NeurIPS 版）</th><th>全注意力（Llama-8B-1M-Full）</th></tr>
+  <tr><td>AGIEval [0-shot]</td><td>0.5144</td><td>0.5268</td><td>0.5146</td></tr>
+  <tr><td>BBH [3-shot]</td><td>0.6573</td><td>0.6584</td><td>0.6589</td></tr>
+  <tr><td>CEval [5-shot]</td><td>0.6273</td><td>0.6298</td><td>0.6165</td></tr>
+  <tr><td>GSM8K [5-shot]</td><td>0.7278</td><td>0.7324</td><td>0.7142</td></tr>
+  <tr><td>HellaSWAG [0-shot]</td><td>0.8262</td><td>0.8262</td><td>0.8279</td></tr>
+  <tr><td>Loogle [0-shot]</td><td>0.4209</td><td>0.3333</td><td>0.4016</td></tr>
+  <tr><td>Competition Math [0-shot]</td><td>0.4254</td><td>0.4454</td><td>0.4324</td></tr>
+  <tr><td>MBPP [3-shot]</td><td>0.5380</td><td>0.5220</td><td>0.5320</td></tr>
+  <tr><td>MBPP Sanitized [0-shot]</td><td>0.6926</td><td>0.6498</td><td>0.6615</td></tr>
+  <tr><td>MMLU [0-shot]</td><td>0.4903</td><td>0.4968</td><td>0.4904</td></tr>
+  <tr><td>MMLU Pro [5-shot][CoT]</td><td>0.4295</td><td>0.4343</td><td>0.4328</td></tr>
+  <tr><td>HumanEval [0-shot][pass@1]</td><td>0.6951</td><td>0.6890</td><td>0.7012</td></tr>
+  <tr><td>SimpleQA [0-shot]</td><td>0.0465</td><td>0.0460</td><td>0.0492</td></tr>
+  <tr><td>TriviaQA [0-shot]</td><td>0.5673</td><td>0.5610</td><td>0.5667</td></tr>
+  <tr><td>LongBench @32K [0-shot]</td><td>0.4828</td><td>0.4807</td><td>0.4821</td></tr>
+  <tr><td>RULER @128K [0-shot]</td><td>arXiv 版 0.7818；NeurIPS 版 0.7671</td><td>0.7690</td><td>arXiv 版 0.7849；NeurIPS 版 0.8031</td></tr>
+</table></div>
+<p>表面上看，两个模型几乎打平：第一列和全注意力相比，16 项里赢 7 项、输 9 项，大多数差距在 1 个百分点以内。但读这张表之前要先想清楚，哪些项目真的考到了稀疏注意力。</p>
+<p><b>短输入上，MoBA 层就是全注意力。</b>§2.2 推算过，在块 4096、top-12 的设置下，长度不超过 49,152 个 token 的输入，MoBA 层的计算和全注意力完全相同。AGIEval、BBH、GSM8K、MMLU、HumanEval 这类基准的输入只有几百到几千 token，LongBench 也截断在 32K，都在这个范围以内。所以这些项目上的差异，并不来自“稀疏注意力少看了什么”，而来自两个模型最后一段训练的不同（MoBA 版在 1M 阶段用 MoBA 训练了 100B token，参数因此走到了不同的地方）。它们能说明的是“换成 MoBA 训练没有伤到短文本能力”，不能说明“稀疏注意力在这些任务上没有损失”。</p>
+<p><b>真正考到稀疏的，是 RULER@128K 和长到 1M 的大海捞针。</b>128K 时共 32 块，每个 query 最多看 12 块，论文给出的稀疏度是 \(1-\frac{4096\times12}{128\text{K}}=62.5\%\)。偏偏这里两个版本的数字不一样：arXiv 版是 MoBA 0.7818 对全注意力 0.7849，几乎打平；NeurIPS 版同一格变成了 0.7671 对 0.8031，差了 3.6 个百分点（全程 MoBA 为 0.7690）。其余 15 项的数字在两个版本里完全相同，论文没有解释 RULER 为什么变了，正文的措辞仍是“几乎追平”。</p>
+<p>NeurIPS 版附录给出了 RULER 13 个子任务的分数（附录表 5）：</p>
+<div class="table-wrap"><table>
+  <tr><th>RULER 子任务（128K）</th><th>MoBA 预填充 + MoBA 生成</th><th>MoBA 预填充 + 全注意力生成</th><th>全注意力</th></tr>
+  <tr><td>平均</td><td>0.769</td><td>0.767</td><td>0.803</td></tr>
+  <tr><td>niah_multikey_1</td><td>0.982</td><td>0.982</td><td>1.000</td></tr>
+  <tr><td>niah_multikey_2</td><td>0.762</td><td>0.754</td><td>0.992</td></tr>
+  <tr><td>niah_multikey_3</td><td>0.944</td><td>0.948</td><td>0.994</td></tr>
+  <tr><td>niah_multiquery</td><td>0.819</td><td>0.812</td><td>0.765</td></tr>
+  <tr><td>niah_multivalue</td><td>0.558</td><td>0.559</td><td>0.571</td></tr>
+  <tr><td>niah_single_1</td><td>1.000</td><td>1.000</td><td>1.000</td></tr>
+  <tr><td>niah_single_2</td><td>0.992</td><td>0.984</td><td>1.000</td></tr>
+  <tr><td>niah_single_3</td><td>0.966</td><td>0.958</td><td>0.982</td></tr>
+  <tr><td>ruler_cwe</td><td>0.009</td><td>0.010</td><td>0.010</td></tr>
+  <tr><td>ruler_fwe</td><td>0.882</td><td>0.881</td><td>0.905</td></tr>
+  <tr><td>ruler_qa_hotpot</td><td>0.510</td><td>0.518</td><td>0.542</td></tr>
+  <tr><td>ruler_qa_squad</td><td>0.604</td><td>0.602</td><td>0.753</td></tr>
+  <tr><td>ruler_vt</td><td>0.968</td><td>0.965</td><td>0.926</td></tr>
+</table></div>
+<p>差距最大的是 niah_multikey_2（0.754 对 0.992）和 qa_squad（0.602 对 0.753）；MoBA 在 niah_multiquery（0.812 对 0.765）和变量追踪 vt（0.965 对 0.926）上反而更高。multikey 类任务要在大量格式相同的干扰“针”里找出指定的那一根，这正是“块平均分数”最难分辨的情形：装着目标的块和装着干扰项的块，平均 logit 看起来差不多。这是本站的解读，论文没有逐项分析。</p>
+<p>全程 MoBA 的配置还有两处明显下降：Loogle 从 0.4209 掉到 0.3333，MBPP Sanitized 从 0.6926 降到 0.6498；论文没有讨论这些差异。大海捞针测到了 1M：arXiv 版图 7（预填充 MoBA、生成全注意力）在所有长度、所有深度上都是满分；NeurIPS 版图 6 加了全程 MoBA 的配置，其中有少数格子降到 80% 左右，作者说预填充 MoBA + 生成全注意力的配置略好一些。1M 时稀疏度最高 95.31%，单根针仍能找到满分，说明门控至少能在百万 token 里找到装着针的那一块；但单针检索是较容易的长上下文测试，RULER 的多针任务已经显示出差距。</p>
+
+<h4 id="n-5-4">3.4 效率与可扩展性</h4>
+<p>效率实验比较的是 §3.3 两个模型的<b>注意力层前向时间</b>（也就是预填充时间），不包括前馈层等其他部分，理由是两个模型其余部分的计算量相同。原文图 2(a) 中，序列从 8K 增长到 1M，作者说 MoBA 在所有长度上都比全注意力（FlashAttention）快，1M 时快 6.5 倍。本站把从原图数据点读出的各长度加速倍数、按计算量推算的理想值、以及 NeurIPS 版补充的整个模型的数字画在下图。</p>
+<div class="dia">
+  <div class="dia-title">示意图：MoBA 相对全注意力的加速倍数（块 4096，top-12）</div>
+  <svg class="dg" viewBox="0 0 960 304" role="img" aria-label="MoBA 相对全注意力的加速倍数随长度的变化" style="--dg-min:760px">
+    <line x1="140" y1="255" x2="860" y2="255" class="axis"/>
+    <text x="130" y="255" class="t-r t-xs">0×</text>
+    <line x1="140" y1="225" x2="860" y2="225" class="grid-ln"/>
+    <text x="130" y="225" class="t-r t-xs">2×</text>
+    <line x1="140" y1="195" x2="860" y2="195" class="grid-ln"/>
+    <text x="130" y="195" class="t-r t-xs">4×</text>
+    <line x1="140" y1="165" x2="860" y2="165" class="grid-ln"/>
+    <text x="130" y="165" class="t-r t-xs">6×</text>
+    <line x1="140" y1="135" x2="860" y2="135" class="grid-ln"/>
+    <text x="130" y="135" class="t-r t-xs">8×</text>
+    <line x1="140" y1="105" x2="860" y2="105" class="grid-ln"/>
+    <text x="130" y="105" class="t-r t-xs">10×</text>
+    <line x1="140" y1="75" x2="860" y2="75" class="grid-ln"/>
+    <text x="130" y="75" class="t-r t-xs">12×</text>
+    <text x="200" y="271" class="t-c t-sm">128K</text>
+    <text x="400" y="271" class="t-c t-sm">256K</text>
+    <text x="600" y="271" class="t-c t-sm">512K</text>
+    <text x="800" y="271" class="t-c t-sm">1M</text>
+    <text x="500" y="292" class="t-c t-xs">上下文长度（Llama-8B-1M 配置：块 4096，top-12；横轴按对数间隔排列）</text>
+    <polyline points="200,229.5 400,209.1 600,167.55 800,84.15" style="fill:none;stroke:var(--text-3);stroke-width:2.2;stroke-dasharray:6 4"/>
+    <circle cx="200" cy="229.5" r="4.5" style="fill:var(--text-3)"/>
+    <text x="208" y="217.5" class="t-xs" style="fill:var(--text-3)">1.70×</text>
+    <circle cx="400" cy="209.1" r="4.5" style="fill:var(--text-3)"/>
+    <text x="408" y="197.1" class="t-xs" style="fill:var(--text-3)">3.06×</text>
+    <circle cx="600" cy="167.55" r="4.5" style="fill:var(--text-3)"/>
+    <text x="608" y="155.55" class="t-xs" style="fill:var(--text-3)">5.83×</text>
+    <circle cx="800" cy="84.15" r="4.5" style="fill:var(--text-3)"/>
+    <text x="808" y="72.15" class="t-xs" style="fill:var(--text-3)">11.39×</text>
+    <line x1="160" y1="18" x2="190" y2="18" style="stroke:var(--text-3);stroke-width:2.2;stroke-dasharray:6 4"/>
+    <text x="198" y="18" class="t-sm">计算量之比（推算，理想上限）</text>
+    <polyline points="200,237.15 400,223.35 600,196.5 800,156.9" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+    <circle cx="200" cy="237.15" r="4.5" style="fill:var(--c-pred)"/>
+    <text x="190" y="237.15" class="t-r t-xs" style="fill:var(--c-pred)">1.2×</text>
+    <circle cx="400" cy="223.35" r="4.5" style="fill:var(--c-pred)"/>
+    <text x="390" y="223.35" class="t-r t-xs" style="fill:var(--c-pred)">2.1×</text>
+    <circle cx="600" cy="196.5" r="4.5" style="fill:var(--c-pred)"/>
+    <text x="590" y="196.5" class="t-r t-xs" style="fill:var(--c-pred)">3.9×</text>
+    <circle cx="800" cy="156.9" r="4.5" style="fill:var(--c-pred)"/>
+    <text x="790" y="156.9" class="t-r t-xs" style="fill:var(--c-pred)">6.5×</text>
+    <line x1="160" y1="36" x2="190" y2="36" style="stroke:var(--c-pred);stroke-width:2.2"/>
+    <text x="198" y="36" class="t-sm">注意力层前向（原文图 2a 读图）</text>
+    <polyline points="400,231 600,220.05 800,204.9" style="fill:none;stroke:var(--c-act);stroke-width:2.2"/>
+    <circle cx="400" cy="231" r="4.5" style="fill:var(--c-act)"/>
+    <text x="408" y="245" class="t-xs" style="fill:var(--c-act)">1.60×</text>
+    <circle cx="600" cy="220.05" r="4.5" style="fill:var(--c-act)"/>
+    <text x="608" y="234.05" class="t-xs" style="fill:var(--c-act)">2.33×</text>
+    <circle cx="800" cy="204.9" r="4.5" style="fill:var(--c-act)"/>
+    <text x="808" y="218.9" class="t-xs" style="fill:var(--c-act)">3.34×</text>
+    <line x1="160" y1="54" x2="190" y2="54" style="stroke:var(--c-act);stroke-width:2.2"/>
+    <text x="198" y="54" class="t-sm">整个模型预填充（NeurIPS 版表 6）</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是上下文长度，纵轴是 MoBA 相对全注意力的加速倍数。灰色虚线是本站按计算量推算的理想值（考虑因果结构、对所有位置平均，忽略打分开销）；橙色是原文图 2(a) 的注意力层前向时间之比（读图约值）；绿色是 NeurIPS 版附录表 6 的整个模型预填充时间之比。8K 和 32K 两个点没画：这两个长度上 MoBA 与全注意力的计算完全相同，原图中两条线也重合，所以“所有长度都更快”的说法并不准确。原图见 <a href="https://arxiv.org/html/2502.13189v1#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>，本站重画。</div>
+</div>
+<p>从图中能读出三层意思。第一，<b>长度越长，MoBA 越划算</b>：128K 时注意力层只快约 1.2 倍，256K 约 2.1 倍，512K 约 3.9 倍，1M 时 6.5 倍。这与计算量的变化一致：块长和 top-k 固定时，MoBA 每个 query 看的 token 数不变，而全注意力随长度线性增加。</p>
+<p>第二，<b>实测只兑现了理想值的一半多</b>：1M 时理想值约 11.4 倍，实测 6.5 倍。差额来自打分、按块收集 query、两次内核调用、LSE 合并这些额外步骤，以及当前块那一次因果注意力。</p>
+<p>第三，<b>整个模型的加速要小得多</b>。NeurIPS 版表 6 测了两个模型完整的预填充时间：256K 时 5.67 秒对 3.55 秒（1.60 倍），512K 时 19.59 秒对 8.40 秒（2.33 倍），1M 时 73.97 秒对 22.15 秒（3.34 倍）。原因有两个：前馈层等部分不受影响；MoBA 模型的最后 3 层仍是全注意力。按本站的粗略拆分（假设每层注意力耗时相同、MoBA 层快 6.5 倍），1M 时全注意力模型约 91% 的预填充时间花在注意力上；MoBA 模型的 22 秒里，3 个全注意力层约占 6.3 秒，29 个 MoBA 层约 9.4 秒，其余部分约 6.5 秒（推算）。也就是说，到了百万 token，保留下来的那 3 层全注意力已经是最大的单项开销之一。</p>
+<p><b>扩到 1000 万 token。</b>原文图 2(b) 换了一种设置：固定 64 个块、top-3（稀疏度 \(1-3/64=95.31\%\)），块长随序列长度成比例增大，从 8K 一直测到 10M。为了在 10M 长度上放得下，作者把张量并行扩展到 query 头的层面：不同的 query 头放在不同的 GPU 上，K 和 V 广播给所有 GPU。读图约值：1M 时全注意力约 0.90 秒、MoBA 约 0.077 秒（约 12 倍）；4M 时约 14.6 秒对 1.0 秒（约 14 倍）；10M 时约 91 秒对 5.9 秒，即论文说的“16 倍”（读图约 15.5 倍）。</p>
+<p>这组实验里块长随长度变大，所以 MoBA 的计算量和全注意力一样按平方增长，只是常数小：按因果结构推算，平均每个 query 只算全注意力的约 7.7%，理想加速约 13 倍。实测在 4M 和 10M 时还略高于这个值，论文没有解释原因。一种可能是：非因果的整块注意力比带因果掩码的全注意力内核跑得更满（按读图数字推算，10M 时 MoBA 的有效算力比全注意力高约两成），但本站无法从论文中核实。</p>
+<div class="note-warn"><b>这些时间到底是什么口径？</b>论文没有写效率测试用的 GPU 型号和数量，也没有说明是否包含反向。从数量级可以做个推算：Llama-3.1-8B 一层注意力在 1M 长度上的前向约 \(9.0\times10^{15}\) 次浮点运算。如果图 2(a) 里全注意力的约 0.94 秒是 32 个头在同一张卡上的时间，这张卡要跑出约 9.5 PFLOP/s，远超 H800 约 0.99 PFLOP/s 的稠密 BF16 峰值；如果是单个头，则约 300 TFLOP/s，和 FlashAttention-2 在 Hopper 上的常见水平相符。官方仓库的测速脚本也是单头（head=1）。所以图 2 很可能是<b>单个注意力头</b>的耗时（推算）。只要两边口径一致，加速倍数仍然有意义，但不能把 0.94 秒当成真实的一层延迟。另外，基线是 FlashAttention（官方代码依赖 flash-attn 2.6.3，即 FlashAttention-2），没有和 Hopper 上更快的 <a href="flashattention-3.html">FlashAttention-3</a> 比；不过 MoBA 自己也建立在 FlashAttention-2 的内核上，两边换成更快的内核后都会变快，倍数未必有大的变化。</div>
+
+<h4 id="n-5-5">3.5 结果的份量</h4>
+<p>把这一节的数字放在一起，哪些可以直接信、哪些要打折扣：</p>
+<ul>
+  <li><b>质量对比是同条件的，但都只跑了一次。</b>8B 实验两边从同一个基座出发、走同一套续训和 SFT 流程，只差注意力，是一个干净的对照；小模型的缩放律实验也只改注意力，其余超参数相同。不过所有数字都是单次运行，没有误差范围（NeurIPS 检查表里作者也注明没有报告统计显著性），而 RULER 一项在两个版本之间就差了 2–4 个百分点，提醒我们这类分数本身有不小的波动。</li>
+  <li><b>大部分基准没有考到稀疏。</b>输入不超过约 4.9 万 token 时，MoBA 层与全注意力等价（推算）。表中 16 项里，只有 RULER@128K 和输入可能更长的 Loogle 超出这个范围（Loogle 的输入长度本站没有核实）；大海捞针单独测到了 1M。真正考到稀疏的项目上，NeurIPS 版的 RULER 差距是 3.6 个百分点。</li>
+  <li><b>“稀疏度”都是最大值，不是平均值。</b>论文给出的稀疏度都按“序列最后一个 query”计算。考虑因果结构后的平均节省见下表（推算）。</li>
+  <li><b>速度是注意力算子的前向，而且很可能是单个头。</b>整个模型预填充的加速在 256K、512K、1M 时分别为 1.60、2.33、3.34 倍；128K 及以下几乎没有收益。论文没有测训练（反向）的速度，也没有测解码的速度；主表配置在生成时用全注意力，KV 缓存一点没减。</li>
+  <li><b>对照组只有全注意力。</b>论文没有在相同计算预算下和滑动窗口混合、Quest、MInference 或同期的 NSA 比较，因此无法判断 MoBA 的门控比更简单的结构好多少。</li>
+  <li><b>缩放律只到 21 亿参数、32K 长度。</b>尾部损失的差距在 3.7%–6.6% 之间（推算）并在缩小，但要说“更大规模会追平”，需要外推很远。</li>
+  <li><b>“已用于 Kimi”无法从外部核实。</b>论文没有给出线上配置、流量或效果的数字；NeurIPS 版把这句话改成了“已部署处理实际生产中的长上下文负载”，不再点名 Kimi。</li>
+</ul>
+<div class="table-wrap"><table>
+  <tr><th>设置</th><th>论文写的稀疏度（最大值）</th><th>考虑因果后平均少算（推算）</th><th>理想加速（推算）</th></tr>
+  <tr><td>8K，块 512，top-3（§3.1）</td><td>81.25%（另一处写 75%）</td><td>71%</td><td>3.5×</td></tr>
+  <tr><td>32K，块 512，top-3（§3.1）</td><td>95.31%</td><td>92%</td><td>13×</td></tr>
+  <tr><td>32K，块 2048，top-3（§3.2）</td><td>（论文未给）</td><td>71%</td><td>3.5×</td></tr>
+  <tr><td>128K，块 4096，top-12（§3.3）</td><td>62.5%</td><td>41%</td><td>1.7×</td></tr>
+  <tr><td>1M，块 4096，top-12（§3.3、§3.4）</td><td>95.31%</td><td>91%</td><td>11.4×</td></tr>
+  <tr><td>8K–10M，固定 64 块，top-3（§3.4）</td><td>95.31%</td><td>92%</td><td>13×</td></tr>
+</table></div>
+<p>推算方法：第 \(i\) 块里的 query 看 \(\min(i-1,\,k-1)\) 个完整的历史块，再加上当前块里平均一半的位置；把所有块加起来，除以因果全注意力的 \(N^2/2\)。“理想加速”只计注意力本身的计算，不计打分和数据搬运。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#S3.SS1" target="_blank" rel="noopener">§3.1 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#S3.SS2" target="_blank" rel="noopener">§3.2 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#S3.SS3" target="_blank" rel="noopener">§3.3 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#S3.SS4" target="_blank" rel="noopener">§3.4 ↗</a> · <a href="https://arxiv.org/html/2502.13189v1#A1" target="_blank" rel="noopener">附录 ↗</a> · <a href="https://proceedings.neurips.cc/paper_files/paper/2025/file/19eae75beed66321d62272e794a9c2ac-Paper-Conference.pdf" target="_blank" rel="noopener">NeurIPS 正式版 PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">4 相关工作：MoBA 在稀疏注意力谱系里的位置</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>高效注意力的研究已经很多，MoBA 处在哪个位置？作者认为哪些已有工作和它最接近，差别又在哪里？</div>
+<p>论文把高效注意力分成四类：</p>
+<ul>
+  <li><b>静态稀疏模式</b>：Sparse Transformer、Star-Transformer、BlockBERT、Longformer、ETC、BigBird、LongT5、LongNet 等，事先规定好跨步、窗口、全局 token、随机连接、膨胀或块稀疏等固定模式；多模态里也有图像的轴向注意力、视频的时空注意力。其中 BlockBERT（分块自注意力，2019）的第一作者正是本文的通讯作者之一 Jiezhong Qiu。</li>
+  <li><b>动态稀疏模式</b>：根据内容决定看哪里。Reformer 用局部敏感哈希、Routing Transformer 用 k-means 把 token 聚类，只在同一类里做注意力；Memorizing Transformer、Unlimiformer 用 k 近邻检索要看的 token；CoLT5 用路由模块挑出重要的 query 和 key；Sparse Sinkhorn Attention 学习把块重新排列。NeurIPS 版在这里加了一句：DeepSeek 的 NSA 也是动态稀疏注意力，它的选择分支与 MoBA 的选块机制相似。</li>
+  <li><b>无需训练的稀疏注意力</b>：拿现成的模型在推理时加速。预填充阶段可以先把完整的提示“看一遍”再决定稀疏模式，例如 MoA、MInference、SeerAttention 研究的 A 形、竖线加斜线、动态块稀疏等模式；解码阶段主要是压缩、裁剪 KV 缓存，如 H2O、StreamingLLM、TOVA、FastGen、Quest。</li>
+  <li><b>替换注意力结构</b>：Hyena、Performer、Linformer、RWKV、Mamba、RetNet 等，需要从头训练，不能复用已有的 Transformer 模型。</li>
+</ul>
+<p>作者点名了两项和 MoBA 最接近的工作。<b>Quest</b> 可以看作块更小、块的代表方式不同的 MoBA。<b>LongHeads</b> 可以看作 top-1 的 MoBA：每个头只挑一个最相关的块。</p>
+<div class="note-pre"><b>先补一点背景：Quest 的“上界”打分和 MoBA 的“平均”打分差在哪里。</b>
+<p>Quest 给每个块保存两个向量：块内 key 在每一维上的最大值 \(\mathbf m^{\max}\) 和最小值 \(\mathbf m^{\min}\)。给定 query，它在每一维上取 \(q_c m^{\max}_c\) 和 \(q_c m^{\min}_c\) 中较大的那个，再把各维加起来。这个数一定不小于块内任何一个 key 与 query 的内积，所以是“块内最大 logit”的一个上界。用上界打分，块里只要有一个 token 和 query 很像，这块的分数就高，不会被其他 token 冲淡；用平均打分则正好相反（见 §2.2 的算例）。上界打分的代价是估计可能偏松，并且每块要存两倍的元数据。Quest 是推理期的方法，块也小得多，专门服务于解码阶段。</p>
+</div>
+<p>同样用块均值、但不训练的路线会怎样？本站的 <a href="xattention.html">XAttention 精读</a> 讨论了这个问题：XAttention 是一种免训练的块稀疏预填充方法，它认为直接对块做池化来估计重要性太粗，改用块内反对角线上的分数之和来打分。两相对照可以看出，MoBA 的块均值打分之所以能用，很大程度上依赖续训让模型去适应它。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">5 结论与局限</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者自己怎样总结这项工作？正式版承认了哪些局限？结合前面的分析，还有哪些局限论文没有正面讨论？</div>
+<p>作者的总结是：MoBA 把上下文切成块，用动态门控为每个 query 挑选最相关的 KV 块，在保持与全注意力相近效果的同时显著降低了计算量，并且可以在全注意力和稀疏注意力之间无缝切换；由于不增加参数、可以接在现有模型上续训，它是提升长上下文能力的一种实用方案。作者列出的未来方向包括改进选块策略、扩展到其他模态、研究它对复杂推理泛化的作用。</p>
+<p>NeurIPS 正式版增加了一段局限说明：第一，路由器没有参数，可能抓不住更细致的长上下文模式，未来可以研究可学习的路由器；第二，只做了文本；第三，没有研究长思维链推理这类场景。</p>
+<p>结合前面各节，本站再补充几条论文没有正面讨论的局限：</p>
+<ul>
+  <li><b>不减少 KV 缓存的存储。</b>任何历史块都可能被选中，所以全部 K、V 都得保留；1M 长度时 Llama-3.1-8B 的 KV 缓存约 128 GB（推算）。MoBA 能减少解码时要“读”的量（如果解码也用 MoBA），但不减少要“存”的量。</li>
+  <li><b>解码加速既没有实现，也没有测量。</b>开源代码在解码时直接用全注意力，论文也没有报告解码速度。</li>
+  <li><b>GQA 组内不共享选择。</b>官方实现里每个 query 头各自选块；如果解码也用 MoBA，一组 4 个头可能要从显存读 4 份不同的块，节省的访存量会打折扣（§6）。</li>
+  <li><b>跨块边界的局部上下文没有保障。</b>当前块必选，紧挨着的上一块却不必选，位于块开头的 query 能看到的近邻很少（§2.2.3）。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2502.13189v1#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">6 对照：同一周发布的 NSA</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DeepSeek 的 NSA（arXiv 首版 2025-02-16）和 MoBA（2025-02-18）两天之内相继发布，都主张“训练时就用稀疏注意力”，也都按块挑选 KV。它们到底在哪里不同？这些不同又是怎样从各自的目标里推出来的？</div>
+<p>NSA 的完整讲解见本站 <a href="native-sparse-attention.html">NSA 精读</a>。这里只把两者并排放在一起。先看一张示意图：上半部分是同一个 query 在两种方法下各读哪些 key；下半部分是同一个 GQA 组的几个 query 头在选择上是否共享。</p>
+<div class="dia">
+  <div class="dia-title">示意图：MoBA 与 NSA 选什么、组内是否共享</div>
+  <svg class="dg" viewBox="0 0 960 380" role="img" aria-label="MoBA 与 NSA 的选择方式与 GQA 组内是否共享" style="--dg-min:800px">
+    <text x="480" y="16" class="t-c t-sm t-b">① 同一个 query（位于 16K 上下文的末尾附近）读哪些 key（示意，块大小按比例缩小）</text>
+    <text x="160" y="42" class="t-r t-sm">MoBA（块 1024，top-3）</text>
+    <rect class="tk off" x="170" y="32" width="712.5" height="20"/>
+    <rect class="tk pred" x="265" y="32" width="47.5" height="20"/>
+    <rect class="tk pred" x="550" y="32" width="47.5" height="20"/>
+    <rect class="tk act" x="882.5" y="32" width="23.75" height="20"/>
+    <rect class="tk mask" x="906.25" y="32" width="23.75" height="20"/>
+    <text x="160" y="74" class="t-r t-sm">NSA ① 压缩（全覆盖、粗粒度）</text>
+    <g class="data"><rect class="box" x="170" y="64" width="734.77" height="20" rx="3"/></g>
+    <text x="536.46" y="74" class="t-c t-xs">每 32 个 token 压成 1 个，步长 16</text>
+    <rect class="tk mask" x="906.25" y="64" width="23.75" height="20"/>
+    <text x="160" y="102" class="t-r t-sm">NSA ② 选择（16 块 × 64）</text>
+    <rect class="tk off" x="170" y="92" width="736.25" height="20"/>
+    <rect class="tk pred" x="170" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="235.31" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="265" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="267.97" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="377.81" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="449.06" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="505.47" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="550" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="552.97" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="624.22" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="698.44" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="754.84" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="793.44" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="852.81" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="900.31" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk pred" x="903.28" y="92" width="2.97" height="20" style="stroke:none"/>
+    <rect class="tk mask" x="906.25" y="92" width="23.75" height="20"/>
+    <text x="160" y="130" class="t-r t-sm">NSA ③ 滑动窗口 512</text>
+    <rect class="tk off" x="170" y="120" width="712.5" height="20"/>
+    <rect class="tk act" x="882.5" y="120" width="23.75" height="20"/>
+    <rect class="tk mask" x="906.25" y="120" width="23.75" height="20"/>
+    <line x1="170" y1="150" x2="930" y2="150" class="axis"/>
+    <text x="170" y="162" class="t-c t-xs">0</text>
+    <text x="360" y="162" class="t-c t-xs">4K</text>
+    <text x="550" y="162" class="t-c t-xs">8K</text>
+    <text x="740" y="162" class="t-c t-xs">12K</text>
+    <text x="930" y="162" class="t-c t-xs">16K</text>
+    <text x="480" y="192" class="t-c t-sm t-b">② 同一个 GQA 组的 4 个 query 头（共用一份 K、V）各自读哪些块</text>
+    <text x="270" y="212" class="t-c t-sm">MoBA（官方实现）：每个头各选各的</text>
+    <text x="102" y="233" class="t-r t-xs">头 1</text>
+    <rect class="tk off" x="110" y="224" width="26.67" height="18"/>
+    <rect class="tk pred" x="136.67" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="163.33" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="190" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="216.67" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="243.33" y="224" width="26.67" height="18"/>
+    <rect class="tk pred" x="270" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="296.67" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="323.33" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="350" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="376.67" y="224" width="26.67" height="18"/>
+    <rect class="tk act" x="403.33" y="224" width="26.67" height="18"/>
+    <text x="102" y="255" class="t-r t-xs">头 2</text>
+    <rect class="tk off" x="110" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="136.67" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="163.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="190" y="246" width="26.67" height="18"/>
+    <rect class="tk pred" x="216.67" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="243.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="270" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="296.67" y="246" width="26.67" height="18"/>
+    <rect class="tk pred" x="323.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="350" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="376.67" y="246" width="26.67" height="18"/>
+    <rect class="tk act" x="403.33" y="246" width="26.67" height="18"/>
+    <text x="102" y="277" class="t-r t-xs">头 3</text>
+    <rect class="tk off" x="110" y="268" width="26.67" height="18"/>
+    <rect class="tk pred" x="136.67" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="163.33" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="190" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="216.67" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="243.33" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="270" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="296.67" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="323.33" y="268" width="26.67" height="18"/>
+    <rect class="tk pred" x="350" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="376.67" y="268" width="26.67" height="18"/>
+    <rect class="tk act" x="403.33" y="268" width="26.67" height="18"/>
+    <text x="102" y="299" class="t-r t-xs">头 4</text>
+    <rect class="tk off" x="110" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="136.67" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="163.33" y="290" width="26.67" height="18"/>
+    <rect class="tk pred" x="190" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="216.67" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="243.33" y="290" width="26.67" height="18"/>
+    <rect class="tk pred" x="270" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="296.67" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="323.33" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="350" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="376.67" y="290" width="26.67" height="18"/>
+    <rect class="tk act" x="403.33" y="290" width="26.67" height="18"/>
+    <text x="102" y="329" class="t-r t-xs">要读</text>
+    <rect class="tk off" x="110" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="136.67" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="163.33" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="190" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="216.67" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="243.33" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="270" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="296.67" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="323.33" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="350" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="376.67" y="320" width="26.67" height="18"/>
+    <rect class="tk act" x="403.33" y="320" width="26.67" height="18"/>
+    <text x="270" y="354" class="t-c t-xs">每个 query 只算 3 块，但这组要从显存读 7 块</text>
+    <text x="750" y="212" class="t-c t-sm">NSA：组内分数相加，全组共用一套选择</text>
+    <text x="582" y="233" class="t-r t-xs">头 1</text>
+    <rect class="tk off" x="590" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="616.67" y="224" width="26.67" height="18"/>
+    <rect class="tk pred" x="643.33" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="670" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="696.67" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="723.33" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="750" y="224" width="26.67" height="18"/>
+    <rect class="tk pred" x="776.67" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="803.33" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="830" y="224" width="26.67" height="18"/>
+    <rect class="tk off" x="856.67" y="224" width="26.67" height="18"/>
+    <rect class="tk act" x="883.33" y="224" width="26.67" height="18"/>
+    <text x="582" y="255" class="t-r t-xs">头 2</text>
+    <rect class="tk off" x="590" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="616.67" y="246" width="26.67" height="18"/>
+    <rect class="tk pred" x="643.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="670" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="696.67" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="723.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="750" y="246" width="26.67" height="18"/>
+    <rect class="tk pred" x="776.67" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="803.33" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="830" y="246" width="26.67" height="18"/>
+    <rect class="tk off" x="856.67" y="246" width="26.67" height="18"/>
+    <rect class="tk act" x="883.33" y="246" width="26.67" height="18"/>
+    <text x="582" y="277" class="t-r t-xs">头 3</text>
+    <rect class="tk off" x="590" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="616.67" y="268" width="26.67" height="18"/>
+    <rect class="tk pred" x="643.33" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="670" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="696.67" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="723.33" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="750" y="268" width="26.67" height="18"/>
+    <rect class="tk pred" x="776.67" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="803.33" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="830" y="268" width="26.67" height="18"/>
+    <rect class="tk off" x="856.67" y="268" width="26.67" height="18"/>
+    <rect class="tk act" x="883.33" y="268" width="26.67" height="18"/>
+    <text x="582" y="299" class="t-r t-xs">头 4</text>
+    <rect class="tk off" x="590" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="616.67" y="290" width="26.67" height="18"/>
+    <rect class="tk pred" x="643.33" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="670" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="696.67" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="723.33" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="750" y="290" width="26.67" height="18"/>
+    <rect class="tk pred" x="776.67" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="803.33" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="830" y="290" width="26.67" height="18"/>
+    <rect class="tk off" x="856.67" y="290" width="26.67" height="18"/>
+    <rect class="tk act" x="883.33" y="290" width="26.67" height="18"/>
+    <text x="582" y="329" class="t-r t-xs">要读</text>
+    <rect class="tk off" x="590" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="616.67" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="643.33" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="670" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="696.67" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="723.33" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="750" y="320" width="26.67" height="18"/>
+    <rect class="tk pred" x="776.67" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="803.33" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="830" y="320" width="26.67" height="18"/>
+    <rect class="tk off" x="856.67" y="320" width="26.67" height="18"/>
+    <rect class="tk act" x="883.33" y="320" width="26.67" height="18"/>
+    <text x="750" y="354" class="t-c t-xs">每个 query 只算 3 块，但这组要从显存读 3 块</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>上半部分横轴是 token 位置，query 在 16K 附近，之后的斜纹是未来。MoBA 一行：两个整块的历史块（橙色）加当前块的前半段（绿色），粒度很粗。NSA 三行：压缩分支用每 32 个 token 压成的粗粒度表示覆盖全部历史（灰色）；选择分支挑出 16 个只有 64 个 token 的小块（细橙线，其中开头 1 块和最近 2 块是固定的）；滑动窗口分支看最近 512 个 token（绿色）。为了画得下，MoBA 的块长按比例缩小成 1,024（论文的 8B 配置是 4,096）。下半部分是 12 个块、每个 query 选 2 个历史块加当前块：MoBA 的官方实现里 4 个头各选各的，整组要从显存读 7 块；NSA 让组内各头把分数相加、共用一套选择，整组只读 3 块。本站示意图。</div>
+</div>
+<div class="table-wrap"><table>
+  <tr><th></th><th>MoBA（本文）</th><th>NSA</th></tr>
+  <tr><td>每个 query 看什么</td><td>当前块（必选，块内因果）加 top-(k−1) 个历史块的原始 token，在它们的并集上做一次 softmax</td><td>三个分支：压缩 token（覆盖全部历史）、选中的 16 个 64-token 块（含开头 1 块、最近 2 块）、最近 512 个 token 的窗口；三路各自做注意力后，由门控加权相加</td></tr>
+  <tr><td>块的大小和数量</td><td>大块：512–4096（§3.4 的超长实验里到约 16 万）；\(k=3\) 或 12</td><td>小块：选择块 64、压缩块 32（步长 16）；选 16 块</td></tr>
+  <tr><td>怎么给块打分</td><td>query 与块内 key 平均的内积，即块内平均 logit；无参数，不在梯度路径上</td><td>直接复用压缩分支的注意力概率，按位置重叠折算到选择块；压缩分支本身被语言模型损失训练</td></tr>
+  <tr><td>新增参数</td><td>无，可以与全注意力随时互换</td><td>压缩用的 MLP、门控 MLP，三个分支各有独立的 K、V 投影</td></tr>
+  <tr><td>GQA 组内</td><td>官方实现中每个 query 头各自选块</td><td>组内各头的分数相加，全组共用一套块，解码时每块只读一次</td></tr>
+  <tr><td>内核</td><td>复用 FlashAttention-2 的变长接口：当前块一次因果调用，历史块按（块，头）分段一次非因果调用，再用 LSE 合并</td><td>自写 Triton 内核：按“同一位置、同一 GQA 组的所有头”装载 query，依次读入选中的块</td></tr>
+  <tr><td>训练方式</td><td>主实验是从 Llama-3.1-8B 续训（最后 100B token 打开 MoBA）；可与全注意力分阶段、分层混合；缩放律小模型从头训练</td><td>从头预训练 27B MoE（每 token 激活 3B）、270B token，8K 预训练后用 YaRN 扩到 32K</td></tr>
+  <tr><td>解码</td><td>主表配置在生成时用全注意力；开源代码的解码为全注意力</td><td>设计目标之一；按访存量推算 64K 时约 11.6 倍（不是实测）</td></tr>
+  <tr><td>报告的速度</td><td>1M 预填充：注意力层前向 6.5 倍（很可能是单头口径，推算），整个模型 3.34 倍</td><td>64K：注意力内核前向 9.0 倍、反向 6.0 倍（A100，Triton 实现）</td></tr>
+  <tr><td>代码</td><td>官方开源（MIT 许可）</td><td>没有官方实现，有多个第三方实现</td></tr>
+</table></div>
+<p>这些差别大多能从两者的出发点推出来。MoBA 想要的是一个能<b>插进现有全注意力模型</b>的模块：不加参数，才能在续训中途打开、在某些层关闭、在 SFT 时部分换回；用很大的块，才能直接复用 FlashAttention 的变长内核，让每个块分到足够多的 query 凑成大矩阵乘。代价是打分粗糙（平均会冲淡单个关键 token）、GQA 组内不共享、解码没有专门的支持。</p>
+<p>NSA 则是<b>从预训练开始的原生设计</b>，同时追求训练和解码的效率：小块让选择更精确，但小块在 GPU 上难跑，于是它强制 GQA 组内共享选择，按组装载 query、自己写内核；压缩分支既提供全局的粗略视图，又顺带给出了经过训练的块分数；滑动窗口分支专门负责局部，避免局部模式“抢走”其他分支的学习。代价是结构更复杂、新增参数，也不能直接和现有的全注意力模型互换。</p>
+<p>两者也有共同点：都认为稀疏应当在训练时就存在，而不只是推理时的补丁；都按连续的块来选，以便和 GPU 的分块计算对齐；都只减少计算量和读取量，不减少 KV 缓存的存储量。</p>
+<div class="note-warn"><b>不要直接横向比较两篇论文的数字：</b>两者的实验条件差别很大。MoBA 是 8B 稠密模型续训到 1M，看 RULER、LongBench 等；NSA 是 27B MoE 从头训练到 32K，看 LongBench、64K 大海捞针和 AIME。速度的口径也不同：MoBA 是（很可能单头的）前向耗时，硬件未写明；NSA 是 A100 上 Triton 内核的前向和反向。两篇论文都没有在相同设置下与对方比较，表中的数字只能各自理解。</div>
+<p class="note-links">相关：<a href="native-sparse-attention.html#n-3-4">NSA 精读 §3.4 选择分支</a> · <a href="native-sparse-attention.html#n-3-6">§3.6 内核设计</a> · <a href="https://arxiv.org/abs/2502.11089" target="_blank" rel="noopener">NSA 原文 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>截至 2026-10，MoBA 的影响主要在三方面：作为“可训练的块稀疏注意力”的代表，被后续工作反复引用和比较；开源实现成为后续工作的起点；还引出了专门针对它的分析和内核。</p>
+
+<h4 id="n-impact-1">FlashMoBA：块该多小，以及怎么让小块跑得快</h4>
+<p>MIT 与 NVIDIA 的 Guangxuan Xiao、Junxian Guo、Kasra Mazaheri、Song Han 在 2025-11 发布了《Optimizing Mixture of Block Attention》（<a href="https://arxiv.org/abs/2511.11571" target="_blank" rel="noopener">arXiv 2511.11571</a>）。他们为 MoBA 的路由建立了一个统计模型：把“装着关键 token 的块”和“纯噪声块”的分数之差看成随机变量，算出它的期望与标准差之比，即信噪比</p>
+<div class="formula">$$\mathrm{SNR}=\Delta\mu_{\text{eff}}\sqrt{\frac{d}{2B}}$$</div>
+<p>其中 \(d\) 是头维度，\(B\) 是块长，\(\Delta\mu_{\text{eff}}\) 是关键 token 相对 query 的“有效”相似度优势；选错块的概率为 \(\Phi(-\mathrm{SNR})\)（\(\Phi\) 是标准正态分布的累积分布函数），随信噪比增大而迅速下降。这和 §2.2 的算例是同一个道理：块越大，单个关键 token 被平均得越淡。由此他们给出两条改进：用更小的块；在 key 上加一个短卷积，让相关的 token 在块内聚得更紧，以提高 \(\Delta\mu_{\text{eff}}\)。在 3.4 亿参数、100B token 的实验里，块长从 512 降到 128，WikiText 困惑度降低 1.2，RULER 提高 17.2 个百分点（该论文图 2 的说明）。</p>
+<p>问题是小块在原来的实现上很慢。他们指出，MoBA 官方实现用小块时，非注意力部分（物化完整的分数矩阵、大量零碎的分段）的开销反而让它比稠密注意力还慢，在他们的设置下长度到 128K 时显存溢出。为此他们写了 FlashMoBA 这个 CUDA 内核：分块计算 top-k，不把完整的分数矩阵写进显存；对每个选中的块，把选了它的 query 收集到片上 SRAM 里做稠密计算，再写回原位。在块长 128、top-8 的设置下，它相对 FlashAttention-2 最高快 14.7 倍。用这些改进从头训练的 3.4 亿和 10 亿参数模型，效果与稠密注意力相当。代码在 <a href="https://github.com/mit-han-lab/flash-moba" target="_blank" rel="noopener">mit-han-lab/flash-moba ↗</a>。</p>
+
+<h4 id="n-impact-2">VMoBA：用到视频扩散模型</h4>
+<p>北京大学与快手可灵团队的 VMoBA（<a href="https://arxiv.org/abs/2506.23858" target="_blank" rel="noopener">arXiv 2506.23858</a>，ICLR 2026 官网的海报列表中有这篇）把 MoBA 改造成适合视频扩散模型的形式：各层轮流按一维、二维、三维的方式切块，以适应视频的时空局部性；在一个注意力头的所有 query 上做全局的块选择；按阈值动态决定选多少块，而不是固定 \(k\)。论文报告，在更长序列上训练时，计算量（FLOPs）降低 2.92 倍、延迟降低 1.48 倍，生成质量与全注意力相当或更好；不训练、直接用于高分辨率生成时，计算量降低 2.40 倍、延迟降低 1.35 倍。</p>
+
+<h4 id="n-impact-3">月之暗面自己后来的方向</h4>
+<p>论文说 MoBA 已用于支持 Kimi 的长上下文请求，但在月之暗面之后公开的模型技术报告里，看不到 MoBA 作为主干注意力：Kimi K2（<a href="https://arxiv.org/abs/2507.20534" target="_blank" rel="noopener">arXiv 2507.20534</a>）的注意力是与 DeepSeek-V3 同类的 MLA，报告中没有提到 MoBA；Kimi Linear（<a href="https://arxiv.org/abs/2510.26692" target="_blank" rel="noopener">arXiv 2510.26692</a>）转向了线性注意力 KDA 与 MLA 的逐层混合，只在相关工作里提到 MoBA，把它和 NSA 一起归为“从 token 级转向块级选择”的方法。本站据此只能说：MoBA 在 Kimi 线上服务中怎么用、用在哪些模型上，没有公开的细节；后续公开的模型走了别的路线。Kimi Linear 的讲解见本站 <a href="kimi-linear.html">Kimi Linear 精读</a>。</p>
+
+<h4 id="n-impact-4">稀疏注意力的另一条线：从块级回到 token 级</h4>
+<p>DeepSeek 后来在 V3.2 上用的 DSA 走了另一个方向：不再按块选，而是用一个很小的“闪电索引器”给每个历史 token 打分，再逐 token 挑选（见本站 <a href="deepseek-v3-2.html">DeepSeek-V3.2 精读</a> 和 <a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DSA 拆解页</a>）。后来的 <a href="minimax-sparse-attention.html">MiniMax Sparse Attention</a> 则回到按块选择，并让 GQA 组内共享选择、单独训练一个索引分支。块级还是 token 级、打分用无参数的统计量还是训练出来的索引器，本质上都是 §2.2 讨论的“选得准”与“算得快”之间的权衡；MoBA 代表了其中最简单的一端：无参数、大块、直接复用现成内核。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v1）。背景只列可公开查证的信息：论文本身、作者参与的其他公开论文、机构页面与公开资料。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Enzhe Lu</b>（第一作者）<div class="aff">Moonshot AI</div>也是《Muon is Scalable for LLM Training》（arXiv 2502.16982，本站有 <a href="muon.html">精读</a>）的作者之一。</div>
+  <div class="author-card"><b>Jingyuan Liu</b><div class="aff">Moonshot AI</div>《Muon is Scalable for LLM Training》的第一作者。</div>
+  <div class="author-card"><b>Weiran He、Xinran Xu</b><div class="aff">Moonshot AI</div>Kimi 推理服务平台 Mooncake（FAST 2025，本站有 <a href="mooncake.html">精读</a>）的作者。</div>
+  <div class="author-card"><b>Jianlin Su</b><div class="aff">Moonshot AI</div>RoFormer（提出 RoPE 位置编码）的第一作者，见本站 <a href="roformer.html">RoFormer 精读</a>。</div>
+  <div class="author-card"><b>Yuxin Wu</b><div class="aff">Moonshot AI</div>月之暗面联合创始人之一；Group Normalization（ECCV 2018，与 Kaiming He 合著）的第一作者。</div>
+  <div class="author-card"><b>Neo Y. Zhang</b><div class="aff">Moonshot AI</div>NeurIPS 正式版与官方仓库的引用条目中写作 Yutao Zhang。</div>
+  <div class="author-card senior"><b>Zhilin Yang</b><div class="aff">Moonshot AI 创始人、CEO</div>卡内基梅隆大学博士；XLNet 第一作者、Transformer-XL 共同第一作者。</div>
+  <div class="author-card senior"><b>Xinyu Zhou</b>（共同通讯作者）<div class="aff">Moonshot AI</div>月之暗面联合创始人之一。</div>
+  <div class="author-card senior"><b>Mingxing Zhang</b>（NeurIPS 版列为共同通讯作者）<div class="aff">清华大学计算机系助理教授（2022 年起），MADSys 实验室</div>Mooncake 的作者之一（该文获 FAST 2025 最佳论文）。</div>
+  <div class="author-card senior"><b>Jiezhong Qiu</b>（共同通讯作者）<div class="aff">arXiv 版：之江实验室 / 浙江大学；NeurIPS 版：中国科学院杭州医学研究所</div>arXiv 上本文的提交人；分块自注意力 BlockBERT（arXiv 1911.02972）的第一作者，本文相关工作中引用了它。</div>
+  <div class="author-card"><b>其余作者</b><div class="aff">Moonshot AI</div>Zhejun Jiang、Yulun Du、Tao Jiang、Chao Hong、Shaowei Liu、Enming Yuan、Yuzhi Wang、Zhiqi Huang、Huan Yuan、Suting Xu、Guokun Lai、Yanru Chen、Huabin Zheng、Junjie Yan。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：arXiv 首版 2025-02-18（截至 2026-10-20 只有 v1，标注为技术报告）；后被 NeurIPS 2025 主会接收（<a href="https://proceedings.neurips.cc/paper_files/paper/2025/hash/19eae75beed66321d62272e794a9c2ac-Abstract-Conference.html" target="_blank" rel="noopener">论文集页面</a>，DOI 10.52202/085713-0602）。第三方论文索引 papers.cool 把它标为 Spotlight，本站未能在 OpenReview 官方页面上核实。正式版与 arXiv 版的主要差别：增加了全程 MoBA 的推理配置、RULER 分项表、端到端预填充时间（表 6）、帕累托前沿实验（表 7）和局限说明；RULER@128K 的两列数字有改动（§3.3）。</li>
+  <li><b>代码</b>：<a href="https://github.com/MoonshotAI/MoBA" target="_blank" rel="noopener">MoonshotAI/MoBA</a> 2,194 star、161 fork（截至 2026-10-20），MIT 许可；仓库创建于 2025-02-17（arXiv 首版前一天），最后一次推送在 2025-04-03。提供朴素与高效两个实现，以及 Hugging Face 模型的接入示例；依赖 flash-attn 2.6.3。</li>
+  <li><b>采用</b>：论文称已用于支持 Kimi 的长上下文请求（NeurIPS 版改为“实际生产中的长上下文负载”），没有公开的配置或效果数字。后续研究里，FlashMoBA（MIT / NVIDIA）专门为它写了小块内核，VMoBA（北大 / 快手）把它改造到视频扩散模型上。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="native-sparse-attention.html">NSA 精读</a>：同一周发布的原生稀疏注意力，三分支、GQA 组内共享与 Triton 内核；本页 §6 是两者的对照。</li>
+  <li><a href="flashattention.html">FlashAttention 精读</a>（分块、在线 softmax、块稀疏扩展）与 <a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 拆解页</a>；Hopper 上的后续见 <a href="flashattention-3.html">FlashAttention-3 精读</a>。</li>
+  <li><a href="xattention.html">XAttention 精读</a>：免训练的块稀疏预填充，可以和 MoBA 的“训练出来的块均值打分”对照着读。</li>
+  <li><a href="deepseek-v3-2.html">DeepSeek-V3.2 精读</a> 与 <a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek 稀疏注意力拆解页</a>：从块级选择到 token 级选择。</li>
+  <li><a href="minimax-sparse-attention.html">MiniMax Sparse Attention 精读</a>：另一种组内共享的按块选择方案。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MoE 的共享专家与细粒度专家，MoBA 的类比来源。</li>
+  <li><a href="roformer.html">RoFormer 精读</a>：RoPE，理解位置插值和“块平均 key”的背景。</li>
+  <li><a href="snapkv.html">SnapKV 精读</a>：一种推理期 KV 选择方法，代表引言里的“第二类”路线。</li>
+  <li><a href="mooncake.html">Mooncake 精读</a>：Kimi 的推理服务架构，同一团队的系统侧工作。</li>
+  <li><a href="kimi-linear.html">Kimi Linear 精读</a>（另有 <a href="../legacy/tracks/ai-infra/20-kimi-linear.html">拆解页</a>）与 <a href="gated-deltanet.html">Gated DeltaNet 精读</a>：月之暗面后来转向的线性注意力路线。</li>
+  <li><a href="muon.html">Muon 规模化精读</a>：月之暗面同月（2025-02）发布的优化器工作，作者有重叠。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Enzhe Lu et al. <em>MoBA: Mixture of Block Attention for Long-Context LLMs.</em> <a href="https://arxiv.org/abs/2502.13189" target="_blank" rel="noopener">arXiv:2502.13189</a>（v1 2025-02-18），NeurIPS 2025。arXiv 版本以 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a> 许可发布，该许可不允许发布改编作品，所以本页没有使用任何原图。本页是对论文的中文精读笔记，正文与所有示意图均为本站撰写和绘制，并非翻译或复制；标“读图约值”的数字是本站从原图数据点读出的近似值，标“推算”的数字为本站计算。数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

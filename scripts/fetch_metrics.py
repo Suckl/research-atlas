@@ -42,7 +42,7 @@ def title_match(title: str) -> dict | None:
     try:
         rec = (request(MATCH + urllib.parse.quote(title)).get("data") or [None])[0]
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (400, 404):   # 400: S2 rejects some titles (e.g. very short or symbol-heavy ones)
             return None
         raise
     norm = lambda s: re.sub(r"\W+", "", s).lower()

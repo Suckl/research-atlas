@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlashAttention-4 精读</title>
+<meta name="description" content="FlashAttention-4（MLSys 2026）的逐节精读：Blackwell 上张量核翻倍、指数单元与共享内存带宽不变的“非对称扩展”，tcgen05 与张量内存（TMEM）、2-CTA 矩阵乘，前向的双 Q 块乒乓流水、软件模拟指数与条件重缩放，反向的 TMEM 流水、2-CTA 与确定性模式，LPT 调度、CuTe-DSL，以及和 cuDNN 对比时结果的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="flash-attention-4">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · MLSys 2026</div>
+  <h1>FlashAttention-4：张量核翻倍之后，围绕指数单元与共享内存重新设计注意力</h1>
+  <p class="en-title">FlashAttention-4: Algorithm and Kernel Pipelining Co-Design for Asymmetric Hardware Scaling</p>
+  <div class="paper-authors">Ted Zadouri<sup>*1,6</sup>, Markus Hoehnerbach<sup>*2</sup>, Jay Shah<sup>*3</sup>, Timmy Liu<sup>4</sup>, Vijay Thakkar<sup>2,5</sup>, Tri Dao<sup>1,6</sup></div>
+  <div class="paper-affil"><sup>1</sup>Princeton University　<sup>2</sup>Meta　<sup>3</sup>Colfax Research　<sup>4</sup>NVIDIA　<sup>5</sup>Georgia Tech　<sup>6</sup>Together AI　<sup>*</sup>共同一作（按 arXiv v1 署名；MLSys 正式版的署名里没有 Timmy Liu，见第 8 节）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2603.05451" target="_blank" rel="noopener">arXiv 2603.05451 ↗</a>
+    <a class="pill" href="https://mlsys.org/virtual/2026/oral/3759" target="_blank" rel="noopener">MLSys 2026 · Oral ↗</a>
+    <a class="pill" href="https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute" target="_blank" rel="noopener">Code: Dao-AILab/flash-attention（flash_attn/cute/）↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/22-flash-attention-4.html">结构拆解：FA4 架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>25.2k</b><span>GitHub star（Dao-AILab/flash-attention，FA1–FA4 共用一个仓库，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文（arXiv v1，2026-03-05）的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。这一页假定你已经读过本站的 <a href="flashattention.html">FlashAttention 精读</a> 和 <a href="flashattention-3.html">FlashAttention-3 精读</a>，所以在线 softmax 和 Hopper 的线程、存储层次只简单回顾，背景知识的篇幅主要留给 Blackwell 这一代硬件。论文以 CC BY-NC-SA 4.0 许可发布，本站不转载原图：页面里所有的图，都是本站按论文内容自己画的示意图，或者把论文报告的数字重新画成的简化图表，图下附原图链接。MLSys 2026 正式版比 arXiv 版多了一组消融实验（附录 B），放在第 7 节一起讲。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>FlashAttention 系列四代论文做的是同一件事：不改变注意力的计算结果，只改变“怎么组织计算”，让它在当时最新的 GPU 上跑得尽可能快。<a href="flashattention.html">第一代</a>（2022）发现注意力的时间主要花在显存读写上，于是把 \(Q,K,V\) 切成小块，用在线 softmax 在芯片上的小存储里一块块算完；FlashAttention-2（2023）重新分配了线程的工作；<a href="flashattention-3.html">FlashAttention-3</a>（2024）为 H100（Hopper 架构）引入了异步执行和 warp 专业化，让搬数据、矩阵乘和 softmax 同时进行。</p>
+<p>这篇论文面对的是再下一代硬件：NVIDIA 的 Blackwell 数据中心 GPU，也就是 B200 和 GB200。B200 的 BF16 矩阵乘峰值从 H100 的约 1 PFLOPs/s 提高到 2.25 PFLOPs/s，可负责算指数的单元和片上共享内存的带宽，按每个 SM 每个时钟周期算，一点都没变。论文把这种“矩阵乘单元涨得飞快、其他单元原地踏步”的现象叫作<b>非对称扩展</b>（asymmetric scaling）。它的后果是：头维 128 时，一个 \(128\times128\) 分数块的两次矩阵乘，和这个块里 16,384 次指数运算，理论上各要 1024 个时钟周期，softmax 第一次变得和矩阵乘一样贵；反向传播里，共享内存的读写量甚至比矩阵乘还多出约 30%。与此同时，FlashAttention-3 依赖的 Hopper 矩阵乘指令 WGMMA 在 Blackwell 上已经不存在了，FlashAttention-3 根本跑不起来。</p>
+<p>FlashAttention-4 的回答分四块。第一，<b>重新设计流水线</b>：Blackwell 的矩阵乘完全异步，结果写进一块新的片上存储“张量内存”（TMEM），不再占用寄存器；论文据此让每个线程块同时处理两个查询块、轮流使用张量核，每个线程负责一整行，再用一组单独的线程去做输出的重缩放。第二，<b>减轻指数单元的负担</b>：把每行 10–25% 的指数改用普通乘加单元上的多项式来算，和硬件指数单元并行；再把 online softmax 的重缩放改成“只有行最大值涨得够多（超过 \(2^8\) 倍）才做”，省掉大部分重缩放。第三，<b>减少反向的共享内存流量</b>：用张量内存放更多中间结果，用 Blackwell 的 2-CTA 矩阵乘让两个线程块合用一份操作数，顺带把 \(dQ\) 的全局原子加次数减半，并提供一个代价可控的确定性模式。第四，<b>更好的调度</b>：用“最长的任务先做”（LPT）平衡因果掩码和变长序列下各个 SM 的负载。整个内核用嵌在 Python 里的 CuTe-DSL 编写，编译时间比 C++ 模板快 20–30 倍。</p>
+<p>论文报告的结果是：在 B200 上，BF16 前向最高 1613 TFLOPs/s，约为理论峰值 2.25 PFLOPs/s 的 71%；比 cuDNN 9.13 快 1.1–1.3 倍，比 Triton 实现快 2.1–2.7 倍。但同一组图里还画了更新的 cuDNN 9.19.1：NVIDIA 已经把 FA4 的部分技巧吸收进了 cuDNN，新版在前向上和 FA4 基本持平。第 7 节会逐个核对这些数字是在什么条件下测出来的。</p>
+<p>和前几代相比，这篇论文的思路又往前走了一步。第一代问的是“要搬多少数据”，第三代问的是“哪个单元在什么时刻做什么”；到了 Blackwell，单靠编排已经不够，因为矩阵乘不再是最慢的那个单元，所以 FA4 开始动算法本身：换一种方法算一部分指数，少做一部分重缩放，让慢单元的活变少。标题里的“算法与内核流水线协同设计”，说的就是这个。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>“非对称扩展”具体是哪些单元涨了、哪些没涨？为什么 GPU 厂商只加张量核？</li>
+  <li>Blackwell 的 tcgen05 矩阵乘指令、张量内存（TMEM）、2-CTA 矩阵乘各是什么，和 Hopper 的 WGMMA 有什么不同？</li>
+  <li>怎样只用几条乘加指令算出 \(2^{x}\)？精度够不够？为什么只模拟 10–25% 的指数？</li>
+  <li>为什么可以不做大部分 softmax 重缩放，而最终结果仍然精确？</li>
+  <li>反向为什么卡在共享内存上？2-CTA 模式怎样同时减少共享内存流量和 \(dQ\) 的原子加？确定性模式要付出多少速度？</li>
+  <li>1613 TFLOPs/s、“比 cuDNN 快 1.3 倍”是在什么条件下测的？和新版 cuDNN 比又是什么结果？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#abstract1" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：硬件的“非对称扩展”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>每一代 GPU 的峰值算力都在涨，为什么注意力内核每换一代硬件就得重写一遍？论文的回答是：新硬件并不是所有部件同比例变快。矩阵乘单元涨得最快，共享内存和指数单元几乎原地不动；一旦矩阵乘不再是最慢的部件，过去“只要把张量核喂饱就行”的设计目标就失效了。这一节还交代了现有方案（FlashAttention-3、低精度注意力）为什么不够用，以及论文的四项贡献。</div>
+
+<div class="note-pre"><b>先补一点背景：几个硬件单元并行工作时，谁决定速度。</b>
+<p>一个注意力内核里有好几种工作，分别交给芯片上不同的硬件单元：张量核（Tensor Core）做矩阵乘，多功能单元（MUFU）算指数，共享内存给张量核供应操作数，普通的 FP32 运算单元做加减乘和比较。这些单元彼此独立，可以同时工作。</p>
+<p>所以估算一个内核要多久，可以先分别算出每个单元单独干完自己那份活要多少个时钟周期。如果各单元的工作能完美地叠在一起，总时间约等于其中最长的那一个；如果完全不能重叠，总时间就是它们相加。最长的那个单元就是<b>瓶颈</b>。这和工厂流水线一样：几个工位同时开工，产量取决于最慢的那个工位；给其他工位加人，产量不会变。</p>
+<p>第一代 FlashAttention 用的 roofline 分析只比较两条线：算力和显存带宽。FlashAttention-4 把同样的思路搬进了芯片内部，比较的是张量核、共享内存、指数单元这几个片上部件。论文把这种逐个部件算周期的分析叫作 “feeds and speeds”。</p>
+</div>
+
+<p>论文给出的对比是：B200 的 FP16/BF16 张量核峰值是 2.25 PFLOPs/s，H100 是约 1 PFLOPs/s，翻了一倍还多；可是共享内存带宽、指数单元，以及整数和浮点运算单元，要么涨得慢，要么没涨。下图把这几项放在一起比较：</p>
+<div class="dia">
+  <div class="dia-title">示意图：从 H100 到 B200，各个部件分别快了多少倍</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="横向条形图：张量核和显存带宽约翻倍，共享内存和指数单元每个 SM 每周期不变" style="--dg-min:720px">
+    <line x1="540" y1="20" x2="540" y2="292" style="stroke:var(--text-3);stroke-width:1.2;stroke-dasharray:4 4"/>
+    <line x1="760" y1="20" x2="760" y2="292" style="stroke:var(--border-strong);stroke-width:1;stroke-dasharray:2 4"/>
+    <text x="300" y="36" class="t-r">张量核（每 SM 每周期）</text><text x="300" y="52" class="t-r t-xs">4096 → 8192 次浮点运算</text>
+    <rect x="320" y="30" width="440" height="22" rx="3" style="fill:var(--c-pred)"/><text x="768" y="42" class="t-sm">2.00×</text>
+    <text x="300" y="82" class="t-r">张量核（全卡峰值）</text><text x="300" y="98" class="t-r t-xs">989 → 2250 TFLOPs/s（BF16）</text>
+    <rect x="320" y="76" width="499" height="22" rx="3" style="fill:var(--c-pred)"/><text x="827" y="88" class="t-sm">2.27×</text>
+    <text x="300" y="128" class="t-r">HBM 显存带宽（全卡）</text><text x="300" y="144" class="t-r t-xs">3.35 → 8 TB/s（NVIDIA 规格，非论文数字）</text>
+    <rect x="320" y="122" width="526" height="22" rx="3" style="fill:var(--c-tgt)"/><text x="854" y="134" class="t-sm">2.39×</text>
+    <text x="300" y="174" class="t-r">共享内存读带宽（每 SM 每周期）</text><text x="300" y="190" class="t-r t-xs">128 → 128 字节</text>
+    <rect x="320" y="168" width="220" height="22" rx="3" style="fill:var(--c-data)"/><text x="548" y="180" class="t-sm">1.00×</text>
+    <text x="300" y="220" class="t-r">指数单元 MUFU（每 SM 每周期）</text><text x="300" y="236" class="t-r t-xs">16 → 16 次（B300 为 32）</text>
+    <rect x="320" y="214" width="220" height="22" rx="3" style="fill:var(--c-data)"/><text x="548" y="226" class="t-sm">1.00×</text>
+    <text x="300" y="266" class="t-r">共享内存与指数（全卡，推算）</text><text x="300" y="282" class="t-r t-xs">132 SM × 1.83 GHz → 148 SM × 1.85 GHz</text>
+    <rect x="320" y="260" width="249" height="22" rx="3" style="fill:var(--c-data)"/><text x="577" y="272" class="t-sm">1.13×</text>
+    <line x1="320" y1="296" x2="900" y2="296" style="stroke:var(--text-3);stroke-width:1"/>
+    <text x="320" y="312" class="t-c t-xs">0</text><text x="540" y="312" class="t-c t-xs">1×（和 H100 一样）</text><text x="760" y="312" class="t-c t-xs">2×</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>每根条的长度是 B200 相对 H100 的倍数，虚线是“没变”（1 倍）。橙色是张量核，紫色是显存带宽，灰色是这篇论文关心的两个片上部件。张量核每个 SM 每周期的运算次数正好翻倍，加上 B200 的 SM 更多，全卡峰值涨了约 2.27 倍；显存带宽也涨了约 2.4 倍，所以“从显存搬数据”并没有变成新的瓶颈。可共享内存带宽和指数单元按每个 SM 每周期算完全没变，全卡只因为 SM 多了一些、频率略高而涨了约 13%（推算：\(148\times1.85 \div (132\times1.83)\approx1.13\)）。数字来源：张量核、共享内存、指数单元来自论文 §2.2；H100 的 989 TFLOPs/s、132 个 SM 和 1830 MHz 见 <a href="flashattention-3.html#n-2-2">FlashAttention-3 精读 2.2</a>；显存带宽是 NVIDIA 公开规格。本站示意图。</div>
+</div>
+<p>这样一来，对注意力这类工作，<b>不做矩阵乘的那些单元反而成了瓶颈</b>。论文在引言里概括说，按它的 roofline 分析，Blackwell 上典型注意力负载中共享内存流量和指数运算的耗时“比矩阵乘多出 25–60%”。第 3、4 节会把这笔账算清楚。</p>
+<p>为什么 GPU 厂商只加张量核？论文给的解释只有一句：在功耗和芯片面积差不多的约束下，厂商优先提高最重要部件（通常就是矩阵乘单元）的吞吐。可以这样理解（本站的补充）：矩阵乘每从存储里取一个数，可以拿它做很多次乘加，所以把张量核阵列做大，换来的浮点运算次数非常可观；而大模型训练和推理的绝大部分时间都花在矩阵乘上，面积和功耗自然先花在这里。指数单元和共享内存是所有程序共用的通用部件，把它们做大很费面积，收益却只落在少数内核上。顺带一提，论文也提到，下一款 B300 / GB300 已经把指数单元的吞吐翻倍到每 SM 每周期 32 次，说明厂商也注意到了这个失衡。</p>
+<p>Blackwell 还带来了几项新的硬件特性：每个 SM 有 256 KB 的<b>张量内存</b>（TMEM），专门存放张量核的中间结果；单条矩阵乘指令处理的块变成 \(128\times128\)，面积是 Hopper 上 \(64\times128\) 的两倍；张量核的运算完全异步，结果直接写进张量内存。论文指出，把现有的注意力算法原样移植过来，要么性能留下很多空间，要么根本做不到，因为 Hopper 的矩阵乘指令不向前兼容。具体来说，FlashAttention-3 的核心指令 WGMMA 只存在于 Hopper，Blackwell 换成了一套新的 tcgen05 指令（PyTorch 团队的博客也明确写了这一点），所以论文实验里有一句脚注：FlashAttention-3 不能在 B200 上运行。</p>
+<p>论文也提到了另一条路：用更低的精度换速度。SageAttention 系列用 INT8、INT4/FP8 乃至 FP4（在 Blackwell 消费级显卡上）来量化注意力。作者认为这些工作主要面向消费级 GPU，而大部分 AI 算力部署在数据中心 GPU 上；而且它们改变了计算结果，和 FlashAttention 保持精确的定位不同。</p>
+<p>论文列出的贡献是：</p>
+<ul>
+  <li><b>重新设计的流水线</b>：前向和反向都利用完全异步的矩阵乘和更大的块，让张量核、softmax 和数据搬运尽量重叠。</li>
+  <li><b>缓解指数单元瓶颈</b>：前向用 FMA 单元上的多项式软件模拟一部分指数，提高指数的总吞吐；再加上条件重缩放，跳过不必要的重缩放操作。</li>
+  <li><b>减少共享内存流量</b>：反向用张量内存存放更多中间结果；用 2-CTA 矩阵乘让每个线程块只暂存一半的 B 操作数，并借此重组 \(dQ\) 的计算，把原子归约的次数减半；另外实现了一个开销不大的确定性模式，方便强化学习等需要可复现训练的场景。</li>
+  <li><b>更好的调度与资源分配</b>：为 Blackwell 的资源约束和更大的块设计新的线程块调度策略和寄存器分配方案。</li>
+</ul>
+<p>此外，整个实现用 CuTe-DSL（嵌在 Python 里的领域专用语言）编写，编译速度比 C++ 模板快 20–30 倍。代码以宽松许可开源，在官方仓库的 <code>flash_attn/cute</code> 目录。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“指数单元成了瓶颈”不是说指数单元变慢了。全卡的指数吞吐其实还涨了约 13%，只是张量核涨了一倍多，两者的比例变了。瓶颈永远是相对的。</li>
+  <li>引言里“比矩阵乘多出 25–60%”这个范围，在正文的两张 roofline 表里找不到直接对应：前向表里指数和矩阵乘是一样长的，反向表里共享内存比矩阵乘多约 30%。这个范围可能还包括了正文没列出的头维 64 等配置（头维 64 时指数是矩阵乘的 2 倍，见第 2.5 节的公式），论文没有说明，所以读的时候以表里的数字为准。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 背景：注意力的前向与反向，以及 Blackwell 的新硬件</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FA4 要在 Blackwell 上重新安排注意力的计算，那么它要安排的是哪几步计算？Blackwell 的存储层次、线程层次和张量核比 Hopper 多了什么、少了什么？“张量内存”“2-CTA 矩阵乘”这些新名词具体是什么意思？以及，按每个 SM 每个周期算，B200 上各个部件的吞吐到底是多少？后面所有的设计都建立在这些数字上。</div>
+
+<h4 id="n-2-1">2.1 注意力的前向与反向：前向 2 次矩阵乘，反向 5 次</h4>
+<p>论文先写出单个注意力头的计算。设 \(Q,K,V\in\mathbb{R}^{N\times d}\)，\(N\) 是序列长度，\(d\) 是头维：</p>
+<div class="formula">$$S=\alpha QK^{\top}\in\mathbb{R}^{N\times N},\qquad P=\mathrm{softmax}(S)\in\mathbb{R}^{N\times N},\qquad O=PV\in\mathbb{R}^{N\times d}$$</div>
+<p>softmax 按行做，\(\alpha=1/\sqrt{d}\) 是缩放系数。实际计算时先从每行减去这一行的最大值，防止指数溢出。多头注意力就是每个头各算一遍，头之间、batch 之间互不相干，可以并行。</p>
+<p>反向传播给定输出的梯度 \(dO\)，要算出三个输入的梯度：</p>
+<div class="formula">$$dV=P^{\top}dO,\quad dP=dO\,V^{\top},\quad dS=\mathrm{dsoftmax}(dP),\quad dQ=\alpha\,dS\,K,\quad dK=\alpha\,dS^{\top}Q$$</div>
+<p>其中 softmax 的梯度按行算：对一行概率 \(p=\mathrm{softmax}(s)\)，有 \(ds=(\mathrm{diag}(p)-pp^{\top})\,dp\)。</p>
+<div class="note-pre"><b>先补一点背景：反向里的 \(\delta\) 和 LSE 是什么。</b>
+<p>论文图 2 的反向计算图里出现了两个正文没解释的量：\(\delta\) 和 LSE。它们都来自 FlashAttention 系列的标准做法。把上面那个 softmax 梯度展开到单个元素，是 \(dS_{ij}=P_{ij}\big(dP_{ij}-\sum_{k}P_{ik}dP_{ik}\big)\)。括号里那个求和看起来要把一整行的 \(P\) 和 \(dP\) 都准备好才能算，但它可以化简：</p>
+<div class="formula">$$\delta_i=\sum_{k}P_{ik}\,dP_{ik}=\sum_{k}P_{ik}\,(dO_i\cdot V_k)=dO_i\cdot\Big(\sum_k P_{ik}V_k\Big)=dO_i\cdot O_i$$</div>
+<p>也就是说，\(\delta\) 只是 \(dO\) 和前向输出 \(O\) 逐行做点积，可以在反向开始前用一个很便宜的预处理内核一次算好。于是 \(dS=P\circ(dP-\delta)\)，变成纯逐元素运算。</p>
+<p>LSE 是前向时每一行的 \(\log\sum_j e^{S_{ij}}\)（log-sum-exp）。前向把它存下来，反向就能直接用 \(P=\exp(S-\mathrm{LSE})\) 一步重算出概率，不必再扫一遍求最大值和求和。这就是第一代 FlashAttention 的“反向重算”：不存 \(N\times N\) 的 \(P\)，用的时候再算（详见 <a href="flashattention.html#n-4">FlashAttention 精读第 4 节</a>）。</p>
+</div>
+<p>数一下矩阵乘的个数：前向有 \(QK^{\top}\) 和 \(PV\) 两次；反向要先重算 \(S\)，再算 \(dV\)、\(dP\)、\(dQ\)、\(dK\) 四次，一共五次。每次矩阵乘的运算量都一样大，所以反向的运算量是前向的 2.5 倍，第 7 节算反向 TFLOPs/s 时用的就是这个倍数。</p>
+
+<h4 id="n-2-2">2.2 存储层次：多了一层“张量内存”</h4>
+<div class="note-pre"><b>先回顾一下 Hopper 的存储层次（详见 <a href="flashattention-3.html#n-2-2">FlashAttention-3 精读 2.2</a>）。</b>
+<p>离计算单元由远到近依次是：芯片外的显存（HBM，论文叫全局内存 GMEM），所有 SM 共享；芯片上的 L2 缓存，由硬件自动管理；每个 SM 里程序员自己管理的共享内存（SMEM），同一个线程块的线程都能读写；最后是每个线程私有的寄存器，每个线程最多 256 个。在 Hopper 上，张量核（WGMMA 指令）的累加结果放在寄存器里，由一个 warpgroup 的 128 个线程分着存，每一行分散在 4 个线程手里。这正是 FlashAttention-3 寄存器紧张、需要用 <code>setmaxnreg</code> 在 warpgroup 之间挪寄存器的根源。</p>
+</div>
+<p>Blackwell 在 SM 里新加了一层存储：<b>张量内存</b>（Tensor Memory，TMEM），每个 SM 256 KB，专门存放张量核运算的中间结果。和共享内存不同，它和张量核紧紧绑在一起：矩阵乘的输出直接写进张量内存，不经过寄存器。论文强调，这缓解了困扰 Hopper 内核的寄存器压力，也让更大的块成为可能。</p>
+<p>按 NVIDIA 的 PTX 指令集文档，张量内存的组织方式是一个二维表格：128 行（叫 lane）乘 512 列，每格 32 位，合起来正好 256 KB。它有几条使用规则，后面的设计处处受它们约束：</p>
+<ul>
+  <li><b>要手动分配和释放。</b>分配以列为单位，最少 32 列，而且列数要是 2 的幂；每分配一列，就拿到这一列的全部 128 行。32 列就是论文说的 16 KB 分配粒度（推算：\(128\times32\times4\) 字节）。内核退出前必须把分配的张量内存全部释放。</li>
+  <li><b>每个 warp 只能碰自己的那 32 行。</b>一个 warpgroup 有 4 个 warp，第 0 个 warp 只能读写第 0–31 行，第 1 个 warp 只能读写第 32–63 行，依此类推；所有的列它们都能访问。所以要读完整的张量内存，需要一整个 warpgroup（128 个线程）。</li>
+  <li><b>和寄存器之间要显式搬运。</b>线程用 <code>tcgen05.ld</code> 把张量内存里的数据读进寄存器，用 <code>tcgen05.st</code> 写回去。</li>
+</ul>
+<p>算一下容量（推算）：一个 \(128\times128\) 的 FP32 累加器要占 128 列，也就是 64 KB，所以张量内存最多同时放下 4 个这样的块。“只放得下 4 个累加器”这件事，在第 4 节的反向设计里是一个硬约束。</p>
+<p>打个比方：寄存器像每个工人手里的工具，共享内存像车间的公共货架，张量内存则是紧挨着机床的一张工作台。机床（张量核）把加工好的零件直接放到工作台上，不用再塞到工人手里；工人需要时自己去台面上取，而且每个工人只能取自己面前那一段台面上的东西。</p>
+
+<h4 id="n-2-3">2.3 第五代张量核：tcgen05，一个线程发指令，结果写进张量内存</h4>
+<p>线程层次和 Hopper 一样，从小到大依次是线程、warp（32 个线程）、warpgroup（4 个相邻的 warp）、线程块（CTA）、线程块簇（cluster）和网格。同一个线程块的线程被放在同一个 SM 上，同一个簇的线程块被放在同一个 GPC 上。</p>
+<p>变化最大的是张量核。Blackwell 的第五代张量核用 <code>tcgen05.mma</code> 指令（CUTLASS 里常叫 UMMA）做矩阵乘，和 Hopper 的 WGMMA 相比有三点不同：</p>
+<ul>
+  <li><b>块更大。</b>一条指令处理 \(128\times N\) 的输出块（\(N\) 通常是 128 或 256），Hopper 是 \(64\times N\)。</li>
+  <li><b>完全异步，结果写进张量内存。</b>Hopper 的 WGMMA 虽然也是异步发射，但结果要写回发起线程的寄存器，线程读结果之前必须等它完成；Blackwell 的矩阵乘把结果直接写进张量内存，张量核不再因为“往寄存器写回”而阻塞，其他线程也能去张量内存里取结果。矩阵乘完成后，硬件通过 <code>tcgen05.commit</code> 在共享内存里的一个屏障（mbarrier）上记一笔，等结果的线程看这个屏障就知道算完了没有。</li>
+  <li><b>一个线程就能发。</b>按 PTX 文档，<code>tcgen05.mma</code> 由线程块里的<b>单个线程</b>发出；WGMMA 则要整个 warpgroup 的 128 个线程一起发。操作数方面，\(A\) 可以来自共享内存或张量内存，\(B\) 来自共享内存，累加结果 \(D\) 在张量内存里。论文把两个操作数都来自共享内存的矩阵乘叫 SS，\(A\) 来自张量内存的叫 TS。</li>
+</ul>
+<p>这三点合在一起，改变了内核的分工方式。在 Hopper 上，做 softmax 的 warpgroup 也得亲自发矩阵乘、在自己的寄存器里接收结果；在 Blackwell 上，发矩阵乘变成了一个线程就能干的轻活，可以交给一个专门的 “MMA warp”，其余线程专心做 softmax，所有寄存器都留给 softmax 用。这仍然是 FlashAttention-3 讲过的 warp 专业化（生产者只发搬运或矩阵乘指令，消费者只做计算，思路最早来自 2011 年的 CudaDMA），只是分工更彻底了。</p>
+<div class="table-wrap"><table>
+  <tr><th>项目</th><th>H100（Hopper）</th><th>B200（Blackwell）</th></tr>
+  <tr><td>矩阵乘指令</td><td>WGMMA</td><td>tcgen05.mma</td></tr>
+  <tr><td>谁发指令</td><td>整个 warpgroup（128 线程）</td><td>单个线程</td></tr>
+  <tr><td>单条指令的块</td><td>\(64\times N\)</td><td>\(128\times N\)（2-CTA 模式可到 256 行）</td></tr>
+  <tr><td>累加结果放在哪</td><td>寄存器，每行分在 4 个线程手里</td><td>张量内存（每 SM 256 KB）</td></tr>
+  <tr><td>张量核吞吐（BF16，每 SM 每周期）</td><td>4096 次</td><td>8192 次</td></tr>
+  <tr><td>指数单元 MUFU（每 SM 每周期）</td><td>16 次</td><td>16 次（B300 为 32 次）</td></tr>
+  <tr><td>共享内存读带宽（每 SM 每周期）</td><td>128 字节</td><td>128 字节</td></tr>
+</table></div>
+<p class="w-note">来源：论文 §1、§2.2；“谁发指令”一行来自 NVIDIA PTX 指令集文档（tcgen05 的 Issue Granularity 表）和 <a href="flashattention-3.html#n-2-3">FlashAttention-3 精读 2.3</a>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Blackwell 一个 SM 里，注意力内核的数据怎么流动</div>
+  <svg class="dg" viewBox="0 0 960 440" role="img" aria-label="显存经 TMA 到共享内存，共享内存供给张量核，张量核把结果写进张量内存，张量内存与寄存器之间显式搬运，寄存器里的数据交给指数单元和 FMA 单元" style="--dg-min:760px">
+    <rect class="box data" x="20" y="20" width="180" height="56" rx="8"/>
+    <text x="32" y="40" class="t-b">显存 HBM</text><text x="32" y="60" class="t-sm">芯片外，所有 SM 共享</text>
+    <rect class="box data" x="250" y="20" width="270" height="56" rx="8"/>
+    <text x="262" y="40" class="t-b">共享内存 SMEM</text><text x="262" y="60" class="t-sm">读 128 字节/周期/SM，和 H100 一样</text>
+    <rect class="box pred" x="600" y="20" width="340" height="56" rx="8"/>
+    <text x="612" y="40" class="t-b">第五代张量核：tcgen05.mma</text><text x="612" y="60" class="t-sm">单线程发射 · 异步 · 128×N 块 · 8192 次/周期/SM</text>
+    <rect class="box data" x="250" y="170" width="270" height="56" rx="8"/>
+    <text x="262" y="190" class="t-b">寄存器 RMEM</text><text x="262" y="210" class="t-sm">每线程至多 256 个；softmax 在这里算</text>
+    <rect class="box act" x="250" y="300" width="270" height="56" rx="8"/>
+    <text x="262" y="320" class="t-b">MUFU（算 2^x）与 FMA 单元</text><text x="262" y="340" class="t-sm">MUFU 只有 16 次/周期/SM</text>
+    <rect class="box reg" x="600" y="125" width="340" height="170" rx="8"/>
+    <text x="612" y="145" class="t-b">张量内存 TMEM（Blackwell 新增）</text><text x="612" y="163" class="t-sm">每 SM 256 KB = 128 行（lane）× 512 列 × 32 位</text>
+    <rect x="615" y="177" width="310" height="22" rx="3" style="fill:var(--surface);stroke:var(--c-reg)"/><text x="770" y="188" class="t-c t-sm">warp 0 只能访问第 0–31 行</text>
+    <rect x="615" y="203" width="310" height="22" rx="3" style="fill:var(--surface);stroke:var(--c-reg)"/><text x="770" y="214" class="t-c t-sm">warp 1：第 32–63 行</text>
+    <rect x="615" y="229" width="310" height="22" rx="3" style="fill:var(--surface);stroke:var(--c-reg)"/><text x="770" y="240" class="t-c t-sm">warp 2：第 64–95 行</text>
+    <rect x="615" y="255" width="310" height="22" rx="3" style="fill:var(--surface);stroke:var(--c-reg)"/><text x="770" y="266" class="t-c t-sm">warp 3：第 96–127 行</text>
+    <path class="edge" d="M200,48 L248,48" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/><text x="224" y="38" class="t-c t-xs">TMA</text>
+    <path class="edge" d="M520,48 L598,48"/><text x="559" y="38" class="t-c t-xs">A、B 操作数</text>
+    <path class="edge pred" d="M700,76 L700,123"/><text x="708" y="100" class="t-sm">写累加结果 D</text>
+    <path class="edge pred" d="M880,123 L880,78"/><text x="872" y="100" class="t-r t-sm">读 A（如 P）</text>
+    <path class="edge" d="M522,198 L598,198" style="marker-start:url(#ah)"/><text x="560" y="186" class="t-c t-xs">tcgen05.ld/st</text>
+    <path class="edge" d="M385,228 L385,298" style="marker-start:url(#ah)"/><text x="395" y="262" class="t-sm">取出一行算 softmax</text>
+    <rect class="box enc" x="20" y="125" width="180" height="44" rx="8"/><text x="30" y="141" class="t-sm t-b">MMA warp（1 个线程发）</text><text x="30" y="158" class="t-xs">驱动张量核</text>
+    <rect class="box enc" x="20" y="185" width="180" height="44" rx="8"/><text x="30" y="201" class="t-sm t-b">softmax warpgroup × 2</text><text x="30" y="218" class="t-xs">一个线程管一整行</text>
+    <rect class="box enc" x="20" y="245" width="180" height="44" rx="8"/><text x="30" y="261" class="t-sm t-b">correction warpgroup</text><text x="30" y="278" class="t-xs">重缩放输出 O</text>
+    <rect class="box enc" x="20" y="305" width="180" height="44" rx="8"/><text x="30" y="321" class="t-sm t-b">load warp</text><text x="30" y="338" class="t-xs">发 TMA，搬 Q、K、V</text>
+    <text x="20" y="385" class="t-sm">左列蓝框是 FA4 前向里的线程分工（第 3.2 节）；右边是硬件部件。</text>
+    <text x="20" y="405" class="t-sm">Hopper 上，张量核的结果要写回发指令那组线程的寄存器；Blackwell 上它落在张量内存里，谁都可以来取。</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>紫色箭头是 TMA 把数据从显存搬进共享内存；黑色箭头是张量核从共享内存读操作数；两条橙色箭头是张量核和张量内存之间的往来：结果写进张量内存，也可以从张量内存读第一个操作数（FA4 前向的 \(PV\) 就这样读 \(P\)）。张量内存和寄存器之间要用 <code>tcgen05.ld/st</code> 显式搬运，而且每个 warp 只能访问自己那 32 行（右侧四条横带）。寄存器里的数据再交给 MUFU 算指数、交给 FMA 单元做加减乘。数字来自论文 §2.2 和 PTX 指令集文档。本站示意图。</div>
+</div>
+
+<h4 id="n-2-4">2.4 2-CTA 矩阵乘：两个线程块合算一个大矩阵乘</h4>
+<div class="note-pre"><b>先补一点背景：线程块簇和分布式共享内存。</b>
+<p>Hopper 引入了<b>线程块簇</b>（cluster）：若干个线程块被保证同时放在同一个 GPC（相邻的一组 SM）上运行。同一个簇里的线程块可以直接读写彼此的共享内存，这叫<b>分布式共享内存</b>（DSMEM）。它比绕道显存交换数据快得多，但仍比读自己的共享内存慢一些，而且要求对方线程块此时还活着。第 4.3 节的反向会用 DSMEM 在两个线程块之间交换半块数据。</p>
+</div>
+<p>Blackwell 支持一种 <b>2-CTA 矩阵乘</b>模式：同一个簇里的两个线程块组成一对（按 PTX 文档，簇内编号只差最后一位的两个线程块叫一个 CTA 对），合起来执行一条矩阵乘，这条指令可以读写两个线程块各自的张量内存。具体规则是：</p>
+<ul>
+  <li>这一对里只需要一个线程发出指令，但另一个线程块必须已经启动，并且在运算进行期间不能退出。</li>
+  <li>单个线程块的矩阵乘最多 128 行（\(M\le128\)）；成对模式支持 \(M=128\) 或 256。\(A\) 块和累加结果按行（\(M\) 维）切成两半，每个线程块各管一半；\(B\) 块按列（\(N\) 维）切成两半，每个线程块只在自己的共享内存里存一半，硬件在运算时把两半拼起来用。</li>
+  <li>好处是少存、少读：每个线程块只需要暂存和读取一半的 \(B\)，省下共享内存的容量和带宽。代价是内核必须固定成对启动线程块，而且整个内核里的张量内存操作和矩阵乘都得一致地使用 2-CTA 模式。</li>
+</ul>
+<p>打个比方：两个学生做同一本习题集，各自负责一半的题（\(A\) 和结果按行分），但解题都要查同一本厚手册（\(B\)）。与其每人复印一整本，不如每人只复印半本，两人坐在一起，需要时互相翻对方那半本。</p>
+<div class="dia">
+  <div class="dia-title">示意图：M = 256 的 2-CTA 矩阵乘，两个线程块各存什么</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="两个线程块各存一半行的 A 和一半列的 B，累加结果按行分在各自的张量内存里" style="--dg-min:720px">
+    <text x="480" y="22" class="t-c t-sm">CTA 对中的一个线程发出一条 M = 256 的 tcgen05.mma（cta_group::2）</text>
+    <rect class="frame" x="30" y="40" width="420" height="235" rx="10"/>
+    <text x="45" y="60" class="t-b">CTA 0（在 SM 0 上）</text>
+    <rect class="box data" x="50" y="80" width="170" height="54" rx="6"/><text x="135" y="100" class="t-c">A：第 0–127 行</text><text x="135" y="120" class="t-c t-xs">在 CTA 0 的共享内存</text>
+    <rect class="box tgt" x="250" y="80" width="180" height="54" rx="6"/><text x="340" y="100" class="t-c">B：前一半列</text><text x="340" y="120" class="t-c t-xs">只存一半</text>
+    <rect class="box reg" x="50" y="190" width="380" height="60" rx="6"/><text x="240" y="212" class="t-c">累加结果 D：第 0–127 行</text><text x="240" y="234" class="t-c t-xs">在 CTA 0 的张量内存</text>
+    <rect class="frame" x="510" y="40" width="420" height="235" rx="10"/>
+    <text x="525" y="60" class="t-b">CTA 1（在 SM 1 上）</text>
+    <rect class="box data" x="530" y="80" width="170" height="54" rx="6"/><text x="615" y="100" class="t-c">A：第 128–255 行</text><text x="615" y="120" class="t-c t-xs">在 CTA 1 的共享内存</text>
+    <rect class="box tgt" x="730" y="80" width="180" height="54" rx="6"/><text x="820" y="100" class="t-c">B：后一半列</text><text x="820" y="120" class="t-c t-xs">只存一半</text>
+    <rect class="box reg" x="530" y="190" width="380" height="60" rx="6"/><text x="720" y="212" class="t-c">累加结果 D：第 128–255 行</text><text x="720" y="234" class="t-c t-xs">在 CTA 1 的张量内存</text>
+    <path class="edge" d="M135,134 L135,188"/>
+    <path class="edge" d="M615,134 L615,188"/>
+    <path class="edge" d="M340,134 L340,188" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge" d="M820,134 L820,188" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge sg" d="M400,134 C470,160 560,165 640,188" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge sg" d="M760,134 C690,160 400,165 320,188" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text x="480" y="300" class="t-c t-sm">紫色虚线：两半 B 在运算时被硬件拼成完整的 B，两边的结果都要用到整个 B</text>
+    <text x="480" y="320" class="t-c t-xs">每个线程块读的 B 只有单独做 M = 128 矩阵乘时的一半</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>左右两个虚线框是一对线程块，分别在两个 SM 上。灰色是 \(A\)，按行分成两半；紫色是 \(B\)，按列分成两半，每个线程块只存自己那一半；青色是累加结果，按行分在两边各自的张量内存里。竖直的实线表示“本地数据参与本地结果”，交叉的紫色虚线表示另一半 \(B\) 也参与了运算。规则来自论文 §2.2 和 PTX 指令集文档。本站示意图，对应的硬件说明没有原图。</div>
+</div>
+
+<h4 id="n-2-5">2.5 瓶颈的转移：B200 上的三个关键吞吐</h4>
+<p>论文列出了 B200（以及 GB200）上三个部件每个 SM 每个时钟周期的吞吐：</p>
+<ol>
+  <li><b>张量核</b>：BF16 矩阵乘每 SM 每周期 8192 次运算，是 Hopper 4096 次的两倍。这个数可以从峰值反推：2.25 PFLOPs/s 除以 1850 MHz 的时钟频率、再除以 148 个 SM，约等于 8192。</li>
+  <li><b>指数单元</b>：MUFU 每 SM 每周期 16 次，和 Hopper 相同（引自 CUDA 编程指南）。B300 / GB300 翻倍到 32 次，但论文写作时这两款还没有大量供货。</li>
+  <li><b>共享内存</b>：读带宽每 SM 每周期 128 字节，和 Hopper 相同（引自一篇用微基准测试剖析 Hopper 的论文）。</li>
+</ol>
+<p>把这几个数放进注意力里比一比。分数矩阵里的每个元素要做一次指数；而为了这一个元素，两次矩阵乘一共要做 \(4d\) 次浮点运算（\(QK^{\top}\) 和 \(PV\) 各 \(2d\) 次）。所以在 B200 上，一个 \(M\times N\) 的分数块，矩阵乘耗时和指数耗时之比是（推算）：</p>
+<div class="formula">$$\frac{T_{\text{MMA}}}{T_{\exp}}=\frac{4MNd/8192}{MN/16}=\frac{d}{128}\qquad\text{（H100 上是 }\frac{4MNd/4096}{MN/16}=\frac{d}{64}\text{）}$$</div>
+<p>头维 \(d=128\) 时这个比值正好是 1：矩阵乘和指数一样长。头维 64 时，指数比矩阵乘还长一倍。而在 H100 上，头维 128 时矩阵乘是指数的 2 倍，指数可以从容地藏在矩阵乘后面。这就是 FlashAttention-3 论文里“FP8 时指数的问题更严重”的那种处境（Hopper 的 FP8 矩阵乘吞吐也是 8192），到了 Blackwell 成了 BF16 的日常。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>“MUFU 每周期 16 次”只算了指数本身。softmax 还有很多别的逐元素运算：每个分数要乘缩放系数并减去最大值、求最大值、求和、把 FP32 转成 BF16，这些都在 FP32 运算单元上执行，也要花时间。论文在 roofline 分析里明确说没有计入这些“浮点运算、寄存器带宽、L2 带宽”等资源，所以真实情况比表里的数字更紧张。这也是 FA4 除了加速指数，还要设法“少做一些非矩阵乘运算”（条件重缩放）的原因。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 前向：把指数和重缩放从关键路径上挪开</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在 B200 上，注意力前向的一个块到底卡在哪个单元上？知道了瓶颈之后，FA4 怎样安排张量核、指数单元和各组线程的工作，让它们尽量同时忙起来？指数单元实在不够用时，能不能换一个硬件来算指数？online softmax 每一步都要做的输出重缩放，能不能少做？这一节对应论文 §3.1，是全文的核心。</div>
+
+<h4 id="n-3-1">3.1 先算一笔账：一个块在三种单元上各要多久</h4>
+<p>设一个块在查询方向有 \(M\) 行、在键方向有 \(N\) 列，头维是 \(d\)。论文分别算出三个部件处理这个块要多少个时钟周期。论文自己也说明，这是一个简化的分析：没有计入 FP32 运算单元、寄存器带宽、L2 带宽等资源，但足以找出瓶颈。</p>
+<p><b>张量核。</b>每处理一个块要做两次矩阵乘：\(QK^{\top}\)（由 \(M\times d\) 和 \(d\times N\) 得到 \(M\times N\)）和 \(PV\)（由 \(M\times N\) 和 \(N\times d\) 得到 \(M\times d\)），各需 \(2MNd\) 次浮点运算。按每周期 8192 次：</p>
+<div class="formula">$$T_{\text{MMA}}=\frac{4MNd}{8192}\ \text{个周期}$$</div>
+<p><b>共享内存。</b>两次矩阵乘里，\(QK^{\top}\) 的两个操作数都从共享内存读（SS）；\(PV\) 的第一个操作数 \(P\) 从张量内存读，只有 \(V\) 从共享内存读（TS）。关键的一点是：一条矩阵乘指令只算一个 \(128\times128\) 的输出块，如果整个输出需要好几条指令，共享内存里的操作数就会被重复读好几遍。具体来说，\(QK^{\top}\) 需要 \(\lceil M/128\rceil\times\lceil N/128\rceil\) 条指令，每条读 \(128\times d\) 的 \(Q\) 和 \(d\times128\) 的 \(K^{\top}\)；\(PV\) 需要 \(\lceil M/128\rceil\times\lceil d/128\rceil\) 条指令，每条读 \(N\times128\) 的 \(V\)。每个 BF16 元素 2 字节，共享内存每周期读 128 字节，当 \(M,N,d\) 都是 128 的倍数时：</p>
+<div class="formula">$$T_{\text{smem}}=\frac{2\big\lceil\tfrac{M}{128}\big\rceil\big\lceil\tfrac{N}{128}\big\rceil\cdot256d+2\big\lceil\tfrac{M}{128}\big\rceil\big\lceil\tfrac{d}{128}\big\rceil\cdot128N}{128}=\frac{3MNd}{8192}\ \text{个周期}$$</div>
+<p>拿 \(M=N=d=128\) 走一遍（推算）：\(Q\)、\(K\)、\(V\) 各有一块 \(128\times128\) 的 BF16 数据要读，每块 32 KB，一共 96 KB，也就是 98,304 字节，除以每周期 128 字节，得到 768 个周期。</p>
+<p><b>指数单元。</b>\(M\times N\) 个分数各要一次指数，每周期 16 次：</p>
+<div class="formula">$$T_{\exp}=\frac{MN}{16}\ \text{个周期}$$</div>
+<p>论文表 1 用这三个公式算了两种常见的块：</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个前向块在三种部件上各要多少个时钟周期（头维 128，数字来自原文表 1；H100 两行为推算）</div>
+  <div class="dia-row"><span class="lbl">B200 128×128：张量核</span><div class="dia-track"><span class="dia-seg kv" style="flex:1024">1024</span><span class="dia-seg oth" style="flex:1024"></span></div></div>
+  <div class="dia-row"><span class="lbl">共享内存</span><div class="dia-track"><span class="dia-seg w" style="flex:768">768</span><span class="dia-seg oth" style="flex:1280"></span></div></div>
+  <div class="dia-row"><span class="lbl">指数单元</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1024">1024</span><span class="dia-seg oth" style="flex:1024"></span></div></div>
+  <div class="dia-out">三者几乎一样长：张量核和指数并列第一，共享内存只差一点。</div>
+  <div class="dia-row"><span class="lbl">B200 256×128：张量核</span><div class="dia-track"><span class="dia-seg kv" style="flex:2048">2048</span></div></div>
+  <div class="dia-row"><span class="lbl">共享内存</span><div class="dia-track"><span class="dia-seg w" style="flex:1536">1536</span><span class="dia-seg oth" style="flex:512"></span></div></div>
+  <div class="dia-row"><span class="lbl">指数单元</span><div class="dia-track"><span class="dia-seg cmp" style="flex:2048">2048</span></div></div>
+  <div class="dia-out">块变大一倍，张量核和指数都翻倍；共享内存也翻倍，因为 \(K\)、\(V\) 要被两个 \(128\) 行的查询块各读一遍。</div>
+  <div class="dia-row"><span class="lbl">H100 128×128：张量核</span><div class="dia-track"><span class="dia-seg kv" style="flex:2048">2048</span></div></div>
+  <div class="dia-row"><span class="lbl">指数单元</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1024">1024</span><span class="dia-seg oth" style="flex:1024"></span></div></div>
+  <div class="dia-out">同样一个块，在 H100 上张量核要慢一倍，指数只占它的一半，所以 FlashAttention-3 能把指数藏在矩阵乘后面。</div>
+  <div class="dia-note"><b>怎么看：</b>每一行的蓝、紫、绿段分别是张量核、共享内存、指数单元单独处理这个块要用的时钟周期，灰色是空着的部分，三组的满格都是 2048 个周期。哪一段最长，哪个部件就是瓶颈。H100 两行按每 SM 每周期 4096 次矩阵乘、16 次指数推算。本站示意图，对应 <a href="https://arxiv.org/html/2603.05451#S3.T1" target="_blank" rel="noopener">原文表 1 ↗</a>。</div>
+</div>
+<p>从这张表，论文得出三条设计方向：第一，用大块，并且让矩阵乘和 softmax 最大程度地重叠；第二，借用其他硬件单元来提高指数的吞吐；第三，减少不必要的非矩阵乘运算。下面三小节依次对应这三条。</p>
+<div class="note-warn"><b>一个容易忽略的前提：</b>这笔账默认 \(P\) 经张量内存交给张量核，不经过共享内存。假如像某些实现那样先把 \(P\) 写进共享内存、再让 \(PV\) 从共享内存读，那么每个块要多写 32 KB、多读 32 KB，共享内存多出约 512 个周期，变成 1280 个周期，反超张量核成为唯一的瓶颈（推算，假设写带宽与读带宽相同）。所以张量内存在这里不只是“省寄存器”，它还直接省下了共享内存的带宽。</div>
+
+<h4 id="n-3-2">3.2 新的前向流水线：两个查询块乒乓，一个线程管一整行</h4>
+<p>Blackwell 的张量核吞吐又翻了一倍，所以让 softmax 和矩阵乘重叠比在 Hopper 上更加关键。FA4 沿用 FlashAttention-3 的<b>乒乓调度</b>（见 <a href="flashattention-3.html#n-3-2">FlashAttention-3 精读 3.2</a>）：每个线程块同时负责两个查询块（论文图 1 叫它们 H 块和 L 块，各 128 行，合起来 256 行），一个块在张量核上做矩阵乘的时候，另一个块在做 softmax，然后交换。线程块之间的分工和以前一样：查询块分给不同的线程块（外层循环），每个线程块沿 \(K,V\) 一块块往后扫（内层循环）。</p>
+<p>和 Hopper 不同的地方有三处。</p>
+<p><b>第一，一个线程负责一整行。</b>Hopper 的累加器在寄存器里，一行分散在 4 个线程手里，要求一行的最大值和总和，就得在线程之间用 shuffle 指令交换数据，每个线程还要为自己负责的几行各存一份统计量。Blackwell 的累加块是 \(128\times128\)，放在张量内存里；而张量内存规定一个 warpgroup 的 4 个 warp 分别访问 32 行，正好是 128 个线程对 128 行。于是最自然的分工是：两个 softmax warpgroup，各 128 个线程，每个线程把自己那一行整个读进寄存器。这样求最大值、求和都在一个线程内部完成，不需要跨线程通信。和 FlashAttention-3 一样，两个 softmax warpgroup 被显式同步，保证它们的“关键段”（算指数的那一段）不重叠，免得两组同时抢 MUFU。每个 softmax warpgroup 的步骤是：把整行读进寄存器，求最大值，再做 softmax（减去最大值、乘缩放系数、算指数、转换成输入精度），最后求行和。</p>
+<p><b>第二，重缩放交给单独的 warpgroup。</b>online softmax 每当行最大值变大，就要把已经累加好的输出 \(O\) 整体乘一个缩放因子。在 Hopper 上，\(O\) 在 softmax 那组线程自己的寄存器里，只能由它们自己做，这一步就卡在 softmax 的关键路径上。在 Blackwell 上，\(O\) 的累加器在张量内存里，\(P\) 也通过张量内存交给张量核，于是可以另开一个 <b>correction warpgroup</b>：它从张量内存读出 \(O\) 的行、乘上缩放因子、写回去，和 softmax 并行进行，不再挡 softmax 的路。</p>
+<p><b>第三，张量内存的划分。</b>无论怎么划分，都要先给两个查询块的输出 \(O\) 各留一块累加器。头维 128 时，这两块正好占掉张量内存的一半。剩下的一半用来放 \(S\) 和 \(P\)：这一半能放两份 FP32 的 \(S\)，或者四份 BF16 的 \(P\)（两个 BF16 挤在一个 32 位格子里，一份 \(P\) 只占 64 列）。可选的方案大致有两种：一份 \(S\) 加两份 \(P\)，或者两份 \(S\)、让 \(P\) 直接覆盖在 \(S\) 的位置上。论文选了后者，因为这样流水线一开始就能连续算出两个 \(S\) 块；而且 \(P\) 只占 \(S\) 的一半，剩下的空间还能用来把重缩放需要的统计量传给 correction warpgroup。</p>
+<div class="dia">
+  <div class="dia-title">示意图：每个 SM 的 512 列张量内存怎么分（头维 128，BF16 输入）</div>
+  <div class="dia-row"><span class="lbl">前向（第 3.2 节）</span><div class="dia-track"><span class="dia-seg kv" style="flex:128">O（H 块）<br>128 列</span><span class="dia-seg kv" style="flex:128">O（L 块）<br>128 列</span><span class="dia-seg cmp" style="flex:128">S（H）→ P（H）<br>128 列</span><span class="dia-seg cmp" style="flex:128">S（L）→ P（L）<br>128 列</span></div></div>
+  <div class="dia-out">\(P\) 写在 \(S\) 的位置上，只占其中 64 列；各段的先后顺序是示意。</div>
+  <div class="dia-row"><span class="lbl">反向 1-CTA（第 4.2 节）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:128">S → P<br>第 0–127 列</span><span class="dia-seg kv" style="flex:128">dV 累加<br>第 128–255 列</span><span class="dia-seg w" style="flex:128">dP → dS → dQ<br>第 256–383 列</span><span class="dia-seg kv" style="flex:128">dK 累加<br>第 384–511 列</span></div></div>
+  <div class="dia-out">四个 \(128\times128\) 的 FP32 累加器正好占满 512 列，放不下第五个。</div>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个 SM 上的整块张量内存（512 列 × 128 行），按列切成四段，每段 128 列正好放一个 \(128\times128\) 的 FP32 累加器（64 KB）。蓝色是整个循环里一直在累加的结果，绿色和紫色是每次迭代都会被覆盖的临时结果，箭头表示同一段空间先后存放的东西。前向的划分来自论文 §3.1.2 的文字；反向的列号来自原文图 2 的图例。本站示意图。</div>
+</div>
+<p><b>寄存器压力。</b>一个线程管一整行带来一个问题：除非反复去张量内存里重新读，否则一个线程要把整行 128 个元素都放在寄存器里。BF16 输入时，输入要占 128 个寄存器，输出（BF16 的 \(P\)，两个一组）可能还要 64 个，再加上各种临时变量。而一个线程块里一共有四个 warpgroup：两个 softmax、一个 correction、一个负责发矩阵乘和 TMA 的，寄存器必须优先分给 softmax，否则就会溢出到慢得多的内存里。为了降低峰值占用，FA4 把 \(P\) 分两次写回张量内存：先写前四分之三，并立即触发对应的矩阵乘；最后四分之一单独再写。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>官方代码 <code>flash_attn/cute/flash_fwd_sm100.py</code>（main 分支，2026-10-20 查看）里，一个线程块有 16 个 warp、512 个线程：warp 0–3 和 4–7 是两个 softmax warpgroup，8–11 是 correction warpgroup，12 号发矩阵乘，13 号做收尾写回，14 号发 TMA 加载，15 号空闲或做调度。头维 128、因果掩码的配置下，每个 softmax 线程分到 192 个寄存器，correction 线程 72 个，其余线程 56 个；一个 SM 有 65,536 个寄存器，除以 128 是 512，正好等于 \(192+192+72+56\)（推算），寄存器被分得一个不剩。</div>
+<p>下面这张图按论文图 1 的时间线，画出一个线程块里两个查询块的交替（每格 512 个周期，正好是一次 \(128\times128\times128\) 矩阵乘的耗时：\(2\times128^{3}\div8192=512\)）：</p>
+<div class="dia">
+  <div class="dia-title">示意图：前向流水线，两个查询块（H、L）轮流使用张量核和指数单元</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="时间线：张量核依次计算两个查询块的 QK 和 PV，两个 softmax warpgroup 交替算 softmax，correction warpgroup 偶尔重缩放" style="--dg-min:760px">
+    <rect x="190" y="12" width="14" height="12" rx="2" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="210" y="18" class="t-sm">H 块（第 0–127 行查询）</text>
+    <rect x="400" y="12" width="14" height="12" rx="2" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="420" y="18" class="t-sm">L 块（第 128–255 行查询）</text>
+    <rect x="610" y="12" width="14" height="12" rx="2" style="fill:var(--surface);stroke:var(--text-3);stroke-dasharray:4 3"/><text x="630" y="18" class="t-sm">只在最大值涨幅超过阈值时才做</text>
+    <text x="180" y="56" class="t-r t-sm">张量核（MMA warp 发射）</text>
+    <text x="180" y="106" class="t-r t-sm">softmax WG 0（H 块）</text>
+    <text x="180" y="156" class="t-r t-sm">softmax WG 1（L 块）</text>
+    <text x="180" y="206" class="t-r t-sm">correction WG</text>
+    <rect class="box enc" x="190" y="40" width="80" height="32" rx="4"/><text x="230" y="56" class="t-c t-sm">S₀</text>
+    <rect class="box pred" x="270" y="40" width="80" height="32" rx="4"/><text x="310" y="56" class="t-c t-sm">S₀</text>
+    <rect class="box enc" x="430" y="40" width="80" height="32" rx="4"/><text x="470" y="56" class="t-c t-sm">O+=P₀V₀</text>
+    <rect class="box enc" x="510" y="40" width="80" height="32" rx="4"/><text x="550" y="56" class="t-c t-sm">S₁</text>
+    <rect class="box pred" x="590" y="40" width="80" height="32" rx="4"/><text x="630" y="56" class="t-c t-sm">O+=P₀V₀</text>
+    <rect class="box pred" x="670" y="40" width="80" height="32" rx="4"/><text x="710" y="56" class="t-c t-sm">S₁</text>
+    <rect class="box enc" x="750" y="40" width="80" height="32" rx="4"/><text x="790" y="56" class="t-c t-sm">O+=P₁V₁</text>
+    <rect class="box enc" x="830" y="40" width="80" height="32" rx="4"/><text x="870" y="56" class="t-c t-sm">S₂</text>
+    <rect class="box enc" x="270" y="90" width="160" height="32" rx="4"/><text x="350" y="106" class="t-c t-sm">P₀ = softmax(S₀)</text>
+    <rect class="box enc" x="590" y="90" width="160" height="32" rx="4"/><text x="670" y="106" class="t-c t-sm">P₁ = softmax(S₁)</text>
+    <rect class="box pred" x="430" y="140" width="160" height="32" rx="4"/><text x="510" y="156" class="t-c t-sm">P₀ = softmax(S₀)</text>
+    <rect class="box pred" x="750" y="140" width="160" height="32" rx="4"/><text x="830" y="156" class="t-c t-sm">P₁ = softmax(S₁)</text>
+    <rect x="630" y="190" width="96" height="32" rx="4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-dasharray:4 3"/><text x="678" y="206" class="t-c t-xs">按需缩放 O（H）</text>
+    <rect x="790" y="190" width="96" height="32" rx="4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text x="838" y="206" class="t-c t-xs">按需缩放 O（L）</text>
+    <line x1="190" y1="236" x2="912" y2="236" style="stroke:var(--text-3);stroke-width:1"/>
+    <line x1="190" y1="232" x2="190" y2="240" style="stroke:var(--text-3)"/><text x="190" y="250" class="t-c t-xs">0</text>
+    <line x1="350" y1="232" x2="350" y2="240" style="stroke:var(--text-3)"/><text x="350" y="250" class="t-c t-xs">1024</text>
+    <line x1="510" y1="232" x2="510" y2="240" style="stroke:var(--text-3)"/><text x="510" y="250" class="t-c t-xs">2048</text>
+    <line x1="670" y1="232" x2="670" y2="240" style="stroke:var(--text-3)"/><text x="670" y="250" class="t-c t-xs">3072</text>
+    <line x1="830" y1="232" x2="830" y2="240" style="stroke:var(--text-3)"/><text x="830" y="250" class="t-c t-xs">4096 个周期</text>
+    <path d="M430,270 L910,270" style="stroke:var(--c-act);stroke-width:2;fill:none"/><path d="M430,264 L430,276 M910,264 L910,276" style="stroke:var(--c-act);stroke-width:2"/>
+    <text x="670" y="288" class="t-c t-sm" style="fill:var(--c-act)">稳定阶段：张量核和指数单元在理论上都不停</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是时间，每格 512 个周期；蓝色属于 H 块，橙色属于 L 块，下标是第几个 \(K,V\) 块。张量核这一行里，\(S_j\) 是 \(QK_j^{\top}\)，\(O\mathrel{+}=P_jV_j\) 是第二个矩阵乘。看从 1536 周期开始的稳定阶段：每 1024 个周期里，张量核做两次矩阵乘（一个块的 \(PV\) 加上同一个块下一轮的 \(QK^{\top}\)），而指数单元恰好做完另一个块的一整轮 softmax，两边都满负荷。开头那 512 个周期的空档是流水线启动的代价。虚线框是 correction warpgroup 的重缩放：它必须在上一次 \(O\) 累加之后、下一次累加之前完成，而且在 FA4 里多数时候会被跳过（第 3.4 节）。本站示意图，对应 <a href="https://arxiv.org/html/2603.05451#S3.F1" target="_blank" rel="noopener">原文图 1 ↗</a>（原图还画了查询块怎样分到各个线程块、各个 SM）。</div>
+</div>
+<div class="note-warn"><b>和 FlashAttention-3 的乒乓有什么不同：</b>FlashAttention-3 的乒乓发生在两个消费者 warpgroup 之间，每组各自发自己的 WGMMA，靠屏障规定谁先用张量核。FA4 的两个查询块的矩阵乘都由同一个 MMA warp 发出，张量核的使用顺序由这一个 warp 排定，softmax warpgroup 只管从张量内存取 \(S\)、写回 \(P\)。这个乒乓值多少，MLSys 正式版的消融实验给了答案：每个线程块只处理一个查询块（不乒乓）时，非因果前向只有约 1000 TFLOPs/s，吞吐只有默认配置的 64–72%（第 7.4 节）。</div>
+
+<h4 id="n-3-3">3.3 用多项式在 FMA 单元上算指数</h4>
+<p>上面的流水线让张量核和指数单元同时忙起来，可两者的工作量一样大（各 1024 个周期），稍有一点别的开销，指数单元就会拖后腿。论文的办法是：既然 MUFU 每周期只能算 16 个指数，那就把一部分指数挪到另一种数量多得多的硬件上去算，也就是做浮点乘加（FMA）的普通 FP32 运算单元。两种单元可以同时工作，指数的总吞吐就提高了。</p>
+<div class="note-pre"><b>先补一点背景：FP32 的位结构，以及为什么算的是 \(2^{x}\)。</b>
+<p>一个 FP32 数有 32 位：1 位符号、8 位指数、23 位尾数。它表示的值是 \(1.\text{尾数}\times2^{\text{指数位}-127}\)。比如 1.6245 的指数位是 127，尾数约 0.6245。要把一个数乘以 \(2^{k}\)，只需要把它的指数位加上 \(k\)，尾数不动。如果把这 32 位当成一个整数来看，指数位从第 23 位开始，所以“给指数位加 \(k\)”就等于“给这个整数加上 \(k\) 左移 23 位”，一条整数加法就够了。</p>
+<p>另外，GPU 的硬件指数指令 <code>MUFU.EX2</code> 算的是以 2 为底的 \(2^{x}\)，不是 \(e^{x}\)。由于 \(e^{x}=2^{x\log_{2}e}\)，实际代码会把 \(\log_{2}e\) 和 softmax 的缩放系数 \(\alpha\) 合在一起，用一条乘加指令把分数换算成以 2 为底的指数，再求 \(2^{x}\)（<a href="flashattention-3.html#n-3-2">FlashAttention-3 精读 3.2</a> 也讲过这一点）。所以下面只需要讨论怎样算 \(2^{x}\)。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：一个 FP32 数的 32 位（格子宽度按位数画）</div>
+  <div class="dia-row"><span class="lbl">FP32</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">符</span><span class="dia-seg w" style="flex:8">指数 8 位：存 \(\lfloor x\rfloor+127\)</span><span class="dia-seg kv" style="flex:23">尾数 23 位：存 \(2^{x-\lfloor x\rfloor}\) 的小数部分</span></div></div>
+  <div class="dia-note"><b>怎么看：</b>FA4 的软件指数把结果拆成两半来造：紫色的指数位只由 \(x\) 的整数部分决定，用整数运算直接写进去；蓝色的尾数由 \(x\) 的小数部分决定，用多项式算出来。本站示意图。</div>
+</div>
+<p>论文用的是经典的 Cody–Waite 区间约化加多项式逼近（引自《浮点算术手册》）。核心是把指数拆成整数部分和小数部分：</p>
+<div class="formula">$$2^{x}=2^{\lfloor x\rfloor}\cdot2^{\,x-\lfloor x\rfloor},\qquad x-\lfloor x\rfloor\in[0,1)$$</div>
+<p><b>整数部分</b> \(2^{\lfloor x\rfloor}\) 不用算：按上面讲的位结构，它只是指数位上的一个移位加法，用整数运算单元就能完成。<b>小数部分</b> \(2^{x_{\text{frac}}}\) 的自变量只在 \([0,1)\) 这一小段里，用一个低次多项式就能逼近得很好：</p>
+<div class="formula">$$2^{x_{\text{frac}}}\approx\sum_{i=0}^{n}p_i\,x_{\text{frac}}^{\,i},\qquad p_0=1$$</div>
+<div class="note-pre"><b>先补一点背景：minimax 多项式和 Horner 法。</b>
+<p>逼近一个函数，最容易想到的是泰勒展开：\(2^{t}=1+t\ln2+\frac{(t\ln2)^2}{2}+\frac{(t\ln2)^3}{6}+\cdots\)。但泰勒展开只在 \(t=0\) 附近最准，离得越远误差越大。我们需要的是在整个 \([0,1)\) 上最大误差最小的多项式，这叫 <b>minimax 逼近</b>。论文用数值软件包 Sollya 求出系数，目标是让 \([0,1)\) 上的最大相对误差最小。官方代码 <code>flash_attn/cute/utils.py</code> 里的 3 次多项式系数是 1、0.6951、0.2276、0.0771；对应的泰勒系数是 1、0.6931、0.2402、0.0555。两组系数差得不多，但 minimax 那组把误差均匀地摊到了整个区间上。</p>
+<p>求多项式的值用 <b>Horner 法</b>：把 \(c_3t^3+c_2t^2+c_1t+1\) 写成 \(((c_3t+c_2)t+c_1)t+1\)，从里往外算，每一层正好是一次“乘再加”，也就是一条 FMA 指令。所以 3 次多项式只要 3 条 FMA。</p>
+</div>
+<p>完整的算法有五步：</p>
+<ol>
+  <li>把 \(x\) 钳到不小于 \(-127\)，防止指数位下溢（再小的结果对 softmax 来说也就是 0）。</li>
+  <li>求 \(\lfloor x\rfloor\)：在“向下舍入”模式下给 \(x\) 加上 \(2^{23}+2^{22}\)（等于 12,582,912），再减回来。这个数大到 FP32 在它附近能表示的相邻两个数正好相差 1，所以加上去的那一刻，\(x\) 的小数部分被舍掉，结果的低位里就存着 \(\lfloor x\rfloor\)。</li>
+  <li>求小数部分：\(x_{\text{frac}}=x-\lfloor x\rfloor\)。</li>
+  <li>用多项式算 \(2^{x_{\text{frac}}}\)，结果在 \([1,2)\) 里。</li>
+  <li>把整数部分和小数部分拼起来：把 \(\lfloor x\rfloor\) 移到指数位上，和 \(2^{x_{\text{frac}}}\) 的位模式做一次整数加法。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：用软件算 \(2^{-3.3}\) 的五步（系数取自官方代码的 3 次多项式）</div>
+  <div class="dia-flow"><span class="dia-box">① 钳位<small>\(x=-3.3\ge-127\)，不变</small></span><span class="dia-arrow">→</span><span class="dia-box">② 加 12,582,912，向下舍入<small>得 12,582,908，低位里存着 \(-4\)；减回来得 \(\lfloor x\rfloor=-4\)</small></span><span class="dia-arrow">→</span><span class="dia-box">③ 小数部分<small>\(x_{\text{frac}}=-3.3-(-4)=0.7\)</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box enc">④ Horner 求多项式（3 条 FMA）<small>\(((0.0771\cdot0.7+0.2276)\cdot0.7+0.6951)\cdot0.7+1=1.62456\)</small></span><span class="dia-arrow">→</span><span class="dia-box reg">⑤ 指数位减 4<small>\(1.62456\times2^{-4}=0.101535\)</small></span></div>
+  <div class="dia-out">精确值 \(2^{-3.3}=0.101532\)，相对误差约 \(3.4\times10^{-5}\)（推算）。</div>
+  <div class="dia-note"><b>怎么看：</b>第一行用加减法把 \(x\) 拆成整数 \(-4\) 和小数 \(0.7\)；第二行先用多项式算出 \(2^{0.7}\)（精确值 1.624505），再把它的指数位减 4，相当于除以 16。整个过程只用到 FP32 加减、乘加和整数运算，一次也没有用到 MUFU。本站示意图，数字为推算。</div>
+</div>
+<p><b>只模拟一部分。</b>多项式模拟也有代价：要额外的寄存器存中间值和系数，要占用更多寄存器带宽，延迟也比一条 <code>MUFU.EX2</code> 长。如果所有指数都用软件算，寄存器压力会大到溢出，反而得不偿失。所以 FA4 只对每行里 10–25% 的元素用多项式，其余仍交给 MUFU。具体比例按经验调，依据是在某种块配置下矩阵乘和指数吞吐的比值。</p>
+<div class="dia">
+  <div class="dia-title">示意图：把一部分指数挪走后，MUFU 处理一个 128×128 块要多少个周期（推算）</div>
+  <div class="dia-row"><span class="lbl">张量核（参照）</span><div class="dia-track"><span class="dia-seg kv" style="flex:1024">1024</span></div></div>
+  <div class="dia-row"><span class="lbl">全部用 MUFU</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1024">1024</span></div></div>
+  <div class="dia-row"><span class="lbl">模拟 12.5%</span><div class="dia-track"><span class="dia-seg cmp" style="flex:896">896</span><span class="dia-seg oth" style="flex:128"></span></div></div>
+  <div class="dia-row"><span class="lbl">模拟 18.75%</span><div class="dia-track"><span class="dia-seg cmp" style="flex:832">832</span><span class="dia-seg oth" style="flex:192"></span></div></div>
+  <div class="dia-row"><span class="lbl">模拟 25%</span><div class="dia-track"><span class="dia-seg cmp" style="flex:768">768</span><span class="dia-seg oth" style="flex:256"></span></div></div>
+  <div class="dia-note"><b>怎么看：</b>绿色是 MUFU 的耗时，按 \((1-f)\times16384\div16\) 推算，\(f\) 是用多项式模拟的比例；灰色是腾出来的余量。只要 MUFU 比张量核短一截，指数单元就不再是瓶颈，余量可以吸收 softmax 里其他运算带来的抖动。12.5% 和 18.75% 是按官方代码的调参表推算出的实际比例（见下面的代码说明）。挪走的指数并不是免费的：它们变成了 FMA 单元上的工作。本站示意图。</div>
+</div>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>官方代码（<code>flash_fwd_sm100.py</code> 的调参表与 <code>softmax.py</code>，2026-10-20 查看）把每行 128 个元素分成 4 段，每段 32 个；第一段和最后一段总用硬件，中间两段里按固定的间隔挑出一些元素用多项式算。按调参表推算：头维 128、因果掩码时每段挑 8 个，模拟比例是 \(16/128=12.5\%\)；头维 128、非因果、2-CTA 时每段挑 12 个，比例是 \(24/128=18.75\%\)，都落在论文说的 10–25% 之内。软件版本两个指数一组，用 Blackwell 的“打包双 FP32”指令一次算两个，每两个指数大约要 12 条指令（推算：2 次钳位、6 条打包的加减与乘加、4 条整数移位与加法），而硬件版本是每个指数一条 <code>MUFU.EX2</code>。另外，代码对 B300（SM103）的配置把模拟比例设成 0，注释写着 SM103 有更快的原生指数：硬件指数单元翻倍之后，这个技巧就不需要了。</div>
+<p><b>精度。</b>论文表 2 在 \([0,1)\) 上随机取了 400 万个输入，以 FP64 的结果为准，比较了不同次数的多项式和硬件 <code>MUFU.EX2</code>。分两种口径：FP32 一栏是多项式的原始输出，BF16 一栏是把输出舍入到 BF16 之后。</p>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th class="num">FP32 最大相对误差</th><th class="num">FP32 平均相对误差</th><th class="num">BF16 最大相对误差</th><th class="num">BF16 平均相对误差</th></tr>
+  <tr><td>理想值（FP64 直接舍入到 BF16）</td><td class="num">—</td><td class="num">—</td><td class="num">3.89×10⁻³</td><td class="num">1.41×10⁻³</td></tr>
+  <tr><td>硬件 MUFU.EX2</td><td class="num">1.41×10⁻⁷</td><td class="num">3.04×10⁻⁸</td><td class="num">3.89×10⁻³</td><td class="num">1.41×10⁻³</td></tr>
+  <tr><td>3 次多项式</td><td class="num">8.77×10⁻⁵</td><td class="num">5.43×10⁻⁵</td><td class="num">3.90×10⁻³</td><td class="num">1.41×10⁻³</td></tr>
+  <tr><td>4 次多项式</td><td class="num">3.05×10⁻⁶</td><td class="num">1.84×10⁻⁶</td><td class="num">3.89×10⁻³</td><td class="num">1.41×10⁻³</td></tr>
+  <tr><td>5 次多项式</td><td class="num">1.44×10⁻⁷</td><td class="num">5.48×10⁻⁸</td><td class="num">3.89×10⁻³</td><td class="num">1.41×10⁻³</td></tr>
+</table></div>
+<p class="w-note">原文表 2。本站用官方代码的 3 次系数在 \([0,1)\) 上逐点验算，最大相对误差约 \(8.76\times10^{-5}\)，与表中一致（推算）。</p>
+<p>怎么读这张表：在 FP32 层面，3 次多项式的最大相对误差是 \(8.8\times10^{-5}\)，比硬件大约 600 倍（\(8.77\times10^{-5}\div1.41\times10^{-7}\approx622\)）。但舍入到 BF16 之后，所有 3 次及以上的多项式和硬件几乎分不出来。原因是 BF16 本身的舍入误差就有 \(3.9\times10^{-3}\)：BF16 只有 7 位尾数，相邻两个可表示数的相对间隔是 \(2^{-7}\)，舍入最多差半个间隔，约 \(3.9\times10^{-3}\)。多项式那点 \(10^{-5}\) 量级的误差被淹没在里面。论文进一步报告，3 次多项式在 99% 的输入上和硬件结果相差不超过 1 个 BF16 的最小单位（ULP）。注意力里的 \(P\) 本来就要转成 BF16 才送进 \(PV\) 矩阵乘，所以 3 次已经够用。如果需要在 FP32 层面也接近硬件，5 次多项式的最大误差已经和硬件相当，代价是每次多两条 FMA。</p>
+<div class="note-warn"><b>精度结论的边界：</b>表 2 测的是多项式在 \([0,1)\) 上单独的误差，输入是均匀随机数；论文没有报告换用软件指数之后整个注意力输出的误差。本站的看法是：行和 \(\ell\) 是用 FP32 的 \(p\) 值累加的，会带上 \(10^{-4}\) 量级的相对误差，但这比最终输出的 BF16 精度小一个数量级以上，影响可以忽略。不过这只是分析，不是论文的测量结果。</div>
+
+<h4 id="n-3-4">3.4 跳过大部分 online softmax 重缩放</h4>
+<div class="note-pre"><b>先回顾一下 online softmax（详见 <a href="flashattention.html#n-3-2">FlashAttention 精读 3.2</a>）。</b>
+<p>FlashAttention 一块块地处理 \(K,V\)。处理第 \(j\) 块时，设这一块的分数是 \(S_j=QK_j^{\top}\)，算法维护每一行的“目前为止的最大值” \(m_j\) 和“目前为止的指数和” \(\ell_j\)：</p>
+<div class="formula">$$m_j=\max\big(m_{j-1},\ \mathrm{rowmax}(S_j)\big),\qquad \ell_j=e^{m_{j-1}-m_j}\,\ell_{j-1}+\mathrm{rowsum}\big(e^{S_j-m_j}\big)$$</div>
+<p>输出的中间结果按同样的方式更新：\(O_j=e^{m_{j-1}-m_j}O_{j-1}+e^{S_j-m_j}V_j\)。每当遇到更大的分数，最大值变了，已经累加好的 \(O\) 就要整体乘上 \(e^{m_{j-1}-m_j}\)，换到新的基准上。这一步就是<b>重缩放</b>。全部处理完之后，再用 \(O\) 除以 \(\ell\) 得到最终输出。</p>
+</div>
+<p>重缩放 \(e^{m_{j-1}-m_j}O_{j-1}\) 需要把 \(O\) 的一整行乘上一个数。在 FA4 里，这意味着 correction warpgroup 要把 \(O\) 从张量内存读出来、乘完再写回去，还要和 softmax warpgroup 同步。论文基于两个简单的观察来省掉它：</p>
+<ol>
+  <li>只有当 \(m_j>m_{j-1}\)，也就是遇到了更大的值，才需要重缩放。</li>
+  <li>重缩放可以有一些“松弛”：只在 \(m_j-m_{j-1}>\tau\) 时才做，\(\tau\) 是一个阈值，通常取 \(\log_2 256=8\)，对应 256 倍的缩放因子。只要记住真正用了哪个基准，最后仍然能得到正确的分母和输出。</li>
+</ol>
+<p>改动后的更新规则是：</p>
+<div class="formula">$$O_j=\begin{cases}e^{m_{j-1}-m_j}\,O_{j-1}+e^{S_j-m_j}V_j, &amp; m_j-m_{j-1}>\tau\\[4pt] O_{j-1}+e^{S_j-m_{j-1}}V_j, &amp; \text{否则}\end{cases}$$</div>
+<p>当涨幅不超过 \(\tau\) 时，不更新最大值，继续沿用旧的 \(m_{j-1}\)。</p>
+<p><b>为什么结果仍然正确。</b>论文的解释是：最后会用真正的最大值和分母做一次归一化，把中间少做的重缩放补回来。可以用一行式子看得更清楚（本站的推导）：设整个过程中用作基准的是某个数 \(\tilde m\)，只要 \(O\) 和 \(\ell\) 用的是同一个基准，</p>
+<div class="formula">$$\frac{O}{\ell}=\frac{\sum_k e^{s_k-\tilde m}\,v_k}{\sum_k e^{s_k-\tilde m}}=\frac{e^{-\tilde m}\sum_k e^{s_k}\,v_k}{e^{-\tilde m}\sum_k e^{s_k}}=\frac{\sum_k e^{s_k}\,v_k}{\sum_k e^{s_k}}$$</div>
+<p>公共因子 \(e^{-\tilde m}\) 在分子分母里约掉了，所以基准取多少，在数学上根本不影响结果。减去最大值只有一个作用：防止指数太大而溢出、或者精度损失。所以基准不必时刻等于真正的最大值，只要离得不太远就行。阈值 \(\tau=8\) 保证每个 \(p\) 值最多是 \(2^{8}=256\)，而不是不超过 1；FP32 的累加器能表示到约 \(3.4\times10^{38}\)，BF16 的 \(P\) 也能表示 256，都不会溢出。</p>
+<p><b>为什么能省掉大部分重缩放。</b>一行分数的最大值通常在扫过前几个块之后就基本稳定了，后面即使再涨，涨幅也很少超过 \(2^{8}\) 倍。所以按照新规则，绝大多数迭代都不需要重缩放（这是本站对论文“显著减少重缩放次数”的解释，论文没有给出跳过的比例）。下面用一组虚构的数字演示：</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一行分数，标准 online softmax 重缩放 8 次，FA4 只重缩放 1 次（虚构数据）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="折线图：真实的行最大值逐块上升，FA4 使用的最大值只在涨幅超过 8 时才更新" style="--dg-min:720px">
+    <rect x="90" y="97" width="510" height="104" style="fill:var(--c-pred-bg)"/>
+    <rect x="600" y="40" width="300" height="30" style="fill:var(--c-pred-bg)"/>
+    <text x="100" y="114" class="t-xs" style="fill:var(--c-pred)">容忍区间：比使用中的基准高 8 以内，不重缩放</text>
+    <line x1="90" y1="240" x2="900" y2="240" style="stroke:var(--text-3);stroke-width:1"/>
+    <line x1="90" y1="40" x2="90" y2="240" style="stroke:var(--text-3);stroke-width:1"/>
+    <text x="80" y="240" class="t-r t-xs">0</text><text x="80" y="175" class="t-r t-xs">5</text><text x="80" y="110" class="t-r t-xs">10</text><text x="80" y="45" class="t-r t-xs">15</text>
+    <text x="30" y="140" class="t-c t-xs" transform="rotate(-90 30 140)">行最大值（以 2 为底的指数刻度）</text>
+    <text x="90" y="256" class="t-c t-xs">块 1</text><text x="175" y="256" class="t-c t-xs">2</text><text x="260" y="256" class="t-c t-xs">3</text><text x="345" y="256" class="t-c t-xs">4</text><text x="430" y="256" class="t-c t-xs">5</text><text x="515" y="256" class="t-c t-xs">6</text><text x="600" y="256" class="t-c t-xs">7</text><text x="685" y="256" class="t-c t-xs">8</text><text x="770" y="256" class="t-c t-xs">9</text><text x="855" y="256" class="t-c t-xs">10</text>
+    <path d="M90,201 H175 V168.5 H260 V162 H345 V112.6 H430 V107.4 H515 V103.5 H600 V69.7 H685 V67.1 H770 V65.8 H900" style="fill:none;stroke:var(--c-enc);stroke-width:2"/>
+    <path d="M90,201 H600 V69.7 H900" style="fill:none;stroke:var(--c-pred);stroke-width:3.5;stroke-opacity:.75"/>
+    <circle cx="175" cy="168.5" r="4" style="fill:var(--c-enc)"/><circle cx="260" cy="162" r="4" style="fill:var(--c-enc)"/><circle cx="345" cy="112.6" r="4" style="fill:var(--c-enc)"/><circle cx="430" cy="107.4" r="4" style="fill:var(--c-enc)"/><circle cx="515" cy="103.5" r="4" style="fill:var(--c-enc)"/><circle cx="600" cy="69.7" r="4" style="fill:var(--c-enc)"/><circle cx="685" cy="67.1" r="4" style="fill:var(--c-enc)"/><circle cx="770" cy="65.8" r="4" style="fill:var(--c-enc)"/>
+    <circle cx="600" cy="69.7" r="9" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <text x="612" y="92" class="t-xs" style="fill:var(--c-pred)">涨幅 13.1 − 3.0 = 10.1 &gt; 8，FA4 在这里重缩放</text>
+    <line x1="100" y1="282" x2="130" y2="282" style="stroke:var(--c-enc);stroke-width:2"/><circle cx="115" cy="282" r="4" style="fill:var(--c-enc)"/>
+    <text x="140" y="282" class="t-sm">标准做法：每块都用真实的最大值，每涨一次就重缩放（圆点，共 8 次）</text>
+    <line x1="100" y1="306" x2="130" y2="306" style="stroke:var(--c-pred);stroke-width:3.5;stroke-opacity:.75"/>
+    <text x="140" y="306" class="t-sm">FA4：只在涨幅超过 8 时才换基准（大圆圈，共 1 次）；其余时候沿用旧基准</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是这一行依次处理的第 1–10 个 \(K\) 块，纵轴是到这个块为止的行最大值（已乘 \(\log_2e\) 和缩放系数，所以是以 2 为底的指数刻度）。蓝线是真实的最大值，它在第 2–9 块都涨了一点，标准 online softmax 每涨一次就要重缩放一次 \(O\)。橙色粗线是 FA4 实际使用的基准：第 1 块定为 3.0，之后只要真实最大值不超过 3.0 + 8 = 11.0（橙色底色区域），就继续用 3.0；到第 7 块最大值涨到 13.1，超出区间，才换基准并重缩放一次。数据是虚构的，只用来说明规则。本站示意图。</div>
+</div>
+<p>最后还有一个实现细节：为了避免同一个 warp 里的线程走不同的分支（warp 分歧会让两条分支串行执行），只要一个 warp 的 32 个线程（32 行）里有任何一行需要重缩放，整个 warp 就一起做。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>代码里的阈值是在以 2 为底的指数刻度上比较的：新旧最大值之差乘上 \(\log_2e\) 和缩放系数之后，不超过 8 就沿用旧值（<code>softmax.py</code> 的 <code>rescale_threshold</code>）。<code>flash_fwd_sm100.py</code> 只在输入是 16 位格式（BF16/FP16）时把阈值设成 8.0，FP8 输入时设成 0，也就是不松弛。代码注释解释了原因：松弛之后 \(P\) 最大可以到 \(2^{8}\)，如果超出输入格式能表示的最大值（FP8 E4M3 只到 448，代码还会再乘一个偏移量），最大的那些概率就会被截断，而 FP32 的分母却把它们完整地算了进去，输出会整体偏小（仓库 issue #2716）。这说明“结果仍然精确”的前提是 \(P\) 的格式装得下这个松弛。</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>阈值 \(\tau=8\) 是以 2 为底的：意思是“最大值涨了 256 倍以内不管”，不是“分数涨了 8 以内”。论文正文写的是 \(m_j-m_{j-1}>\tau\)、\(\tau=\log_2256\)，读的时候要把 \(m\) 理解成换算到以 2 为底之后的值。</li>
+  <li>条件重缩放省下的是 correction warpgroup 的工作和它与 softmax 之间的同步，不是指数单元的工作；它和软件指数分别对付第 3.1 节说的“非矩阵乘运算太多”和“指数吞吐不够”两个问题。MLSys 正式版的消融显示，每一步都强制重缩放会让前向吞吐下降 6–18%（第 7.4 节）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 反向：瓶颈是共享内存</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>反向传播有五次矩阵乘，指数只有前向那么多，为什么它的瓶颈反而是共享内存？张量内存只放得下四个累加器，五个矩阵乘的结果怎么安排？2-CTA 矩阵乘怎样同时减少共享内存流量和 \(dQ\) 的全局原子加？“确定性”的反向又要付出什么代价？这一节对应论文 §3.2。</div>
+<div class="note-pre"><b>先补一点背景：FlashAttention 的反向怎么并行，\(dQ\) 为什么要用原子加。</b>
+<p>从 FlashAttention-2 开始，反向的并行方式是：把 \(K,V\) 按块分给各个线程块，每个线程块固定持有一块 \(K_j,V_j\)（外层循环），然后在内层循环里依次扫过所有的查询块 \(Q_i\)。这样，\(dK_j\) 和 \(dV_j\) 只和自己这一块有关，可以在本地一直累加，最后写一次。可 \(dQ_i=\sum_j dS_{ij}K_j\) 要把<b>所有</b> \(K\) 块的贡献加起来，而这些贡献分散在不同的线程块里。于是每个线程块算出自己那一份后，要用<b>全局原子加</b>（atomic add）把它加到显存里的 \(dQ_i\) 上。原子加保证多个线程块同时加同一个位置时不会互相覆盖，但它很贵，而且加的先后顺序不固定（第 4.4 节会讲这带来的问题）。FlashAttention-3 为此专门设了一个累加 \(dQ\) 的 warp（见 <a href="flashattention-3.html#n-3-6">FlashAttention-3 精读 3.6</a>）。</p>
+<p>另外，FA4 的反向按“转置”的形式计算：先算 \(S^{\top}=KQ^{\top}\)，再得到 \(P^{\top}\)、\(dP^{\top}\)、\(dS^{\top}\)。原因是 \(dV=P^{\top}dO\) 和 \(dK=dS^{\top}Q\) 这两个矩阵乘要从张量内存里读第一个操作数，而张量内存里的矩阵必须按输出的行排列，这里输出的行正是这个线程块持有的 \(K,V\) 行。</p>
+</div>
+
+<h4 id="n-4-1">4.1 先算一笔账：共享内存比矩阵乘多出约 30%</h4>
+<p>和前向一样，论文先算三个部件的周期数。为了让公式简单，这里假设 \(M=N=d=128\)（\(M\) 是查询块的行数，\(N\) 是 \(K,V\) 块的行数）。</p>
+<p><b>张量核。</b>五次矩阵乘，每次都涉及一个 \(M\times N\)、一个 \(M\times d\)、一个 \(d\times N\) 的矩阵（只是哪个是输出不同），各需 \(2MNd\) 次运算：</p>
+<div class="formula">$$T_{\text{MMA}}=\frac{10MNd}{8192}=2560\ \text{个周期}$$</div>
+<p><b>共享内存。</b>五次矩阵乘里，三次的两个操作数都来自共享内存（SS）：\(S^{\top}=KQ^{\top}\)、\(dP^{\top}=V\,dO^{\top}\)、\(dQ=dS\,K\)；两次的第一个操作数来自张量内存（TS）：\(dV=P^{\top}dO\)、\(dK=dS^{\top}Q\)。数一下从共享内存读的元素：SS 的三次读了 \(K,Q,V,dO,dS,K\)，共 \(2Md+3Nd+MN\) 个；TS 的两次读了 \(dO\) 和 \(Q\)，共 \(2Md\) 个。每个 BF16 元素 2 字节、每周期 128 字节，这部分是</p>
+<div class="formula">$$T_{\text{smem,MMA}}=\frac{4Md+3Nd+MN}{64}=2048\ \text{个周期}$$</div>
+<p>此外还有两笔：中间梯度 \(dS\)（\(M\times N\)，BF16）要写进共享内存，供 \(dQ=dS\,K\) 读取，\(MN/64=256\) 个周期；\(dQ\) 的部分和（\(M\times d\)，FP32，每个元素 4 字节）先写进共享内存，再由 TMA 读出来做全局归约，读写共 \(8Md\) 字节，\(Md/16=1024\) 个周期。合计：</p>
+<div class="formula">$$T_{\text{smem}}=\frac{4Md+3Nd+MN}{64}+\frac{MN}{64}+\frac{Md}{16}=2048+256+1024=3328\ \text{个周期}$$</div>
+<p><b>指数单元。</b>重算 \(P\) 需要对 \(M\times N\) 个元素做指数（论文把对数等相关的非线性运算也算在这里），\(MN/16=1024\) 个周期。</p>
+<p>结论很清楚：共享内存的 3328 个周期超过了矩阵乘的 2560 个周期（约多 30%），也远超指数的 1024 个周期，所以<b>反向的瓶颈是共享内存带宽</b>。论文补了一句：这个瓶颈没有“只看显存流量”时想象的那么严重，所以设计的重点是让矩阵乘和其他运算尽量重叠，把共享内存的延迟藏起来。</p>
+<div class="dia">
+  <div class="dia-title">示意图：反向一个 128×128 块，三种部件各要多少个周期（数字来自原文表 3）</div>
+  <div class="dia-row"><span class="lbl">1-CTA：张量核</span><div class="dia-track"><span class="dia-seg kv" style="flex:2560">2560</span><span class="dia-seg oth" style="flex:768"></span></div></div>
+  <div class="dia-row"><span class="lbl">1-CTA：共享内存</span><div class="dia-track"><span class="dia-seg w" style="flex:2048">读操作数 2048</span><span class="dia-seg oth" style="flex:256">dS 写</span><span class="dia-seg frag" style="flex:1024">dQ 写+读 1024</span></div></div>
+  <div class="dia-row"><span class="lbl">1-CTA：指数</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1024">1024</span><span class="dia-seg oth" style="flex:2304"></span></div></div>
+  <div class="dia-out">共享内存合计 3328，比张量核多约 30%。</div>
+  <div class="dia-row"><span class="lbl">2-CTA：张量核</span><div class="dia-track"><span class="dia-seg kv" style="flex:2560">2560</span><span class="dia-seg oth" style="flex:768"></span></div></div>
+  <div class="dia-row"><span class="lbl">2-CTA：共享内存</span><div class="dia-track"><span class="dia-seg w" style="flex:1536">读操作数 1536</span><span class="dia-seg oth" style="flex:256">dS 写</span><span class="dia-seg res" style="flex:384">交换 dS</span><span class="dia-seg frag" style="flex:512">dQ 512</span><span class="dia-seg oth" style="flex:640"></span></div></div>
+  <div class="dia-row"><span class="lbl">2-CTA：指数</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1024">1024</span><span class="dia-seg oth" style="flex:2304"></span></div></div>
+  <div class="dia-out">共享内存合计 2688，只比张量核多约 5%。</div>
+  <div class="dia-note"><b>怎么看：</b>每一行的满格是 3328 个周期。共享内存那一行按用途分段：紫色是矩阵乘读操作数，灰色是写 \(dS\)，红色是 \(dQ\) 的写入与读回，斜纹是 2-CTA 模式下两个线程块之间用 DSMEM 交换半块 \(dS\) 的额外开销。2-CTA 的数字是按每个线程块计算的。本站示意图，对应 <a href="https://arxiv.org/html/2603.05451#S3.T3" target="_blank" rel="noopener">原文表 3 ↗</a>。</div>
+</div>
+
+<h4 id="n-4-2">4.2 用张量内存重排反向流水线</h4>
+<p>在 FlashAttention-3 里，累加器都在寄存器里，而寄存器很有限。这给计算顺序加了很强的约束，实际上把五次矩阵乘串成了一条线：依次算 \(S,dP,dV,dQ,dK\)，只有 TMA 加载能明显地提前进行。softmax 相关的逐元素运算只能和 \(dP\) 那一次矩阵乘重叠。</p>
+<p>在 Blackwell 上，张量内存让更多的调度方式成为可能。目标和前向一样，是把 softmax 相关的逐元素运算藏到矩阵乘后面。第 3.1 节已经说明，在 Blackwell 上指数要用的时间和两次矩阵乘相当，所以<b>至少要有两次矩阵乘和它同时进行</b>。FA4 用的是上一次迭代的 \(dQ\) 和 \(dK\) 两次矩阵乘：本轮算 \(P\) 的同时，张量核在算上一轮留下的 \(dK\)、\(dQ\)。</p>
+<p>这需要仔细管理共享内存和张量内存。张量内存最多放 4 个 \(128\times128\) 的累加器，放不下 5 个；其中 \(dV\) 和 \(dK\) 要在整个内层循环里一直累加，必须各占一块，不能和别人共用。剩下两块的安排是：\(S\) 和 \(P\) 共用一块（从第 0 列开始），\(dP\)、\(dS\)、\(dQ\) 共用另一块（见第 3.2 节的张量内存划分图）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：反向一次迭代里，张量核和逐元素运算怎么交错（1-CTA 模式，按原文图 2 的顺序）</div>
+  <svg class="dg" viewBox="0 0 960 210" role="img" aria-label="时间线：张量核依次算 S、上一轮的 dK 和 dQ、dP、dV，逐元素运算在其间算 P 和 dS" style="--dg-min:720px">
+    <text x="180" y="50" class="t-r t-sm">张量核（5 次矩阵乘）</text>
+    <text x="180" y="110" class="t-r t-sm">逐元素运算（softmax 线程）</text>
+    <rect class="box enc" x="190" y="34" width="80" height="32" rx="4"/><text x="230" y="50" class="t-c t-sm">S（本轮）</text>
+    <rect class="box data" x="270" y="34" width="80" height="32" rx="4"/><text x="310" y="50" class="t-c t-sm">dK（上一轮）</text>
+    <rect class="box data" x="350" y="34" width="80" height="32" rx="4"/><text x="390" y="50" class="t-c t-sm">dQ（上一轮）</text>
+    <rect class="box enc" x="430" y="34" width="80" height="32" rx="4"/><text x="470" y="50" class="t-c t-sm">dP</text>
+    <rect class="box enc" x="510" y="34" width="80" height="32" rx="4"/><text x="550" y="50" class="t-c t-sm">dV</text>
+    <rect class="box pred" x="590" y="34" width="80" height="32" rx="4"/><text x="630" y="50" class="t-c t-sm">S（下一轮）</text>
+    <rect class="box enc" x="670" y="34" width="80" height="32" rx="4"/><text x="710" y="50" class="t-c t-sm">dK（本轮）</text>
+    <rect class="box enc" x="750" y="34" width="80" height="32" rx="4"/><text x="790" y="50" class="t-c t-sm">dQ（本轮）</text>
+    <rect class="box act" x="270" y="94" width="160" height="32" rx="4"/><text x="350" y="110" class="t-c t-sm">P = exp(S − LSE)</text>
+    <rect class="box act" x="510" y="94" width="80" height="32" rx="4"/><text x="550" y="110" class="t-c t-xs">dS=P∘(dP−δ)</text>
+    <rect class="box act" x="670" y="94" width="160" height="32" rx="4" style="opacity:.6"/><text x="750" y="110" class="t-c t-sm">下一轮的 P</text>
+    <line x1="190" y1="146" x2="912" y2="146" style="stroke:var(--text-3);stroke-width:1"/>
+    <text x="190" y="160" class="t-c t-xs">0</text><text x="350" y="160" class="t-c t-xs">1024</text><text x="510" y="160" class="t-c t-xs">2048</text><text x="670" y="160" class="t-c t-xs">3072</text><text x="830" y="160" class="t-c t-xs">4096 个周期</text>
+    <text x="190" y="186" class="t-sm">指数要 1024 个周期，正好藏在上一轮的 dK、dQ 两次矩阵乘（各 512 个周期）后面；dS 只是乘加，藏在 dV 后面。</text>
+    <text x="190" y="202" class="t-xs">这只是张量核的理想时间线；1-CTA 模式下共享内存每轮要 3328 个周期，比张量核的 2560 长，实际会被共享内存拖慢。</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>上面一行是张量核按顺序执行的五次矩阵乘（每格 512 个周期），灰色两格是上一轮迭代留下的 \(dK\)、\(dQ\)，橙色是下一轮的开头。下面一行是 softmax 线程做的逐元素运算：\(P_j\) 必须等 \(S_j\) 算完，\(dS_j\) 必须等 \(dP_j\) 算完；而本轮的 \(dK_j\)、\(dQ_j\) 要用到 \(dS_j\)，所以被推迟到下一轮，正好用来遮住下一轮的指数。为了图面简洁，省略了 \(\delta\) 与 LSE 的读取和 \(dQ\) 的原子加。本站示意图，对应 <a href="https://arxiv.org/html/2603.05451#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。</div>
+</div>
+
+<h4 id="n-4-3">4.3 2-CTA 反向：共享内存流量和 \(dQ\) 原子加都减半</h4>
+<p>即使流水线改好了、十个矩阵乘操作数里有两个常驻在张量内存里，剩下的八个 BF16 操作数仍要从共享内存读，共享内存的耗时还是比张量核多约 30%。为了进一步缓解，FA4 用上了第 2.4 节讲的 2-CTA 矩阵乘：矩阵乘块取 \(M=256\)、\(N=K=128\)，两个线程块合起来当作一个更大的块，每个线程块只加载和暂存一半的 \(B\) 操作数，只保留自己那一半的累加结果。</p>
+<p><b>为什么能省一半。</b>在反向里，一对线程块各自持有不同的 \(K,V\) 块，却在同一时刻处理同一个查询块。所以 \(Q\) 和 \(dO\) 这两样东西是两个线程块共用的。而它们恰好是 \(S^{\top}=KQ^{\top}\)、\(dP^{\top}=V\,dO^{\top}\)、\(dV=P^{\top}dO\)、\(dK=dS^{\top}Q\) 四次矩阵乘里的 \(B\) 操作数，每次读 \(Md\) 个元素，合计 \(4Md\) 个元素、1024 个周期。2-CTA 之后每个线程块只读一半，省下 512 个周期，读操作数的耗时从 2048 降到 1536（推算，与原文表 3 吻合）。</p>
+<p><b>\(dQ\) 遇到的麻烦。</b>2-CTA 矩阵乘只按输出的行切分，不切分求和的那一维。可 \(dQ_i=\sum_j dS_{ij}K_j\) 的求和维正是 \(K,V\) 的方向，而这个方向天然就被两个线程块分掉了：线程块 0 只有 \(dS_{i,j_0}\)，线程块 1 只有 \(dS_{i,j_1}\)。按 2-CTA 的规则，线程块 0 负责 \(dQ_i\) 的上半部分行，它需要两个 \(K\) 块对这些行的全部贡献，可另一半 \(dS\) 在对方手里。</p>
+<p>FA4 的解决办法是用分布式共享内存（DSMEM）交换半块 \(dS\)：线程块 0 把自己 \(dS\) 的下半部分行发给线程块 1，线程块 1 把上半部分行发给线程块 0。交换之后，\(dS\) 不再按 \(K,V\) 块切分，而是按行切分：每个线程块拥有 \(M/2\) 行、但覆盖两个 \(K,V\) 块的完整 \(2N\) 列。于是每个线程块的 \(dQ\) 矩阵乘变成 \((M/2\times2N)\cdot(2N\times d)\)，求和长度翻倍成 256，在自己的张量内存里累加出 \(M/2\times d\) 的 \(dQ\) 块。在 2-CTA 模式下，\(S\)、\(dP\)、\(dV\)、\(dK\) 四次矩阵乘用 \(M=256\) 的块，\(dQ\) 用 \(M=128\)、求和长度 \(2N=256\) 的块。</p>
+<div class="dia">
+  <div class="dia-title">示意图：2-CTA 反向里的 \(dQ\)：先用 DSMEM 交换半块 \(dS\)，再合算一条矩阵乘</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="两个线程块各有一块 dS，交换上下半块后，每块拥有一半行和两块的全部列，再与两块 K 相乘得到一半行的 dQ" style="--dg-min:760px">
+    <text x="20" y="22" class="t-sm t-b">① 交换前：各有自己 K 块的 dS</text>
+    <text x="300" y="22" class="t-sm t-b">② 经 DSMEM 交换后：按行分</text>
+    <text x="600" y="22" class="t-sm t-b">③ 一条 2-CTA 矩阵乘求 dQ</text>
+    <text x="95" y="44" class="t-c t-xs">CTA 0（K 块 j₀）</text>
+    <rect x="40" y="52" width="110" height="55" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="95" y="80" class="t-c t-xs">dS(i,j₀) 上半</text>
+    <rect x="40" y="107" width="110" height="55" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-dasharray:4 3"/><text x="95" y="135" class="t-c t-xs">dS(i,j₀) 下半</text>
+    <text x="95" y="194" class="t-c t-xs">CTA 1（K 块 j₁）</text>
+    <rect x="40" y="202" width="110" height="55" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text x="95" y="230" class="t-c t-xs">dS(i,j₁) 上半</text>
+    <rect x="40" y="257" width="110" height="55" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="95" y="285" class="t-c t-xs">dS(i,j₁) 下半</text>
+    <text x="440" y="56" class="t-c t-xs">CTA 0：上 M/2 行 × 2N 列</text>
+    <rect x="330" y="64" width="110" height="55" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="385" y="92" class="t-c t-xs">j₀ 的上半</text>
+    <rect x="440" y="64" width="110" height="55" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="495" y="92" class="t-c t-xs">j₁ 的上半</text>
+    <text x="440" y="206" class="t-c t-xs">CTA 1：下 M/2 行 × 2N 列</text>
+    <rect x="330" y="214" width="110" height="55" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="385" y="242" class="t-c t-xs">j₀ 的下半</text>
+    <rect x="440" y="214" width="110" height="55" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="495" y="242" class="t-c t-xs">j₁ 的下半</text>
+    <path class="edge" d="M150,80 C220,80 270,90 328,90"/>
+    <path class="edge" d="M150,295 C300,320 470,320 495,271"/>
+    <path class="edge sg" d="M150,230 C250,200 400,160 495,121" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <path class="edge sg" d="M150,135 C230,150 290,230 328,240" style="stroke:var(--c-tgt);marker-end:url(#ah-tgt)"/>
+    <text x="255" y="163" class="t-c t-xs" style="fill:var(--c-tgt)">DSMEM</text>
+    <text x="575" y="96" class="t-c">×</text><text x="575" y="246" class="t-c">×</text>
+    <rect class="box data" x="600" y="64" width="150" height="205" rx="6"/>
+    <text x="675" y="130" class="t-c t-sm">B = [K(j₀) ; K(j₁)]</text><text x="675" y="150" class="t-c t-xs">2N × d</text><text x="675" y="175" class="t-c t-xs">两个 CTA 各存</text><text x="675" y="192" class="t-c t-xs">其中 d/2 列</text>
+    <path class="edge" d="M752,92 L788,92"/><path class="edge" d="M752,242 L788,242"/>
+    <rect class="box reg" x="790" y="64" width="150" height="55" rx="6"/><text x="865" y="85" class="t-c t-sm">dQ(i) 上半</text><text x="865" y="104" class="t-c t-xs">M/2 × d，原子加</text>
+    <rect class="box reg" x="790" y="214" width="150" height="55" rx="6"/><text x="865" y="235" class="t-c t-sm">dQ(i) 下半</text><text x="865" y="254" class="t-c t-xs">M/2 × d，原子加</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>蓝色属于 \(K\) 块 \(j_0\)（线程块 0 持有），橙色属于 \(K\) 块 \(j_1\)（线程块 1 持有）。① 每个线程块只有自己 \(K\) 块的 \(dS\)，\(M\times N\)。② 黑色实线表示留在本地的半块，紫色虚线表示经 DSMEM 发给对方的半块（虚线框是要发走的那一半）；交换后，线程块 0 拥有两个 \(K\) 块在上半部分行上的 \(dS\)，线程块 1 拥有下半部分行。③ 每个线程块用自己的 \(M/2\times2N\) 乘以两块 \(K\) 拼成的 \(2N\times d\)，直接得到对两个 \(K\) 块求过和的那一半 \(dQ\)，再原子加到显存。本站示意图，对应 <a href="https://arxiv.org/html/2603.05451#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a>。</div>
+</div>
+<p>交换要花时间，所以 FA4 重新安排了 2-CTA 版本的流水线顺序来藏住 DSMEM 的延迟：先算本轮的 \(dP\)，再算上一轮的 \(dQ\)。因为 \(dQ\) 块（\(M/2\times d\)）足够小，可以和 \(P\) 一起放进 \(S\) 原来的那块张量内存里，所以 2-CTA 模式下 \(dP\) 和 \(dQ\) 不再共用一块空间。按这个新顺序，本轮 \(dS\) 的逐元素计算可以和上一轮的 \(dQ\) 矩阵乘同时进行。</p>
+<p><b>附带的好处：原子加减半。</b>在 1-CTA 模式下，两个线程块各自要把一整块 \(M\times d\) 的 \(dQ\) 原子加到显存；在 2-CTA 模式下，每个线程块只加 \(M/2\times d\)，而且这一半已经包含了两个 \(K\) 块的贡献。所以全局原子加的次数减半。原子加既贵（每次内层迭代都要做），又是不确定性的来源，减半是双重的收益。</p>
+<p>代价方面，原文表 3 显示，2-CTA 模式多了 384 个周期的 DSMEM 交换，但读操作数省了 512、\(dQ\) 的写读省了 512，共享内存合计从 3328 降到 2688，只比张量核的 2560 多约 5%。</p>
+<div class="note-warn"><b>需要注意的地方：</b>2-CTA 的收益在论文里是用 roofline 周期数论证的；论文的实验部分没有单独比较 1-CTA 和 2-CTA 反向的实测速度，只说反向的加速“证明了 2-CTA 反向的有效性”。另外，2-CTA 要求线程块成对启动、整个内核统一使用这种模式，在查询块很少（例如解码）的场景下，线程块成对占用 SM，未必划算。</div>
+
+<h4 id="n-4-4">4.4 确定性反向：用固定顺序换可复现</h4>
+<div class="note-pre"><b>先补一点背景：为什么原子加会让结果“不确定”。</b>
+<p>浮点加法不满足结合律。举一个 FP32 的例子：FP32 只有 24 位有效数字，\(2^{24}=16{,}777{,}216\) 加 1 之后，结果不能表示成 16,777,217，会被舍入回 16,777,216。于是 \((16777216+1)+1=16777216\)，但 \(16777216+(1+1)=16777218\)。同样几个数，加的顺序不同，结果就可能不同。</p>
+<p>全局原子加的顺序取决于哪个线程块先算完，而这每次运行都可能不一样，所以同样的输入跑两次，\(dQ\) 可能在最后几位上有差别。对普通训练这通常无所谓，但在需要严格复现的场景（例如排查训练异常、强化学习里要求训练和推理数值一致）就成了问题。本站的 <a href="../legacy/tracks/ai-infra/13-batch-invariance.html">批不变性拆解页</a> 讲了这类问题在推理端的表现。</p>
+</div>
+<p>FA4 的反向在两处有跨线程块的全局归约：一般情况下是 \(dQ\)；在分组查询注意力（GQA）下，多个查询头共用一组 \(K,V\)，\(dK\)、\(dV\) 也要跨线程块累加。论文提供了一个确定性模式，用的是标准做法：用一个信号量（semaphore）锁把全局归约串行化。每个要往同一块 \(dQ\) 上加的线程块，必须按预先规定的顺序拿到锁，做完自己的归约，再把信号量计数加一，把锁交给下一个。</p>
+<p>这种做法有两处代价：一是每次释放锁前要发一个内存栅栏（fence），确保信号量的写入对整张 GPU 可见；二是线程块要等排在它前面的线程块做完，会产生停顿。在负载不均衡时，如果线程块的顺序选得不好，停顿会非常严重。FA4 的应对是：一般情况下，在头和 batch 两个维度上做线程块的重排（swizzle，具体见第 5 节，受 L2 缓存容量的限制）；因果掩码时，还按降序启动 \(K,V\) 块，每个线程块从对角线开始按升序遍历查询块，并按查询块编号从大到小安排 \(dQ\) 的归约顺序。论文把这个顺序叫“最短处理时间优先”（SPT），它保证没有哪个线程块会在第一次写 \(dQ\) 时就被卡住。</p>
+<p>论文图 7 和图 8（附录）比较了几种顺序下确定性反向的速度（头维 128，B200）。本站从图上读出的数字如下：</p>
+<div class="table-wrap"><table>
+  <tr><th>序列长度</th><th class="num">1K</th><th class="num">2K</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th></tr>
+  <tr><td>因果：SPT 顺序</td><td class="num">470</td><td class="num">660</td><td class="num">830</td><td class="num">920</td><td class="num">940</td><td class="num">950</td></tr>
+  <tr><td>因果：LPT（m 块逆序）</td><td class="num">450</td><td class="num">600</td><td class="num">710</td><td class="num">790</td><td class="num">810</td><td class="num">830</td></tr>
+  <tr><td>因果：LPT</td><td class="num">440</td><td class="num">570</td><td class="num">670</td><td class="num">720</td><td class="num">740</td><td class="num">760</td></tr>
+  <tr><td>因果：朴素顺序，不做重排</td><td class="num">250</td><td class="num">280</td><td class="num">310</td><td class="num">350</td><td class="num">410</td><td class="num">540</td></tr>
+  <tr><td>非因果：做 batch/头重排</td><td class="num">630</td><td class="num">760</td><td class="num">840</td><td class="num">850</td><td class="num">860</td><td class="num">880</td></tr>
+  <tr><td>非因果：朴素顺序</td><td class="num">500</td><td class="num">570</td><td class="num">650</td><td class="num">730</td><td class="num">840</td><td class="num">880</td></tr>
+</table></div>
+<p class="w-note">单位 TFLOPs/s，读自原文图 7、图 8；图上的数字都是 10 的整数倍，可能是取整后的标注。</p>
+<p>因果掩码时，顺序的影响非常大：SPT 比朴素顺序快 1.8–2.7 倍（推算）。论文的结论是，确定性反向最高能达到非确定性 1-CTA 反向速度的 75%。这个比例没法从图上直接核对，因为论文没有画出 1-CTA 非确定性反向的曲线；拿第 7 节原文图 6 里的非确定性反向（论文说它体现了 2-CTA 反向的效果）对照，32K 时因果是 \(950\div1446\approx66\%\)，非因果是 \(880\div1412\approx62\%\)（推算）。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2603.05451#A1.F8" target="_blank" rel="noopener">原文图 8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 调度：最长的任务先做</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了快的内核，还要决定“哪个 SM 先算哪一块”。因果掩码和变长序列会让不同的块工作量相差很大，按默认顺序派发，会出现大部分 SM 早早干完、少数 SM 拖到最后的情况。FA4 用了一个 1969 年的经典调度结论来解决这个问题，并且照顾到了 L2 缓存。这一节对应论文 §3.3。</div>
+<div class="note-pre"><b>先补一点背景：完工时间与“最长处理时间优先”（LPT）。</b>
+<p>把一堆长短不一的任务分给几台相同的机器，每台机器空出来就去领下一个任务，所有任务做完的时刻叫<b>完工时间</b>（makespan）。领任务的顺序很重要。Graham 在 1969 年证明了一个经典结果：如果按处理时间从长到短排队（LPT，longest-processing-time-first），完工时间离最优解不会差太多；而如果长任务排在最后，很可能出现“别的机器都闲着、只有一台还在跑最后一个大任务”的局面。</p>
+<p>举个例子（本站构造）：8 个任务，长度分别是 1 到 8，交给 4 台机器。总工作量 36，理想的完工时间是 9。按 1、2、…、8 的顺序派发，最后一个长度为 8 的任务在时刻 4 才开始，完工时间是 12；按 8、7、…、1 的顺序派发，完工时间正好是 9。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：同样 8 个任务、4 个 SM，派发顺序不同，完工时间差了三分之一</div>
+  <svg class="dg" viewBox="0 0 960 250" role="img" aria-label="两张甘特图：按从短到长派发完工于 12，按从长到短派发完工于 9" style="--dg-min:720px">
+    <text x="80" y="24" class="t-sm t-b">按编号从短到长派发（因果掩码的默认顺序）</text>
+    <text x="560" y="24" class="t-sm t-b">LPT：从长到短派发</text>
+    <text x="70" y="56" class="t-r t-xs">SM 0</text><text x="70" y="91" class="t-r t-xs">SM 1</text><text x="70" y="126" class="t-r t-xs">SM 2</text><text x="70" y="161" class="t-r t-xs">SM 3</text>
+    <rect class="box enc" x="80" y="43" width="30" height="26"/><text x="95" y="56" class="t-c t-xs">1</text>
+    <rect class="box pred" x="110" y="43" width="150" height="26"/><text x="185" y="56" class="t-c t-xs">5</text>
+    <rect class="box enc" x="80" y="78" width="60" height="26"/><text x="110" y="91" class="t-c t-xs">2</text>
+    <rect class="box pred" x="140" y="78" width="180" height="26"/><text x="230" y="91" class="t-c t-xs">6</text>
+    <rect class="box enc" x="80" y="113" width="90" height="26"/><text x="125" y="126" class="t-c t-xs">3</text>
+    <rect class="box pred" x="170" y="113" width="210" height="26"/><text x="275" y="126" class="t-c t-xs">7</text>
+    <rect class="box enc" x="80" y="148" width="120" height="26"/><text x="140" y="161" class="t-c t-xs">4</text>
+    <rect class="box pred" x="200" y="148" width="240" height="26"/><text x="320" y="161" class="t-c t-xs">8</text>
+    <line x1="80" y1="186" x2="440" y2="186" style="stroke:var(--text-3)"/>
+    <text x="80" y="200" class="t-c t-xs">0</text><text x="170" y="200" class="t-c t-xs">3</text><text x="260" y="200" class="t-c t-xs">6</text><text x="350" y="200" class="t-c t-xs">9</text><text x="440" y="200" class="t-c t-xs">12</text>
+    <line x1="440" y1="36" x2="440" y2="186" style="stroke:var(--c-loss);stroke-dasharray:4 3"/><text x="440" y="222" class="t-c t-sm" style="fill:var(--c-loss)">完工于 12，SM 0–2 末尾空等</text>
+    <text x="550" y="56" class="t-r t-xs">SM 0</text><text x="550" y="91" class="t-r t-xs">SM 1</text><text x="550" y="126" class="t-r t-xs">SM 2</text><text x="550" y="161" class="t-r t-xs">SM 3</text>
+    <rect class="box pred" x="560" y="43" width="240" height="26"/><text x="680" y="56" class="t-c t-xs">8</text>
+    <rect class="box enc" x="800" y="43" width="30" height="26"/><text x="815" y="56" class="t-c t-xs">1</text>
+    <rect class="box pred" x="560" y="78" width="210" height="26"/><text x="665" y="91" class="t-c t-xs">7</text>
+    <rect class="box enc" x="770" y="78" width="60" height="26"/><text x="800" y="91" class="t-c t-xs">2</text>
+    <rect class="box pred" x="560" y="113" width="180" height="26"/><text x="650" y="126" class="t-c t-xs">6</text>
+    <rect class="box enc" x="740" y="113" width="90" height="26"/><text x="785" y="126" class="t-c t-xs">3</text>
+    <rect class="box pred" x="560" y="148" width="150" height="26"/><text x="635" y="161" class="t-c t-xs">5</text>
+    <rect class="box enc" x="710" y="148" width="120" height="26"/><text x="770" y="161" class="t-c t-xs">4</text>
+    <line x1="560" y1="186" x2="920" y2="186" style="stroke:var(--text-3)"/>
+    <text x="560" y="200" class="t-c t-xs">0</text><text x="650" y="200" class="t-c t-xs">3</text><text x="740" y="200" class="t-c t-xs">6</text><text x="830" y="200" class="t-c t-xs">9</text><text x="920" y="200" class="t-c t-xs">12</text>
+    <line x1="830" y1="36" x2="830" y2="186" style="stroke:var(--c-act);stroke-dasharray:4 3"/><text x="830" y="222" class="t-c t-sm" style="fill:var(--c-act)">完工于 9，所有 SM 同时收工</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一个 SM，方块里的数字是任务的长度（比如因果掩码下一个查询块要扫过的 \(K\) 块数），横轴是时间。规则都是“哪个 SM 先空出来，就领队列里的下一个任务”，只是队列顺序不同。左图长任务排在最后，SM 3 在时刻 4 才开始最长的任务；右图先发长任务、后用短任务补空，四个 SM 同时在时刻 9 完工。本站构造的例子，不是论文数据。</div>
+</div>
+<p><b>因果掩码下的 LPT。</b>注意力的网格通常是（查询块，头，batch）三维，按从左到右递增的顺序派发。因果掩码时，对角线以上的分数都被遮掉，第 \(i\) 个查询块只需要扫过前 \(i\) 个左右的 \(K\) 块。于是对固定的头和 batch，SM 们实际上是按从短到长的顺序在领任务，正是上图左边的低效情形。</p>
+<p>但简单地把所有任务按长度倒排也不行，因为还要考虑 L2 缓存：处理同一个（batch，头）的各个查询块要读同一份 \(K,V\)，如果它们挨着执行，\(K,V\) 能留在 L2 里反复使用；如果先把所有头的长任务都做一遍，不同头的 \(K,V\) 会超出 L2 容量，互相挤掉。FA4 的折中是：batch 永远放在最外层；把头分成若干段，每段的 \(K,V\) 不超过 L2 容量；调度器按“段内各个头 → 查询块逆序（长的先做）→ 下一段 → 下一个 batch”的顺序遍历。对 MQA 和 GQA（多个查询头共用一组 \(K,V\)），总是先把同一个 \(K,V\) 头对应的所有查询头做完，再换查询块。论文在 H200 上测得，BF16、头维 128 时，这个 LPT 顺序让多头注意力（MHA）快 4–8%，让 8 个查询头共用一组 KV 的 MQA 快 7–14%。论文强调这个思路与具体的 GPU 架构无关，在 Hopper 上也验证过对 FlashAttention-3 有提升。</p>
+<p><b>变长序列下的 LPT。</b>在一个 batch 里拼接长短不一的序列（varlen）时，负载不均衡还来自序列之间：比如解码时各请求的上下文长度不同，连续批处理时有的请求在做预填充、有的在解码。各序列的查询长度和 \(K,V\) 长度通常作为元数据存在 GPU 上，标准的 varlen 内核按 batch 编号递增地处理，这个顺序可能非常糟，例如几个短的预填充后面跟着长上下文的解码。FA4 的办法是先启动一个预处理内核，按“每个任务块的最长执行时间”给 batch 排序，写出一张“虚拟编号到真实编号”的映射表，注意力内核按这张表的顺序遍历。论文说这份元数据可以缓存复用，所以排序不带来性能损失。</p>
+<div class="note-warn"><b>需要注意的地方：</b>4–8% 和 7–14% 这两个数是在 H200 上测的，不是 B200；变长序列的 LPT 没有给出任何实测数字。第 7 节里论文把因果情形下更大的领先归功于 LPT 调度，但并没有在 B200 上做去掉 LPT 的对照。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S3.SS3" target="_blank" rel="noopener">英文原文 §3.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 语言与框架：整个内核用 Python 里的 CuTe-DSL 编写</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FlashAttention-2、3 都是 C++ 模板写的，为什么 FA4 换成了嵌在 Python 里的 CuTe-DSL？换了之后会不会失去对硬件的精细控制？编译时间省了多少，又为什么重要？这一节对应论文 §4。</div>
+<div class="note-pre"><b>先补一点背景：CUTLASS、CuTe 和“模板爆炸”。</b>
+<p>CUTLASS 是 NVIDIA 开源的高性能矩阵运算 C++ 模板库，CuTe 是它里面描述“数据怎么在内存和线程之间排布”（layout）的一套抽象。FlashAttention-2、3 都建立在它们之上。C++ 模板的特点是：每一种组合（头维、数据类型、是否因果、是否变长、是否有 dropout……）都要在编译时单独生成一个内核。为了让用户 <code>pip install</code> 之后开箱即用，就得预先编译几百个变体，编译慢，安装包也大。</p>
+<p>即时编译（JIT）则是另一种思路：等程序运行、真正知道要哪种组合时，再当场编译那一个内核。前提是单个内核的编译要足够快。</p>
+</div>
+<p>FA4 完全用 CuTe-DSL 编写，没有任何 CUDA C++ 代码。CuTe-DSL 编译器读入 Python 源码，生成 PTX（NVIDIA 的中间汇编），再由 PTX 编译器 <code>ptxas</code> 生成最终在 GPU 上执行的机器码 SASS。论文强调三点：</p>
+<ul>
+  <li><b>表达能力不打折。</b>CuTe-DSL 的编程模型和 CUTLASS C++ 是一一对应的，所以 FA4 保留了底层 GPU 编程的全部控制力，只是把元编程从 C++ 模板换成了 Python。它还允许直接嵌入 PTX 作为“逃生通道”：FA4 就为一些 CuTe-DSL 暂时还没封装好的操作写了自定义的 PTX 序列（第 3.3 节软件指数的整数拼接就是这样写的）。</li>
+  <li><b>编译快得多。</b>论文表 4 比较了单个内核的编译时间：</li>
+</ul>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th class="num">前向</th><th class="num">反向</th></tr>
+  <tr><td>FlashAttention-3（C++ 模板）</td><td class="num">55 秒</td><td class="num">45 秒</td></tr>
+  <tr><td>FlashAttention-4（CuTe-DSL）</td><td class="num">2.5 秒</td><td class="num">1.4 秒</td></tr>
+  <tr><td>倍数</td><td class="num">22×</td><td class="num">32×</td></tr>
+</table></div>
+<ul>
+  <li><b>灵活、门槛低。</b>论文举例说，已经有开发者在 FA4 之上实现了 FlexAttention 和块稀疏注意力的变体，没有修改核心框架；只有几个月 GPU 编程经验的研究者和工程师也能做出有意义的扩展。作者的目标是把块稀疏模式、掩码策略、变长序列、任务调度这些功能做成互相独立、可以自由组合的基本部件，让所有基于这个框架的注意力变体都能共享优化。</li>
+</ul>
+<div class="note-warn"><b>读的时候要注意：</b>“20–30 倍”比较的是单个内核从源码到机器码的时间，而且两边不是同一个内核（FlashAttention-3 是 Hopper 内核，FA4 主要是 Blackwell 内核）。即时编译并没有让编译消失，而是把它挪到了第一次调用的时候：第一次遇到某种形状或配置，程序要先等几秒编译。对训练这无关紧要，对延迟敏感的在线服务则需要预热或缓存（本站的提醒）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 实验：B200 上快了多少，和谁比</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>FA4 在 B200 上的前向和反向分别能跑到多少 TFLOPs/s？“比 cuDNN 9.13 快 1.3 倍”是在什么形状、什么掩码下测出来的？同一张图里更新的 cuDNN 9.19 又是什么水平？MLSys 正式版补的消融实验说明了哪项技术最值钱？最后，这些数字能支持多强的结论？</div>
+
+<h4 id="n-7-1">7.1 实验设置</h4>
+<p><b>对手。</b>论文比较了 PyTorch 的标准实现、FlashAttention-2（2.8.3 版）、Triton（3.6 版，论文说它用上了 B200 专用指令）、Gluon（Triton 团队推出的更底层的 GPU 编程语言，控制比 Triton 更精细）以及 cuDNN（NVIDIA 为 B200 优化的闭源库）。FlashAttention-3 不能在 B200 上运行，所以不在其中。cuDNN 比了两个版本：正文结论用的 9.13.0，以及写作时最新的 9.19.1.2。</p>
+<p><b>形状。</b>只测 BF16 输入；分有无因果掩码；头维取 64、128 和 (192, 128)；序列长度取 1K、2K、……、32K，batch 大小随之调整，让总 token 数固定为 32K；隐藏维度 2048，所以头维 64 时 32 个头，头维 128 时 16 个头。(192, 128) 指查询和键的头维是 192、值的头维是 128，用 16 个头，这是 DeepSeek-V3 的配置：它的 MLA 在预填充时，每个头的查询和键由 128 维的普通部分和 64 维的 RoPE 部分拼成（见 <a href="deepseek-v3.html">DeepSeek-V3 精读</a>）。</p>
+<p><b>怎么算 TFLOPs/s。</b>前向的运算量按 \(4\cdot N^{2}\cdot d\cdot h\) 计算（\(N\) 序列长度，\(d\) 头维，\(h\) 头数，再乘 batch 大小）；因果掩码时除以 2，因为大约只有一半分数需要算；反向按前向的 2.5 倍算（前向 2 次矩阵乘，反向 5 次）。同一个公式用于所有实现，所以各实现之间的比较是公平的。</p>
+<p><b>环境（附录 A）。</b>每个配置先预热 5 次，再重复 10 次取平均。软件版本：CUDA 13.1、PyTorch 2.10.0、CuTe-DSL 4.4.1。测试卡在 arXiv v1 的附录里写成 “B100 180GB SXM6 (1000W)”，MLSys 正式版改成了 “B200 180GB SXM6 (1000W)”，以正式版为准。附录还说明，从 cuDNN 9.13、9.14 起，作者就和 cuDNN 团队合作，把 FA4 的部分技巧吸收进了 cuDNN。</p>
+
+<h4 id="n-7-2">7.2 前向：比 cuDNN 9.13 快，和 cuDNN 9.19 持平</h4>
+<p>论文的结论是：前向比 cuDNN 9.13 快 1.1–1.3 倍，比 Triton 快 2.1–2.7 倍；在 4K 及以上的中长序列上，FA4 在各种头维和掩码设置下都超过所有对手；因果掩码时领先更多，作者归功于 LPT 调度。最高 1613 TFLOPs/s，约为 2.25 PFLOPs/s 的 71%（推算：71.7%）。下表是本站从原文图 4、图 5 读出的数字：</p>
+<div class="table-wrap"><table>
+  <tr><th>前向，头维 128（TFLOPs/s）</th><th class="num">1K</th><th class="num">2K</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th></tr>
+  <tr><td colspan="7"><b>非因果</b></td></tr>
+  <tr><td>FlashAttention-2</td><td class="num">383</td><td class="num">406</td><td class="num">420</td><td class="num">427</td><td class="num">430</td><td class="num">432</td></tr>
+  <tr><td>Triton 3.6</td><td class="num">507</td><td class="num">594</td><td class="num">648</td><td class="num">676</td><td class="num">695</td><td class="num">703</td></tr>
+  <tr><td>Gluon 3.6</td><td class="num">1060</td><td class="num">1147</td><td class="num">1198</td><td class="num">1226</td><td class="num">1242</td><td class="num">1250</td></tr>
+  <tr><td>cuDNN 9.13.0</td><td class="num">1157</td><td class="num">1328</td><td class="num">1413</td><td class="num">1460</td><td class="num">1488</td><td class="num">1517</td></tr>
+  <tr><td>cuDNN 9.19.1.2</td><td class="num">1346</td><td class="num">1474</td><td class="num">1552</td><td class="num">1585</td><td class="num">1609</td><td class="num">1613</td></tr>
+  <tr><td><b>FA4</b></td><td class="num"><b>1355</b></td><td class="num"><b>1468</b></td><td class="num"><b>1532</b></td><td class="num"><b>1579</b></td><td class="num"><b>1601</b></td><td class="num"><b>1613</b></td></tr>
+  <tr><td colspan="7"><b>因果</b></td></tr>
+  <tr><td>FlashAttention-2</td><td class="num">292</td><td class="num">343</td><td class="num">375</td><td class="num">395</td><td class="num">404</td><td class="num">408</td></tr>
+  <tr><td>Triton 3.6</td><td class="num">351</td><td class="num">455</td><td class="num">546</td><td class="num">609</td><td class="num">647</td><td class="num">670</td></tr>
+  <tr><td>Gluon 3.6</td><td class="num">638</td><td class="num">824</td><td class="num">938</td><td class="num">982</td><td class="num">1023</td><td class="num">1037</td></tr>
+  <tr><td>cuDNN 9.13.0</td><td class="num">717</td><td class="num">929</td><td class="num">1076</td><td class="num">1168</td><td class="num">1285</td><td class="num">1266</td></tr>
+  <tr><td>cuDNN 9.19.1</td><td class="num">822</td><td class="num">1103</td><td class="num">1295</td><td class="num">1430</td><td class="num">1509</td><td class="num">1540</td></tr>
+  <tr><td><b>FA4</b></td><td class="num"><b>744</b></td><td class="num"><b>1053</b></td><td class="num"><b>1279</b></td><td class="num"><b>1426</b></td><td class="num"><b>1526</b></td><td class="num"><b>1576</b></td></tr>
+  <tr><td colspan="7"><b>因果，头维 (192, 128)</b></td></tr>
+  <tr><td>cuDNN 9.13.0</td><td class="num">769</td><td class="num">999</td><td class="num">1167</td><td class="num">1276</td><td class="num">1375</td><td class="num">1382</td></tr>
+  <tr><td>cuDNN 9.19.1.2</td><td class="num">860</td><td class="num">1133</td><td class="num">1311</td><td class="num">1415</td><td class="num">1515</td><td class="num">1563</td></tr>
+  <tr><td><b>FA4</b></td><td class="num"><b>812</b></td><td class="num"><b>1121</b></td><td class="num"><b>1357</b></td><td class="num"><b>1506</b></td><td class="num"><b>1600</b></td><td class="num"><b>1654</b></td></tr>
+</table></div>
+<p class="w-note">单位 TFLOPs/s，B200，BF16，总 token 数 32K，读自原文图 4（头维 128）和图 5（头维 (192, 128)）柱子上标注的数字。</p>
+<p>把这些数字换算成倍数（推算），能看到几件论文正文没有明说的事：</p>
+<ul>
+  <li><b>对 cuDNN 9.13：</b>非因果时 FA4 快 1.06–1.17 倍，因果时快 1.04–1.25 倍，(192, 128) 因果快 1.06–1.20 倍。所以“1.1–1.3 倍”是一个取整后偏宽松的说法，按图上的数字，前向最大约 1.25 倍，最小只有 1.04 倍（因果、1K）。</li>
+  <li><b>对 cuDNN 9.19：</b>非因果时两者几乎完全一样（0.99–1.01 倍）；因果时 FA4 在 16K、32K 略快（1.01、1.02 倍），在 1K、2K 反而慢 5–10%（0.90、0.95 倍）；(192, 128) 时 0.94–1.06 倍。也就是说，吸收了 FA4 技巧的新版 cuDNN 已经追平了 FA4 的前向，短序列因果时还略胜一筹。图 4 的图注承认了这一点。</li>
+  <li><b>对 Triton 和 Gluon：</b>对 Triton 是 2.12–2.67 倍，和论文的 2.1–2.7 倍一致；对更底层、能表达 warp 专业化等细节的 Gluon，差距小得多：非因果 1.28–1.29 倍，因果 1.17–1.52 倍。</li>
+  <li><b>对 FlashAttention-2：</b>3.5–3.9 倍。FlashAttention-2 是为 A100 写的，在 B200 上只能用旧的矩阵乘指令，这个差距主要反映“没有用上 Blackwell 的新硬件”，不是什么公平的较量。</li>
+  <li><b>(192, 128) 的绝对值要小心：</b>FA4 在这个配置下标到 1654 TFLOPs/s，比头维 128 的“最高 1613”还高。原因多半在运算量的算法：公式里的“头维”取 192 还是查询、值两个头维的平均（160），论文没有说明；如果用 192，就会高估约 20%（推算）。不过 FA4 和 cuDNN 用的是同一个公式，两者之间的倍数仍然可比。</li>
+</ul>
+
+<h4 id="n-7-3">7.3 反向：领先保持得更久</h4>
+<p>论文对反向只说了一句结论：FA4 在长序列和因果掩码下都有一致的加速，证明了 2-CTA 反向的有效性。下表是从原文图 6 读出的数字：</p>
+<div class="table-wrap"><table>
+  <tr><th>反向，头维 128（TFLOPs/s）</th><th class="num">1K</th><th class="num">2K</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th></tr>
+  <tr><td colspan="7"><b>非因果</b></td></tr>
+  <tr><td>FlashAttention-2</td><td class="num">295</td><td class="num">333</td><td class="num">357</td><td class="num">374</td><td class="num">381</td><td class="num">386</td></tr>
+  <tr><td>cuDNN 9.13.0</td><td class="num">857</td><td class="num">1016</td><td class="num">1116</td><td class="num">1171</td><td class="num">1212</td><td class="num">1107</td></tr>
+  <tr><td>cuDNN 9.19.1.2</td><td class="num">928</td><td class="num">1108</td><td class="num">1231</td><td class="num">1300</td><td class="num">1280</td><td class="num">1274</td></tr>
+  <tr><td><b>FA4</b></td><td class="num"><b>936</b></td><td class="num"><b>1166</b></td><td class="num"><b>1331</b></td><td class="num"><b>1430</b></td><td class="num"><b>1457</b></td><td class="num"><b>1412</b></td></tr>
+  <tr><td colspan="7"><b>因果</b></td></tr>
+  <tr><td>FlashAttention-2</td><td class="num">208</td><td class="num">252</td><td class="num">295</td><td class="num">323</td><td class="num">341</td><td class="num">355</td></tr>
+  <tr><td>cuDNN 9.13.0</td><td class="num">543</td><td class="num">732</td><td class="num">893</td><td class="num">1008</td><td class="num">1085</td><td class="num">1142</td></tr>
+  <tr><td>cuDNN 9.19.1</td><td class="num">651</td><td class="num">894</td><td class="num">1090</td><td class="num">1218</td><td class="num">1293</td><td class="num">1337</td></tr>
+  <tr><td><b>FA4</b></td><td class="num"><b>614</b></td><td class="num"><b>887</b></td><td class="num"><b>1102</b></td><td class="num"><b>1284</b></td><td class="num"><b>1402</b></td><td class="num"><b>1446</b></td></tr>
+</table></div>
+<p class="w-note">单位 TFLOPs/s（按前向运算量的 2.5 倍计算），读自原文图 6。图里没有 Triton 和 Gluon 的反向。</p>
+<p>推算下来：对 cuDNN 9.13，反向快 1.09–1.29 倍（因果 32K 的 1.27 倍、16K 的 1.29 倍是全文对 cuDNN 9.13 最大的领先，比前向还大）；对 cuDNN 9.19，非因果快 1.01–1.14 倍，因果在 1K 慢约 6%、2K 持平、4K 以上快 1–8%。也就是说，在反向上 FA4 对新版 cuDNN 仍保持着可观的优势。反向的最高值 1457 TFLOPs/s 约为峰值的 65%（推算），比前向低，符合第 4 节“反向被共享内存拖累”的分析。</p>
+<div class="dia">
+  <div class="dia-title">示意图：FA4 相对两个版本 cuDNN 的速度倍数（因果掩码，头维 128；数字由原文图 4、图 6 推算）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="折线图：相对 cuDNN 9.13 的倍数在 1.04 到 1.29 之间，相对 cuDNN 9.19 的倍数在 0.9 到 1.08 之间" style="--dg-min:720px">
+    <line x1="100" y1="260" x2="880" y2="260" style="stroke:var(--border);stroke-width:1"/>
+    <line x1="100" y1="180" x2="880" y2="180" style="stroke:var(--border);stroke-width:1"/>
+    <line x1="100" y1="140" x2="880" y2="140" style="stroke:var(--border);stroke-width:1"/>
+    <line x1="100" y1="100" x2="880" y2="100" style="stroke:var(--border);stroke-width:1"/>
+    <line x1="100" y1="220" x2="880" y2="220" style="stroke:var(--text-3);stroke-width:1.2;stroke-dasharray:5 4"/>
+    <text x="90" y="260" class="t-r t-xs">0.9×</text><text x="90" y="220" class="t-r t-xs">1.0×</text><text x="90" y="180" class="t-r t-xs">1.1×</text><text x="90" y="140" class="t-r t-xs">1.2×</text><text x="90" y="100" class="t-r t-xs">1.3×</text>
+    <text x="886" y="220" class="t-xs">持平</text>
+    <text x="100" y="290" class="t-c t-xs">1K</text><text x="256" y="290" class="t-c t-xs">2K</text><text x="412" y="290" class="t-c t-xs">4K</text><text x="568" y="290" class="t-c t-xs">8K</text><text x="724" y="290" class="t-c t-xs">16K</text><text x="880" y="290" class="t-c t-xs">32K</text>
+    <text x="490" y="312" class="t-c t-xs">序列长度（总 token 数固定为 32K）</text>
+    <polyline points="100,204.8 256,166.8 412,144.4 568,131.6 724,144.8 880,122" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+    <polyline points="100,258 256,238 412,224.8 568,221.2 724,215.6 880,210.8" style="fill:none;stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:7 5"/>
+    <polyline points="100,167.6 256,135.2 412,126.4 568,110.4 724,103.2 880,113.6" style="fill:none;stroke:var(--c-pred);stroke-width:2.5"/>
+    <polyline points="100,242.8 256,223.2 412,215.6 568,198.4 724,186.4 880,187.6" style="fill:none;stroke:var(--c-pred);stroke-width:2.5;stroke-dasharray:7 5"/>
+    <line x1="110" y1="30" x2="140" y2="30" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="148" y="30" class="t-sm">前向，对 cuDNN 9.13</text>
+    <line x1="110" y1="52" x2="140" y2="52" style="stroke:var(--c-enc);stroke-width:2.5;stroke-dasharray:7 5"/><text x="148" y="52" class="t-sm">前向，对 cuDNN 9.19.1</text>
+    <line x1="470" y1="30" x2="500" y2="30" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="508" y="30" class="t-sm">反向，对 cuDNN 9.13</text>
+    <line x1="470" y1="52" x2="500" y2="52" style="stroke:var(--c-pred);stroke-width:2.5;stroke-dasharray:7 5"/><text x="508" y="52" class="t-sm">反向，对 cuDNN 9.19.1</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>纵轴是 FA4 的 TFLOPs/s 除以 cuDNN 的 TFLOPs/s，高于虚线表示 FA4 更快。实线是对论文标题结论所用的 cuDNN 9.13，虚线是对同一张图里更新的 cuDNN 9.19.1。蓝色是前向，橙色是反向。实线都在 1.0 以上，说明对 9.13 的领先是真实的；蓝色虚线贴着 1.0，说明新版 cuDNN 在前向上已经追平；橙色虚线在长序列上仍高出 5–8%，说明反向的领先保持得更久。本站根据原文图 4、图 6 的标注数字重画的简化图表。</div>
+</div>
+<p>确定性反向的结果已经在第 4.4 节讲过。</p>
+
+<h4 id="n-7-4">7.4 MLSys 正式版的消融：哪项技术最值钱</h4>
+<p>arXiv v1 没有消融实验；MLSys 正式版的附录 B 补了一组前向消融，固定头维 128、16 个查询头和 16 个 KV 头、总 token 数 32K（例如序列长度 2048、batch 16），分别关掉一项技术看吞吐的变化。“q-stage 1”指每个线程块只处理一个查询块（即不做两个查询块的乒乓），“不模拟指数”指全部用 <code>MUFU.EX2</code>，“总是重缩放”指关掉条件重缩放：</p>
+<div class="table-wrap"><table>
+  <tr><th>序列长度</th><th class="num">2K</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th></tr>
+  <tr><td colspan="6"><b>非因果</b></td></tr>
+  <tr><td>默认配置</td><td class="num">1379.2</td><td class="num">1466.0</td><td class="num">1507.5</td><td class="num">1561.0</td><td class="num">1563.7</td></tr>
+  <tr><td>q-stage 1（不乒乓）</td><td class="num">993.5</td><td class="num">1019.8</td><td class="num">1035.1</td><td class="num">1038.8</td><td class="num">1013.2</td></tr>
+  <tr><td>不模拟指数</td><td class="num">1333.8</td><td class="num">1400.2</td><td class="num">1428.9</td><td class="num">1447.4</td><td class="num">1360.7</td></tr>
+  <tr><td>总是重缩放</td><td class="num">1290.0</td><td class="num">1336.9</td><td class="num">1351.6</td><td class="num">1366.2</td><td class="num">1288.0</td></tr>
+  <tr><td colspan="6"><b>因果</b></td></tr>
+  <tr><td>默认配置</td><td class="num">1033.3</td><td class="num">1260.6</td><td class="num">1401.0</td><td class="num">1496.4</td><td class="num">1544.6</td></tr>
+  <tr><td>q-stage 1（不乒乓）</td><td class="num">677.1</td><td class="num">812.8</td><td class="num">908.2</td><td class="num">960.9</td><td class="num">989.3</td></tr>
+  <tr><td>不模拟指数</td><td class="num">1022.6</td><td class="num">1240.7</td><td class="num">1380.9</td><td class="num">1461.7</td><td class="num">1501.4</td></tr>
+  <tr><td>总是重缩放</td><td class="num">964.4</td><td class="num">1154.4</td><td class="num">1272.7</td><td class="num">1313.3</td><td class="num">1372.0</td></tr>
+</table></div>
+<p class="w-note">单位 TFLOPs/s，前向，B200，取自 MLSys 2026 正式版附录 B 的表 5–12。</p>
+<p>换算成相对默认配置的变化（推算）：</p>
+<ul>
+  <li><b>两个查询块的乒乓最关键。</b>只用一个查询块时，吞吐只剩默认配置的 64–72%，非因果停在约 1000 TFLOPs/s，约为峰值的 45%。这和第 2.5 节的分析对得上：头维 128 时矩阵乘和指数一样长，如果两者基本不能重叠，张量核的利用率上限就是 50%。</li>
+  <li><b>条件重缩放其次。</b>总是重缩放时，吞吐下降 6–18%，而且序列越长下降越多（非因果 32K 时下降约 18%）。</li>
+  <li><b>软件指数的收益最小，而且依赖设置。</b>非因果时关掉它，吞吐下降 3–13%，32K 时最明显；因果时只下降 1–3%。官方代码在因果时也用了更低的模拟比例（第 3.3 节），两者是一致的。</li>
+</ul>
+<p>需要注意，消融里“默认配置”的数字（非因果 32K 为 1563.7）和图 4 里同一设置的 1613 并不相同，说明它们是不同时间、不同软件状态下的测量；消融只用来比较同一组测量内部的相对变化。</p>
+
+<h4 id="n-7-5">7.5 结果的份量</h4>
+<p>把上面的数字放回测量条件里，可以这样看待它们：</p>
+<ul>
+  <li><b>对手是谁，是否最强。</b>标题结论里的对手 cuDNN 9.13 是 NVIDIA 为 B200 优化的闭源库，可以算当时最强的对手；但 FA4 的代码从 2025 年年中起就公开了，cuDNN 随后吸收了它的技巧（附录 A；cuDNN 9.15 的发行说明写明部分优化“受 flash attention v4 启发”）。所以“比 cuDNN 9.13 快 1.3 倍”衡量的主要是“有这些技巧”和“还没有这些技巧”之间的差距。同一张图里的 cuDNN 9.19 才是论文发表时的最强对手：前向基本持平，反向 FA4 在长序列上领先最多约 14%。cuDNN 是闭源的，我们无法知道它具体采用了哪些技巧，两者也不是独立的工作。FlashAttention-2 在 B200 上没有用新硬件，拿它对比意义不大；Triton 的 2.1–2.7 倍说明通用编译器还写不出这种流水线，而更底层的 Gluon 已经把差距缩小到 1.2–1.5 倍。</li>
+  <li><b>硬件条件。</b>所有数字来自一张 B200（1000 W 的 SXM6 版本），论文没有说明是否锁定了频率（FlashAttention-3 当年锁在 1830 MHz），而 71% 这个利用率是按 1850 MHz 推出的 2.25 PFLOPs/s 计算的。没有 GB200 或 B300 的结果；B300 的指数单元翻了倍，第 3 节的瓶颈分析在那里会变（官方代码在 B300 上已经关掉了软件指数）。LPT 调度的 4–14% 是在 H200 上测的。</li>
+  <li><b>测的是什么。</b>全部是单个注意力算子的 TFLOPs/s，前向和反向分开测，总 token 数固定为 32K、隐藏维度 2048，属于训练和长上下文预填充的形状；没有端到端的训练或推理吞吐，没有解码（每次只有一个查询 token，瓶颈在读 KV 缓存）的测量，也没有变长序列的测量。设置里列了头维 64，但论文没有给出任何头维 64 的图；文字里列了 PyTorch 标准实现，图里也没有它。</li>
+  <li><b>精度。</b>只测了 BF16，没有 FP8。软件指数和条件重缩放都改变了实际执行的运算，论文用表 2（多项式单独的误差）和数学论证说明它们数值上安全，但没有像 FlashAttention-3 那样报告整个注意力输出相对参考实现的误差。</li>
+  <li><b>消融覆盖面。</b>只有 MLSys 正式版有消融，而且只覆盖前向的三项技术、一种头维；反向的张量内存流水线、2-CTA 模式都只有 roofline 周期数的论证，没有实测对照。确定性反向“最高达到非确定性 1-CTA 版的 75%”无法从图上核对，作者博客写的是“约 85–90%”，两者也不一致。</li>
+  <li><b>说法与数字的对应。</b>引言里“共享内存和指数比矩阵乘多 25–60%”在正文表格里找不到对应；“前向比 cuDNN 9.13 快 1.1–1.3 倍”按图上数字是 1.04–1.25 倍；作者博客写的最高值是 1605 TFLOPs/s，论文是 1613。这些出入都不大，但说明标题数字最好按图上的具体设置去引用。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a> · <a href="https://arxiv.org/html/2603.05451#A1" target="_blank" rel="noopener">附录 A ↗</a> · <a href="https://proceedings.mlsys.org/paper_files/paper/2026/file/ae8b0b5838ba510daff1198474e7b984-Paper-Conference.pdf" target="_blank" rel="noopener">MLSys 正式版 PDF（附录 B 消融）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 讨论与结论，以及两个版本的差别</h3>
+<p>论文的结论是：在“非对称扩展”的硬件上，张量核快到让共享内存流量和指数吞吐成了主要瓶颈，这要求算法和内核协同设计。FA4 围绕完全异步的矩阵乘重新设计流水线，让 softmax 和更大块的矩阵乘重叠；用软件模拟指数和条件重缩放减少非矩阵乘运算；用张量内存和 2-CTA 模式减少共享内存流量，并借 2-CTA 重组全局原子累加，把原子加的次数减半；整个实现用 CuTe-DSL 编写，在保留底层控制的同时把编译时间缩短了 20–30 倍。作者最后说，虽然这些技术是为 Blackwell 优化的，但只要算力继续跑在非矩阵乘单元前面，其中一部分算法也能推广到其他加速器上。</p>
+<p>这篇论文有两个公开版本，内容基本相同，差别如下：</p>
+<div class="table-wrap"><table>
+  <tr><th>项目</th><th>arXiv v1（2026-03-05）</th><th>MLSys 2026 正式版</th></tr>
+  <tr><td>作者</td><td>6 位，含 NVIDIA 的 Timmy Liu</td><td>5 位，没有 Timmy Liu</td></tr>
+  <tr><td>附录 A 的测试卡</td><td>B100 180GB SXM6 (1000W)</td><td>B200 180GB SXM6 (1000W)</td></tr>
+  <tr><td>消融实验</td><td>无</td><td>附录 B：表 5–12（第 7.4 节）</td></tr>
+  <tr><td>引言里的集成计划</td><td>正在集成到常用的库</td><td>点名 PyTorch 和 Megatron-LM</td></tr>
+  <tr><td>图的编号</td><td>图 5 是 (192, 128) 前向，图 6 是反向</td><td>图 5 是反向，图 6 是 (192, 128) 前向</td></tr>
+  <tr><td>标题数字</td><td colspan="2">相同：最高 1613 TFLOPs/s（71%），对 cuDNN 9.13 最多 1.3 倍、对 Triton 最多 2.7 倍，编译快 20–30 倍</td></tr>
+</table></div>
+<div class="note-warn"><b>一处明显的笔误：</b>两个版本的附录 A 都写着软件版本取自“写作时（2025 年 3 月）”的最新版。这和论文自己的说法矛盾：附录同时说 cuDNN 从 9.13、9.14 起才开始吸收 FA4 的技巧，而 FA4 的代码 2025 年年中才公开（作者博客）。所以这里应当是 2026 年 3 月（本站判断）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2603.05451#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">9 后来怎么样了</h3>
+<p><b>代码比论文早。</b>FA4 和前几代不同，代码先于论文公开。按作者博客的说法，代码在论文发表约 8 个月前（2025 年年中）就放进了官方仓库；2025 年 8 月 Tri Dao 在 Hot Chips 上展示了初步结果；2025 年 9 月 26 日，Modal 团队在还没有技术报告的情况下，直接读源码写了一篇《We reverse-engineered Flash Attention 4》，讲清了软件指数和条件重缩放这两个技巧，并转述了“比 cuDNN 快约 20%”的初步数字。论文在 2026 年 3 月 5 日上 arXiv，2026 年 5 月在 MLSys 2026 上作口头报告（另有海报）。</p>
+<p><b>技巧进入了 NVIDIA 的官方库。</b>cuDNN 9.15.0 的发行说明写道，16 位输入的 SDPA 做了进一步优化，“部分受 flash attention v4 启发”，默认设置是 <code>CUDNN_RESCALE_THRESHOLD=8</code> 和 <code>CUDNN_USE_EX2_EMULATION=1</code>，也就是第 3.3、3.4 节的两个算法改动，连阈值 8 都一样。论文附录说合作从 9.13、9.14 开始，发行说明里则从 9.15 起才明确提到。第 7 节看到的“新版 cuDNN 前向追平 FA4”，就是这个结果。</p>
+<p><b>被框架和推理引擎采用。</b>以下均为各项目官方文档或博客的说法（2026-10-20 查看）：</p>
+<ul>
+  <li><b>PyTorch FlexAttention</b>：2026 年 3 月的博客《FlexAttention + FlashAttention-4: Fast and Flexible》介绍了基于 FA4 的 Flash 后端（<code>BACKEND: "FLASH"</code>），把用户写的分数修改函数自动生成为 CuTe-DSL 代码，内联进 FA4 的流水线。博客报告在 GB200 上前向比原来的 Triton 实现快 1.6–3.2 倍、反向快 1.85–2.3 倍；也提到一个限制：由于每个线程块处理两个查询块，Blackwell 上块稀疏的最小粒度是 256×128。第 6 节说的“有人在 FA4 之上做了 FlexAttention”，指的就是这项工作。</li>
+  <li><b>vLLM</b>：注意力后端文档（v0.19）写明，FlashAttention 后端在 SM100 及以上（Blackwell）默认用 FA4，在 Hopper 上用 FA3，可用 <code>--attention-config.flash_attn_version</code> 指定。</li>
+  <li><b>SGLang</b>：提供 <code>fa4</code> 注意力后端，支持 Hopper 和 Blackwell 上的预填充和解码，但不是自动选择的默认后端，需要显式指定。</li>
+</ul>
+<p><b>代码本身的演进。</b>截至 2026-10-20，官方仓库的 <code>flash_attn/cute</code> 目录已经远超论文描述的范围，可以用 <code>pip install flash-attn-4</code> 安装，README 写的是同时面向 Hopper 和 Blackwell。目录里能看到 SM90（Hopper）、SM100（B200）和 SM120（消费级 Blackwell）的前向与反向文件，MLA 专用内核，分页 KV 缓存，块稀疏，头维 256 的 2-CTA 反向，以及 FP8 前向的调参表。前向在非因果等情况下也会启用 2-CTA 矩阵乘（<code>interface.py</code> 的选择逻辑），这正好对付第 3.1 节表 1 里大块时 \(K,V\) 被重复读取的问题。最能说明问题的是 B300（SM103）的配置：代码在那里关掉了软件指数（注释说 SM103 有更快的原生指数），并直接用张量内存读取指令在硬件里求行最大值。硬件一补上短板，对应的软件技巧就退场了，“非对称扩展”的分析是随硬件代际变化的。</p>
+<p><b>独立复现。</b>到 2026 年 10 月，本站没有找到对论文全部数字的独立第三方复测。Modal 的文章是对源码的解读；PyTorch 博客的数字是 FlexAttention 后端的，不是 FA4 本身的标准注意力。</p>
+<div class="dia">
+  <div class="dia-title">示意图：FlashAttention 四代各自面对的瓶颈</div>
+  <div class="dia-flow"><span class="dia-box enc">FA1 · 2022<small>A100；显存读写；分块 + 在线 softmax + 反向重算</small></span><span class="dia-arrow">→</span><span class="dia-box enc">FA2 · 2023<small>A100；线程分工；沿序列并行，减少非矩阵乘运算</small></span><span class="dia-arrow">→</span><span class="dia-box enc">FA3 · 2024<small>H100；同步执行；warp 专业化、乒乓、FP8</small></span><span class="dia-arrow">→</span><span class="dia-box pred">FA4 · 2026<small>B200；指数单元与共享内存；TMEM 流水、软件指数、条件重缩放、2-CTA</small></span></div>
+  <div class="dia-note"><b>怎么看：</b>按时间排列四代（年份为 arXiv 首版），橙色是本页的论文。每个方框写了主要面向的 GPU、那一代的瓶颈和主要手段。注意力的数学从第一代起没有变过；变的是“同一套计算在新硬件上卡在哪个部件”。前三代的瓶颈都在“怎么把张量核喂饱”，到 FA4，张量核反而不再是最慢的部件。本站示意图。</div>
+</div>
+<p>想看 FA4 的可交互架构图和配套简答题，见<a href="../legacy/tracks/ai-infra/22-flash-attention-4.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v1）。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及论文和项目博客本身。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Ted Zadouri</b>（共同一作）<div class="aff">Princeton University；Together AI</div>MLSys 正式版写明所在单位为普林斯顿大学计算机系。2025 年与 Tri Dao 等发表 “Hardware-Efficient Attention for Fast Decoding”（arXiv 2505.21487，提出 GTA 与 GLA，任第一作者）；2023 年以第一作者发表参数高效的 MoE 指令微调工作（arXiv 2309.05444）。</div>
+  <div class="author-card"><b>Markus Hoehnerbach</b>（共同一作）<div class="aff">Meta</div>PyTorch 博客《FlexAttention + FlashAttention-4》的致谢把他列为 FA4 内核扩展点与 PyTorch Inductor 端（下降与 CuTe-DSL 代码生成）的贡献者。</div>
+  <div class="author-card"><b>Jay Shah</b>（共同一作）<div class="aff">Colfax Research</div>FlashAttention-3 的共同一作（见 <a href="flashattention-3.html#authors">FlashAttention-3 精读</a>）。</div>
+  <div class="author-card"><b>Timmy Liu</b><div class="aff">NVIDIA</div>仅出现在 arXiv v1 的署名中。</div>
+  <div class="author-card senior"><b>Vijay Thakkar</b><div class="aff">Meta；Georgia Tech（本文署名）</div>FlashAttention-3 署名时在 NVIDIA，是 CUTLASS 3 的主要作者之一（见 <a href="flashattention-3.html#authors">FlashAttention-3 精读</a>）。</div>
+  <div class="author-card senior"><b>Tri Dao</b><div class="aff">普林斯顿大学计算机系助理教授；Together AI 联合创始人兼首席科学家</div>FlashAttention 系列的主要作者，也是 Mamba 的作者之一。详见 <a href="flashattention.html#authors">FlashAttention 精读页</a>。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：MLSys 2026，口头报告（<a href="https://mlsys.org/virtual/2026/oral/3759" target="_blank" rel="noopener">会议页面</a>，2026-05-22），另有海报；<a href="https://proceedings.mlsys.org/paper_files/paper/2026/file/ae8b0b5838ba510daff1198474e7b984-Paper-Conference.pdf" target="_blank" rel="noopener">正式版 PDF</a>。</li>
+  <li><b>开源</b>：代码在 <a href="https://github.com/Dao-AILab/flash-attention/tree/main/flash_attn/cute" target="_blank" rel="noopener">Dao-AILab/flash-attention 的 flash_attn/cute 目录</a>，与 FA1–FA3 共用一个仓库；该仓库截至 2026-10-20 有 25,163 个 star、3,175 个 fork，BSD-3-Clause 许可；PyPI 包名 <code>flash-attn-4</code>。作者博客：<a href="https://tridao.me/blog/2026/flash4/" target="_blank" rel="noopener">tridao.me</a>。</li>
+  <li><b>采用</b>：cuDNN 9.15 起默认启用同类的条件重缩放与软件指数；PyTorch FlexAttention 的 Flash 后端建立在 FA4 之上；vLLM 在 Blackwell 上默认使用 FA4，SGLang 提供可选的 <code>fa4</code> 后端（见上一节，均为 2026-10-20 查看的官方文档）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="flashattention-3.html">FlashAttention-3</a>、<a href="flashattention.html">FlashAttention</a></li>
+  <li><a href="../legacy/tracks/ai-infra/22-flash-attention-4.html">FlashAttention-4 拆解</a>：Blackwell 上的瓶颈转移、前向流水线图、软件指数与条件重缩放、简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 1 / 2 / 3 结构拆解</a>：可交互的前向流程图、三代对比。</li>
+  <li><a href="../legacy/tracks/ai-infra/13-batch-invariance.html">批不变性拆解</a>：浮点累加顺序为什么会让结果不可复现（对应第 4.4 节）。</li>
+  <li><a href="../legacy/tracks/ai-infra/02-flashinfer.html">FlashInfer 拆解</a>：面向推理服务的注意力内核库，同样走即时编译的路线。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>：roofline、预填充与解码的访存特性。</li>
+  <li><a href="../legacy/tracks/ai-infra/index.html">AI Infra 路线（旧版）</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2603.05451" target="_blank" rel="noopener">arXiv:2603.05451</a>（v1）；第 7.4 节的消融与第 8 节的版本对照取自 <a href="https://proceedings.mlsys.org/paper_files/paper/2026/file/ae8b0b5838ba510daff1198474e7b984-Paper-Conference.pdf" target="_blank" rel="noopener">MLSys 2026 正式版</a>。论文以 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noopener">CC BY-NC-SA 4.0</a> 许可发布，本页没有使用原图：所有示意图均为本站绘制，结果图表是根据论文报告的数字重画的简化版本，每张图下附原图链接。硬件细节另参考了 NVIDIA PTX 指令集文档；代码细节取自官方仓库 main 分支（2026-10-20 查看）。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

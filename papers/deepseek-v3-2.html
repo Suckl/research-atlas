@@ -1,0 +1,1044 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V3.2 / DSA 精读</title>
+<meta name="description" content="DeepSeek-V3.2 技术报告（arXiv 2512.02556，含 2025-09 的 V3.2-Exp）的逐节精读：DeepSeek 稀疏注意力 DSA 的闪电索引器、top-k 选择、MLA 的 MQA 模式、从 V3.1-Terminus 继续训练、成本曲线，以及规模化 GRPO、工具调用中的思考、合成智能体任务与评测。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="deepseek-sparse-attention">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · 技术报告（arXiv，2025-12；前身 V3.2-Exp，2025-09）</div>
+  <h1>DeepSeek-V3.2：把开源大模型推向能力前沿</h1>
+  <p class="en-title">DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models</p>
+  <div class="paper-authors">DeepSeek-AI</div>
+  <div class="paper-affil">research@deepseek.com　（署名为机构；贡献者名单见原文附录 E，按角色分三组、组内按名字字母排序，带星号者已离开团队）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2512.02556" target="_blank" rel="noopener">arXiv 2512.02556 ↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/DeepSeek_V3_2.pdf" target="_blank" rel="noopener">V3.2-Exp 技术报告（2025-09，PDF）↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp" target="_blank" rel="noopener">Code：deepseek-ai/DeepSeek-V3.2-Exp（推理示例与内核入口）↗</a>
+    <a class="pill" href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2" target="_blank" rel="noopener">Hugging Face 权重：DeepSeek-V3.2 ↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">稀疏注意力内核：FlashMLA ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">结构拆解：DSA 架构图、NSA → DSA → V4 谱系与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>2048</b><span>每个 query 选中的 KV 条目数 k</span></div>
+    <div><b>2.1B + 943.7B</b><span>两阶段继续训练的 token 数（稠密预热 + 稀疏训练）</span></div>
+    <div><b>1,656</b><span>GitHub star（deepseek-ai/DeepSeek-V3.2-Exp，截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按报告（arXiv v1）的章节顺序，用本站自己的话把整份报告从头讲一遍；附录的内容放进讲到它的那一节。DeepSeek 稀疏注意力（DSA）是本页的重点，讲得最细；后训练、智能体数据和评测也逐节讲到。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。这份报告的许可证不允许转载原图，所以页面里的图都是本站画的示意图或按原图数据重画的简化图，并附原图链接。标“推算”的数字是本站根据报告、配置文件或官方文档算出来的，标“读图”的数字是本站从原图的矢量数据里读出来的近似值，都不是报告原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这份报告讲了什么</h3>
+<p>DeepSeek-V3.2 是 DeepSeek 在 2025 年 12 月发布的模型，这份技术报告同时介绍了它的高算力变体 V3.2-Speciale。模型的骨架和 DeepSeek-V3 一样：671B 参数的混合专家模型（MoE），注意力层用多头潜在注意力（MLA）。报告写明，和它的前一版 V3.1-Terminus 相比，<b>唯一的结构改动</b>是加入了 DeepSeek 稀疏注意力（DeepSeek Sparse Attention，DSA），而且这个改动不是从头训练出来的，是在 V3.1-Terminus 已经训好的检查点上继续训练得到的。</p>
+<p>理解这份报告，先要理清它和 <b>V3.2-Exp</b> 的关系。2025 年 9 月 29 日，DeepSeek 先发布了实验版 V3.2-Exp 和一份 6 页的短报告，那份短报告只讲 DSA：结构、两阶段继续训练、和 V3.1-Terminus 的对比、推理成本曲线。为了单独衡量稀疏注意力带来的影响，V3.2-Exp 的后训练刻意沿用了 V3.1-Terminus 的流程、算法和数据。12 月的这份报告写明 V3.2 与 V3.2-Exp 的结构完全相同（Hugging Face 上 V3.2 的模型卡也标明它是在 V3.2-Exp-Base 上微调得到的），所以两者共用同一个继续预训练后的基座，区别在后训练：V3.2 投入了更多强化学习算力，并加入了新的智能体数据。本报告 §2 讲 DSA 的文字几乎原样来自 Exp 报告，新增的是 Exp 发布之后的人类偏好与第三方长上下文评测；§3、§4 的后训练和评测则全部是新内容。本页逐节读 12 月的报告，讲到 DSA 的评测时会把 Exp 报告里的对比表一并拿来。</p>
+<p>DSA 的想法可以一句话说清：先用一个非常便宜的小模块（“闪电索引器”）给当前 token 和它前面的每一个 token 打一个相关性分数，再只挑出分数最高的 2048 个 token，让真正的注意力只在这 2048 个 token 上算。这样，主注意力的计算量就不再随上下文长度增长。DSA 直接建在 MLA 的“MQA 模式”上：每个被选中的条目同时服务 128 个注意力头，选一次、所有头共用，这是它能在 GPU 上真正跑快的关键。训练分两步：先冻结整个模型，只训练索引器 21 亿（2.1B）个 token，让它学会模仿原来的稠密注意力；再打开稀疏选择，训练全部参数 9437 亿（943.7B）个 token。结果是模型效果和 V3.1-Terminus 持平，而在 128K 长度的位置上，按 DeepSeek 自己服务的成本估算，解码一个 token 的成本从约 2.15 美元/百万 token 降到约 0.25 美元/百万 token（读图）。</p>
+<p>报告的另一半是后训练。DeepSeek 把强化学习的算力加到超过预训练成本的 10%，给 GRPO 加了四个让大规模训练保持稳定的补丁；让模型在调用工具的过程中保留思考；并用自动化的流水线合成了 1,800 多个环境、8.5 万条智能体任务提示。结果是 V3.2 在推理基准上与 GPT-5（High）相当，放开长度限制的 V3.2-Speciale 在 IMO 2025、IOI 2025、ICPC 世界总决赛 2025 和 CMO 2025 上达到金牌分数线。</p>
+<div class="dia">
+  <div class="dia-title">示意图：这份报告在 DeepSeek 模型谱系里的位置</div>
+  <div class="dia-flow"><span class="dia-box">V3<small>2024-12：MLA + MoE，671B</small></span><span class="dia-arrow">→</span><span class="dia-box">V3.1<small>2025-08：在 V3 基座上加量重做长上下文扩展</small></span><span class="dia-arrow">→</span><span class="dia-box">V3.1-Terminus<small>2025-09-22：V3.1 的最后一版，DSA 的起点</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box enc">V3.2-Exp<small>2025-09-29：加入 DSA，后训练沿用 V3.1-Terminus 的做法</small></span><span class="dia-arrow">→</span><span class="dia-box enc">V3.2 与 V3.2-Speciale<small>2025-12-01：同一基座，加大 RL 并加入智能体数据（本报告）</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box reg">V4 预览版<small>2026-04-24：在压缩后的 KV 上做 DSA 式选择（CSA），配合重度压缩（HCA）</small></span><span class="dia-arrow">→</span><span class="dia-box reg">V4.1-Flash<small>2026-09-10：跨层复用 KV（CSA2）+ FP4 KV 缓存</small></span></div>
+  <div class="dia-note">日期来自 DeepSeek API 文档的发布记录与 arXiv。蓝框是本页讲的内容，紫框是后续工作（见末节“后来怎么样了”，以及本站的 <a href="deepseek-v4.html">DeepSeek-V4 精读</a> 和 <a href="deepseek-v4-1-flash.html">DeepSeek-V4.1-Flash 精读</a>）。</div>
+</div>
+<p>读完这一页，你应该能回答这几个问题：</p>
+<ul>
+  <li>MLA 已经把 KV 缓存压得很小了，为什么长上下文时解码还是越来越贵？DSA 省下的到底是什么，没省下的又是什么？</li>
+  <li>闪电索引器怎么打分？为什么用 ReLU、FP8 和少量的头？它自己的开销有多大？</li>
+  <li>为什么 DSA 必须建在 MLA 的“MQA 模式”上？这和 NSA 的“组内共享选择”是什么关系？</li>
+  <li>怎样把一个已经训好的稠密注意力模型改造成稀疏的？两个训练阶段各训练什么，为什么要把索引器的输入断开梯度？</li>
+  <li>“效果持平”和“成本降低”这两个结论分别是怎么测出来的，份量有多重？</li>
+  <li>GRPO 的四个稳定性补丁各自对付哪一种“采样时”和“训练时”的不一致？</li>
+  <li>思考如何与工具调用结合？合成的智能体任务真的有用吗？</li>
+  <li>DSA 之后，V4 和 V4.1-Flash 又往前走了哪几步？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2512.02556" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/DeepSeek_V3_2.pdf" target="_blank" rel="noopener">V3.2-Exp 报告 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：开源模型落后在哪三件事上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者为什么要做 V3.2？他们观察到，最近几个月闭源模型进步得比开源模型快，两者的差距不但没有缩小，反而在拉大。那么，开源模型具体卡在哪里？作者给出了三个诊断，后面整份报告就是对这三点的回应。</div>
+<div class="note-pre"><b>先补一点背景：推理模型、思考模式与智能体。</b>
+<p>2024 年底到 2025 年初，OpenAI 的 o1 和 DeepSeek-R1 这类“推理模型”带来了一次大的跃升。它们在给出答案之前，先生成一长段“思考过程”（思维链），在里面列步骤、试错、检查，然后才写最终答案。这种能力主要靠强化学习训练出来：给模型出有标准答案的题（数学、编程），答对就给奖励，模型就逐渐学会“多想一会儿再答”。同一个模型可以有两种用法：<b>思考模式</b>先想再答，<b>非思考模式</b>直接回答。</p>
+<p><b>智能体</b>（agent）则是让模型在多轮交互里调用外部工具，比如搜索网页、运行代码、操作文件，根据工具返回的结果决定下一步。思考过程和工具返回的结果都会堆进上下文里，所以推理模型和智能体有一个共同后果：<b>上下文变得很长</b>，几万甚至十几万个 token 是常态。上下文越长，注意力的开销越大，这一点是理解本报告 §2 的出发点。</p>
+</div>
+<p>作者的三个诊断是：</p>
+<ol>
+  <li><b>结构上</b>，主流模型仍然依赖标准的稠密注意力，它在长序列上效率很低。效率低不只影响部署成本，也影响后训练：强化学习需要模型大量地生成长回答（称为 rollout），每一条都很贵，能做的强化学习就有限。</li>
+  <li><b>资源分配上</b>，开源模型在后训练阶段投入的算力不够，所以在难题上的表现上不去。</li>
+  <li><b>智能体能力上</b>，开源模型的泛化和指令遵循明显落后于闭源模型，在真实部署里不够好用。</li>
+</ol>
+<p>对应的三个对策是：用 DSA 降低长序列的计算复杂度，同时保住长上下文性能；设计一套稳定、可扩展的强化学习流程，把后训练的计算预算提到超过预训练成本的 10%；搭建一条把推理融入工具调用的流水线，先用 DeepSeek-V3 的方法做冷启动，把推理和工具调用放进同一条轨迹，再大规模合成智能体任务（报告说超过 1,800 个环境、85,000 条复杂提示）来驱动强化学习。</p>
+<div class="dia">
+  <div class="dia-title">示意图：三个诊断与三个对策（对应报告 §2、§3.1、§3.2）</div>
+  <div class="dia-flow"><span class="dia-box pred">稠密注意力在长序列上太贵<small>部署与 RL rollout 都受限</small></span><span class="dia-arrow">→</span><span class="dia-box enc">DSA：每个 query 只算 2048 个条目<small>§2，本页重点</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">后训练算力投入不足<small>难题上不去</small></span><span class="dia-arrow">→</span><span class="dia-box enc">规模化 GRPO：RL 预算超过预训练成本的 10%<small>§3.1 的四个稳定性补丁</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">智能体泛化与指令遵循落后<small>真实部署不好用</small></span><span class="dia-arrow">→</span><span class="dia-box enc">工具调用中的思考 + 大规模合成任务<small>§3.2：1,800+ 环境、85,000 条提示</small></span></div>
+  <div class="dia-note">本站示意图。三条线并不独立：DSA 让长上下文变便宜，长思考和长智能体轨迹的 RL 才负担得起。</div>
+</div>
+<p>结果方面，作者说 V3.2 在多个推理基准上与 Kimi-K2-Thinking 和 GPT-5 相近，在智能体任务上明显推进了开源模型的水平，而且成本低得多。放宽长度限制训练出的 V3.2-Speciale 与当时领先的闭源模型 Gemini-3.0-Pro 水平相当，在 IOI 2025、ICPC 世界总决赛 2025、IMO 2025 和 CMO 2025 上达到金牌水平。原文图 1 用柱状图把 Speciale、V3.2-Thinking、GPT-5-High、Claude-4.5-Sonnet、Gemini-3.0-Pro 在 8 个推理和智能体基准上的分数放在一起，这些数字在本页 §4 的表格里逐一出现。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“闭源与开源的差距在拉大”是作者的判断，报告没有给出度量它的数据。“与 GPT-5 相当”指的是作者挑选的推理基准上的分数，并且对照的是 GPT-5 的 High 档；Gemini-3.0-Pro 在多数推理基准上仍然更高（§4.1）。原文图 1 里 HMMT 2025 用的是 2 月那场，HLE 用的是纯文本子集。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2512.02556#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2.1 DeepSeek 稀疏注意力（DSA）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V3.2 相对 V3.1-Terminus 唯一的结构改动是什么？报告把 DSA 拆成两个部件：一个给 token 对打分的“闪电索引器”，一个按分数挑 token 的“细粒度 token 选择”。然后说明为了能从 V3.1-Terminus 继续训练，DSA 建在 MLA 之上，而且必须用 MLA 的“MQA 模式”。原文这部分只有一页，但每一句背后都有一笔账。本节先把这笔账算清楚，再逐个部件讲。</div>
+
+<h4 id="n-2-1">2.1.0 先算一笔账：长上下文时注意力的钱花在哪里</h4>
+<div class="note-pre"><b>先补一点背景：注意力在长序列上的两种开销。</b>
+<p>注意力让每个 token 去“看”它前面的所有 token：拿自己的 query 和前面每个 token 的 key 算相似度，经过 softmax 变成权重，再用权重把前面各 token 的 value 加权平均（公式与直观解释见本站 <a href="vllm.html#n-2-1">vLLM 精读 §2.1</a>）。设序列长度为 \(L\)，开销分两种情况：</p>
+<ul>
+  <li><b>预填充</b>（prefill，一次处理整段输入）：\(L\) 个 query 各自和前面的 token 配对，一共约 \(L^2/2\) 对，所以计算量随长度<b>平方</b>增长。长度翻倍，注意力的计算量变成 4 倍。</li>
+  <li><b>解码</b>（decode，逐个生成新 token）：位置 \(t\) 上的新 token 要和前面 \(t\) 个 token 各算一次，并且要把这 \(t\) 个 token 的 KV 缓存从显存读一遍。所以<b>每生成一个 token</b> 的注意力开销随位置线性增长；在 128K 的位置上生成一个 token，注意力开销大约是在 1K 位置上的 128 倍。</li>
+</ul>
+<p>DeepSeek-V3 的 MLA 把每个 token 每层的 KV 缓存压成一个 512 维的潜向量加一个 64 维的位置编码 key，共 576 个数，比普通的多头注意力小得多（来龙去脉见 <a href="deepseek-v3.html#n-2-1">DeepSeek-V3 精读 §2.1.1</a>）。但 MLA 只压缩了<b>存储</b>，并没有减少“要看的 token 数”。而且在解码时，MLA 用“矩阵吸收”的算法，让 128 个头都直接和 576 维的潜向量做点积，每一对（query，历史 token）在一层里要花约 \(128\times(576+512)\times2\approx 27.9\) 万次浮点运算（推算：576 维算分数、512 维加权求和，乘加各算一次）。</p>
+</div>
+<p>这里有一个容易被忽略的事实：<b>MLA 的解码其实偏“算力受限”，而不是“带宽受限”</b>。一个 token 的 MLA 缓存在 V3.2 的 FP8 格式下占 656 字节（FlashMLA 文档），读这 656 字节要配上约 27.9 万次运算，每字节约 425 次运算（推算）。H800 的 BF16 稠密算力约 989 TFLOPS（FlashMLA 文档按这个数计算），显存带宽约 3.35 TB/s（NVIDIA 公布的规格），两者之比约 295 次运算/字节（推算）。425 大于 295，说明算力先成为瓶颈。原因在于 128 个头共享同一份 KV：读一次数据，要做 128 份计算。所以对 MLA 来说，想让长上下文的解码变便宜，必须减少<b>计算</b>，光省带宽不够。这就解释了为什么 V3.1-Terminus 的解码成本几乎正比于位置增长（§2.3 的成本曲线）。</p>
+<p>DSA 的做法是：每个 query 只和 \(k=2048\) 个被选中的 token 做真正的注意力，所以这部分的计算从“随位置增长”变成固定值；为了知道该选哪 2048 个，它用一个很轻的索引器对前面<b>所有</b> token 打分，这一部分仍然随位置增长，但每对的开销小得多。把一个 128K 位置上的解码步骤放到账本上（推算，一层、一个 query）：</p>
+<div class="dia">
+  <div class="dia-title">示意图：在第 128K 个位置上解码一个 token，一层注意力的账本（推算）</div>
+  <div class="dia-row"><span class="lbl">计算：稠密 MLA</span><div class="dia-track"><span class="dia-seg w" style="flex:36.5">131,072 对 × 27.9 万 ≈ 36.5 GFLOP（BF16）</span></div></div>
+  <div class="dia-row"><span class="lbl">计算：DSA</span><div class="dia-track"><span class="dia-seg kv" style="flex:0.57"></span><span class="dia-seg cmp" style="flex:1.07"></span><span class="dia-seg oth" style="flex:34.9">省掉的部分</span></div></div>
+  <div class="dia-out">蓝：核心注意力 2048 对 × 27.9 万 ≈ 0.57 GFLOP；绿：索引器 131,072 对 × 1.6 万 ≈ 2.15 GFLOP（FP8，按 FP8 吞吐是 BF16 的两倍折成约 1.07 GFLOP 的 BF16 当量）。合计约为稠密的 1/22。</div>
+  <div class="dia-row"><span class="lbl">读取：稠密 MLA</span><div class="dia-track"><span class="dia-seg w" style="flex:86">131,072 × 656 字节 ≈ 86.0 MB</span></div></div>
+  <div class="dia-row"><span class="lbl">读取：DSA</span><div class="dia-track"><span class="dia-seg kv" style="flex:1.34"></span><span class="dia-seg cmp" style="flex:17.3">索引 key</span><span class="dia-seg oth" style="flex:67.4">省掉的部分</span></div></div>
+  <div class="dia-out">蓝：被选中的 2048 个 MLA 条目 ≈ 1.34 MB；绿：全部 131,072 个索引 key × 132 字节 ≈ 17.3 MB。合计约为稠密的 1/4.6。</div>
+  <div class="dia-note">推算依据：每对的运算量按官方配置算（主注意力 128 头 × (576 + 512) × 2；索引器 64 头 × 128 维 × 2），字节数按 FlashMLA 文档的 FP8 MLA 格式（656 字节）与 vLLM 文档描述的索引 key 格式（128 个 FP8 + 一个 4 字节缩放因子 = 132 字节）。这是理想化的计数，不含内核开销、批处理和 MTP 等因素。</div>
+</div>
+<p>这本账说明了三件事。第一，DSA 把核心注意力的计算砍掉了约 98%（131,072 对变成 2048 对），而 MLA 解码本来就是算力受限的，所以这一刀切在了要害上。第二，在 128K 的位置上，<b>索引器反而成了注意力里最大的一块开销</b>：它的运算量（约 2.15 GFLOP）已经超过被它“精简”过的核心注意力（约 0.57 GFLOP），读取量（约 17.3 MB）也远大于核心注意力要读的条目（约 1.34 MB）。报告说“索引器仍是 \(O(L^2)\)，但计算量比 MLA 小得多”，这句话在 128K 上意味着：DSA 的长上下文成本主要由索引器决定，索引器做得多便宜，DSA 就有多便宜。第三，读取量只降到约 1/4.6，比计算降得少，因为索引 key 必须全部读一遍。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>DSA 减少的是每一步的<b>计算和读取</b>，不减少 KV 缓存的<b>存储</b>。所有 token 的 MLA 条目仍然要留在显存里（因为将来的 query 可能选中任何一个），而且每个 token 每层还多存一个 132 字节的索引 key，比 FP8 的 MLA 条目（656 字节）多出约 20%（推算）。按 FlashMLA 文档的口径（62 层，含 MTP 层），一条 128K 的请求在 BF16 下的 MLA 缓存约 8.72 GiB；换成 V3.2 的 FP8 格式再加上索引 key，约 5.96 GiB（推算）。所以 DSA 解决的是“长上下文算得慢、算得贵”，不解决“长上下文存不下”。后者要等到 V4 在存储层面压缩 KV（见末节）。</div>
+
+<h4 id="n-2-2">2.1.1 闪电索引器：用一个极便宜的模块给每对 token 打分</h4>
+<p>索引器为当前 query token \(\mathbf{h}_t\) 和它前面的每一个 token \(\mathbf{h}_s\) 计算一个<b>索引分数</b> \(I_{t,s}\)，分数越高，说明 \(s\) 越值得被 \(t\) 看。原文式 (1)：</p>
+<div class="formula">$$I_{t,s}=\sum_{j=1}^{H^{I}} w^{I}_{t,j}\cdot \mathrm{ReLU}\!\left(\mathbf{q}^{I}_{t,j}\cdot \mathbf{k}^{I}_{s}\right)$$</div>
+<p>逐个符号解释：</p>
+<ul>
+  <li>\(H^{I}\) 是索引器的头数。每个头 \(j\) 有自己的索引 query \(\mathbf{q}^{I}_{t,j}\)，都由当前 token 算出来。报告正文没有给出具体数字；官方推理代码的配置文件写的是 \(H^{I}=64\) 个头、每头 \(d^{I}=128\) 维（主注意力是 128 个头）。代码里，索引 query 不是直接从隐状态算的，而是从 MLA 已经算好的 1536 维“query 潜向量”再投影一次得到的，等于和主注意力共用了 query 的压缩路径。</li>
+  <li>\(\mathbf{k}^{I}_{s}\) 是历史 token \(s\) 的索引 key，每个 token <b>只有一个</b>，128 维，由隐状态经过一个线性层和一个 LayerNorm 得到，<b>被 64 个索引头共用</b>。也就是说，索引器自己的结构也是“多查询注意力”（MQA）的形状：很多个 query 头对一个 key。这让索引器需要缓存的东西很小，每个 token 每层只有 128 个数。</li>
+  <li>\(w^{I}_{t,j}\) 是一个标量权重，同样由当前 token 算出来（代码里是隐状态经过一个 7168→64 的线性层）。它决定“对这个 query 来说，第 \(j\) 个头的意见有多重要”。不同 query 可以更信任不同的头。</li>
+  <li>\(\mathrm{ReLU}(x)=\max(x,0)\)：把负的点积截成 0。</li>
+</ul>
+<p>为什么用 ReLU？报告只说是“出于吞吐考虑”。可以这样理解：索引分数只用来<b>排序</b>，不需要像注意力那样变成一个加起来等于 1 的概率分布，所以不必对整行做 softmax（要算指数、要先扫一遍求和）。ReLU 只需要一次比较，可以紧跟在 FP8 矩阵乘之后在寄存器里完成，然后按头加权求和，输出一行分数直接交给 top-k。截掉负值还有一个效果：某个头认为“不相关”的 token，不会用一个大的负分去拉低其他头的判断，只是不投票。</p>
+<p>为什么能用 FP8？因为索引器的分数只用来决定“选谁”，个别分数有一点误差，最多是把排名第 2040 和第 2050 的两个 token 换了个位置，对结果影响很小；而 FP8 的数据量是 BF16 的一半，Hopper GPU 上 FP8 矩阵乘的峰值吞吐也是 BF16 的两倍（FP8 格式的背景见本站 <a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式拆解页</a>）。官方推理代码在量化之前还对 query 和 key 各做了一次 Hadamard 变换（一种正交旋转，把少数特别大的分量“摊”到所有维度上，减小 FP8 量化误差），然后按每 128 个数一组做 FP8 量化。vLLM 在首日支持时去掉了这个 Hadamard 变换，说观察不到它对精度的影响。</p>
+<p>索引器的参数量很小。按官方配置推算，每层的索引器有：从 1536 维 query 潜向量到 64 × 128 维索引 query 的投影约 1258 万参数，从 7168 维隐状态到 128 维索引 key 的投影约 92 万，头权重投影约 46 万，合计约 1400 万；61 层加起来约 8.5 亿，大约是 671B 总参数的 0.13%（推算）。</p>
+<div class="note-warn"><b>实现时容易踩的坑：</b>索引器里的位置编码（RoPE，原理见 <a href="roformer.html">RoFormer 精读</a>）只作用在 query 和 key 的前 64 维上，而且它要求的张量排布是“非交错”的，主注意力 MLA 里的 RoPE 却是“交错”排布。DeepSeek 在 2025-11-17 的仓库更新里承认，此前公开的推理示例代码在索引器的 RoPE 排布上写错了，可能导致模型效果下降，并发布了修正版。所以如果你在 2025 年 11 月之前基于官方示例自己实现过 DSA，结果偏差可能来自这里。</div>
+
+<h4 id="n-2-3">2.1.2 细粒度 token 选择：每个 query 只取分数最高的 2048 个条目</h4>
+<p>有了一行索引分数 \(\{I_{t,s}\}\)，下一步就是挑出分数最高的 \(k\) 个位置，只把这些位置上的 KV 条目 \(\mathbf{c}_s\) 交给主注意力。原文式 (2)：</p>
+<div class="formula">$$\mathbf{u}_{t}=\mathrm{Attn}\Big(\mathbf{h}_t,\ \big\{\mathbf{c}_s \,\big|\, I_{t,s}\in \mathrm{Top\text{-}k}(I_{t,:})\big\}\Big)$$</div>
+<p>这里 \(\mathbf{u}_t\) 是注意力的输出，\(\mathbf{c}_s\) 是 MLA 缓存里位置 \(s\) 的条目（下一小节解释为什么是它）。V3.2 取 \(k=2048\)。“细粒度”是相对 NSA 说的：NSA 以 64 个连续 token 组成的块为单位选择，DSA 以单个 token 为单位选择，选中的 2048 个 token 可以散落在整个上下文的任何位置（NSA 的设计见本站 <a href="native-sparse-attention.html">NSA 精读</a>）。</p>
+<p>有一个直接的推论：当 query 所在位置 \(t\le 2048\) 时，前面一共也就不超过 2048 个 token，<b>全部都会被选中</b>，DSA 和原来的稠密注意力完全等价。只有当上下文超过 2048 之后，选择才真正开始“丢掉”一些 token。所以 DSA 对短文本的影响，从结构上就被限制得很小。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一行索引分数，在 k = 4 的玩具例子里怎么选（真实模型 k = 2048）</div>
+  <div class="dia-row"><span class="lbl">位置 t = 4（t ≤ k）</span><div class="cells"><span class="cell a">1</span><span class="cell a">2</span><span class="cell a">3</span><span class="cell a">4</span></div></div>
+  <div class="dia-out">前面只有 4 个 token，全选，等同稠密注意力。</div>
+  <div class="dia-row"><span class="lbl">位置 t = 16 的分数</span><div class="cells"><span class="cell">0.1</span><span class="cell a">2.3</span><span class="cell">0</span><span class="cell">0.4</span><span class="cell">0</span><span class="cell">0.2</span><span class="cell a">1.7</span><span class="cell">0</span><span class="cell">0.6</span><span class="cell">0.3</span><span class="cell">0</span><span class="cell">0.1</span><span class="cell">0.5</span><span class="cell a">1.1</span><span class="cell">0.2</span><span class="cell a">0.9</span></div></div>
+  <div class="dia-out">取分数最高的 4 个（蓝）：位置 2、7、14、16。它们可以不相邻；很多分数是 0，因为 ReLU 截掉了负值。主注意力只读这 4 个 MLA 条目。</div>
+  <div class="dia-note">本站示意图，分数是编的，只用来说明选择规则。</div>
+</div>
+<div class="note-pre"><b>先补一点背景：GPU 上怎么做 top-k。</b>
+<p>从一行 \(L\) 个分数里挑出最大的 \(k\) 个，最直接的办法是整行排序，但排序要 \(O(L\log L)\) 次操作，而且把不需要的顺序也算出来了。GPU 上常用“选择”而不是“排序”。一种经典做法是<b>基数选择</b>（radix select）：把浮点数映射成保序的无符号整数，先按最高的 8 位做直方图，算出“第 \(k\) 大的数落在哪个桶里”；比这个桶大的元素直接入选，落在这个桶里的再按下一个 8 位细分，几轮之后就能精确定出前 \(k\) 个。DeepSeek 提供的 TileLang 参考内核就是这样做的：先 8 位直方图定位门槛桶，再最多 4 轮细化。</p>
+<p>2026 年 9 月，DeepSeek 又开源了专门的 top-k 内核 <b>DeepSelect</b>，说明它用在 V3.2、V4、V4.1 的 DSA 里。它的思路是维护一个“当前第 \(k\) 大”的门槛：按随机顺序一块一块扫输入，只把超过门槛的元素放进候选区；候选区满了就用基数选择压回 \(k\) 个，同时抬高门槛。门槛只升不降，越往后能通过的元素越少，所以每个输入元素只从显存读一次，额外的工作量在期望上只有 \(O(k\log(L/k))\) 量级。它的说明文档报告比 PyTorch 自带的 <code>torch.topk</code> 快 2～20 倍，主要针对 \(k=512\)（V4 用的 \(k\)）做了优化。</p>
+<p>为什么要在 top-k 上花这么大力气？因为它和索引器一样，每个 query 都要扫一遍全部 \(L\) 个分数。vLLM 的实现博客还指出，批量很大、上下文很长时，若先把整张分数矩阵写回显存再逐行做 top-k，这张矩阵本身就很大；他们的第一批优化之一，就是参考 DeepSeek 的 TileLang 内核把 top-k 写成融合内核。</p>
+</div>
+<div class="note-warn"><b>容易误解的地方：</b>“按 token 选”听起来会让显存读取变得零碎，但每个被选中的 MLA 条目本身是一整行连续的 656 字节，内核按行去取（TileLang 的说明称之为“合并的 gather”），所以读取效率并不差。真正让它高效的前提，是取来的这一行能被很多个 query 头同时用上，这就是下一小节的 MQA 模式。</div>
+
+<h4 id="n-2-4">2.1.3 为什么要在 MLA 的“MQA 模式”上实现</h4>
+<div class="note-pre"><b>先补一点背景：MLA 的两种算法——MHA 模式和 MQA 模式（原文附录 A）。</b>
+<p>MLA 给每个 token 缓存的是一个 512 维的潜向量 \(\mathbf{c}^{KV}\) 和一个 64 维、带位置编码、所有头共用的 key \(\mathbf{k}^{R}\)。要拿它做注意力，有两种数学上等价的算法：</p>
+<ul>
+  <li><b>MHA 模式</b>：先用上投影矩阵把潜向量“展开”成 128 个头各自的 key（128 维不带位置的部分 + 64 维位置部分 = 192 维）和 value（128 维），然后像普通多头注意力一样算。每一对（query，token）的运算约 \(128\times(192+128)\times2\approx 8.2\) 万次（推算）。</li>
+  <li><b>MQA 模式</b>：不展开，而是把上投影矩阵“吸收”进 query 一侧和输出一侧。这样每个头的 query 变成 576 维，直接和缓存里的 576 维条目做点积；加权求和也直接对 512 维潜向量做，最后再投影回去。此时一个缓存条目同时充当<b>所有 128 个头</b>的 key 和 value，形状和“多查询注意力”（MQA，所有头共用一份 KV）一模一样。代价是每一对的运算变成约 27.9 万次（推算），是 MHA 模式的约 3.4 倍。</li>
+</ul>
+<p>报告附录 A 说明，V3.1-Terminus 在训练和预填充时用 MHA 模式，在解码时用 MQA 模式。原因是：预填充和训练时很多 query 一起算，算力是瓶颈，每对运算少的 MHA 模式更划算；解码时每次只有一个 query，读缓存是主要负担，直接读 576 维条目、不展开的 MQA 模式更划算。</p>
+</div>
+<p>DSA 的选择发生在“KV 条目”这一层：选中位置 \(s\)，就把 \(\mathbf{c}_s\) 取来参与计算。报告给出的理由引用了 NSA：<b>在内核层面，每个 KV 条目必须被多个 query 共享，计算才高效</b>。这句话的意思可以这样展开。GPU 上的注意力内核（FlashAttention 一类，见 <a href="flashattention.html">FlashAttention 精读</a>）把一小块 KV 从显存搬进片上共享内存，然后让尽可能多的 query 行和它一起做矩阵乘，这样张量核心才吃得饱，搬一次数据才划算。在 MQA 模式下，128 个头的 query 共用同一个条目，选一次、取一次，就能做 128 份计算；如果改成 MHA 模式并让每个头各选各的 2048 个 token，那就要做 128 次互不相同的取数，显存读取变成 128 倍，每次矩阵乘的规模也小得喂不饱张量核心。</p>
+<p>和 NSA 对照来看，两者遵守的是同一条原则，只是走到了两头。NSA 建在分组查询注意力（GQA）上，同一组里的若干个头共用一套选择，并且按 64 个连续 token 成块选择，用“块”来保证取数连续。DSA 建在 MLA 的 MQA 模式上，相当于 128 个头组成<b>一个</b>组，共用一套选择；既然每次取数都能被 128 个头复用，就不必再为了连续而成块选择，可以细到单个 token。</p>
+<p>代价也很清楚：MQA 模式每对的运算是 MHA 模式的约 3.4 倍。对很长的序列这不是问题，因为 DSA 已经把对数压到了 2048；但对短序列，用 MHA 模式把前面的 token 全算一遍，可能比用 MQA 模式只算 2048 个还便宜。报告 §2.3 有一句不起眼的话正对应这一点：<b>短序列预填充时，他们专门实现了一个“带掩码的 MHA 模式”来模拟 DSA</b>，即用 MHA 模式算稠密的分数，再用 top-k 掩码把没选中的位置屏蔽掉，结果和 DSA 相同，但在短上下文下效率更高。两条线的交点可以算出来：</p>
+<div class="dia">
+  <div class="dia-title">示意图：短序列用“带掩码的 MHA 模式”，长序列用“稀疏 MQA 模式”（推算）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="单个位置的注意力计算量：带掩码的 MHA 模式与稀疏 MQA 模式" style="--dg-min:720px">
+<text x="490" y="18" class="t-c t-b">位置 t 上一个 query、一层的核心注意力计算量（百万 FLOPs，推算，不含索引器）</text>
+<line x1="80" y1="260" x2="900" y2="260" class="axis"/>
+<text x="74" y="260" class="t-r t-xs">0</text>
+<line x1="80" y1="197.1" x2="900" y2="197.1" class="grid-ln"/>
+<text x="74" y="197.1" class="t-r t-xs">400</text>
+<line x1="80" y1="134.3" x2="900" y2="134.3" class="grid-ln"/>
+<text x="74" y="134.3" class="t-r t-xs">800</text>
+<line x1="80" y1="71.4" x2="900" y2="71.4" class="grid-ln"/>
+<text x="74" y="71.4" class="t-r t-xs">1200</text>
+<line x1="80" y1="260" x2="80" y2="34" class="axis"/>
+<text x="80" y="276" class="t-c t-xs">0K</text>
+<text x="182.5" y="276" class="t-c t-xs">2K</text>
+<text x="285" y="276" class="t-c t-xs">4K</text>
+<text x="387.5" y="276" class="t-c t-xs">6K</text>
+<text x="490" y="276" class="t-c t-xs">8K</text>
+<text x="592.5" y="276" class="t-c t-xs">10K</text>
+<text x="695" y="276" class="t-c t-xs">12K</text>
+<text x="797.5" y="276" class="t-c t-xs">14K</text>
+<text x="900" y="276" class="t-c t-xs">16K</text>
+<text x="490" y="296" class="t-c t-sm">query 所在位置 t（前面有 t 个 token）→</text>
+<polyline points="80,260 336.2,41.2" style="fill:none;stroke:var(--text-3);stroke-width:2;stroke-dasharray:5 4"/>
+<text x="342.2" y="45.2" class="t-xs">稠密 MQA 模式：t × 0.279</text>
+<polyline points="80,260 900,54" style="fill:none;stroke:var(--c-act);stroke-width:2.5"/>
+<text x="896" y="44" class="t-r t-xs" style="fill:var(--c-act)">带掩码的 MHA 模式：t × 0.082</text>
+<polyline points="80,260 185,170.4 900,170.4" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<text x="896" y="184.4" class="t-r t-xs" style="fill:var(--c-enc)">稀疏 MQA 模式：min(t, 2048) × 0.279 ≈ 570</text>
+<line x1="436.9" y1="140.4" x2="436.9" y2="260" style="stroke:var(--c-pred);stroke-dasharray:4 4"/>
+<circle cx="436.9" cy="170.4" r="4" style="fill:var(--c-pred)"/>
+<text x="442.9" y="134.4" class="t-xs" style="fill:var(--c-pred)">交点 t ≈ 7.0K：左边用 MHA 模式更省，右边用稀疏 MQA 更省</text>
+</svg>
+  <div class="dia-note">本站按官方配置推算的理想计数，不含索引器（两种模式都要跑索引器，所以不影响交点）。交点满足 \(t\times 8.19\text{ 万}=2048\times 27.9\text{ 万}\)，即 \(t\approx 6{,}963\)。原文图 3(a) 中 V3.2 的预填充成本曲线在约 6.6K 处有一个转折（读图，见 §2.3），与这个交点大致吻合；这是本站的解读，报告没有给出切换的具体长度。</div>
+</div>
+<p>内核方面，DeepSeek 在发布 V3.2-Exp 当天（2025-09-29）在 FlashMLA 里开源了 token 级稀疏注意力内核：预填充内核在 H800 上最高约 640 TFLOPS；解码内核读 FP8 格式的缓存、用 BF16 做矩阵乘，在计算受限的配置（批大小 128、128 头、每次 2 个 query token、top-k 2048）下达到 410 TFLOPS。配套的技术博客解释了解码内核的难点：H800 不能把 FP8 直接转成 BF16，反量化一个 token 的 512 个数要约 50 个时钟周期，比 64 个头的矩阵乘本身（约 34 个周期）还慢；他们利用 Hopper 的“线程块集群”和分布式共享内存，让负责同一个 query、不同 64 个头的两个线程块各反量化一半、再互相交换，把反量化的工作量减半，从 250 TFLOPS 提到 410 TFLOPS。博客还给了一个直观的换算：这个稀疏解码内核处理 2048 个条目的耗时，大约相当于稠密解码内核处理 3000 长度的序列，超过这个长度稀疏内核就开始占优。这里也再次印证了上一小节的判断：MQA 模式的解码，瓶颈在计算这一侧。</p>
+
+<h4 id="n-2-5">2.1.4 把它画在一起：一层 DSA 的完整数据流</h4>
+<div class="dia">
+  <div class="dia-title">示意图：V3.2 一层注意力的数据流（DSA 建在 MLA 的 MQA 模式上）</div>
+  <svg class="dg" viewBox="0 0 960 430" role="img" aria-label="DSA 一层的数据流" style="--dg-min:780px">
+    <g class="data"><rect class="box" x="16" y="196" width="132" height="56" rx="8"/><text x="82" y="216" class="t-c">输入隐状态 h</text><text x="82" y="236" class="t-c t-xs">当前 token，7168 维</text></g>
+    <text x="82" y="270" class="t-c t-xs">历史上每个 token</text><text x="82" y="284" class="t-c t-xs">也走同样的路径</text>
+    <g class="enc"><rect class="box" x="180" y="24" width="190" height="56" rx="8"/><text x="275" y="44" class="t-c">query 潜向量 c<tspan baseline-shift="super" style="font-size:10px">Q</tspan></text><text x="275" y="64" class="t-c t-xs">1536 维（MLA 原有）</text></g>
+    <g class="enc"><rect class="box" x="180" y="104" width="190" height="56" rx="8"/><text x="275" y="124" class="t-c">KV 潜向量 + RoPE key</text><text x="275" y="144" class="t-c t-xs">512 + 64 = 576 维（MLA 原有）</text></g>
+    <g class="pred"><rect class="box" x="180" y="262" width="190" height="56" rx="8"/><text x="275" y="282" class="t-c">头权重 w<tspan baseline-shift="super" style="font-size:10px">I</tspan></text><text x="275" y="302" class="t-c t-xs">64 个标量（由 h 投影）</text></g>
+    <g class="pred"><rect class="box" x="180" y="352" width="190" height="56" rx="8"/><text x="275" y="372" class="t-c">索引 key k<tspan baseline-shift="super" style="font-size:10px">I</tspan></text><text x="275" y="392" class="t-c t-xs">每 token 1 个、128 维，64 头共用</text></g>
+    <g class="enc"><rect class="box" x="410" y="24" width="200" height="56" rx="8"/><text x="510" y="44" class="t-c">主 query：128 个头</text><text x="510" y="64" class="t-c t-xs">吸收上投影后每头 576 维</text></g>
+    <g class="data"><rect class="box" x="410" y="104" width="200" height="56" rx="8"/><text x="510" y="124" class="t-c">MLA 缓存（全部 L 个）</text><text x="510" y="144" class="t-c t-xs">FP8：656 字节 / token / 层</text></g>
+    <g class="pred"><rect class="box" x="410" y="184" width="200" height="52" rx="8"/><text x="510" y="203" class="t-c">索引 query q<tspan baseline-shift="super" style="font-size:10px">I</tspan></text><text x="510" y="222" class="t-c t-xs">64 头 × 128 维（由 c<tspan baseline-shift="super" style="font-size:10px">Q</tspan> 投影）</text></g>
+    <g class="pred"><rect class="box" x="410" y="262" width="200" height="64" rx="8"/><text x="510" y="281" class="t-c">闪电索引器打分（FP8）</text><text x="510" y="299" class="t-c t-xs">I = Σ 各头 w × ReLU(q · k)</text><text x="510" y="314" class="t-c t-xs">对前面全部 L 个位置打分</text></g>
+    <g class="data"><rect class="box" x="410" y="352" width="200" height="56" rx="8"/><text x="510" y="372" class="t-c">索引 key 缓存（全部 L 个）</text><text x="510" y="392" class="t-c t-xs">FP8：132 字节 / token / 层</text></g>
+    <g class="enc"><rect class="box" x="650" y="40" width="160" height="72" rx="8"/><text x="730" y="60" class="t-c">稀疏核心注意力</text><text x="730" y="80" class="t-c t-xs">MQA 模式：128 个头</text><text x="730" y="96" class="t-c t-xs">共用同一批 2048 个条目</text></g>
+    <g class="pred"><rect class="box" x="650" y="262" width="132" height="64" rx="8"/><text x="716" y="281" class="t-c">top-k 选择</text><text x="716" y="299" class="t-c t-xs">取分数最高的 2048 个</text><text x="716" y="314" class="t-c t-xs">得到位置集合 S</text></g>
+    <g class="act"><rect class="box" x="840" y="40" width="108" height="72" rx="8"/><text x="894" y="62" class="t-c">输出 u</text><text x="894" y="82" class="t-c t-xs">→ 输出投影</text><text x="894" y="96" class="t-c t-xs">→ 残差、MoE</text></g>
+    <g class="loss"><rect class="box" x="840" y="262" width="108" height="64" rx="8"/><text x="894" y="281" class="t-c">训练时：KL</text><text x="894" y="299" class="t-c t-xs">让 I 逼近主注意力</text><text x="894" y="314" class="t-c t-xs">只更新索引器</text></g>
+    <path class="edge enc" d="M148,206 C166,206 160,52 178,52"/>
+    <path class="edge enc" d="M148,214 C166,214 162,132 178,132"/>
+    <path class="edge pred" d="M148,232 C166,232 162,290 178,290"/>
+    <path class="edge pred" d="M148,240 C160,240 160,380 178,380"/>
+    <path class="edge enc" d="M370,52 L408,52"/>
+    <path class="edge pred" d="M370,70 C394,70 390,210 408,210"/>
+    <path class="edge enc" d="M370,132 L408,132"/>
+    <path class="edge pred" d="M370,290 L408,290"/>
+    <path class="edge pred" d="M370,380 L408,380"/>
+    <path class="edge pred" d="M510,236 L510,260"/>
+    <path class="edge pred" d="M510,352 L510,328"/>
+    <path class="edge pred" d="M610,294 L648,294"/>
+    <path class="edge idx" d="M716,262 L716,114"/>
+    <text x="722" y="190" class="t-xs">按 S 取条目</text>
+    <path class="edge enc" d="M610,52 C630,52 630,62 648,62"/>
+    <path class="edge idx" d="M610,132 C630,132 630,96 648,96"/>
+    <text x="616" y="152" class="t-xs">只读被选中的 2048 条</text>
+    <path class="edge enc" d="M810,76 L838,76"/>
+    <path class="edge pred" d="M782,294 L838,294"/>
+    <path class="edge sg" d="M790,112 C800,180 880,200 894,260"/>
+    <text x="884" y="150" class="t-c t-xs">主注意力分布 p</text>
+    <text x="884" y="164" class="t-c t-xs">（作目标，不回传）</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2512.02556#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a> 与附录 A 的 <a href="https://arxiv.org/html/2512.02556#A1" target="_blank" rel="noopener">图 7 ↗</a>。蓝色是 MLA 原有的部分，橙色是 DSA 新增的索引器，灰绿色是两种缓存，虚线箭头是“按索引取数”。维度来自官方推理代码的配置文件（报告正文没有给出）。</div>
+</div>
+<p>按计算顺序走一遍：</p>
+<ol>
+  <li>当前 token 的隐状态照常经过 MLA：算出 1536 维的 query 潜向量和 128 个头的主 query；算出自己的 576 维 KV 条目，以 FP8 格式写进 MLA 缓存。</li>
+  <li>同时，索引器从 query 潜向量投影出 64 个索引 query，从隐状态投影出 64 个头权重和一个 128 维的索引 key，索引 key 以 FP8 写进索引缓存。</li>
+  <li>索引器拿 64 个索引 query 和缓存里<b>全部</b>历史索引 key 做 FP8 点积，ReLU 后按头权重加权求和，得到一行 \(L\) 个分数。</li>
+  <li>top-k 从这一行里选出 2048 个位置（位置不足 2048 时全选）。</li>
+  <li>稀疏核心注意力按这 2048 个位置从 MLA 缓存里取条目，128 个头共用这批条目，在 MQA 模式下算出输出，后面接输出投影、残差和 MoE，和 V3.1 完全一样。</li>
+  <li>训练时，主注意力在选中位置上的分布作为目标，用 KL 散度训练索引器（下一节）。</li>
+</ol>
+<p>写成伪代码（单个解码步、单层，省略批处理与 MTP）：</p>
+<pre><code class="lang-py">def dsa_decode_step(h_t, mla_cache, idx_cache, k=2048):
+    # mla_cache: [L, 576] FP8（656 字节/行）   idx_cache: [L, 128] FP8（132 字节/行）
+    cq = W_dq(h_t)                                   # 1536 维 query 潜向量（MLA 原有）
+    q_main = absorb(W_uq(cq))                        # [128 头, 576]，MQA 模式
+    mla_cache.append(compress_kv(h_t))               # 576 维条目
+    q_idx = W_qi(cq)                                 # [64 头, 128]
+    w = W_w(h_t)                                     # [64]
+    idx_cache.append(layernorm(W_ki(h_t)))           # [128]
+    scores = (relu(q_idx @ idx_cache.T) * w[:, None]).sum(0)   # [L]，FP8 矩阵乘
+    S = topk(scores, min(k, len(scores)))            # 2048 个位置
+    return sparse_mla_attention(q_main, mla_cache[S])           # 128 头共用这 2048 行</code></pre>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>DSA 不是“NSA 的简化版”。它没有 NSA 的压缩分支和滑动窗口分支，也没有门控；它的打分器是一个独立的小网络，而 NSA 的打分复用压缩分支的注意力分数。另一方面，DSA 的“一次选择、全体共用”也意味着 128 个头看到的是同一批 token：如果某个头需要的 token 恰好没进入前 2048，这个头就看不到它。报告没有分析这种情况发生的频率。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a> · <a href="https://arxiv.org/html/2512.02556#A1" target="_blank" rel="noopener">附录 A ↗</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Exp/tree/main/inference" target="_blank" rel="noopener">官方推理代码 ↗</a> · <a href="https://github.com/deepseek-ai/FlashMLA/tree/ba89a3466e9470ad08ab39738d4e7bb66989e1e7" target="_blank" rel="noopener">FlashMLA（仍支持 V3.2 的版本）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">2.1.1（原文）继续预训练：先教索引器模仿，再让模型适应稀疏</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V3.1-Terminus 是一个已经训好的稠密注意力模型，它的每一层都习惯了“看全部 token”。现在给它装上一个随机初始化的索引器，并且要求它只看 2048 个 token，怎样才能不把模型改坏？报告的答案是两步走：先在稠密注意力下只训练索引器，让它学会挑出主注意力本来就会重视的 token；然后再打开稀疏选择，让整个模型适应“只看一部分”。这一节讲两个阶段各自的目标函数、超参数，以及为什么要把索引器和主模型的梯度分开。</div>
+<p>起点是 V3.1-Terminus 的基座检查点，它的上下文长度已经扩展到 128K。两个阶段用的数据，分布和 V3.1-Terminus 做 128K 长上下文扩展时的数据<b>完全一致</b>。这一点很重要：后面拿 V3.2-Exp 和 V3.1-Terminus 比效果时，数据分布这个变量被控制住了。</p>
+
+<h4 id="n-3-1">第一阶段：稠密预热</h4>
+<p>如果一开始就打开稀疏选择，随机初始化的索引器会随便挑 2048 个 token，主模型看到的上下文是错的，语言模型损失会把主模型往错误的方向拉。所以第一阶段<b>保持稠密注意力</b>，并且<b>冻结除索引器以外的全部参数</b>，只让索引器学习。</p>
+<p>索引器学习的目标从主注意力里来。对第 \(t\) 个 query，先把主注意力在所有头上的注意力分数（softmax 之后的权重）<b>相加</b>，再沿序列方向做 L1 归一化（除以总和，使它加起来等于 1），得到一个目标分布 \(p_{t,:}\)。然后让索引分数经过 softmax 后的分布去逼近它。原文式 (3)：</p>
+<div class="formula">$$\mathcal{L}^{I}=\sum_{t}\mathbb{D}_{\mathrm{KL}}\Big(p_{t,:}\ \Big\|\ \mathrm{Softmax}\big(I_{t,:}\big)\Big)$$</div>
+<div class="note-pre"><b>先补一点背景：KL 散度，以及它的“方向”。</b>
+<p>KL 散度 \(\mathbb{D}_{\mathrm{KL}}(p\,\|\,q)=\sum_s p_s\log(p_s/q_s)\) 衡量分布 \(q\) 和目标分布 \(p\) 差多远，两者相同时为 0。它不对称。这里 \(p\) 是主注意力（目标），\(q\) 是索引器的分布，这种写法叫“前向 KL”：凡是 \(p_s\) 大的位置，如果 \(q_s\) 很小，\(\log(p_s/q_s)\) 就很大，惩罚很重；反过来，\(q\) 把一些概率分给 \(p\) 不在意的位置，惩罚很轻。</p>
+<p>用一个 4 个 token 的例子算一下。设主注意力（各头相加并归一化后）是 \(p=(0.6,\,0.3,\,0.1,\,0)\)。如果索引器给出 \(q=(0.4,\,0.4,\,0.1,\,0.1)\)，KL ≈ 0.6·ln1.5 + 0.3·ln0.75 ≈ 0.16；如果索引器漏掉了最重要的第 1 个 token，给出 \(q=(0.05,\,0.45,\,0.25,\,0.25)\)，KL ≈ 0.6·ln12 + 0.3·ln(2/3) + 0.1·ln0.4 ≈ 1.28，大了 8 倍（推算）。这正是 top-k 选择需要的性质：对索引器来说，<b>漏掉主注意力重视的 token 是最严重的错误</b>，多选几个不重要的 token 只是浪费一点名额。</p>
+</div>
+<p>为什么要把所有头的注意力<b>相加</b>，而不是每个头各训练一个索引器？因为上一节讲过，DSA 的选择是 128 个头共用的。一个 token 只要对某几个头很重要，它就应该被选上，所以目标应该反映“所有头加在一起有多需要这个 token”。</p>
+<p>这一阶段的学习率是 \(10^{-3}\)，只训练 1000 步，每步 16 条 128K 长的序列，共 21 亿（2.1B）个 token（核对：1000 × 16 × 131,072 ≈ 2.10B）。相对于后面的阶段，这只是一个很短的预热。</p>
+
+<h4 id="n-3-2">第二阶段：稀疏训练</h4>
+<p>预热之后，打开细粒度的 token 选择，<b>训练模型的全部参数</b>，让主模型适应 DSA 的稀疏模式。这一阶段索引器继续向主注意力对齐，但只在被选中的集合 \(\mathcal{S}_t=\{s\mid I_{t,s}\in\mathrm{Top\text{-}k}(I_{t,:})\}\) 上算 KL。原文式 (4)：</p>
+<div class="formula">$$\mathcal{L}^{I}=\sum_{t}\mathbb{D}_{\mathrm{KL}}\Big(p_{t,\mathcal{S}_t}\ \Big\|\ \mathrm{Softmax}\big(I_{t,\mathcal{S}_t}\big)\Big)$$</div>
+<p>为什么只在选中集合上算？因为打开稀疏之后，主注意力本身就只在这 2048 个位置上计算，选中集合之外的位置根本没有主注意力分数，目标分布 \(p\) 只能在 \(\mathcal{S}_t\) 上定义。这也带来一个本站认为值得注意的后果：第二阶段的 KL 只调整索引器在“已选中的 2048 个 token 内部”的相对排序，不会直接告诉索引器“某个没被选中的 token 其实很重要”。漏选的修正主要依靠第一阶段打下的基础，以及第二阶段里选中集合随训练不断变化。报告没有讨论这一点。</p>
+<p>还有一个关键的设计：<b>索引器的输入从计算图上断开</b>（detach）。索引器只从 \(\mathcal{L}^{I}\) 得到训练信号，主模型只按语言模型损失优化。断开的作用有两个方向。一方面，top-k 是离散的选择，语言模型损失本来就无法通过“选谁”把梯度传给索引器，所以索引器只能靠 KL 蒸馏来学。另一方面，断开输入后，KL 损失的梯度也不会流进主模型的隐状态，主模型不会为了“让索引器更容易模仿”而去改变自己的表示。两个部件各学各的，互不干扰。</p>
+<p>这一阶段的学习率是 \(7.3\times10^{-6}\)，每个 query 选 2048 个 KV token，主模型和索引器一起训练 15,000 步，每步 480 条 128K 长的序列，共 9437 亿（943.7B）个 token（核对：15,000 × 480 × 131,072 ≈ 943.7B）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：两个阶段里，谁在被训练、梯度从哪里来</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="DSA 两阶段继续训练的梯度流" style="--dg-min:760px">
+    <rect class="panel" x="8" y="8" width="462" height="274" rx="10"/>
+    <rect class="panel" x="490" y="8" width="462" height="274" rx="10"/>
+    <text x="239" y="30" class="t-c t-b">阶段一：稠密预热</text>
+    <text x="721" y="30" class="t-c t-b">阶段二：稀疏训练</text>
+    <g class="tgt"><rect class="box frozen" x="30" y="56" width="210" height="64" rx="8"/><text x="135" y="78" class="t-c">主模型（冻结）</text><text x="135" y="98" class="t-c t-xs">稠密注意力，看全部 token</text></g>
+    <g class="pred"><rect class="box" x="30" y="190" width="210" height="60" rx="8"/><text x="135" y="211" class="t-c">闪电索引器</text><text x="135" y="231" class="t-c t-xs">唯一被训练的部分，lr = 1e-3</text></g>
+    <g class="loss"><rect class="box" x="300" y="190" width="150" height="60" rx="8"/><text x="375" y="211" class="t-c">KL(p ‖ softmax(I))</text><text x="375" y="231" class="t-c t-xs">在全部历史位置上</text></g>
+    <path class="edge sg" d="M240,88 L375,88 L375,188"/>
+    <text x="300" y="78" class="t-c t-xs">主注意力分布 p（只作目标）</text>
+    <path class="edge loss" d="M240,220 L298,220"/>
+    <path class="edge sg" d="M135,120 L135,188"/>
+    <text x="142" y="156" class="t-xs">隐状态（detach）</text>
+    <text x="239" y="270" class="t-c t-xs">1000 步 × 16 条 × 128K ≈ 2.1B token</text>
+    <g class="enc"><rect class="box" x="510" y="56" width="210" height="64" rx="8"/><text x="615" y="78" class="t-c">主模型（全部参数训练）</text><text x="615" y="98" class="t-c t-xs">只对 top-2048 条目做注意力</text></g>
+    <g class="loss"><rect class="box" x="780" y="56" width="150" height="64" rx="8"/><text x="855" y="78" class="t-c">语言模型损失</text><text x="855" y="98" class="t-c t-xs">只更新主模型，lr = 7.3e-6</text></g>
+    <g class="pred"><rect class="box" x="510" y="190" width="210" height="60" rx="8"/><text x="615" y="211" class="t-c">闪电索引器</text><text x="615" y="231" class="t-c t-xs">继续训练</text></g>
+    <g class="loss"><rect class="box" x="780" y="190" width="150" height="60" rx="8"/><text x="855" y="211" class="t-c">KL(p<tspan baseline-shift="sub" style="font-size:10px">S</tspan> ‖ softmax(I<tspan baseline-shift="sub" style="font-size:10px">S</tspan>))</text><text x="855" y="231" class="t-c t-xs">只在选中集合 S 上</text></g>
+    <path class="edge loss" d="M720,88 L778,88"/>
+    <path class="edge loss" d="M720,220 L778,220"/>
+    <path class="edge sg" d="M700,120 L700,150 L855,150 L855,188"/>
+    <text x="790" y="142" class="t-c t-xs">p 只在 S 上（只作目标）</text>
+    <path class="edge sg" d="M560,120 L560,188"/>
+    <text x="566" y="168" class="t-xs">detach</text>
+    <path class="edge idx" d="M640,190 L640,122"/>
+    <text x="646" y="176" class="t-xs">top-k 位置 S</text>
+    <text x="721" y="270" class="t-c t-xs">15000 步 × 480 条 × 128K ≈ 943.7B token</text>
+  </svg>
+  <div class="dia-note">本站示意图。虚线箭头表示“只当目标或输入，不回传梯度”，点线箭头表示把 top-k 位置交给主模型。实线箭头指向各自的损失。</div>
+</div>
+
+<h4 id="n-3-3">把训练量放在一起看</h4>
+<p>9437 亿 token 是多少？可以拿几个数比一比（都是推算）：</p>
+<ul>
+  <li>DeepSeek-V3 的预训练用了 14.8T token，稀疏训练阶段约为它的 6.4%。</li>
+  <li>V3.1 的模型卡写明它的长上下文扩展用了 630B token（32K 阶段）和 209B token（128K 阶段）（见 <a href="deepseek-v3.html#n-8-3">DeepSeek-V3 精读 §4.3</a>）。V3.2 的稀疏训练比 V3.1 整个长上下文扩展的总量（839B）还多，是其中 128K 阶段的约 4.5 倍。</li>
+  <li>每步 480 条 × 131,072 个 token ≈ 6290 万 token，恰好等于 V3 预训练后期的批大小（15,360 条 × 4,096 个 token）。也就是说，稀疏训练每一步“吃”的 token 数和 V3 预训练一样，只是每条序列长了 32 倍。</li>
+</ul>
+<p>这说明 DSA 不是一个“装上就能用”的模块，而是一次规模不小的继续训练。不过因为训练本身也在稀疏注意力下进行（DeepSeek 在 TileLang 里公开了稀疏 MLA 的反向内核作为参考实现），128K 长度上每个 token 的训练成本比稠密注意力低。报告和 Exp 报告都说 DSA 显著提高了训练效率，但没有给出训练速度或 GPU 小时的数字。</p>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>报告没有给出两个阶段花了多少 GPU 小时，也没有给出索引器的头数和维度（只能从推理代码的配置里读到）。</li>
+  <li>报告没有任何消融：不知道去掉预热会怎样、\(k\) 取 1024 或 4096 会怎样、第二阶段的 KL 如果不限制在选中集合上会怎样，也没有和 NSA 或免训练的稀疏方法比较。</li>
+  <li>V3.2-Exp 比 V3.1-Terminus 多训练了约 0.95T 个 128K 长度的 token。下一节“效果持平”的结论是在这个前提下得到的：多出来的训练量本身可能弥补了一部分稀疏化带来的损失，所以它不等于“同等训练量下稀疏与稠密一样好”。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S2.SS1.SSS1" target="_blank" rel="noopener">英文原文 §2.1.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">2.2 对等评测：加了稀疏以后，模型变差了吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>每个 query 只看 2048 个 token，听起来一定会丢信息。那么 V3.2-Exp 的能力有没有比 V3.1-Terminus 下降？报告从三个角度回答：标准基准、人类偏好（用 Chatbot Arena 间接衡量）、第三方的长上下文评测。前两个都是在 V3.2-Exp 上测的，因为 V3.2-Exp 的后训练和 V3.1-Terminus 完全相同，比较才公平。</div>
+<p><b>标准基准。</b>2025 年 9 月发布 V3.2-Exp 时，DeepSeek 在一组覆盖通用知识、搜索智能体、代码、代码智能体和数学的基准上比较了两者。12 月的报告只用一句话说“性能相近，短上下文和长上下文任务都没有观察到明显退化”，具体数字在 Exp 报告的表 1 里：</p>
+<div class="dia">
+  <div class="dia-title">示意图：V3.2-Exp 相对 V3.1-Terminus 的分差（重画 Exp 报告表 1 的数字）</div>
+  <svg class="dg" viewBox="0 0 960 410" role="img" aria-label="V3.2-Exp 相对 V3.1-Terminus 的分数差" style="--dg-min:720px">
+<text x="480" y="18" class="t-c t-b">V3.2-Exp 减去 V3.1-Terminus 的分差（单位：分）</text>
+<text x="250" y="38" class="t-r t-xs">基准（Terminus → Exp）</text>
+<line x1="390" y1="44" x2="390" y2="358" class="grid-ln"/>
+<text x="390" y="372" class="t-c t-xs">-3</text>
+<line x1="460" y1="44" x2="460" y2="358" class="grid-ln"/>
+<text x="460" y="372" class="t-c t-xs">-2</text>
+<line x1="530" y1="44" x2="530" y2="358" class="grid-ln"/>
+<text x="530" y="372" class="t-c t-xs">-1</text>
+<line x1="600" y1="44" x2="600" y2="358" class="axis"/>
+<text x="600" y="372" class="t-c t-xs">0</text>
+<line x1="670" y1="44" x2="670" y2="358" class="grid-ln"/>
+<text x="670" y="372" class="t-c t-xs">+1</text>
+<line x1="740" y1="44" x2="740" y2="358" class="grid-ln"/>
+<text x="740" y="372" class="t-c t-xs">+2</text>
+<line x1="810" y1="44" x2="810" y2="358" class="grid-ln"/>
+<text x="810" y="372" class="t-c t-xs">+3</text>
+<text x="250" y="56" class="t-r t-sm">MMLU-Pro（85 → 85）</text>
+<line x1="600" y1="49" x2="600" y2="63" style="stroke:var(--text-2);stroke-width:3"/>
+<text x="608" y="56" class="t-xs">0.0</text>
+<text x="250" y="80" class="t-r t-sm">GPQA-Diamond（80.7 → 79.9）</text>
+<rect class="tk pred" x="544" y="73" width="56" height="14"/>
+<text x="538" y="80" class="t-r t-xs">-0.8</text>
+<text x="250" y="104" class="t-r t-sm">HLE（21.7 → 19.8）</text>
+<rect class="tk pred" x="467" y="97" width="133" height="14"/>
+<text x="461" y="104" class="t-r t-xs">-1.9</text>
+<text x="250" y="128" class="t-r t-sm">LiveCodeBench（74.9 → 74.1）</text>
+<rect class="tk pred" x="544" y="121" width="56" height="14"/>
+<text x="538" y="128" class="t-r t-xs">-0.8</text>
+<text x="250" y="152" class="t-r t-sm">Aider-Polyglot（76.1 → 74.5）</text>
+<rect class="tk pred" x="488" y="145" width="112" height="14"/>
+<text x="482" y="152" class="t-r t-xs">-1.6</text>
+<text x="250" y="176" class="t-r t-sm">AIME 2025（88.4 → 89.3）</text>
+<rect class="tk enc" x="600" y="169" width="63" height="14"/>
+<text x="669" y="176" class="t-xs">+0.9</text>
+<text x="250" y="200" class="t-r t-sm">HMMT 2025（86.1 → 83.6）</text>
+<rect class="tk pred" x="425" y="193" width="175" height="14"/>
+<text x="419" y="200" class="t-r t-xs">-2.5</text>
+<text x="250" y="224" class="t-r t-sm">BrowseComp（38.5 → 40.1）</text>
+<rect class="tk enc" x="600" y="217" width="112" height="14"/>
+<text x="718" y="224" class="t-xs">+1.6</text>
+<text x="250" y="248" class="t-r t-sm">BrowseComp-zh（45 → 47.9）</text>
+<rect class="tk enc" x="600" y="241" width="203" height="14"/>
+<text x="809" y="248" class="t-xs">+2.9</text>
+<text x="250" y="272" class="t-r t-sm">SimpleQA（96.8 → 97.1）</text>
+<rect class="tk enc" x="600" y="265" width="21" height="14"/>
+<text x="627" y="272" class="t-xs">+0.3</text>
+<text x="250" y="296" class="t-r t-sm">SWE Verified（68.4 → 67.8）</text>
+<rect class="tk pred" x="558" y="289" width="42" height="14"/>
+<text x="552" y="296" class="t-r t-xs">-0.6</text>
+<text x="250" y="320" class="t-r t-sm">SWE-bench Multilingual（57.8 → 57.9）</text>
+<rect class="tk enc" x="600" y="313" width="7" height="14"/>
+<text x="613" y="320" class="t-xs">+0.1</text>
+<text x="250" y="344" class="t-r t-sm">Terminal-bench（36.7 → 37.7）</text>
+<rect class="tk enc" x="600" y="337" width="70" height="14"/>
+<text x="676" y="344" class="t-xs">+1</text>
+<text x="480" y="394" class="t-c t-xs">左边（橙）= Exp 更低，右边（蓝）= Exp 更高。Codeforces 评分 2046 → 2121（+75）单位不同，未画。</text>
+</svg>
+  <div class="dia-note">数字来自 <a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/DeepSeek_V3_2.pdf" target="_blank" rel="noopener">V3.2-Exp 报告表 1 ↗</a>（也见官方仓库 README）。均为推理模式、不用工具或用工具的智能体模式，按原表分组。</div>
+</div>
+<p>13 项可以比较的基准里，6 项 Exp 更高，6 项更低，1 项持平；差距最大的是 HMMT 2025（−2.5）和 BrowseComp-zh（+2.9）。Exp 报告对几项下降给了一个解释：V3.2-Exp 在 GPQA、HLE 和 HMMT 2025 上生成的推理 token 更少，所以分数略低；如果取一个生成 token 数相当的中间检查点，差距就消失了。Exp 报告还比较了两者在强化学习过程中的训练曲线：在 BrowseComp 和 SWE Verified 上，两条曲线的准确率都稳步上升、基本重合，作者以此说明 DSA 在 RL 训练中也是稳定的。</p>
+<p>注意，这些推理任务的<b>输出</b>往往有一两万个 token（§4.2 的表 3 列出了平均输出长度），远超 2048。所以在思考的后半段，模型确实是在稀疏注意力下工作的，这组对比并不只是测了“短文本上等价于稠密”的部分。</p>
+<p><b>人类偏好。</b>作者认为直接请人评估容易有偏差，于是用 Chatbot Arena 作为间接指标。V3.1-Terminus 和 V3.2-Exp 用相同的后训练策略，它们在 2025-11-10 的 Elo 分数“非常接近”。报告没有给出具体分数。</p>
+<p><b>长上下文。</b>V3.2-Exp 发布后，有几个独立的长上下文评测用此前未公开的测试集测了它。在 Artificial Analysis 的长上下文推理基准 AA-LCR 上，V3.2-Exp 在推理模式下比 V3.1-Terminus 高 4 分；在 Fiction.liveBench 上，V3.2-Exp 在多项指标上一致优于 V3.1-Terminus。作者据此认为，V3.2-Exp 的基座在长上下文任务上没有退化。</p>
+
+<h4 id="n-4-1">结果的份量</h4>
+<ul>
+  <li><b>控制住了什么：</b>同一个起点检查点、同一种继续训练数据分布、同一套后训练流程与数据（Exp 报告明确写了这一点，目的就是严格评估 DSA 的影响）。这是这组对比最有价值的地方，在大模型的结构改动里很少见。</li>
+  <li><b>没有控制住什么：</b>V3.2-Exp 多训练了 943.7B token；它在若干推理任务上生成的 token 数也和 V3.1-Terminus 不同，而 Exp 报告自己承认这会影响分数。所以“持平”是两个训练历史不同的模型在终点上的比较。</li>
+  <li><b>差异的大小：</b>正负两个方向都有、最大约 3 分，报告没有给出多次评测的方差。这类基准（例如 AIME、HMMT）题量只有几十道，一道题就相当于几分，所以单次评测上 ±2 分的差异不足以说明谁更好或更差。</li>
+  <li><b>长上下文证据偏少：</b>DeepSeek 自己没有报告“大海捞针”、RULER、LongBench 一类专门测长距离检索的基准；长上下文的证据来自两个第三方评测，报告里只有“高 4 分”“一致更好”这样的描述，没有列出完整数字和设置。对一个只看 2048 个 token 的机制来说，最该担心的恰恰是“需要同时用到上下文里很多分散信息”的任务，而这类任务的证据不多。</li>
+  <li><b>没有和其他稀疏方法比：</b>报告没有和 NSA、MoBA 或免训练的稀疏注意力在相同条件下比较，所以不能从这里得出“DSA 比别的稀疏方案更好”的结论。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2 ↗</a> · <a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/DeepSeek_V3_2.pdf" target="_blank" rel="noopener">Exp 报告表 1、图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">2.3 推理成本：每百万 token 便宜了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DSA 在理论上把核心注意力从 \(O(L^2)\) 降到 \(O(Lk)\)，那么在真实部署里能省多少钱？报告用一张图回答：在 DeepSeek 自己的线上服务上实测，换算成“按 token 所在位置，每百万 token 要花多少美元”，比较 V3.1-Terminus 和 V3.2。读这张图之前，要先弄清楚“按位置的单 token 成本”是什么意思。</div>
+<div class="note-pre"><b>先补一点背景：按 token 计价的成本是怎么算出来的。</b>
+<p>推理服务的成本，最终是 GPU 的租用时间。报告假设 H800 的租价是每 GPU 小时 2 美元（和 V3 报告的训练成本口径相同）。如果在某种负载下，一张 GPU 每秒能产出 \(N\) 个 token，那么每百万 token 的成本就是 \(2\div3600\div N\times10^6\approx 556/N\) 美元。反过来，0.25 美元/百万 token 相当于每张 GPU 每秒约 2,200 个 token（推算）。</p>
+<p>“按位置”是说：同样是生成一个 token，它前面有 1K 个 token 还是 128K 个 token，花的钱不一样，因为注意力要看的东西不一样多。图的横轴是 token 在序列中的位置，纵轴是“如果所有 token 都处在这个位置上，每百万 token 要花多少钱”。一个请求的总成本，是它所有 token 的成本加起来，相当于对这条曲线在请求覆盖的位置范围内取平均。预填充（处理输入）和解码（逐个生成输出）分开画，因为两者的效率差别很大：预填充可以一次并行处理很多 token，解码每次只能生成一个，所以解码的单 token 成本高得多。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：按位置的每百万 token 成本（按原文图 3 的矢量数据重画）</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="按 token 位置的每百万 token 成本：预填充与解码" style="--dg-min:760px">
+<text x="235" y="20" class="t-c t-b">(a) 预填充：每百万 token 成本（美元）</text>
+<line x1="70" y1="270" x2="400" y2="270" class="axis"/>
+<text x="64" y="270" class="t-r t-xs">$0</text>
+<line x1="70" y1="207.1" x2="400" y2="207.1" class="grid-ln"/>
+<text x="64" y="207.1" class="t-r t-xs">$0.2</text>
+<line x1="70" y1="144.3" x2="400" y2="144.3" class="grid-ln"/>
+<text x="64" y="144.3" class="t-r t-xs">$0.4</text>
+<line x1="70" y1="81.4" x2="400" y2="81.4" class="grid-ln"/>
+<text x="64" y="81.4" class="t-r t-xs">$0.6</text>
+<line x1="70" y1="270" x2="70" y2="40" class="axis"/>
+<text x="70" y="286" class="t-c t-xs">0K</text>
+<text x="152.5" y="286" class="t-c t-xs">32K</text>
+<text x="235" y="286" class="t-c t-xs">64K</text>
+<text x="317.5" y="286" class="t-c t-xs">96K</text>
+<text x="400" y="286" class="t-c t-xs">128K</text>
+<text x="235" y="304" class="t-c t-sm">token 在序列中的位置 →</text>
+<polyline points="70,253.4 400,60.7" style="fill:none;stroke:var(--c-tgt);stroke-width:2.5"/>
+<polyline points="70,250.8 87,238.6 400,211.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<text x="404" y="60.7" class="t-xs" style="fill:var(--c-tgt)">≈$0.67</text>
+<text x="404" y="209.2" class="t-xs" style="fill:var(--c-enc)">≈$0.19</text>
+<circle cx="87" cy="238.6" r="3.5" style="fill:var(--c-pred)"/>
+<text x="725" y="20" class="t-c t-b">(b) 解码：每百万 token 成本（美元）</text>
+<line x1="560" y1="270" x2="890" y2="270" class="axis"/>
+<text x="554" y="270" class="t-r t-xs">$0</text>
+<line x1="560" y1="196.7" x2="890" y2="196.7" class="grid-ln"/>
+<text x="554" y="196.7" class="t-r t-xs">$0.8</text>
+<line x1="560" y1="123.3" x2="890" y2="123.3" class="grid-ln"/>
+<text x="554" y="123.3" class="t-r t-xs">$1.6</text>
+<line x1="560" y1="50" x2="890" y2="50" class="grid-ln"/>
+<text x="554" y="50" class="t-r t-xs">$2.4</text>
+<line x1="560" y1="270" x2="560" y2="40" class="axis"/>
+<text x="560" y="286" class="t-c t-xs">0K</text>
+<text x="642.5" y="286" class="t-c t-xs">32K</text>
+<text x="725" y="286" class="t-c t-xs">64K</text>
+<text x="807.5" y="286" class="t-c t-xs">96K</text>
+<text x="890" y="286" class="t-c t-xs">128K</text>
+<text x="725" y="304" class="t-c t-sm">token 在序列中的位置 →</text>
+<polyline points="560,263.5 890,72.5" style="fill:none;stroke:var(--c-tgt);stroke-width:2.5"/>
+<polyline points="560,261.3 565.3,256.6 822,249.2 890,247.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<text x="894" y="72.5" class="t-xs" style="fill:var(--c-tgt)">≈$2.15</text>
+<text x="894" y="245.2" class="t-xs" style="fill:var(--c-enc)">≈$0.25</text>
+<circle cx="565.3" cy="256.6" r="3.5" style="fill:var(--c-pred)"/>
+<text x="96" y="259" class="t-xs" style="fill:var(--c-pred)">← 约 6.6K 处转平</text>
+<text x="700" y="234" class="t-xs" style="fill:var(--c-pred)">V3.2 在约 2K（= k）处转平</text>
+<line x1="300" y1="322" x2="326" y2="322" style="stroke:var(--c-tgt);stroke-width:2.5"/><text x="332" y="322" class="t-sm">V3.1-Terminus（稠密 MLA）</text>
+<line x1="560" y1="322" x2="586" y2="322" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="592" y="322" class="t-sm">V3.2（DSA）</text>
+</svg>
+  <div class="dia-note">本站重画的简化图，曲线端点和转折点是从 <a href="https://arxiv.org/html/2512.02556#S2.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 的矢量文件里读出的坐标（读图）。原图的两条线都是折线，V3.1-Terminus 是一条直线，V3.2 在预填充里有一个转折、在解码里有两个转折（第二个在约 102K 处，斜率几乎不变，图中未标）。</div>
+</div>
+<p>从图上读出的数（读图，美元/百万 token）：</p>
+<div class="table-wrap"><table>
+  <tr><th>token 位置</th><th>预填充 V3.1-Terminus</th><th>预填充 V3.2</th><th>比值</th><th>解码 V3.1-Terminus</th><th>解码 V3.2</th><th>比值</th></tr>
+  <tr><td>0</td><td>0.053</td><td>0.061</td><td>0.87×</td><td>0.070</td><td>0.095</td><td>0.74×</td></tr>
+  <tr><td>32K</td><td>0.206</td><td>0.118</td><td>1.7×</td><td>0.591</td><td>0.170</td><td>3.5×</td></tr>
+  <tr><td>64K</td><td>0.359</td><td>0.141</td><td>2.6×</td><td>1.112</td><td>0.197</td><td>5.7×</td></tr>
+  <tr><td>128K</td><td>0.666</td><td>0.187</td><td>3.6×</td><td>2.154</td><td>0.249</td><td>8.7×</td></tr>
+</table></div>
+<p class="w-note">比值 = V3.1-Terminus ÷ V3.2，大于 1 表示 V3.2 更便宜。全部为本站读图所得的近似值。</p>
+<p>这张图可以读出好几件事：</p>
+<ul>
+  <li><b>V3.1-Terminus 的成本随位置直线上升。</b>这正是 §2.1 那本账的体现：每个 token 的注意力开销正比于它前面的 token 数。解码从 0K 的约 0.07 美元涨到 128K 的约 2.15 美元，涨了约 30 倍；位置 0 处的那部分成本主要来自注意力以外的计算（MoE 前馈层、通信等）。</li>
+  <li><b>V3.2 的成本几乎是平的。</b>解码在约 2K 处有一个转折：2048 个位置以内，所有 token 都被选中，核心注意力和稠密一样随位置增长；超过 2048 后，核心注意力的开销固定下来，剩下的斜率主要来自索引器。到 128K，解码单 token 的成本约为 V3.1-Terminus 的 1/8.7。</li>
+  <li><b>预填充的转折在约 6.6K。</b>这与 §2.1.3 推算的“带掩码 MHA 模式”与“稀疏 MQA 模式”的交点（约 7.0K）大致吻合，可以理解为短序列和长序列走了两套不同的实现。</li>
+  <li><b>短序列上 V3.2 并不更便宜。</b>按读图的数字，解码在约 4.8K 以内、预填充在约 10K 以内，V3.2 的单 token 成本略高于 V3.1-Terminus（推算的交点）。索引器、top-k 和稀疏内核都有固定开销，上下文很短时省不下什么。</li>
+  <li><b>整段长输入的平均成本。</b>如果一个请求的输入正好 128K，预填充的总成本相当于对曲线从 0 到 128K 取平均：V3.1-Terminus 约 0.36 美元/百万 token，V3.2 约 0.14 美元/百万 token，便宜约 2.6 倍（推算）。这比“128K 位置上便宜 3.6 倍”要少，因为前面的位置省得少。</li>
+</ul>
+<p>V3.2-Exp 发布当天，DeepSeek 宣布 API 价格下调 50% 以上。价格是商业决定，不等于成本，但方向与这张图一致。</p>
+
+<h4 id="n-5-1">结果的份量</h4>
+<ul>
+  <li><b>这是成本估算，不是性能测试报告。</b>报告说这些数字是“对部署在 H800 上的实际服务做基准测试后估算出来的”。服务的部署方式（批大小、预填充与解码是否分离、专家并行规模、是否开启 MTP 投机解码、缓存命中情况）都没有公开，也没有给出吞吐（token/秒）、首 token 延迟或每 token 延迟这类可以独立复现的指标。</li>
+  <li><b>两条曲线是同一套服务系统、同一种硬件上测的</b>，这一点让两者之间的比值比绝对值更可信。但位置 0 处 V3.2 反而略贵，说明两者的部署配置或实现并不完全相同，比值里可能混有工程优化的差别，不全是 DSA 本身的贡献。</li>
+  <li><b>按位置，不按请求。</b>用户实际感受到的降幅取决于请求的长度分布：大多数请求很短的服务，省得很少；以长文档、长思考、长智能体轨迹为主的服务，省得最多。</li>
+  <li><b>内核层面的数字是另一回事。</b>FlashMLA 的 640 / 410 TFLOPS 是单个内核在特定形状下的算力利用率，说明实现得高效，但不能直接换算成端到端的成本下降。</li>
+  <li><b>和 §2.1 的推算对照：</b>128K 位置上，理想计数给出的注意力计算量之比约 22 倍，读取量之比约 4.6 倍；图上扣掉位置 0 的基础成本后，解码的注意力部分大约便宜了 13 倍（推算：(2.154 − 0.070) ÷ (0.249 − 0.095)）。落在两者之间是合理的，因为索引器的读取和各种固定开销会吃掉一部分理论收益。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S2.SS3" target="_blank" rel="noopener">英文原文 §2.3 ↗</a> · <a href="https://api-docs.deepseek.com/news/news250929" target="_blank" rel="noopener">V3.2-Exp 发布说明（价格下调）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">3 后训练总览：专家蒸馏，再加一次混合强化学习</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了继续预训练后的稀疏注意力基座，怎样把它变成最终的 V3.2？报告说后训练的流程和 V3.2-Exp 相同，分两步：先为每个领域训练一个“专家模型”，用专家生成的数据蒸馏出一个通才；再把推理、智能体和人类对齐的强化学习合在一个阶段里做。另外还训练了一个只做推理、放宽长度惩罚的变体 V3.2-Speciale。后训练阶段的注意力同样是稀疏的，方式和稀疏继续训练阶段一样。</div>
+<div class="note-pre"><b>先补一点背景：专家蒸馏。</b>
+<p>直接训练一个什么都会的模型，各领域的目标会互相拉扯。一种常见做法是先“分而治之”：每个领域单独训练一个专家，让它在自己的领域里做到最好；然后让这些专家大量生成高质量的答案，把它们混在一起，用监督微调教给一个通才模型。这一步叫蒸馏，因为通才是在模仿专家的输出。DeepSeek-V3 的后训练已经用过类似的思路，从 R1 蒸馏推理能力（见 <a href="deepseek-v3.html#n-10-1">DeepSeek-V3 精读 §5.1</a>）。</p>
+</div>
+<p><b>专家蒸馏。</b>除了写作和一般问答，V3.2 的专家覆盖六个领域：数学、编程、一般逻辑推理、一般智能体任务、智能体编程、智能体搜索，每个领域都同时支持思考模式和非思考模式。（V3.2-Exp 报告里是五个领域，没有“一般智能体任务”，这一项是 V3.2 新加的。）所有专家都从同一个 V3.2 基座检查点微调而来，每个专家都用大规模强化学习训练。思考模式的长思维链数据和非思考模式的直接回答数据，由不同的模型生成。实验表明，在蒸馏数据上训练出的通才只比各领域专家略差一点，这点差距在随后的强化学习里基本被消除。</p>
+<p><b>混合强化学习。</b>算法仍是 GRPO（下一节详细讲）。和更早的 DeepSeek 模型分好几个阶段做 RL 不同，V3.2-Exp 起把推理、智能体和人类对齐的训练合并成<b>一个</b> RL 阶段，作者说这样既能平衡各领域的表现，又避免了多阶段训练常见的“学了后面忘了前面”（灾难性遗忘）。奖励分两类：推理和智能体任务用基于规则的结果奖励（答案对不对、测试过没过），外加长度惩罚和语言一致性奖励；一般任务用生成式奖励模型打分，而且每条提示都有自己的评分细则（rubric）。</p>
+<p><b>V3.2 与 V3.2-Speciale。</b>V3.2 把专家蒸馏出来的推理、智能体和对齐数据合在一起，再继续做数千步 RL 得到最终检查点。为了探索“让模型想得更久”能走多远，作者另外训练了实验性的 V3.2-Speciale：它<b>只用推理数据</b>训练，RL 中的长度惩罚减小，并加入了 DeepSeekMath-V2 的数据集和奖励方法来增强数学证明能力。Speciale 不支持工具调用。</p>
+<div class="dia">
+  <div class="dia-title">示意图：V3.2 的后训练流程</div>
+  <div class="dia-flow"><span class="dia-box data">V3.2 基座<small>V3.1-Terminus + 两阶段 DSA 继续训练</small></span><span class="dia-arrow">→</span><span class="dia-box enc">六个领域的专家 + 写作 / 问答<small>每个都用大规模 RL 训练，思考与非思考两种模式</small></span><span class="dia-arrow">→ 生成数据、蒸馏 →</span><span class="dia-box enc">通才 SFT 检查点</span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box pred">一个阶段的混合 RL（GRPO）<small>推理 + 智能体 + 人类对齐；规则奖励 + 长度惩罚 + 语言一致性；生成式奖励模型 + 每题评分细则</small></span><span class="dia-arrow">→</span><span class="dia-box act">V3.2<small>数千步 RL，长度约束较严</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">另一支 →</span><span class="dia-box act">V3.2-Speciale<small>只用推理数据、减小长度惩罚、加入 DeepSeekMath-V2 的证明数据与奖励；不支持工具</small></span></div>
+  <div class="dia-note">本站示意图，按原文 §3 开头的描述整理。</div>
+</div>
+<p>报告在引言和 §4.1 两次强调：后训练 RL 的计算预算已经<b>超过预训练成本的 10%</b>，并且过去几个月里观察到性能随 RL 预算持续提升，作者推测继续加算力还能更好。报告没有说明“预训练成本”具体指哪一次预训练，也没有给出 GPU 小时数。</p>
+<div class="note-warn"><b>读的时候要注意：</b>专家模型的数量、各自的训练量、蒸馏数据的规模、RL 的总步数和批大小，报告都没有给出。“蒸馏后只比专家略差、RL 后差距消除”是定性描述，没有对应的数字表格。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">3.1 把 GRPO 规模化：四个让训练保持稳定的补丁</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把强化学习的算力加大到预训练的 10% 以上，最先遇到的不是“学不会”，而是“训着训着崩了”。大规模 RL 系统里，生成数据的推理引擎和更新参数的训练引擎是两套不同的程序，策略也在不断更新，采样时的模型和训练时的模型在好几个地方并不完全一致。这一节先回顾 GRPO，然后讲 DeepSeek 针对这些不一致加的四个补丁：无偏的 KL 估计、离策略序列掩码、保持路由、保持采样掩码。</div>
+
+<h4 id="n-7-0">先回顾 GRPO</h4>
+<div class="note-pre"><b>先补一点背景：GRPO 在优化什么。</b>
+<p>GRPO（Group Relative Policy Optimization，DeepSeekMath 提出，DeepSeek-R1 和 V3 的后训练都用它，见 <a href="deepseek-v3.html#n-10-2">DeepSeek-V3 精读 §5.2</a>）是 PPO 的一个省资源版本。对每道题 \(q\)，先用旧策略 \(\pi_{\mathrm{old}}\) 采样一组 \(G\) 个回答 \(\{o_1,\dots,o_G\}\)，每个回答由奖励模型（或规则）打一个分 \(R_i\)。一个回答的“优势” \(\hat{A}_{i,t}\) 就是它的分数减去这组回答的平均分：比平均好的回答，其中每个 token 都被鼓励；比平均差的，都被抑制。这样不需要像 PPO 那样再训练一个价值网络来估计基线。报告写的是 \(\hat{A}_{i,t}=R_i-\mathrm{mean}(\mathbf{R})\)，只减均值，没有像 DeepSeekMath 原文那样再除以标准差。</p>
+<p>目标函数（原文式 5）：</p>
+<div class="formula">$$\mathcal{J}_{\mathrm{GRPO}}(\theta)=\mathbb{E}\Bigg[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\Big(\min\big(r_{i,t}(\theta)\hat{A}_{i,t},\ \mathrm{clip}\big(r_{i,t}(\theta),1-\varepsilon,1+\varepsilon\big)\hat{A}_{i,t}\big)-\beta\,\mathbb{D}_{\mathrm{KL}}\big(\pi_\theta(o_{i,t})\,\|\,\pi_{\mathrm{ref}}(o_{i,t})\big)\Big)\Bigg],\qquad r_{i,t}(\theta)=\frac{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}{\pi_{\mathrm{old}}(o_{i,t}\mid q,o_{i,\lt t})}$$</div>
+<p>其中 \(r_{i,t}\) 是<b>重要性采样比</b>：数据是旧策略采的，现在要更新的是当前策略 \(\pi_\theta\)，乘上这个比值就把“旧策略下的平均”换算成“当前策略下的平均”。clip 把比值限制在 \([1-\varepsilon,1+\varepsilon]\) 内，防止一次更新走得太远。最后一项是到参考策略 \(\pi_{\mathrm{ref}}\)（通常是 RL 开始前的模型）的 KL 惩罚，系数 \(\beta\)，防止模型偏离太多。</p>
+</div>
+
+<h4 id="n-7-1">补丁一：无偏的 KL 估计</h4>
+<div class="note-pre"><b>先补一点背景：怎样用样本估计 KL。</b>
+<p>KL 散度 \(\mathbb{D}_{\mathrm{KL}}(\pi_\theta\|\pi_{\mathrm{ref}})\) 要对整个词表求和，太贵，实践中用采样到的 token 来估计。Schulman 在 2020 年的一篇博客里比较了几种估计量，GRPO 用的是其中的 “k3”：记 \(\rho=\pi_{\mathrm{ref}}(o_t)/\pi_\theta(o_t)\)，用 \(\rho-\log\rho-1\) 作为单个 token 的估计。它永远非负，而且<b>当样本来自 \(\pi_\theta\) 时</b>，它的期望恰好等于 KL。</p>
+</div>
+<p>问题出在“当样本来自 \(\pi_\theta\) 时”这个前提。GRPO 的样本来自旧策略 \(\pi_{\mathrm{old}}\)，不是当前策略。作者的修正是给 k3 乘上当前策略和旧策略的重要性比（原文式 7）：</p>
+<div class="formula">$$\mathbb{D}_{\mathrm{KL}}\big(\pi_\theta(o_{i,t})\,\|\,\pi_{\mathrm{ref}}(o_{i,t})\big)=\frac{\pi_\theta(o_{i,t})}{\pi_{\mathrm{old}}(o_{i,t})}\left(\frac{\pi_{\mathrm{ref}}(o_{i,t})}{\pi_\theta(o_{i,t})}-\log\frac{\pi_{\mathrm{ref}}(o_{i,t})}{\pi_\theta(o_{i,t})}-1\right)$$</div>
+<p>（为了简洁，这里省略了条件 \(q,o_{i,\lt t}\)。）作者说，这样修正之后这个 KL 估计的梯度就是无偏的。更重要的是它对梯度大小的影响，可以自己推一下（本站推导）：</p>
+<ul>
+  <li><b>不修正时</b>，k3 对 \(\theta\) 的梯度是 \((1-\pi_{\mathrm{ref}}/\pi_\theta)\,\nabla\log\pi_\theta\)。当某个采到的 token 在当前策略下的概率远小于参考策略（\(\pi_\theta\ll\pi_{\mathrm{ref}}\)），系数 \(\pi_{\mathrm{ref}}/\pi_\theta\) 可以任意大。由于目标里减去了 KL，最大化目标就会用一个巨大的权重去拉高这个 token 的概率。报告描述的正是这种情况：权重大且无界，梯度噪声很大，积累下来会让后续采样的质量变差、训练变得不稳定。</li>
+  <li><b>修正后</b>，梯度变成 \(\dfrac{\pi_\theta}{\pi_{\mathrm{old}}}\log\dfrac{\pi_\theta}{\pi_{\mathrm{ref}}}\,\nabla\log\pi_\theta\)。同样的情况下，权重只随概率之比的<b>对数</b>增长，而且前面还乘着一个很小的 \(\pi_\theta/\pi_{\mathrm{old}}\)，不会失控。在旧策略下取期望，它正好等于真实 KL 的梯度。</li>
+  <li>举个数：\(\pi_{\mathrm{ref}}=0.1\)、\(\pi_\theta=\pi_{\mathrm{old}}=0.001\)。不修正时权重的大小是 \(0.1/0.001-1=99\)；修正后是 \(|\ln 0.01|\approx4.6\)，小了约 20 倍（推算）。</li>
+</ul>
+<p>作者还提到一个实践经验：不同领域适合的 KL 强度不同，比如数学，用较弱的 KL 惩罚甚至完全去掉，效果更好。</p>
+
+<h4 id="n-7-2">补丁二：离策略序列掩码</h4>
+<div class="note-pre"><b>先补一点背景：为什么 RL 训练会变成“离策略”。</b>
+<p>“同策略”（on-policy）是说，用来更新模型的数据，正是当前模型自己生成的。实际的大规模 RL 系统做不到严格同策略，原因有两个。第一，为了效率，系统一次生成一大批回答，再把它切成若干个小批，依次做几次梯度更新；做到第二个小批时，模型已经被第一个小批更新过了，数据就有点“过时”。第二，生成数据用的推理引擎（为了快，做了各种算子融合、低精度、批处理优化）和训练引擎是两套实现，即使参数完全相同，算出来的概率也会有细微差别（这种不一致的来源，见本站 <a href="batch-invariance.html">批不变性精读</a>）。两者叠加，采样时的策略和训练时的策略之间就有了一段距离。</p>
+</div>
+<p>作者的做法是：对那些<b>优势为负</b>、并且采样策略和当前策略<b>差得太远</b>的回答，整条不参与训练。差多远用整条回答上逐 token 的对数概率比的平均来衡量，这其实就是两种策略在这条样本上的 KL 估计。原文式 (8) 在式 (5) 的 clip 项上乘了一个二值掩码 \(M_{i,t}\)，式 (9) 定义它：</p>
+<div class="formula">$$M_{i,t}=\begin{cases}0, &amp; \hat{A}_{i,t}\lt 0\ \text{且}\ \dfrac{1}{|o_i|}\displaystyle\sum_{t=1}^{|o_i|}\log\frac{\pi_{\mathrm{old}}(o_{i,t}\mid q,o_{i,\lt t})}{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}\gt \delta\\[6pt] 1, &amp; \text{其他情况}\end{cases}$$</div>
+<p>这里有两个细节。第一，\(\pi_{\mathrm{old}}\) 用的是<b>推理引擎直接返回的采样概率</b>，而不是训练引擎重算的值，所以这个距离同时包含了“数据过时”和“两套实现不一致”两种来源。第二，只屏蔽<b>负</b>样本，正样本不管多离策略都保留。作者的直觉解释是：模型从自己的错误中学到的东西最多；但如果一个错误回答在当前策略看来已经很不像自己会写的东西了，拿它来“惩罚”当前策略，信号可能是误导性的，甚至会破坏优化的稳定性。阈值 \(\delta\) 是超参数，报告没有给出取值。作者说经验上观察到，这个操作在某些原本会不稳定的训练场景里提高了稳定性。</p>
+
+<h4 id="n-7-3">补丁三：保持路由（Keep Routing）</h4>
+<p>MoE 模型的每个 token 只激活少数几个专家，由路由器根据隐状态打分决定（MoE 的背景见 <a href="deepseek-v3.html#n-2-2">DeepSeek-V3 精读 §2.1.2</a>）。推理引擎和训练引擎的数值差异，再加上策略本身在更新，会让<b>同一个输入</b>在采样时和训练时被路由到不同的专家。路由一变，参与计算的参数子空间就突然换了一批：采样时这个 token 是专家 3 和专家 17 算的，训练时却去更新专家 5 和专家 17，梯度对应的已经不是产生这条数据的那个函数。这会破坏优化的稳定性，也加重了离策略问题。</p>
+<p>作者的做法是：在推理引擎采样时<b>记录每个 token 的专家路由路径</b>，训练时强制使用同样的路径，确保被优化的正是采样时用到的那些专家参数。报告说，这个操作对 MoE 模型的 RL 稳定性“至关重要”，并且从 DeepSeek-V3-0324 起就一直用在他们的 RL 流程里。</p>
+
+<h4 id="n-7-4">补丁四：保持采样掩码（Keep Sampling Mask）</h4>
+<p>生成回答时常用 top-p 或 top-k 采样：只在概率最高的一部分候选 token 里抽样，把长尾的极低概率 token 截掉。在 RL 里这样做也有好处，可以避免把那些极不可能的 token 当成优化目标。但截断带来了一个问题：采样策略 \(\pi_{\mathrm{old}}\) 的“动作空间”是截断后的候选集合，而训练时计算的 \(\pi_\theta\) 是在整个词表上的分布，两者的动作空间不一样，重要性采样比 \(\pi_\theta/\pi_{\mathrm{old}}\) 就失去了意义，训练会不稳定。作者的做法是：采样时<b>保存截断掩码</b>，训练时把同样的掩码套到 \(\pi_\theta\) 上，让两个策略在同一个动作子空间里比较。经验上，top-p 采样配合这个做法，能在 RL 训练中有效保持语言一致性（例如不在中文回答里突然冒出别的语言）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：采样时与训练时的四处不一致，以及对应的补丁</div>
+  <div class="dia-flow"><span class="dia-box data">推理引擎：生成回答<small>记录：每个 token 的采样概率 π_old、专家路由、top-p 截断后的候选集合</small></span><span class="dia-arrow">→ 回答 + 记录 →</span><span class="dia-box enc">训练引擎：重算 π_θ、更新参数</span></div>
+  <div class="dia-flow"><span class="dia-box pred">KL 估计的样本来自 π_old 而非 π_θ<small>k3 在 π_θ ≪ π_ref 时梯度无界</small></span><span class="dia-arrow">→</span><span class="dia-box enc">无偏 KL：乘上 π_θ / π_old<small>权重只随对数增长</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">数据过时 + 两套实现的数值差异<small>离策略</small></span><span class="dia-arrow">→</span><span class="dia-box enc">离策略序列掩码<small>屏蔽“负优势且偏离超过 δ”的整条回答</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">同一输入被路由到不同专家<small>参数子空间突变</small></span><span class="dia-arrow">→</span><span class="dia-box enc">保持路由<small>训练时重放采样时的路由</small></span></div>
+  <div class="dia-flow"><span class="dia-box pred">top-p 截断让两个策略的动作空间不同<small>重要性比失去意义</small></span><span class="dia-arrow">→</span><span class="dia-box enc">保持采样掩码<small>训练时对 π_θ 套用同一截断</small></span></div>
+  <div class="dia-note">本站示意图，按原文 §3.1 整理。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意：</b>四个补丁在报告里都只有定性描述（“消除系统误差”“在某些场景提高稳定性”“至关重要”“有效保持语言一致性”），没有一张消融表或训练曲线。阈值 \(\delta\)、各领域的 KL 系数 \(\beta\)、clip 的 \(\varepsilon\) 都没有给出。保持路由和保持采样掩码在其他团队的 RL 工作里也有类似做法，它们说明的是同一个更大的问题：大规模 RL 里，“训练用的模型”和“采样用的模型”必须在数值上尽量对齐，否则重要性采样的数学前提就不成立。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a> · 相关：<a href="hybridflow.html">HybridFlow（RL 训练系统）精读</a> · <a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 训练系统拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">3.2 在工具调用中思考</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>DeepSeek-R1 证明了“先思考再回答”能大幅提高解难题的能力。那么在需要多次调用工具的智能体任务里，模型能不能也边想边调工具？要做到这一点有三个问题：多轮工具调用之间，之前的思考内容要不要保留在上下文里；怎样在没有现成“思考 + 工具”数据的情况下起步；以及到哪里去找足够多、足够难、又能自动判分的智能体任务来做强化学习。</div>
+
+<h4 id="n-8-1">3.2.1 思考内容的上下文管理</h4>
+<p>R1 的做法是：每当第二轮消息到来，就把上一轮的推理内容丢掉，只保留最终回答。在普通对话里这很合理，因为用户的新问题往往不需要上一轮的草稿。但在工具调用场景里，一个任务可能要连续调用十几次工具，每次工具返回结果都算“新消息”。如果每次都丢掉思考，模型就得在每次工具调用后<b>从头把整个问题再想一遍</b>，浪费大量 token。</p>
+<p>V3.2 为工具调用场景专门定了两条规则：</p>
+<ul>
+  <li><b>只有新的用户消息到来时，才丢弃历史的推理内容。</b>如果追加的只是工具相关的消息（比如工具输出），推理内容在整个交互过程中一直保留。</li>
+  <li><b>推理内容被丢弃时，工具调用及其结果的历史仍然保留在上下文里。</b>模型不再记得自己当时是怎么想的，但记得自己做过什么、得到了什么。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：一次任务里，模型每一步看到的上下文</div>
+  <div class="dia-row"><span class="lbl">第 1 次调用前</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">工具说明</span><span class="dia-seg oth" style="flex:1">用户消息 1</span></div></div>
+  <div class="dia-out">输出：思考 1.1 → 工具调用 1.1</div>
+  <div class="dia-row"><span class="lbl">工具返回后</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">工具说明</span><span class="dia-seg oth" style="flex:1">用户消息 1</span><span class="dia-seg kv" style="flex:1">思考 1.1</span><span class="dia-seg cmp" style="flex:1">调用 1.1</span><span class="dia-seg cmp" style="flex:1">结果 1.1</span></div></div>
+  <div class="dia-out">思考 1.1 被保留（R1 的做法会在这里丢掉它）。输出：思考 1.2 → 工具调用 1.2，依此类推，直到写出回答 1。</div>
+  <div class="dia-row"><span class="lbl">新用户消息到来</span><div class="dia-track"><span class="dia-seg oth" style="flex:1">工具说明</span><span class="dia-seg oth" style="flex:1">用户消息 1</span><span class="dia-seg cmp" style="flex:1">调用 1.1</span><span class="dia-seg cmp" style="flex:1">结果 1.1</span><span class="dia-seg cmp" style="flex:1">调用 1.2</span><span class="dia-seg cmp" style="flex:1">结果 1.2</span><span class="dia-seg w" style="flex:1">回答 1</span><span class="dia-seg oth" style="flex:1">用户消息 2</span></div></div>
+  <div class="dia-out">之前所有的思考（蓝）都被丢弃，工具调用和结果（绿）、回答保留。模型开始思考 2.1。</div>
+  <div class="dia-note">本站示意图，表达的是 <a href="https://arxiv.org/html/2512.02556#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a> 中的规则。</div>
+</div>
+<p>这套规则有一个副作用：有些智能体框架（报告举了 Roo Code 和 Terminus）不是用“工具”角色、而是用<b>用户消息</b>来模拟工具交互。在这些框架里，每次工具返回都会被当成新的用户消息，推理内容就会被反复丢弃，享受不到上面的好处。所以作者建议在这类框架里使用非思考模式。配合这套规则，V3.2 的对话模板也改了：工具调用格式是新的，增加了一个只用于搜索智能体场景的 <code>developer</code> 角色，官方不再提供 Jinja 模板，而是提供 Python 编码脚本（见 Hugging Face 模型卡）。</p>
+
+<h4 id="n-8-2">3.2.2 冷启动：用提示词把两种能力拼起来</h4>
+<p>手上已有的数据分两类：有推理过程但不用工具的数据，以及用工具但没有推理过程的智能体数据。作者认为，模型已经有足够的指令遵循能力，所以只要在系统提示里明确要求，它就能把工具调用嵌进思考过程里。原文附录 B 的表 6–8 用一道编程题（“交换链表中每两个相邻节点”）演示了三种系统提示：</p>
+<ul>
+  <li><b>推理数据的提示</b>（表 6）：要求模型先推理、再给最终答案，推理过程放在 <code>&lt;think&gt;&lt;/think&gt;</code> 标签里。</li>
+  <li><b>非推理智能体数据的提示</b>（表 7）：说明可以用一个有状态的 Jupyter 环境执行 Python 代码（单次执行 120 秒超时），附上工具说明和调用格式。</li>
+  <li><b>思考中调用工具的提示</b>（表 8）：明确允许在 <code>&lt;think&gt;</code> 里多次调用 Python 工具（最多 20 次），要求尽早调用工具、能用代码算的就别用语言推理，给出最终答案时不要再调用工具。</li>
+</ul>
+<p>这样生成的“思考中调用工具”轨迹并不稳定，但模型偶尔能产出想要的轨迹，这就够给后面的强化学习提供一个起点：RL 会放大那些成功的模式。</p>
+
+<h4 id="n-8-3">3.2.3 大规模智能体任务</h4>
+<p>强化学习需要大量多样的任务。对搜索、代码工程、代码解释这几类任务，作者使用<b>真实工具</b>：真实的网络搜索 API、编程工具和 Jupyter Notebook；但提示词要么从互联网上抽取，要么是合成的，都不是来自真实用户的交互。对其他任务，环境和提示词都是合成的。原文表 1：</p>
+<div class="table-wrap"><table>
+  <tr><th>任务类型</th><th>任务数</th><th>环境</th><th>提示词来源</th></tr>
+  <tr><td>代码智能体</td><td>24,667</td><td>真实</td><td>抽取</td></tr>
+  <tr><td>搜索智能体</td><td>50,275</td><td>真实</td><td>合成</td></tr>
+  <tr><td>一般智能体</td><td>4,417</td><td>合成</td><td>合成</td></tr>
+  <tr><td>代码解释器</td><td>5,908</td><td>真实</td><td>抽取</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 1（以 arXiv HTML 版为准；PDF 的表格排版有错位）。四项合计 85,267 条（推算），对应引言里的“85,000 条复杂提示”。</p>
+<p><b>搜索智能体。</b>用一个基于 V3.2 的多智能体流水线生成数据：先从大规模网页语料里，跨领域采样信息丰富的<b>长尾实体</b>；一个“出题智能体”用搜索工具（深度和广度可调）探索每个实体，把发现的信息整理成问答对；多个配置不同（检查点、系统提示不同）的“作答智能体”为每个问答对生成候选回答；一个能搜索的“验证智能体”多轮核验所有回答，<b>只保留标准答案正确、而所有候选回答都可被证实是错的样本</b>，也就是当前模型做不对、但答案可靠的题。为了更贴近真实使用，又从已有的有用性 RL 数据里筛出“用搜索工具确实有帮助”的样本补进来，这部分用多维度的评分细则加生成式奖励模型打分。这样既优化事实可靠性，也优化实际有用性。</p>
+<p><b>代码智能体。</b>从 GitHub 挖掘了数百万个“问题（issue）—合并请求（PR）”对，用启发式规则和大模型判断严格过滤，要求每条都有合理的问题描述、对应的标准补丁和用于验证的测试补丁。然后用一个基于 V3.2 的“环境搭建智能体”为每一对自动安装依赖、配置环境、运行测试，测试结果统一输出为 JUnit 格式，方便跨语言、跨测试框架解析。只有当打上标准补丁后，“原来失败、现在通过”的测试数不为零（说明问题确实被修复），并且“原来通过、现在失败”的测试数为零（说明没有引入回归）时，这个环境才算搭建成功。最终得到数万个可复现的问题修复环境，覆盖 Python、Java、JavaScript、TypeScript、C、C++、Go、PHP。</p>
+<p><b>代码解释器智能体。</b>用 Jupyter Notebook 作为代码解释器，收集数学、逻辑和数据科学方面需要执行代码才能解出的题。</p>
+<p><b>一般智能体。</b>这是最有意思的一部分：一个自动的“环境合成智能体”造出了 1,827 个面向任务的环境，这些任务的特点是<b>难解但易验</b>。流程如下：</p>
+<div class="dia">
+  <div class="dia-title">示意图：一般智能体任务的自动合成流程</div>
+  <div class="dia-flow"><span class="dia-box data">给定任务类别 + 沙箱<small>例如“规划旅行行程”；沙箱里有 bash 和搜索工具</small></span><span class="dia-arrow">→</span><span class="dia-box enc">生成或检索相关数据，存进沙箱数据库</span><span class="dia-arrow">→</span><span class="dia-box enc">合成一组任务专用的工具<small>每个工具是一个函数</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box enc">提出一个简单任务，并写好解答函数和验证函数<small>解答函数只能调用工具或做逻辑计算，不能直接读数据库</small></span><span class="dia-arrow">→</span><span class="dia-box pred">解答没通过验证？<small>修改解答或验证函数，直到通过</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box pred">逐步加大难度<small>同步更新解答与验证；工具不够就补工具</small></span><span class="dia-arrow">→</span><span class="dia-box act">用 V3.2 在这些任务上做 RL，只保留 pass@100 不为 0 的<small>最终 1,827 个环境、4,417 个任务</small></span></div>
+  <div class="dia-note">本站示意图，按原文 §3.2.3 整理。得到的是〈环境，工具，任务，验证器〉四元组。“解答函数只能通过工具接口解题”保证了任务确实需要使用工具。</div>
+</div>
+<p>原文给了一个合成任务的例子：从杭州出发的三天旅行（2025 年 10 月 1–3 日），城市、酒店、景点、餐厅都不能重复，推荐的酒店、餐厅、景点必须真的在当天所在的城市；第二天的约束随酒店档次变化：如果住 800 元及以上的豪华酒店，午餐和晚餐合计要低于 350 元、两家餐厅评分都至少 4.0、下午景点门票低于 120 元；如果住 500–800 元的中高档酒店，至少一家餐厅评分 4.0 以上、门票低于 180 元；如果住 200–500 元的酒店，只要至少一家餐厅评分不低于 3.2。配套的工具集有 15 个函数，包括按城市查景点、酒店、餐厅，查城市间和城市内交通，查天气，以及提交结果。这个例子说明了“难解但易验”：在巨大的组合空间里找到满足所有约束的方案很难，但检查一个给定方案是否满足约束很简单，验证函数几行代码就能写完。</p>
+<div class="note-warn"><b>读的时候要注意：</b>“1,800 多个环境”主要指合成的一般智能体环境；代码和搜索任务用的是真实工具，但提示词来自抽取或合成，没有真实用户数据。搜索数据的“标准答案正确”由验证智能体判断，环境是否搭好也由智能体判断，这些自动判断本身的错误率报告没有给出，也没有人工抽检的数字。pass@100 不为 0 的筛选保证了每个任务至少可解，但也意味着任务难度是相对 V3.2 自身来定义的。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a> · <a href="https://arxiv.org/html/2512.02556#A2" target="_blank" rel="noopener">附录 B（冷启动模板）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">4.1 主要结果：和闭源、开源模型比</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>经过上面的后训练，V3.2 在推理、代码、数学、代码智能体、搜索智能体和工具使用这几类基准上，和 Claude-4.5-Sonnet、GPT-5-High、Gemini-3.0-Pro 这些闭源模型，以及 Kimi-K2-Thinking、MiniMax-M2 这些支持“工具调用中思考”的开源模型相比，处在什么位置？读表之前，要先知道这些基准分别测什么、在什么设置下测。</div>
+<div class="note-pre"><b>先补一点背景：这些基准测什么。</b>
+<ul>
+  <li><b>MMLU-Pro、GPQA Diamond、HLE</b>：知识与推理问答。HLE（Humanity's Last Exam）是专门收集的极难问题，这里用纯文本子集。</li>
+  <li><b>LiveCodeBench、Codeforces</b>：算法编程。Codeforces 用的是按竞赛规则折算的评分（rating），不是百分比。</li>
+  <li><b>AIME 2025、HMMT 2025（2 月 / 11 月）、IMOAnswerBench</b>：数学竞赛题，只看最终答案。</li>
+  <li><b>Terminal Bench 2.0、SWE-bench Verified / Multilingual</b>：代码智能体。前者在终端里完成任务，后者在真实仓库里修复 GitHub 问题并通过测试。</li>
+  <li><b>BrowseComp / BrowseCompZh、HLE（带搜索）</b>：搜索智能体，需要多轮搜索网页才能找到答案。</li>
+  <li><b>τ²-bench、MCP-Universe、MCP-Mark、Tool-Decathlon</b>：工具使用。τ²-bench 模拟航空、零售、电信客服，需要和一个“模拟用户”对话并调用工具；MCP 系列在真实的 MCP 服务器（文件系统、数据库、浏览器等）上完成任务。</li>
+  <li><b>Pass@1</b>：每道题只采样一次，答对的比例。</li>
+</ul>
+</div>
+<p><b>评测设置。</b>温度 1.0，上下文窗口 128K。工具使用类基准用标准的函数调用格式，模型处于思考模式。MCP-Universe 和 MCP-Mark 用 DeepSeek 内部的环境评测所有模型，因为搜索和 Playwright（浏览器自动化）环境可能和官方设置略有不同。数学题统一用“请逐步推理，并把最终答案放在 \boxed{} 里”的模板；HLE 另用官方模板测了 V3.2-Thinking，得 23.9（表中是 25.1）。原文表 2：</p>
+<div class="table-wrap"><table>
+  <tr><th>类别</th><th>基准（指标）</th><th>Claude-4.5-Sonnet</th><th>GPT-5 High</th><th>Gemini-3.0 Pro</th><th>Kimi-K2 Thinking</th><th>MiniMax M2</th><th>V3.2 Thinking</th></tr>
+  <tr><td rowspan="3">通用</td><td>MMLU-Pro（EM）</td><td>88.2</td><td>87.5</td><td>90.1</td><td>84.6</td><td>82.0</td><td>85.0</td></tr>
+  <tr><td>GPQA Diamond（Pass@1）</td><td>83.4</td><td>85.7</td><td>91.9</td><td>84.5</td><td>77.7</td><td>82.4</td></tr>
+  <tr><td>HLE（Pass@1）</td><td>13.7</td><td>26.3</td><td>37.7</td><td>23.9</td><td>12.5</td><td>25.1</td></tr>
+  <tr><td rowspan="2">代码</td><td>LiveCodeBench（Pass@1-COT）</td><td>64.0</td><td>84.5</td><td>90.7</td><td>82.6</td><td>83.0</td><td>83.3</td></tr>
+  <tr><td>Codeforces（Rating）</td><td>1480</td><td>2537</td><td>2708</td><td>—</td><td>—</td><td>2386</td></tr>
+  <tr><td rowspan="4">数学</td><td>AIME 2025（Pass@1）</td><td>87.0</td><td>94.6</td><td>95.0</td><td>94.5</td><td>78.3</td><td>93.1</td></tr>
+  <tr><td>HMMT Feb 2025（Pass@1）</td><td>79.2</td><td>88.3</td><td>97.5</td><td>89.4</td><td>—</td><td>92.5</td></tr>
+  <tr><td>HMMT Nov 2025（Pass@1）</td><td>81.7</td><td>89.2</td><td>93.3</td><td>89.2</td><td>—</td><td>90.2</td></tr>
+  <tr><td>IMOAnswerBench（Pass@1）</td><td>—</td><td>76.0</td><td>83.3</td><td>78.6</td><td>—</td><td>78.3</td></tr>
+  <tr><td rowspan="3">代码智能体</td><td>Terminal Bench 2.0（Acc）</td><td>42.8</td><td>35.2</td><td>54.2</td><td>35.7</td><td>30.0</td><td>46.4</td></tr>
+  <tr><td>SWE Verified（Resolved）</td><td>77.2</td><td>74.9</td><td>76.2</td><td>71.3</td><td>69.4</td><td>73.1</td></tr>
+  <tr><td>SWE Multilingual（Resolved）</td><td>68.0</td><td>55.3</td><td>—</td><td>61.1</td><td>56.5</td><td>70.2</td></tr>
+  <tr><td rowspan="3">搜索智能体</td><td>BrowseComp（Pass@1）</td><td>24.1</td><td>54.9</td><td>—</td><td>— / 60.2*</td><td>44.0</td><td>51.4 / 67.6*</td></tr>
+  <tr><td>BrowseCompZh（Pass@1）</td><td>42.4</td><td>63.0</td><td>—</td><td>62.3</td><td>48.5</td><td>65.0</td></tr>
+  <tr><td>HLE（Pass@1）</td><td>32.0</td><td>35.2</td><td>45.8</td><td>44.9</td><td>31.8</td><td>40.8</td></tr>
+  <tr><td rowspan="4">工具使用</td><td>τ²-Bench（Pass@1）</td><td>84.7</td><td>80.2</td><td>85.4</td><td>74.3</td><td>76.9</td><td>80.3</td></tr>
+  <tr><td>MCP-Universe（Success Rate）</td><td>46.5</td><td>47.9</td><td>50.7</td><td>35.6</td><td>29.4</td><td>45.9</td></tr>
+  <tr><td>MCP-Mark（Pass@1）</td><td>33.3</td><td>50.9</td><td>43.1</td><td>20.4</td><td>24.4</td><td>38.0</td></tr>
+  <tr><td>Tool-Decathlon（Pass@1）</td><td>38.6</td><td>29.0</td><td>36.4</td><td>17.6</td><td>16.0</td><td>35.2</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 2。带 * 的是使用上下文管理（§4.4）后的分数；τ²-Bench 是三个类别的平均。开源模型只比较支持“工具调用中思考”的模型。</p>
+<p><b>推理。</b>V3.2 与 GPT-5-High 相近，略逊于 Gemini-3.0-Pro。和 Kimi-K2-Thinking 相比分数相当，但输出的 token 少得多（见下一节表 3，例如 AIME 2025 上 16k 对 24k）。作者把这些提升归功于加大的 RL 算力，并说这里的 V3.2 还受到“长度约束奖励”的限制，去掉限制会更好，这就是下一节的 Speciale。</p>
+<p><b>代码智能体。</b>V3.2 在 SWE-bench Verified 和 Terminal Bench 2.0 上明显超过其他开源模型。但这两个数字的测法要看清：Terminal Bench 2.0 的 46.4 是在 <b>Claude Code 框架</b>下测的，因为 §3.2.1 说过，V3.2 的思考模式上下文管理和 Terminus 框架不兼容；在 Terminus 框架、非思考模式下得 39.3。SWE-bench Verified 的 73.1 用的是 DeepSeek 内部框架；在 Claude Code、RooCode 框架和非思考模式下的稳健性测试结果在 72 到 74 之间。</p>
+<p><b>搜索智能体。</b>用一个标准的商业搜索 API 评测。V3.2 最多只支持 128K 上下文，BrowseComp 约 20% 以上的测试样例会超出这个长度，所以最终分数用了上下文管理方法；不用时是 51.4，用了是 67.6（细节见 §4.4）。</p>
+<p><b>工具使用。</b>V3.2 显著缩小了开源和闭源模型的差距，但仍低于前沿模型。τ²-bench 用模型自己扮演“模拟用户”，三个类别分别得 63.8（航空）、81.1（零售）、96.2（电信）。MCP 基准用函数调用格式，工具输出放在“tool”角色的消息里而不是“user”角色。作者观察到 V3.2 经常做多余的自我验证，生成过长的轨迹，在 MCP-Mark 的 GitHub 和 Playwright 任务上常常超出 128K 上下文，拉低了分数；配合上下文管理还能再提高。由于这些基准的环境和工具集在 RL 训练中没有见过，作者认为这些提升说明 V3.2 能把推理策略泛化到训练分布以外的智能体场景。</p>
+<p>附录 C 的表 9 比较了非思考模式和思考模式：非思考模式略差，但仍有竞争力。</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th>非思考</th><th>思考</th></tr>
+  <tr><td>Terminal Bench 2.0（Acc，Claude Code 框架）</td><td>37.1</td><td>46.4</td></tr>
+  <tr><td>SWE Verified（Resolved）</td><td>72.1</td><td>73.1</td></tr>
+  <tr><td>SWE Multilingual（Resolved）</td><td>68.9</td><td>70.2</td></tr>
+  <tr><td>τ²-bench（Pass@1）</td><td>77.2</td><td>80.3</td></tr>
+  <tr><td>MCP-Universe（Success Rate）</td><td>38.6</td><td>45.9</td></tr>
+  <tr><td>MCP-Mark（Pass@1）</td><td>26.5</td><td>38.0</td></tr>
+  <tr><td>Tool-Decathlon（Pass@1）</td><td>25.6</td><td>35.2</td></tr>
+</table></div>
+<p class="w-note">数字来自原文附录 C 表 9。Terminus 框架下非思考模式的 Terminal Bench 2.0 为 39.3。</p>
+
+<h4 id="n-9-1">结果的份量</h4>
+<ul>
+  <li><b>对手的分数从哪来，报告没有说。</b>闭源模型的数字是厂商公布的、第三方榜单的，还是 DeepSeek 自己跑的，表 2 没有注明（只有 MCP 两项明确是在 DeepSeek 内部环境里统一测的）。不同来源的数字，评测框架、提示词、重试次数可能都不一样。</li>
+  <li><b>智能体分数强烈依赖“外壳”。</b>同一个 V3.2，Terminal Bench 2.0 换框架和模式就从 46.4 变成 39.3；BrowseComp 加不加上下文管理差了 16 分。表里有的对手用了类似技巧（Kimi-K2 的 60.2*），有的没有，横向比较时要逐格看条件。</li>
+  <li><b>单次采样、温度 1.0、没有方差。</b>AIME、HMMT 这类竞赛题集都只有几十道题，单次 Pass@1 的随机波动就可能有一两分；报告没有给出多次评测的均值和波动。</li>
+  <li><b>“泛化”的证据是间接的。</b>“MCP 基准的环境在训练中没见过”是作者的说法，无法从外部核实训练数据与评测环境的重叠程度。</li>
+  <li><b>和 DSA 的关系。</b>这张表衡量的是整个模型（基座 + 后训练）的能力，不能用来单独评价 DSA；评价 DSA 应该看 §2.2 那组控制了后训练的对比。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S4.SS1" target="_blank" rel="noopener">英文原文 §4.1 ↗</a> · <a href="https://arxiv.org/html/2512.02556#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">4.2 V3.2-Speciale：放开长度限制会怎样</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>正式版 V3.2 在训练时被施加了较严的长度约束，以控制部署成本和延迟。如果把这个约束放松、只练推理，模型能强到什么程度？代价是多用多少 token？报告用两张表回答：表 3 同时列出准确率和平均输出 token 数，表 4 列出在 2025 年四项顶级竞赛上的得分。</div>
+<p>原文表 3（每格是“准确率（平均输出 token 数）”，k = 千）：</p>
+<div class="table-wrap"><table>
+  <tr><th>基准</th><th>GPT-5 High</th><th>Gemini-3.0 Pro</th><th>Kimi-K2 Thinking</th><th>V3.2 Thinking</th><th>V3.2 Speciale</th></tr>
+  <tr><td>AIME 2025（Pass@1）</td><td>94.6（13k）</td><td>95.0（15k）</td><td>94.5（24k）</td><td>93.1（16k）</td><td>96.0（23k）</td></tr>
+  <tr><td>HMMT Feb 2025（Pass@1）</td><td>88.3（16k）</td><td>97.5（16k）</td><td>89.4（31k）</td><td>92.5（19k）</td><td>99.2（27k）</td></tr>
+  <tr><td>HMMT Nov 2025（Pass@1）</td><td>89.2（20k）</td><td>93.3（15k）</td><td>89.2（29k）</td><td>90.2（18k）</td><td>94.4（25k）</td></tr>
+  <tr><td>IMOAnswerBench（Pass@1）</td><td>76.0（31k）</td><td>83.3（18k）</td><td>78.6（37k）</td><td>78.3（27k）</td><td>84.5（45k）</td></tr>
+  <tr><td>LiveCodeBench（Pass@1-COT）</td><td>84.5（13k）</td><td>90.7（13k）</td><td>82.6（29k）</td><td>83.3（16k）</td><td>88.7（27k）</td></tr>
+  <tr><td>CodeForces（Rating）</td><td>2537（29k）</td><td>2708（22k）</td><td>—</td><td>2386（42k）</td><td>2701（77k）</td></tr>
+  <tr><td>GPQA Diamond（Pass@1）</td><td>85.7（8k）</td><td>91.9（8k）</td><td>84.5（12k）</td><td>82.4（7k）</td><td>85.7（16k）</td></tr>
+  <tr><td>HLE（Pass@1）</td><td>26.3（15k）</td><td>37.7（15k）</td><td>23.9（24k）</td><td>25.1（21k）</td><td>30.6（35k）</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 3（以 arXiv HTML 版为准）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：准确率和输出长度放在一起看（重画原文表 3 的三列）</div>
+  <svg class="dg" viewBox="0 0 960 320" role="img" aria-label="准确率与平均输出 token 数" style="--dg-min:760px">
+<text x="190" y="22" class="t-c t-b">AIME 2025</text>
+<line x1="65" y1="240" x2="315" y2="240" class="axis"/>
+<text x="60" y="240" class="t-r t-xs">92</text>
+<line x1="65" y1="164" x2="315" y2="164" class="grid-ln"/>
+<text x="60" y="164" class="t-r t-xs">94</text>
+<line x1="65" y1="88" x2="315" y2="88" class="grid-ln"/>
+<text x="60" y="88" class="t-r t-xs">96</text>
+<line x1="65" y1="240" x2="65" y2="44" class="axis"/>
+<text x="65" y="256" class="t-c t-xs">10k</text>
+<text x="148.3" y="256" class="t-c t-xs">20k</text>
+<text x="231.7" y="256" class="t-c t-xs">30k</text>
+<text x="315" y="256" class="t-c t-xs">40k</text>
+<text x="190" y="274" class="t-c t-xs">平均输出 token 数 →</text>
+<rect class="tk off" x="85" y="136.2" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="98" y="141.2" class="t-xs">G5</text>
+<rect class="tk off" x="101.7" y="121" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="114.7" y="126" class="t-xs">G3</text>
+<rect class="tk off" x="176.7" y="140" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="189.7" y="145" class="t-xs">K2</text>
+<circle cx="115" cy="198.2" r="6" style="fill:var(--c-enc)"/>
+<rect class="tk pred" x="168.3" y="83" width="10" height="10" transform="rotate(45 173.3 88)"/>
+<text x="505" y="22" class="t-c t-b">HMMT Feb 2025</text>
+<line x1="380" y1="240" x2="630" y2="240" class="axis"/>
+<text x="375" y="240" class="t-r t-xs">86</text>
+<line x1="380" y1="185.7" x2="630" y2="185.7" class="grid-ln"/>
+<text x="375" y="185.7" class="t-r t-xs">90</text>
+<line x1="380" y1="131.4" x2="630" y2="131.4" class="grid-ln"/>
+<text x="375" y="131.4" class="t-r t-xs">94</text>
+<line x1="380" y1="77.1" x2="630" y2="77.1" class="grid-ln"/>
+<text x="375" y="77.1" class="t-r t-xs">98</text>
+<line x1="380" y1="240" x2="380" y2="44" class="axis"/>
+<text x="380" y="256" class="t-c t-xs">10k</text>
+<text x="463.3" y="256" class="t-c t-xs">20k</text>
+<text x="546.7" y="256" class="t-c t-xs">30k</text>
+<text x="630" y="256" class="t-c t-xs">40k</text>
+<text x="505" y="274" class="t-c t-xs">平均输出 token 数 →</text>
+<rect class="tk off" x="425" y="203.8" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="438" y="208.8" class="t-xs">G5</text>
+<rect class="tk off" x="425" y="78.9" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="438" y="83.9" class="t-xs">G3</text>
+<rect class="tk off" x="550" y="188.9" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="563" y="193.9" class="t-xs">K2</text>
+<circle cx="455" cy="151.8" r="6" style="fill:var(--c-enc)"/>
+<rect class="tk pred" x="516.7" y="55.9" width="10" height="10" transform="rotate(45 521.7 60.9)"/>
+<text x="820" y="22" class="t-c t-b">HLE（纯文本）</text>
+<line x1="695" y1="240" x2="945" y2="240" class="axis"/>
+<text x="690" y="240" class="t-r t-xs">20</text>
+<line x1="695" y1="192.5" x2="945" y2="192.5" class="grid-ln"/>
+<text x="690" y="192.5" class="t-r t-xs">25</text>
+<line x1="695" y1="145" x2="945" y2="145" class="grid-ln"/>
+<text x="690" y="145" class="t-r t-xs">30</text>
+<line x1="695" y1="97.5" x2="945" y2="97.5" class="grid-ln"/>
+<text x="690" y="97.5" class="t-r t-xs">35</text>
+<line x1="695" y1="50" x2="945" y2="50" class="grid-ln"/>
+<text x="690" y="50" class="t-r t-xs">40</text>
+<line x1="695" y1="240" x2="695" y2="44" class="axis"/>
+<text x="695" y="256" class="t-c t-xs">10k</text>
+<text x="778.3" y="256" class="t-c t-xs">20k</text>
+<text x="861.7" y="256" class="t-c t-xs">30k</text>
+<text x="945" y="256" class="t-c t-xs">40k</text>
+<text x="820" y="274" class="t-c t-xs">平均输出 token 数 →</text>
+<rect class="tk off" x="731.7" y="175.1" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="744.7" y="180.1" class="t-xs">G5</text>
+<rect class="tk off" x="731.7" y="66.8" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="744.7" y="71.8" class="t-xs">G3</text>
+<rect class="tk off" x="806.7" y="198" width="10" height="10" style="stroke:var(--text-3)"/>
+<text x="819.7" y="203" class="t-xs">K2</text>
+<circle cx="786.7" cy="191.5" r="6" style="fill:var(--c-enc)"/>
+<rect class="tk pred" x="898.3" y="134.3" width="10" height="10" transform="rotate(45 903.3 139.3)"/>
+<circle cx="250" cy="300" r="6" style="fill:var(--c-enc)"/><text x="262" y="300" class="t-sm">V3.2 Thinking</text>
+<rect class="tk pred" x="395" y="295" width="10" height="10" transform="rotate(45 400 300)"/><text x="412" y="300" class="t-sm">V3.2 Speciale</text>
+<rect class="tk off" x="545" y="295" width="10" height="10" style="stroke:var(--text-3)"/><text x="562" y="300" class="t-sm">G5 = GPT-5 High，G3 = Gemini-3.0 Pro，K2 = Kimi-K2 Thinking</text>
+</svg>
+  <div class="dia-note">横轴是平均输出 token 数，纵轴是准确率，越靠左上越“又好又省”。数字全部来自原文表 3。</div>
+</div>
+<p>Speciale 靠多用推理 token，在多项基准上超过了 Gemini-3.0-Pro（例如 AIME 2025、HMMT Feb 2025、HMMT Nov 2025、IMOAnswerBench），但 token 效率明显不如它：HMMT Feb 2025 上 27k 对 16k，Codeforces 上 77k 对 22k，HLE 上 35k 对 15k 却仍低 7 分。作者承认这一点，并说正是为了降低部署成本和延迟，才在正式版 V3.2 的训练里施加了更严的 token 约束，在性能和成本之间取平衡；token 效率是今后的重要方向。</p>
+<p>原文表 4 是 2025 年四项竞赛的成绩：</p>
+<div class="table-wrap"><table>
+  <tr><th>竞赛</th><th>各题得分</th><th>总分</th><th>奖牌</th></tr>
+  <tr><td>IMO 2025</td><td>7, 7, 7, 7, 7, 0</td><td>35 / 42</td><td>金牌</td></tr>
+  <tr><td>CMO 2025（英文版）</td><td>18, 18, 9, 21, 18, 18</td><td>102 / 126</td><td>金牌</td></tr>
+  <tr><td>IOI 2025</td><td>100, 82, 72, 100, 55, 83</td><td>492 / 600</td><td>金牌（排名第 10）</td></tr>
+  <tr><td>ICPC 世界总决赛 2025</td><td>12 题中解出 10 题（A、C、D、E、F、H、I、J、K、L）</td><td>10 / 12</td><td>金牌（排名第 2）</td></tr>
+</table></div>
+<p class="w-note">数字来自原文表 4。ICPC 一栏原表列出的是每道已解出题目的提交次数（A 用了 3 次，E、F 各 2 次，其余 1 次）。</p>
+<p>作者强调，IOI 和 ICPC 的成绩是一个通用模型在<b>没有针对性训练</b>的情况下取得的；IMO 和 CMO 的证明题则借助了 DeepSeekMath-V2 的技术。附录 D 交代了评测方法：所有竞赛最大生成长度 128K，不用工具、不联网，严格遵守竞赛的时间和提交次数限制。</p>
+<ul>
+  <li><b>IOI</b>：规则允许每题最多提交 50 次、按各子任务的最高分计分。做法是每题先采样 500 个候选解，过滤掉过不了样例测试或超长的，再用 V3.2-Exp 识别并去掉“模型自己说做不出来或拒绝作答”的样本，最后从剩下的有效候选里挑<b>思考过程最长的 50 个</b>提交。</li>
+  <li><b>ICPC</b>：同样的过滤方法，每题先生成 32 个候选。</li>
+  <li><b>IMO 和 CMO</b>：采用“生成—验证—改进”的循环，模型反复改进自己的解答，直到自我评估给出满分或达到最大修改次数，与 DeepSeekMath-V2 的流程相同。</li>
+</ul>
+<p>DeepSeek 在 Hugging Face 仓库里公开了这四项竞赛的最终提交，供社区复核。</p>
+<div class="note-warn"><b>结果的份量：</b>
+<ul>
+  <li>这些不是现场参赛成绩，而是赛后用竞赛题目按规则模拟的结果；“金牌”指达到了人类选手的金牌分数线。</li>
+  <li>“每题采样 500 个、按思考长度挑 50 个提交”是一笔很大的测试时计算预算，远超“回答一次”。它在规则允许的提交次数之内，但和人类选手的条件并不相同。</li>
+  <li>报告没有说明 IMO、CMO 的证明题由谁、按什么标准评分。</li>
+  <li>表 3、表 4 都是 Speciale 的成绩，它不能调用工具、输出很长；日常使用的是长度约束更严的 V3.2。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S4.SS2" target="_blank" rel="noopener">英文原文 §4.2 ↗</a> · <a href="https://arxiv.org/html/2512.02556#A4" target="_blank" rel="noopener">附录 D ↗</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main/assets/olympiad_cases" target="_blank" rel="noopener">公开的竞赛提交 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">4.3 合成的智能体任务有用吗</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>§3.2.3 花了很大力气合成一般智能体任务，它们到底有没有用？作者用消融实验回答两个问题：合成任务对强化学习来说够不够难；在合成任务上做 RL，能不能迁移到别的下游任务和真实环境。</div>
+<p><b>够不够难。</b>从合成的一般智能体任务里随机抽 50 个，让合成它们的模型（V3.2-Exp）和几个前沿闭源模型来做。原文表 5：</p>
+<div class="dia">
+  <div class="dia-title">示意图：随机抽取的 50 个合成任务上的通过率（重画原文表 5）</div>
+  <div class="dia-row"><span class="lbl">V3.2-Exp</span><div class="dia-track"><span class="dia-seg kv" style="flex:12">12%</span><span class="dia-seg res" style="flex:14">→ 26%</span><span class="dia-seg oth" style="flex:74"></span></div></div>
+  <div class="dia-row"><span class="lbl">Claude Sonnet-4.5</span><div class="dia-track"><span class="dia-seg kv" style="flex:34">34%</span><span class="dia-seg res" style="flex:28">→ 62%</span><span class="dia-seg oth" style="flex:38"></span></div></div>
+  <div class="dia-row"><span class="lbl">Gemini-3.0 Pro</span><div class="dia-track"><span class="dia-seg kv" style="flex:51">51%</span><span class="dia-seg res" style="flex:23">→ 74%</span><span class="dia-seg oth" style="flex:26"></span></div></div>
+  <div class="dia-row"><span class="lbl">GPT-5-Thinking</span><div class="dia-track"><span class="dia-seg kv" style="flex:62">62%</span><span class="dia-seg res" style="flex:20">→ 82%</span><span class="dia-seg oth" style="flex:18"></span></div></div>
+  <div class="dia-note">实色段是 Pass@1，斜纹段是从 Pass@1 增加到 Pass@4 的部分（采样 4 次至少对 1 次）。原表还有 Pass@2：18%、47%、65%、75%。整条轨道代表 100%。</div>
+</div>
+<p>V3.2-Exp 只做对 12%，最强的闭源模型也只有 62%，说明这些合成任务对 V3.2-Exp 和前沿模型都有挑战性。</p>
+<p><b>能不能迁移。</b>作者从 V3.2 的 SFT 检查点（记作 V3.2-SFT）出发，<b>只</b>用合成的一般智能体任务、在非思考模式下做 RL，以排除长思维链和其他 RL 数据的影响，然后在 τ²-bench、MCP-Mark、MCP-Universe 上和两个参照比较：V3.2-SFT 本身，以及只在搜索和代码环境里做过 RL 的 V3.2-Exp。原文图 5 有 9 个小图（τ²-bench 的航空、零售、电信与总分，MCP-Mark 的文件系统与 PostgreSQL，MCP-Universe 的金融分析、位置导航与 3D 设计），横轴是 RL 步数（约 2000 步），两条参照是水平虚线。从图上大致能读出（读图，约数）：τ²-bench 总分从 SFT 的约 0.55 升到约 0.83（V3.2-Exp 约 0.46）；电信类从约 0.39 升到接近 0.98；MCP-Mark 文件系统从约 0.14 升到约 0.35。几乎每个小图里，RL 曲线都在训练早期就超过了两条参照线，并且总体持续上升。</p>
+<p>作者的结论是：在合成数据上做大规模 RL，能在这三个基准上带来大幅提升；而只在代码和搜索场景里做 RL（V3.2-Exp），并不能提升这些基准。这进一步说明了合成数据的潜力。</p>
+<div class="note-warn"><b>结果的份量：</b>“够不够难”只基于随机抽取的 50 个任务，一道题相当于 2 个百分点。合成这些任务的正是 V3.2-Exp，而任务最后又按“V3.2 跑 RL 时 pass@100 不为 0”筛过，所以“对 V3.2-Exp 很难”在一定程度上是构造使然。迁移实验的对照里，V3.2-Exp 与合成任务 RL 的差别不止“用不用合成数据”，起点检查点和训练方式也不同；报告没有给出“用同等算力在真实环境上做 RL”的对照。图 5 是光栅图，上面的数值是本站目测的约数。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S4.SS3" target="_blank" rel="noopener">英文原文 §4.3 ↗</a> · <a href="https://arxiv.org/html/2512.02556#S4.F5" target="_blank" rel="noopener">原文图 5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">4.4 搜索智能体的上下文管理</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>即使有 128K 的上下文窗口，搜索类的智能体任务也经常在想完之前就把窗口用满，推理被迫中断，测试时多算一些就能做对的题也做不对了。有没有简单的办法让模型在固定窗口里“多走几步”？这一节比较了几种上下文管理策略，也解释了表 2 里 BrowseComp 的 67.6* 是怎么来的。</div>
+<p>当 token 用量超过上下文窗口的 80% 时，触发以下某一种策略：</p>
+<ol>
+  <li><b>Summary</b>：把已经溢出的轨迹总结一下，然后用总结重新开始这次 rollout。</li>
+  <li><b>Discard-75%</b>：丢掉轨迹里前 75% 的工具调用历史，腾出空间。</li>
+  <li><b>Discard-all</b>：丢掉之前全部的工具调用历史，重置上下文（类似 Anthropic 的 new context 工具）。</li>
+</ol>
+<p>作为对照，还实现了一个“并行扩展”的基线 <b>Parallel-fewest-step</b>：独立采样 \(N\) 条轨迹，选步数最少的那条。</p>
+<div class="dia">
+  <div class="dia-title">示意图：不同测试时扩展策略下的 BrowseComp 准确率（按原文图 6 的矢量数据重画）</div>
+  <svg class="dg" viewBox="0 0 960 360" role="img" aria-label="BrowseComp 准确率与实际执行步数" style="--dg-min:720px">
+<text x="490" y="20" class="t-c t-b">BrowseComp 准确率（%）随实际执行步数的变化</text>
+<line x1="80" y1="270" x2="900" y2="270" class="axis"/>
+<text x="74" y="270" class="t-r t-xs">50</text>
+<line x1="80" y1="215" x2="900" y2="215" class="grid-ln"/>
+<text x="74" y="215" class="t-r t-xs">55</text>
+<line x1="80" y1="160" x2="900" y2="160" class="grid-ln"/>
+<text x="74" y="160" class="t-r t-xs">60</text>
+<line x1="80" y1="105" x2="900" y2="105" class="grid-ln"/>
+<text x="74" y="105" class="t-r t-xs">65</text>
+<line x1="80" y1="50" x2="900" y2="50" class="grid-ln"/>
+<text x="74" y="50" class="t-r t-xs">70</text>
+<line x1="80" y1="270" x2="80" y2="44" class="axis"/>
+<text x="80" y="286" class="t-c t-xs">0</text>
+<text x="171.1" y="286" class="t-c t-xs">100</text>
+<text x="262.2" y="286" class="t-c t-xs">200</text>
+<text x="353.3" y="286" class="t-c t-xs">300</text>
+<text x="444.4" y="286" class="t-c t-xs">400</text>
+<text x="535.5" y="286" class="t-c t-xs">500</text>
+<text x="626.7" y="286" class="t-c t-xs">600</text>
+<text x="717.8" y="286" class="t-c t-xs">700</text>
+<text x="808.9" y="286" class="t-c t-xs">800</text>
+<text x="900" y="286" class="t-c t-xs">900</text>
+<text x="490" y="304" class="t-c t-sm">平均实际执行步数 →</text>
+<line x1="80" y1="254.6" x2="900" y2="254.6" style="stroke:var(--text-3);stroke-dasharray:4 4"/>
+<text x="896" y="245.6" class="t-r t-xs">不做上下文管理：51.4</text>
+<polyline points="159.6,253.3 239.4,172.4 319,135.1 398.4,113.8 478.2,101.5 558.3,88.8 638,80.7 717.4,74.2 797,70.3 876.7,66.2" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2"/>
+<circle cx="159.6" cy="253.3" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="239.4" cy="172.4" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="319" cy="135.1" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="398.4" cy="113.8" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="478.2" cy="101.5" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="558.3" cy="88.8" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="638" cy="80.7" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="717.4" cy="74.2" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="797" cy="70.3" r="3" style="fill:var(--c-tgt)"/>
+<circle cx="876.7" cy="66.2" r="3" style="fill:var(--c-tgt)"/>
+<polyline points="187.6,259 247.1,176.7 293.7,142.3 333.1,121.9 367.6,107.1 398.9,95 426.9,87.8 447.6,79.4 454.1,75.8" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+<circle cx="187.6" cy="259" r="3" style="fill:var(--c-enc)"/>
+<circle cx="247.1" cy="176.7" r="3" style="fill:var(--c-enc)"/>
+<circle cx="293.7" cy="142.3" r="3" style="fill:var(--c-enc)"/>
+<circle cx="333.1" cy="121.9" r="3" style="fill:var(--c-enc)"/>
+<circle cx="367.6" cy="107.1" r="3" style="fill:var(--c-enc)"/>
+<circle cx="398.9" cy="95" r="3" style="fill:var(--c-enc)"/>
+<circle cx="426.9" cy="87.8" r="3" style="fill:var(--c-enc)"/>
+<circle cx="447.6" cy="79.4" r="3" style="fill:var(--c-enc)"/>
+<circle cx="454.1" cy="75.8" r="3" style="fill:var(--c-enc)"/>
+<polyline points="207.6,232.6 255.8,193.5 314,171 412.3,157.4" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+<circle cx="207.6" cy="232.6" r="3" style="fill:var(--c-pred)"/>
+<circle cx="255.8" cy="193.5" r="3" style="fill:var(--c-pred)"/>
+<circle cx="314" cy="171" r="3" style="fill:var(--c-pred)"/>
+<circle cx="412.3" cy="157.4" r="3" style="fill:var(--c-pred)"/>
+<polyline points="177.2,223 197.5,193.5 210.4,191.8 225.6,186.6" style="fill:none;stroke:var(--c-act);stroke-width:2.2"/>
+<circle cx="177.2" cy="223" r="3" style="fill:var(--c-act)"/>
+<circle cx="197.5" cy="193.5" r="3" style="fill:var(--c-act)"/>
+<circle cx="210.4" cy="191.8" r="3" style="fill:var(--c-act)"/>
+<circle cx="225.6" cy="186.6" r="3" style="fill:var(--c-act)"/>
+<text x="460.1" y="71.8" class="t-xs" style="fill:var(--c-enc)">67.6（约 410 步）</text>
+<text x="418.3" y="163.4" class="t-xs" style="fill:var(--c-pred)">60.2（约 364 步）</text>
+<text x="876.7" y="56.2" class="t-r t-xs" style="fill:var(--c-tgt)">约 68.5（约 870 步）</text>
+<line x1="80" y1="322" x2="104" y2="322" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="110" y="322" class="t-sm">Summary（总结后重开）</text>
+<line x1="500" y1="322" x2="524" y2="322" style="stroke:var(--c-act);stroke-width:2.5"/><text x="530" y="322" class="t-sm">Discard-75%（丢掉前 75% 工具历史）</text>
+<line x1="80" y1="340" x2="104" y2="340" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="110" y="340" class="t-sm">Discard-all（丢掉全部工具历史）</text>
+<line x1="500" y1="340" x2="524" y2="340" style="stroke:var(--c-tgt);stroke-width:2.5"/><text x="530" y="340" class="t-sm">Parallel-fewest-step（并行采样，取步数最少的）</text>
+</svg>
+  <div class="dia-note">本站重画的简化图，各点坐标是从 <a href="https://arxiv.org/html/2512.02556#S4.F6" target="_blank" rel="noopener">原文图 6 ↗</a> 的矢量文件里读出的（读图）；60.2、67.6、51.4 三个数与报告正文和表 2 一致。</div>
+</div>
+<p>在不同的计算预算下，上下文管理都能显著提高成绩，因为它让模型有空间执行更多步、把测试时计算用起来。Summary 把平均步数延长到 364 步，成绩最高提升到 60.2，但整体效率较低。最简单的 Discard-all 在效率和可扩展性上都表现很好，得到 67.6，和并行扩展的成绩相当，但用的步数少得多（读图：并行扩展要到约 600 步才达到同样水平）。作者的结论是：测试时计算既可以串行扩展（上下文管理），也可以并行扩展，两者都能提高解题能力，但效率和可扩展性不同；因此评测模型时必须考虑实际的计算成本，如何最优地组合串行和并行扩展是今后的方向。</p>
+<div class="note-warn"><b>读的时候要注意：</b>Discard-all 在 BrowseComp 上效果好，可能和这个任务的性质有关：BrowseComp 要找的是一个难找的事实，较早的搜索结果往往已经被否定，丢掉它们损失不大。在需要综合利用全部历史的任务（例如多步代码修改）上，同样的策略未必适用，报告没有在其他任务上验证。另外，表 2 里只有 V3.2 和 Kimi-K2 标了带 * 的分数，其他模型是否用了类似技巧不清楚。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S4.SS4" target="_blank" rel="noopener">英文原文 §4.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-13">5 结论、局限，以及报告没有公开的内容</h3>
+<p>作者的结论是：V3.2 用 DSA 解决了关键的计算复杂度问题，同时没有牺牲长上下文性能；通过加大计算预算，V3.2 在推理基准上达到与 GPT-5 相当的水平；大规模智能体任务合成流水线显著提升了工具使用能力；高算力变体 V3.2-Speciale 在 IMO 和 IOI 上的金牌成绩，是开源大模型的一个里程碑。</p>
+<p>作者坦白承认了三点局限，都是和 Gemini-3.0-Pro 这类前沿闭源模型比较而言：</p>
+<ol>
+  <li><b>世界知识的广度不够。</b>原因是总训练 FLOPs 更少，计划在下一代通过扩大预训练算力来弥补。</li>
+  <li><b>token 效率不高。</b>V3.2 通常需要更长的生成轨迹才能达到 Gemini-3.0-Pro 的输出质量，今后要提高推理链的“智能密度”。</li>
+  <li><b>解复杂任务的能力仍不如前沿模型。</b>需要继续改进基座模型和后训练配方。</li>
+</ol>
+<p>按 DeepSeek 系列页面的统一做法，把整份报告的证据分成三类（本站整理）：</p>
+<ul>
+  <li><b>有数字、可以核对的：</b>DSA 的公式与超参数（\(k\)、学习率、步数、批大小、token 数）；V3.2-Exp 与 V3.1-Terminus 的基准对比（Exp 报告表 1）；按位置的成本曲线（图 3）；表 1–5、表 9 和图 5、图 6；FlashMLA 内核的算力数字（来自内核仓库）；开源的推理代码、权重和竞赛提交。</li>
+  <li><b>只有定性描述的：</b>训练效率的提升；Chatbot Arena 上“非常接近”；AA-LCR “高 4 分”、Fiction.liveBench “一致更好”；GRPO 四个补丁的作用；专家蒸馏“只比专家略差、RL 后差距消除”。</li>
+  <li><b>没有公开的：</b>继续预训练和 RL 的 GPU 小时数；RL 的步数、批大小、\(\beta\)、\(\varepsilon\)、\(\delta\)；索引器结构超参数（只在代码里）；任何关于 \(k\)、预热、KL 形式的消融；线上服务的部署配置与吞吐、延迟；各类合成数据的完整规模和质检结果；对手模型分数的来源。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2512.02556#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<h4 id="n-impact-1">发布、开源与推理框架支持</h4>
+<p>V3.2-Exp 于 2025-09-29 发布，权重和推理示例在 Hugging Face 上开源，许可证为 MIT；当天 DeepSeek 同时开源了三类内核：TileLang 写的可读性更好、面向研究的参考实现（索引器、top-k、稀疏 MLA 的前向与反向），DeepGEMM 里的索引器打分内核（含分页版本），以及 FlashMLA 里的 token 级稀疏注意力内核。为了方便对比，V3.1-Terminus 通过临时 API 保留到 2025-10-15。vLLM 在发布当天就支持了 V3.2-Exp，并接入了 DeepGEMM 和 FlashMLA 的内核；SGLang 提供了 H200、AMD MI350 和华为昇腾 NPU 的镜像；vLLM 发布支持博客时，vllm-ascend、vllm-mlu 也已经支持。2025-11-17，DeepSeek 修正了推理示例里索引器 RoPE 排布的错误（见 §2.1.1）。2025-12-01，V3.2 和 V3.2-Speciale 发布，两者的权重也以 MIT 许可证开源；Speciale 的 API 只开放到 2025-12-15。</p>
+<p>2026-09-30，FlashMLA 发布了一个不兼容的新版本：移除了对 Hopper 架构以及 V3、V3.2、V4.0 等旧模型的支持，并改变了 FP8 / FP4 KV 缓存格式，要在 H800 / H100 上跑 V3.2 的稀疏内核，需要切回仓库里指定的旧提交。2026-09-10 开源的 DeepSelect（DSA 用的 top-k 内核）写明，DSA 用在了 V3.2、V4 和 V4.1 上。</p>
+
+<h4 id="n-impact-2">DeepSeek-V4：在压缩后的 KV 上做 DSA</h4>
+<p>DSA 留下了一个明显的缺口：它减少了读取和计算，却没有减少 KV 缓存的存储（§2.1.0 的提醒）。2026 年 4 月的 <a href="https://arxiv.org/abs/2606.19348" target="_blank" rel="noopener">DeepSeek-V4 预览版</a>（V4-Pro 1.6T 总参数 / 49B 激活，V4-Flash 284B / 13B，都支持 100 万 token 上下文）把注意力改成两种层的混合：压缩稀疏注意力（CSA）先把相邻若干个 token 的 KV 压成一个条目，再在压缩后的条目上做 DSA 式的索引与选择；重度压缩注意力（HCA）用大得多的压缩率压缩、不做选择。这样 KV 缓存本身就变短了。V4 摘要称，在 100 万 token 的设置下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV 缓存只有 10%。详见本站 <a href="deepseek-v4.html">DeepSeek-V4 精读</a> 和 <a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">V4 结构拆解页</a>。</p>
+
+<h4 id="n-impact-3">DeepSeek-V4.1-Flash：把 KV 压到每 token 890 字节</h4>
+<p>2026 年 9 月的 <a href="https://arxiv.org/abs/2609.19969" target="_blank" rel="noopener">DeepSeek-V4.1-Flash</a> 继续沿“压存储”这条路走：在 CSA2 里跨层复用 KV 缓存，并把 KV 缓存存成 FP4，使常驻显存的全局 KV 缓存降到每 token 890 字节，约为 V4-Flash 的 1/4；配合一种部署优化，存在 SSD 或主机内存里的持久 KV 缓存降到约 V4-Flash 的 1/8。作为参照，V3.2 每个 token 的 FP8 MLA 条目加索引 key，61 层合计约 48 KB（推算）；两者的模型结构和统计口径不同，这个对比只说明数量级。详见本站 <a href="deepseek-v4-1-flash.html">DeepSeek-V4.1-Flash 精读</a>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：DeepSeek 在注意力上一步步省下了什么</div>
+  <div class="dia-flow"><span class="dia-box enc">MLA（V2 / V3）<small>省存储：每 token 每层 KV 压成 576 个数</small></span><span class="dia-arrow">→</span><span class="dia-box enc">DSA（V3.2）<small>省计算与读取：每个 query 只看 2048 个条目；存储不变还略增</small></span><span class="dia-arrow">→</span><span class="dia-box reg">CSA + HCA（V4）<small>压存储 + 选择：在压缩后的条目上做 DSA，KV 变短</small></span><span class="dia-arrow">→</span><span class="dia-box reg">CSA2 + FP4 KV（V4.1-Flash）<small>跨层复用、4 位存储：全局 KV 890 字节 / token</small></span></div>
+  <div class="dia-flow"><span class="dia-box act">另一条稀疏轴：Engram 条件记忆（2026-01）<small>不改注意力，用可扩展的查表把静态知识从计算里分出去</small></span></div>
+  <div class="dia-note">本站示意图。V4、V4.1-Flash 的数字来自各自 arXiv 摘要。Engram 见本站 <a href="conditional-memory.html">条件记忆（Engram）精读</a>；V3 时期对硬件的反思见 <a href="deepseek-v3-hardware.html">DeepSeek-V3 硬件反思精读</a>。</div>
+</div>
+
+<h4 id="n-impact-4">DeepSeek 之外</h4>
+<ul>
+  <li><b>GLM-5 采用 DSA。</b>智谱的 <a href="https://arxiv.org/abs/2602.15763" target="_blank" rel="noopener">GLM-5</a>（2026-02）在摘要中写明采用 DSA 来大幅降低训练和推理成本，同时保持长上下文的保真度。这是 DSA 被其他团队的旗舰模型采用的直接证据。</li>
+  <li><b>另一种设计取向：MiniMax Sparse Attention。</b><a href="https://arxiv.org/abs/2606.13392" target="_blank" rel="noopener">MSA</a>（2026-06）建在 GQA 上，用一个轻量的索引分支给 KV <b>块</b>打分，并为每个 GQA 组独立选择 top-k 块，走的是 NSA 那种“按块、按组”的路线，与 DSA 的“按 token、全体共用”正好相对。见本站 <a href="minimax-sparse-attention.html">MiniMax Sparse Attention 精读</a>，以及同一时期的 <a href="moba.html">MoBA 精读</a>。</li>
+  <li><b>理解 DSA 的前身</b>，可以回到 <a href="native-sparse-attention.html">NSA 精读</a>的“后来怎么样了”，那里从 NSA 的角度比较了两者的继承与改变。</li>
+</ul>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">报告的署名是机构 DeepSeek-AI，不是个人。下面只列能从报告本身、相关论文和官方仓库查证的信息，不推测个人背景。</p>
+<div class="author-cards">
+  <div class="author-card senior"><b>DeepSeek-AI</b><div class="aff">署名机构，联系邮箱 research@deepseek.com</div>DeepSeek 的研究团队。V3.2-Exp 的短报告（2025-09）同样署名 DeepSeek-AI。DSA 建立在团队此前的 MLA（DeepSeek-V2 报告）和 NSA（ACL 2025 最佳论文）之上。</div>
+  <div class="author-card"><b>附录 E：贡献者名单</b><div class="aff">按角色分三组，组内按名字字母排序</div>本站按附录 E 清点：研究与工程 212 人、数据标注 27 人、商务与合规 24 人，共约 263 人；名字后带星号的 8 人已离开团队。报告没有标注第一作者或通讯作者。</div>
+  <div class="author-card"><b>与相关工作的作者重合</b><div class="aff">可从各论文与仓库查证</div>NSA 论文的多位作者（如 Jingyang Yuan、Huazuo Gao、Damai Dai、Zhenda Xie、Wangding Zeng、Wenfeng Liang）出现在本报告的名单里。GRPO 出自 DeepSeekMath（Zhihong Shao 等），本报告用到的 DeepSeekMath-V2 也由 Shao 等人署名。DeepSelect 仓库列出的作者 Yi Qian、Shengyu Liu 也在名单中。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表形式</b>：技术报告，只在 arXiv 发布（v1，2025-12-02），没有经过会议或期刊评审；前身 V3.2-Exp 的短报告只以 PDF 形式放在 GitHub 仓库里。</li>
+  <li><b>开源</b>（截至 2026-10-20）：<a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp" target="_blank" rel="noopener">deepseek-ai/DeepSeek-V3.2-Exp</a> 1,656 个 star；Hugging Face 上 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2" target="_blank" rel="noopener">DeepSeek-V3.2</a> 1,583 个点赞、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V3.2-Speciale" target="_blank" rel="noopener">V3.2-Speciale</a> 740 个点赞；仓库与权重均为 MIT 许可证。</li>
+  <li><b>配套内核</b>（截至 2026-10-20 的 star 数）：<a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">FlashMLA</a> 约 13.1k，<a href="https://github.com/deepseek-ai/DeepGEMM" target="_blank" rel="noopener">DeepGEMM</a> 约 9.0k，<a href="https://github.com/tile-ai/tilelang" target="_blank" rel="noopener">TileLang</a> 约 8.7k，<a href="https://github.com/deepseek-ai/DeepSelect" target="_blank" rel="noopener">DeepSelect</a> 499。这些仓库服务于多个模型，star 数不全归功于 V3.2。</li>
+  <li><b>采用</b>：vLLM 首日支持并发布了实现说明博客；SGLang、vllm-ascend、vllm-mlu 支持；GLM-5 采用 DSA；DeepSeek 自己的 V4、V4.1 继续使用 DSA（DeepSelect 说明）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="deepseek-v3.html">DeepSeek-V3</a>、<a href="native-sparse-attention.html">NSA 原生稀疏注意力</a>、<a href="deepseek-v4.html">DeepSeek-V4</a></li>
+  <li><a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek 稀疏注意力结构拆解</a>：可点击的 DSA 架构图、NSA → DSA → V4 谱系表和简答题。</li>
+  <li><a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4 结构拆解</a> 与 <a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3 结构拆解</a>。</li>
+  <li><a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention</a>、<a href="fp8-formats.html">FP8 格式</a>：稀疏内核与 FP8 缓存的背景。</li>
+  <li><a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 训练系统</a> 与 <a href="batch-invariance.html">批不变性</a>：§3.1 那些“采样与训练不一致”问题的系统背景。</li>
+  <li><a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a>：预填充与解码为什么要分开部署、分开算成本。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：DeepSeek-AI. <em>DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models.</em> <a href="https://arxiv.org/abs/2512.02556" target="_blank" rel="noopener">arXiv:2512.02556</a>（v1，2025-12-02），以 arXiv 非独占分发许可（<a href="https://arxiv.org/licenses/nonexclusive-distrib/1.0/" target="_blank" rel="noopener">arXiv.org perpetual non-exclusive license</a>）发布，该许可不允许转载原图；前身报告 <em>DeepSeek-V3.2-Exp: Boosting Long-Context Efficiency with DeepSeek Sparse Attention</em>（2025-09）见 <a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp" target="_blank" rel="noopener">deepseek-ai/DeepSeek-V3.2-Exp</a>。本页是对报告的中文精读笔记，正文与所有示意图均为本站撰写和绘制，并非翻译或复制；按原图数据重画的简化图，数值是从原图矢量文件读出的近似值。数字与结论以原文为准，标“推算”“读图”的为本站计算。模型配置、推理代码与内核细节引自官方仓库（MIT 许可证）、FlashMLA 文档与 vLLM 博客。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

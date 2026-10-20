@@ -1,0 +1,1235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V4.1-Flash 精读</title>
+<meta name="description" content="DeepSeek-V4.1-Flash 技术报告（arXiv 2609.19969）的逐节精读：每个 token 的 KV 缓存怎样从 V1 的 389,120 字节一路压到 890 字节（CSA2 跨层共享、FP4 主 KV、SWA 有界重放），因果编码器—解码器怎样把预填充减半，分层稀疏索引器、Single-Pass mHC、Engram、DSpark 与 Sinkhorn 优化器，以及预训练、后训练、评测和每个数字的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="dsv41-flash">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · 技术报告（arXiv，2026-09）</div>
+  <h1>DeepSeek-V4.1-Flash：把每个 token 的 KV 缓存压到 890 字节</h1>
+  <p class="en-title">DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression</p>
+  <div class="paper-authors">DeepSeek-AI</div>
+  <div class="paper-affil">research@deepseek.com　（署名为机构；贡献者名单见原文附录 A，分“研发与工程”“业务与合规”两组，组内按名字字母排序，带星号者已离开团队）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2609.19969" target="_blank" rel="noopener">arXiv 2609.19969 ↗</a>
+    <a class="pill" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash" target="_blank" rel="noopener">Hugging Face 权重（MIT 许可）↗</a>
+    <a class="pill" href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/main/inference" target="_blank" rel="noopener">Code：官方推理参考实现（inference/）↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">注意力内核：FlashMLA ↗</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>890 B</b><span>每个 token 的全局 KV 缓存（V4-Flash 为 3,514 B）</span></div>
+    <div><b>552B + 196B</b><span>主干参数 + Engram 查表参数</span></div>
+    <div><b>8B / 16B</b><span>每个 token 激活的参数（预填充 / 解码）</span></div>
+    <div><b>4,666</b><span>Hugging Face 点赞（截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">Hugging Face 点赞数为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按报告（arXiv v1）的章节顺序，用本站自己的话把整份报告从头讲一遍；附录的内容放进讲到它的那一节。报告的标题是“KV 缓存压缩”，所以本页把这条主线讲得最细：每一种压缩手段都从头讲起，每一笔“每个 token 多少字节”的账都算一遍，并且逐项说明论文给了什么证据来说明精度没有掉。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。这份报告的许可证不允许转载原图，所以页面里的图都是本站画的示意图，或者按原文数字重画的简化图，每张图都附原图链接。标“推算”的数字是本站根据论文、官方配置文件和内核文档算出来的，不是论文原话。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这份报告讲了什么</h3>
+<p>DeepSeek-V4.1-Flash 是 DeepSeek 在 2026 年 9 月发布的模型：权重 9 月 10 日上传 Hugging Face，技术报告 9 月 17 日上传 arXiv。它是一个能同时读图和读文字的混合专家模型（MoE），主干有 552B 参数，另外挂了 196B 参数的 Engram 查表模块，支持 100 万 token 的上下文。它的主干有 40 层，前 20 层叫“因果编码器”，后 20 层叫“解码器”；这个划分让模型在处理输入（预填充）时每个 token 只激活 8B 参数，在逐个生成输出（解码）时激活 16B 参数。</p>
+<p>报告的标题已经说明了重点：<b>把 KV 缓存压到极限</b>。原因在于使用方式变了。现在的大模型越来越多地被当作智能体使用：它反复调用工具、读取文件和网页，每一轮都把很长的历史重新喂给模型，输出却相对很短。作者把这种负载称为“输入很重”的负载。前几代模型已经用稀疏注意力把长上下文的<b>计算量</b>压了下来，于是剩下的瓶颈变成了<b>存储和搬运</b>：KV 缓存要占用 GPU 显存（HBM），要为了复用而长期存到 SSD 上，还要在机器之间传来传去。</p>
+<p>V4.1-Flash 在三个层面同时压缩。<b>结构层面</b>，新的注意力 CSA2 让多层共用同一份全局 KV，而不是每层各存一份；<b>精度层面</b>，全局 KV 用 4 位浮点（FP4）存储，并在后训练中用量化感知训练让模型适应；<b>部署层面</b>，一种叫“SWA 有界重放”的近似重算，让滑动窗口部分的 KV 不必再长期存到 SSD 上。三者合起来，常驻显存的全局 KV 是每个 token 890 字节，约为上一代 V4-Flash 的 1/4；为前缀复用而长期保存的 KV 约为 V4-Flash 的 1/8。另一个结构改动“因果编码器—解码器”（CED）则把预填充的计算量砍掉将近一半。</p>
+<p>报告的其余部分覆盖了一个完整模型的所有环节：残差流混合的 Single-Pass mHC、条件记忆 Engram、投机解码模块 DSpark、给大嵌入表用的 Sinkhorn 平衡优化器、45T token 的多模态预训练、以数据为中心的后训练（报告明说没有任何算法创新）、可连续调节的“推理努力程度”，以及和 Opus-5、GPT-5.6 Sol、Kimi-K3、GLM-5.3 等模型的对比评测。</p>
+<p>先说读这份报告最需要记住的一点：<b>每一步压缩到底让精度掉了多少，报告几乎没有给数字</b>。FP4 的代价被描述为“只有轻微下降”，有界重放的代价被描述为“可以忽略”，CSA2 的跨层共享没有单独的消融实验。报告里能看到的定量证据，主要是 V4.1-Flash 和 V4-Flash 的整体对比，而两者之间同时变了参数量、训练数据、多模态、Engram、后训练数据等许多东西。此外，这份报告发布至今只有一个月左右，独立的复现和评测还很少，这一点在末节“后来怎么样了”里单独交代。</p>
+<div class="dia">
+  <div class="dia-title">示意图：DeepSeek 注意力这条线怎样一步步压 KV 缓存（每个 token、所有层加起来的全局 KV 字节数）</div>
+  <div class="dia-flow"><span class="dia-box">V1（2023-11）<small>GQA：8 个 KV 头 × 95 层，BF16<br>389,120 B</small></span><span class="dia-arrow">→</span><span class="dia-box">V2 / V3（2024）<small>MLA：每层只存一个 576 维潜向量<br>V3 为 70,272 B（BF16，推算）</small></span><span class="dia-arrow">→</span><span class="dia-box">V3.2（2025-12）<small>DSA：只挑 top-k 个条目算注意力；潜向量改存 FP8<br>48,068 B</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box reg">V4-Flash（2026-04）<small>CSA/HCA：沿序列把 4 个或 128 个 token 压成一个条目<br>3,514 B</small></span><span class="dia-arrow">→</span><span class="dia-box enc">V4.1-Flash（2026-09，本报告）<small>CSA2：40 层里只有 4 层自己存 KV；主 KV 改存 FP4<br>890 B</small></span></div>
+  <div class="dia-note">V1、V3.2、V4-Flash、V4.1-Flash 四个数取自原文图 1(b)；V3 的 70,272 B 是本站按 61 层 × 576 个 BF16 数推算的。各代的字节数是怎么算出来的，见 §1.2 的表。本站相关精读：<a href="deepseek-v3.html#n-2-1">V3 的 MLA</a>、<a href="deepseek-v3-2.html#n-2">V3.2 的 DSA</a>、<a href="deepseek-v4.html#n-4">V4 的 CSA/HCA</a>。对应 <a href="https://arxiv.org/html/2609.19969v1#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</div>
+</div>
+<p>读完这一页，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么说长上下文推理的成本，现在主要卡在 KV 缓存的存储和搬运上？“全局 KV”“SWA KV”“运行时 KV”“持久 KV”分别指什么？</li>
+  <li>890 字节这个数是怎么一字节一字节加出来的？从 V4-Flash 的 3,514 字节到 890 字节，省下的部分分别来自哪里？</li>
+  <li>CSA2 的 Full、Reindex、Reuse 三种模式各自算什么、复用什么？分层稀疏索引器又省了什么？</li>
+  <li>FP4 主 KV 为什么可以去掉 NVFP4 的第二级缩放？滑动窗口的 KV 为什么还留在 FP8？</li>
+  <li>“SWA 有界重放”近似在哪里？它为什么能把持久 KV 再砍一半，又带来了什么新的风险？</li>
+  <li>报告里哪些数字是按设计算出来的、哪些是生产环境里测的、哪些是基准成绩？每一步压缩的精度代价，有哪些证据、缺哪些证据？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2609.19969" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：智能体让输入越来越长，KV 缓存成了部署成本的大头</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>稀疏注意力已经让长上下文的计算便宜了很多，为什么作者还说部署成本卡在 KV 缓存上？V4 系列的 KV 缓存由哪几部分组成，各自存在哪里、受什么资源限制？V4.1-Flash 打算从哪几个层面去压，最后压到了什么程度？</div>
+
+<div class="note-pre"><b>先补一点背景：每个 token 的 KV 缓存有多大，为什么它决定长上下文的成本。</b>
+<p>模型逐个生成 token 时，每一层注意力都要拿当前 token 的 query 去和前面所有 token 的 key、value 计算。前面那些 token 的 key 和 value 每一步都要用，所以推理系统把它们存下来，叫 KV 缓存（详细的来龙去脉见 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>）。衡量它的最方便的单位是<b>每个 token 占多少字节</b>：把每一层为这个 token 存的数加起来，再乘以每个数的字节数。</p>
+<p>以 DeepSeek 的第一代 67B 模型（V1）为例：它有 95 层，每层用分组查询注意力（GQA）存 8 个 key 头和 8 个 value 头，每个头 128 维，用 BF16（每个数 2 字节）存储，所以每个 token 要 \(95\times 2\times 8\times 128\times 2 = 389{,}120\) 字节，约 0.39 MB（推算，和原文图 1(b) 的数一致）。一个 100 万 token 的请求就要约 389 GB，比一台 8 卡服务器的全部显存还多。这就是为什么长上下文模型必须先压 KV：每个 token 的字节数直接决定一张卡能同时服务多少个请求、多长的请求，进而决定每个 token 的成本（这个“批越大越便宜”的道理见 <a href="vllm.html#n-1">vLLM 精读 §1</a>）。</p>
+</div>
+
+<div class="note-pre"><b>先补一点背景：V4 系列的两种 KV，以及它们存在哪里。</b>
+<p>DeepSeek-V4 的每一层注意力有两个分支（详见 <a href="deepseek-v4.html#n-4">V4 精读 §4</a>）。一个是<b>全局分支</b>：它能看到整个上下文，但看到的是压缩过的条目——每 \(m\) 个 token 被压成一个条目，再由一个轻量“索引器”为每个 query 挑出最相关的少数几个条目。全局分支要存的东西叫<b>全局 KV</b>，包括主 KV（真正参与注意力的压缩条目）和索引器 K（索引器打分用的小向量）。另一个是<b>局部分支</b>，即滑动窗口注意力（SWA）：每个 token 只看自己前面最近的 \(n_{\mathrm{win}}=128\) 个 token，用的是没压缩的原始 KV，叫 <b>SWA KV</b>。</p>
+<p>两种 KV 的增长方式完全不同。全局 KV 随序列长度线性增长：上下文翻倍，它也翻倍。SWA KV 每层只需要保留最近 128 个 token，和上下文多长无关。所以上下文足够长时，<b>全局 KV 占了运行时 KV 的绝大部分</b>，它受 GPU 显存容量的限制。</p>
+<p>另一种划分是按“存多久”。正在服务的请求，它的 KV 放在显存里，叫运行时 KV。请求结束后，为了下一轮对话或者别的请求能复用同一段前缀（例如同一个代码仓库、同一份系统提示），推理系统会把一部分 KV 长期存到 SSD 或主机内存里，命中时直接读回来，省掉重新预填充，这部分叫<b>持久 KV 缓存</b>（这种分层存储的系统设计见 <a href="lmcache.html">LMCache 精读</a> 和 <a href="mooncake.html">Mooncake 精读</a>）。持久 KV 受 SSD 和主机内存的容量限制，读写它又受 I/O 和网络带宽限制。</p>
+</div>
+
+<p>作者对问题的诊断是这样的。智能体任务把模型的工作负载推向“超长输入”：一次任务可能有几十上百轮工具调用，每一轮都要带着完整的历史。稀疏注意力（V3.2 的 DSA、V4 的 CSA/HCA）已经让处理长序列的<b>计算</b>便宜了很多，于是<b>存储和数据搬运</b>成了更突出的瓶颈：全局 KV 挤占显存，限制了一张卡能同时服务的请求数；持久 KV 挤占 SSD 和主机内存，限制了前缀能缓存多久、命中率有多高；KV 在机器之间迁移和加载还要占用带宽。这三件事加起来，限制了吞吐、推高了成本，也就限制了智能体能被部署到多长的任务、多大的规模上。</p>
+<p>所以 V4.1-Flash 的设计目标就是在 V4 的基础上继续压 KV。作者给出一个概括性的视角：V4 可以看成“一个以 SWA 做局部处理的骨架，再加上一份压缩过的全局上下文”。既然局部的 SWA 部分已经很省（每层只存 128 个 token），要压就压全局分支，同时尽量保留局部注意力的设计。具体在三个层面动手：</p>
+<ul>
+  <li><b>结构</b>：新的 CSA2 让多层共享同一份全局 KV（主 KV 和索引器 K），并让一些层直接复用别的层选出来的 top-k 位置；同时去掉了 V4 的 HCA，全部改用 CSA2（§2.3）。</li>
+  <li><b>精度</b>：在训练中让全局主 KV 适应 FP4 存储，作者称精度只有轻微下降（§2.4.4）。CSA2 加 FP4，全局 KV 降到 V4-Flash 的约 1/4。</li>
+  <li><b>部署</b>：V4 为了让 SWA 的 KV 能在前缀命中时恢复，要么存下来，要么精确重算，而精确重算需要重放 \(L\times n_{\mathrm{win}}\) 个 token（\(L\) 是层数）。V4.1 引入 SWA 有界重放，只重放最近的 \(n_{\mathrm{win}}\) 个 token，得到一个近似的 SWA 状态，于是 SWA KV 不用再存到 SSD 上，持久 KV 再减半，降到 V4-Flash 的约 1/8（§3.2）。</li>
+</ul>
+
+<h4 id="n-1-1">1.1 原文图 1(b)：四代模型，每个 token 存多少字节</h4>
+<div class="dia">
+  <div class="dia-title">按原文图 1(b) 的数字重画：每个 token 的全局 KV 缓存（字节，对数横轴）</div>
+  <svg class="dg" viewBox="0 0 760 260" role="img" aria-label="四代 DeepSeek 模型每个 token 的全局 KV 字节数，对数坐标条形图" style="max-width:760px;--dg-min:560px">
+    <line x1="200" y1="225" x2="720" y2="225" class="axis"/>
+    <line x1="200" y1="225" x2="200" y2="20" class="axis"/>
+    <line x1="330" y1="225" x2="330" y2="20" class="grid-ln"/>
+    <line x1="460" y1="225" x2="460" y2="20" class="grid-ln"/>
+    <line x1="590" y1="225" x2="590" y2="20" class="grid-ln"/>
+    <line x1="720" y1="225" x2="720" y2="20" class="grid-ln"/>
+    <text x="200" y="242" class="t-c t-xs">100</text>
+    <text x="330" y="242" class="t-c t-xs">1,000</text>
+    <text x="460" y="242" class="t-c t-xs">10,000</text>
+    <text x="590" y="242" class="t-c t-xs">100,000</text>
+    <text x="720" y="242" class="t-c t-xs">1,000,000</text>
+    <text x="190" y="44" class="t-r t-sm">DeepSeek-V1（2023-11）</text>
+    <rect x="200" y="32" width="467" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+    <text x="674" y="45" class="t-sm">389,120</text>
+    <text x="190" y="94" class="t-r t-sm">DeepSeek-V3.2（2025-12）</text>
+    <rect x="200" y="82" width="349" height="26" rx="3" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+    <text x="556" y="95" class="t-sm">48,068</text>
+    <text x="190" y="144" class="t-r t-sm">DeepSeek-V4-Flash（2026-04）</text>
+    <rect x="200" y="132" width="201" height="26" rx="3" style="fill:var(--c-reg-bg);stroke:var(--c-reg)"/>
+    <text x="408" y="145" class="t-sm">3,514</text>
+    <text x="190" y="194" class="t-r t-sm t-b" style="fill:var(--c-enc)">DeepSeek-V4.1-Flash（2026-09）</text>
+    <rect x="200" y="182" width="123" height="26" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+    <text x="330" y="195" class="t-sm t-b" style="fill:var(--c-enc)">890</text>
+    <text x="620" y="125" class="t-xs">相邻两代：8.1× → 13.7× → 3.9×</text>
+    <text x="620" y="141" class="t-xs">V1 → V4.1-Flash：约 437×</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>横轴是对数刻度，每一格是 10 倍。原图用线性横轴画，V4-Flash 和 V4.1-Flash 的条几乎看不见；这里改成对数，是为了让四代都能看清，但要注意对数图会让后两代之间的 3.9 倍显得不大——实际上从 3,514 到 890 是省掉了四分之三。原文图注说 V4.1-Flash 相对 V4-Flash 和 V1 分别小约 4 倍和 437 倍。本站按原文数字重画，对应 <a href="https://arxiv.org/html/2609.19969v1#S0.F1" target="_blank" rel="noopener">原文图 1(b) ↗</a>。</div>
+</div>
+
+<h4 id="n-1-2">1.2 这四个数是怎么算出来的</h4>
+<p>原文图 1(b) 只给了结果，没给算式。本站用各代的官方配置文件和 DeepSeek 注意力内核库 FlashMLA 文档里写明的缓存格式，把四个数都还原了出来，每一个都和原图的数字完全对上。这张表是读懂后面所有设计的钥匙，值得逐行看。</p>
+<div class="table-wrap"><table>
+<tr><th>模型</th><th>每层为每个 token 存什么</th><th>有几层在存、压缩比</th><th class="num">每个 token 合计</th></tr>
+<tr><td>V1（67B）</td><td>8 个 K 头 + 8 个 V 头，每头 128 维，BF16：\(2\times8\times128\times2=4{,}096\) B</td><td>95 层都存，不压缩</td><td class="num">389,120 B</td></tr>
+<tr><td>V3（参考）</td><td>MLA 潜向量 512 维 + RoPE 部分 64 维，BF16：\(576\times2=1{,}152\) B</td><td>61 层都存</td><td class="num">70,272 B</td></tr>
+<tr><td>V3.2</td><td>主 KV：512 个 FP8 + 4 个 FP32 缩放 + 64 个 BF16 RoPE = 656 B；索引器 K：128 个 FP8 + 1 个 FP32 缩放 = 132 B</td><td>61 层都存，不压缩</td><td class="num">\(61\times788=\) 48,068 B</td></tr>
+<tr><td>V4-Flash</td><td>主 KV：448 个 FP8 + 64 个 BF16 RoPE + 8 B 缩放 = 584 B；索引器 K：128 个 FP4 + 4 B 缩放 = 68 B</td><td>21 层 CSA（\(m=4\)，主 KV + 索引器 K）；20 层 HCA（\(m=128\)，只有主 KV）；另 2 层只有 SWA</td><td class="num">\(\tfrac{21\times652}{4}+\tfrac{20\times584}{128}\approx\) 3,514 B</td></tr>
+<tr class="hl"><td>V4.1-Flash</td><td>主 KV：512 个 FP4 + 32 个 E4M3 缩放 = 288 B；索引器 K：128 个 FP4 + 4 B 缩放 = 68 B</td><td>只有 4 层（Full 模式）自己存：编码器 3 层（\(m=2\)），解码器 1 层（\(m=1\)）</td><td class="num">\(\tfrac{3\times356}{2}+356=\) 890 B</td></tr>
+</table></div>
+<p>表里的推算有几处来源需要交代。V3.2、V4、V4.1 主 KV 的每 token 字节数（656、584、288）是 FlashMLA 文档明写的缓存格式；V4.1 的层配置来自官方 <code>config.json</code>（存 KV 的层是第 2、8、14、20 层）；索引器 K 的字节数是本站按“128 维、FP4、每 32 个数一个 1 字节缩放”推出来的，代入后总数与原图分毫不差，可以视为得到了验证。V1 的配置（95 层、8 个 KV 头）来自 DeepSeek LLM 67B 的公开配置。</p>
+<p>把每个 token 的字节数换成“一个 100 万 token 的请求要占多少显存”（推算），差别更直观：V1 约 389 GB，V3.2 约 48 GB，V4-Flash 约 3.5 GB，V4.1-Flash 约 0.89 GB。也就是说，到了 V4.1-Flash，一个百万 token 请求的全局 KV 已经不到 1 GB。这个规模下，KV 已经小到可以考虑长期保存大量请求的前缀，这正是后面持久缓存设计的前提。</p>
+<div class="note-warn"><b>读这些数字时容易混淆的地方：</b>
+<ul>
+  <li>890 字节只算<b>全局 KV</b>。每个请求另外还有 SWA KV：40 层、每层最近 128 个 token、每个 528 字节（FP8 格式，FlashMLA 文档），合计约 2.7 MB（推算）。这部分不随上下文增长，所以在长上下文下占比很小，但在短请求、高并发时并不能忽略。</li>
+  <li>“约 1/4”说的是全局 KV（常驻显存），“约 1/8”说的是持久 KV（存在 SSD 或主机内存），两个数衡量的是不同的东西。后者还依赖部署方式和负载（§3.2.1）。</li>
+  <li>字节数是<b>按设计算出来的</b>，不需要实验，也不会因测试条件而变；它不说明模型在这么小的 KV 下精度如何，后者要看评测。</li>
+</ul></div>
+
+<h4 id="n-1-3">1.3 计算也要省：原文图 2 的单 token 解码 FLOPs</h4>
+<p>压缩 KV 的同时，作者还想让<b>每生成一个 token 的计算量</b>几乎不随上下文变长而增加。原文图 2 画的是“生成一个 token 需要多少次浮点运算”随上下文长度的变化。为了把不同精度的运算放在一起比，作者把 BF16、FP8、FP4 的运算分别按 1、0.5、0.25 的权重折算。</p>
+<div class="dia">
+  <div class="dia-title">按原文图 2 重画的简化图：生成一个 token 的计算量（GFLOPs，按精度折算）随上下文长度的变化</div>
+  <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="V4-Flash 与 V4.1-Flash 单 token 解码计算量随上下文变化的示意曲线" style="max-width:720px;--dg-min:540px">
+    <line x1="80" y1="220" x2="680" y2="220" class="axis"/>
+    <line x1="80" y1="220" x2="80" y2="20" class="axis"/>
+    <line x1="80" y1="163" x2="680" y2="163" class="grid-ln"/>
+    <line x1="80" y1="106" x2="680" y2="106" class="grid-ln"/>
+    <line x1="80" y1="49" x2="680" y2="49" class="grid-ln"/>
+    <text x="70" y="220" class="t-r t-xs">0</text>
+    <text x="70" y="163" class="t-r t-xs">20</text>
+    <text x="70" y="106" class="t-r t-xs">40</text>
+    <text x="70" y="49" class="t-r t-xs">60</text>
+    <text x="80" y="238" class="t-c t-xs">4K</text>
+    <text x="230" y="238" class="t-c t-xs">16K</text>
+    <text x="380" y="238" class="t-c t-xs">64K</text>
+    <text x="530" y="238" class="t-c t-xs">256K</text>
+    <text x="680" y="238" class="t-c t-xs">1M</text>
+    <text x="380" y="258" class="t-c t-sm">上下文长度（对数刻度）→</text>
+    <text x="24" y="120" class="t-c t-sm" transform="rotate(-90 24 120)">GFLOPs / token</text>
+    <path d="M80,171.5 L230,170 L380,166 L455,160 L530,143 L605,112 L680,49" style="fill:none;stroke:var(--c-reg);stroke-width:2.5"/>
+    <path d="M80,163 L230,163 L380,161.6 L530,158.8 L605,155 L680,148.8" style="fill:none;stroke:var(--c-enc);stroke-width:3"/>
+    <text x="588" y="72" class="t-r t-sm" style="fill:var(--c-reg)">V4-Flash：约 17 → 约 60</text>
+    <text x="676" y="136" class="t-r t-sm t-b" style="fill:var(--c-enc)">V4.1-Flash：约 20 → 约 25</text>
+    <text x="470" y="188" class="t-c t-xs">两条线在约 100K 处交叉</text>
+  </svg>
+  <div class="dia-note"><b>怎么看：</b>纵轴是生成一个 token 的计算量。V4-Flash（紫）在短上下文时更省，因为它每个 token 只激活 13B 参数，V4.1-Flash（蓝）激活 16B；但 V4-Flash 的曲线在 256K 以后明显上翘，到 1M 时约是 4K 时的 3.5 倍。V4.1-Flash 几乎是平的：原文说上下文从 4K 增加 256 倍到 1M，计算量只多了约 1/4。除“1/4”外，图上的具体数值都是本站从原图上读出的近似值，只用来说明形状。原图还画了 V1 和 V3.2，它们在 1M 时分别约为 3,000 和 600 GFLOPs，量级完全不同，这里略去。对应 <a href="https://arxiv.org/html/2609.19969v1#S1.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。</div>
+</div>
+<p>为什么 V4.1-Flash 的曲线能这么平，要等读完 §2.3 才能完整解释。先给一个直观的答案：随上下文增长的计算主要来自索引器，因为它要给所有可见的条目打分。V4-Flash 有 21 个 CSA 层，每层都给全部压缩条目打分；V4.1-Flash 只有 8 个层运行索引器，其中 4 个层借助“分层稀疏索引器”只在固定的 16,384 个候选里打分，打分头数也从 64 减到 32。§2.3.2 会把这笔账算清楚。</p>
+
+<h4 id="n-1-4">1.4 报告的其他结论</h4>
+<p>引言还概括了报告的其他内容。架构上，作者把 mHC 升级为 Single-Pass mHC，配合一个叫 Mega-mHC 的部署内核，把激活的显存读写量减半；集成了 Engram 条件记忆来增强能力；用 DSpark 做投机解码。系统上，训练支持视觉编码器分离执行、长序列的图像均衡切分、跨流水线阶段共享注意力状态；推理实现了编码器和解码器两条“有界重放”路径，绝大多数层（Reuse 模式）预填充只用 15 个内核、解码只用 11 个。预训练用了 45T token 的多模态语料，稀疏注意力从头在 64K 长度上训练，没有稠密注意力的预热阶段。作者称基座模型在知识、推理、代码上与 V4-Pro-Base 相当，在内部留出集上好 5%–10%，而总参数只有后者的 1/3、激活参数只有 1/4。后训练则明确“没有算法创新”，所有实质改动都在数据和环境的合成流水线上。</p>
+<div class="note-warn"><b>引言里的“完成 95% 以上真实任务”：</b>引言说模型“能完成 95% 以上的真实世界任务”，但报告里没有给出这个数字的测量方法、任务集或统计口径，应当把它看成一句宣传性的概括，而不是一个可核对的结果。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2.1 架构总览：40 层，一半编码一半解码，只有 4 层存全局 KV</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V4.1-Flash 整体长什么样？40 层里每一层用的是哪种注意力，哪些层真正存 KV，Engram 和视觉编码器接在哪里？这一节先把全局地图摊开，后面几节再逐个部件拆开讲。</div>
+<p>语言主干是 40 层因果 Transformer，隐藏维度 5120。前 20 层是“因果编码器”，后 20 层是“解码器”。这里的“编码器、解码器”不是 T5 那种双向编码器加交叉注意力的结构：两半都是因果的（每个 token 只看前面），区别只在于解码器的全局 KV 从哪里来（§2.2）。除前两层只有滑动窗口注意力（SWA）外，每一层都同时有全局注意力和 SWA 两个分支。所有层的前馈部分都是 DeepSeekMoE：1 个共享专家加 384 个路由专家，每个 token 激活 6 个路由专家，每个专家的中间维度 2304。</p>
+<p>注意力的配置（原文 §4.2.1，与官方 <code>config.json</code> 一致）：64 个 query 头，每个头 512 维，query 先压到 1280 维再展开；所有头共用一个 512 维的 KV 潜向量（配置里 <code>num_key_value_heads = 1</code>，即“MQA 模式”，每个被选中的 KV 条目同时服务全部 64 个头）；输出投影分 8 组，每组中间维度 1024。索引器有 32 个头、每头 128 维，每个 query 选 512 个全局条目（top-k = 512）。SWA 窗口 \(n_{\mathrm{win}}=128\)。在这个配置下，主干共有 552B 参数，预填充时每个 token 激活 8B，解码时激活 16B。</p>
+<div class="dia">
+  <div class="dia-title">示意图：40 层分别做什么（按原文 §4.2.1 与官方 config.json 绘制）</div>
+<svg class="dg" viewBox="0 0 960 300" role="img" aria-label="DeepSeek-V4.1-Flash 40 层的注意力模式分配图" style="--dg-min:760px">
+<path d="M34.0,26 L34.0,20 L478.59999999999997,20 L478.59999999999997,26" style="fill:none;stroke:var(--text-3)"/>
+<text x="256.3" y="12" class="t-c t-sm t-b">因果编码器：第 0–19 层（预填充时所有 token 都要算）</text>
+<path d="M482.0,26 L482.0,20 L926.5999999999999,20 L926.5999999999999,26" style="fill:none;stroke:var(--text-3)"/>
+<text x="704.3" y="12" class="t-c t-sm t-b">解码器：第 20–39 层（预填充时只算最后 128 个 token）</text>
+<rect x="39.9" y="34" width="52" height="16" rx="8" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+<text x="65.9" y="42.5" class="t-c t-xs" style="fill:var(--c-act)">Engram</text>
+<line x1="65.9" y1="50" x2="65.9" y2="76" style="stroke:var(--c-act);stroke-width:1.5"/>
+<rect x="331.1" y="34" width="52" height="16" rx="8" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+<text x="357.1" y="42.5" class="t-c t-xs" style="fill:var(--c-act)">Engram</text>
+<line x1="357.1" y1="50" x2="357.1" y2="76" style="stroke:var(--c-act);stroke-width:1.5"/>
+<path d="M79.8,72 L79.8,68 L208.79999999999998,68 L208.79999999999998,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M214.2,72 L214.2,68 L343.2,68 L343.2,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M348.59999999999997,72 L348.59999999999997,68 L477.59999999999997,68 L477.59999999999997,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M483.0,72 L483.0,68 L567.1999999999999,68 L567.1999999999999,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M572.5999999999999,72 L572.5999999999999,68 L656.8,68 L656.8,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M662.1999999999999,72 L662.1999999999999,68 L746.4,68 L746.4,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M751.8,72 L751.8,68 L836.0,68 L836.0,72" style="fill:none;stroke:var(--border-strong)"/>
+<path d="M841.4,72 L841.4,68 L925.5999999999999,68 L925.5999999999999,72" style="fill:none;stroke:var(--border-strong)"/>
+<rect x="34.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+<text x="43.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-2)">S</text>
+<text x="43.5" y="122" class="t-c t-xs">0</text>
+<rect x="56.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+<text x="65.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-2)">S</text>
+<text x="65.9" y="122" class="t-c t-xs">1</text>
+<rect x="78.8" y="78" width="19" height="32" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:2"/>
+<text x="88.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-enc)">F</text>
+<text x="88.3" y="122" class="t-c t-xs">2</text>
+<rect x="101.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="110.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="110.7" y="122" class="t-c t-xs">3</text>
+<rect x="123.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="133.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="133.1" y="122" class="t-c t-xs">4</text>
+<rect x="146.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="155.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="155.5" y="122" class="t-c t-xs">5</text>
+<rect x="168.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="177.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="177.9" y="122" class="t-c t-xs">6</text>
+<rect x="190.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="200.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="200.3" y="122" class="t-c t-xs">7</text>
+<rect x="213.2" y="78" width="19" height="32" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:2"/>
+<text x="222.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-enc)">F</text>
+<text x="222.7" y="122" class="t-c t-xs">8</text>
+<rect x="235.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="245.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="245.1" y="122" class="t-c t-xs">9</text>
+<rect x="258.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="267.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="267.5" y="122" class="t-c t-xs">10</text>
+<rect x="280.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="289.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="289.9" y="122" class="t-c t-xs">11</text>
+<rect x="302.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="312.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="312.3" y="122" class="t-c t-xs">12</text>
+<rect x="325.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="334.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="334.7" y="122" class="t-c t-xs">13</text>
+<rect x="347.6" y="78" width="19" height="32" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:2"/>
+<text x="357.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-enc)">F</text>
+<text x="357.1" y="122" class="t-c t-xs">14</text>
+<rect x="370.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="379.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="379.5" y="122" class="t-c t-xs">15</text>
+<rect x="392.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="401.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="401.9" y="122" class="t-c t-xs">16</text>
+<rect x="414.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="424.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="424.3" y="122" class="t-c t-xs">17</text>
+<rect x="437.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="446.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="446.7" y="122" class="t-c t-xs">18</text>
+<rect x="459.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="469.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="469.1" y="122" class="t-c t-xs">19</text>
+<rect x="482.0" y="78" width="19" height="32" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:2"/>
+<text x="491.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-enc)">F</text>
+<text x="491.5" y="122" class="t-c t-xs">20</text>
+<rect x="504.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="513.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="513.9" y="122" class="t-c t-xs">21</text>
+<rect x="526.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="536.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="536.3" y="122" class="t-c t-xs">22</text>
+<rect x="549.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="558.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="558.7" y="122" class="t-c t-xs">23</text>
+<rect x="571.6" y="78" width="19" height="32" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2"/>
+<text x="581.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-pred)">I</text>
+<text x="581.1" y="122" class="t-c t-xs">24</text>
+<rect x="594.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="603.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="603.5" y="122" class="t-c t-xs">25</text>
+<rect x="616.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="625.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="625.9" y="122" class="t-c t-xs">26</text>
+<rect x="638.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="648.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="648.3" y="122" class="t-c t-xs">27</text>
+<rect x="661.2" y="78" width="19" height="32" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2"/>
+<text x="670.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-pred)">I</text>
+<text x="670.7" y="122" class="t-c t-xs">28</text>
+<rect x="683.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="693.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="693.1" y="122" class="t-c t-xs">29</text>
+<rect x="706.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="715.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="715.5" y="122" class="t-c t-xs">30</text>
+<rect x="728.4" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="737.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="737.9" y="122" class="t-c t-xs">31</text>
+<rect x="750.8" y="78" width="19" height="32" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2"/>
+<text x="760.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-pred)">I</text>
+<text x="760.3" y="122" class="t-c t-xs">32</text>
+<rect x="773.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="782.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="782.7" y="122" class="t-c t-xs">33</text>
+<rect x="795.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="805.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="805.1" y="122" class="t-c t-xs">34</text>
+<rect x="818.0" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="827.5" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="827.5" y="122" class="t-c t-xs">35</text>
+<rect x="840.4" y="78" width="19" height="32" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2"/>
+<text x="849.9" y="94.5" class="t-c t-sm t-b" style="fill:var(--c-pred)">I</text>
+<text x="849.9" y="122" class="t-c t-xs">36</text>
+<rect x="862.8" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="872.3" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="872.3" y="122" class="t-c t-xs">37</text>
+<rect x="885.2" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="894.7" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="894.7" y="122" class="t-c t-xs">38</text>
+<rect x="907.6" y="78" width="19" height="32" rx="3" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="917.1" y="94.5" class="t-c t-sm t-b" style="fill:var(--text-3)">U</text>
+<text x="917.1" y="122" class="t-c t-xs">39</text>
+<path d="M78.8,134 L78.8,140 L478.59999999999997,140 L478.59999999999997,134" style="fill:none;stroke:var(--c-enc)"/>
+<text x="278.7" y="153" class="t-c t-sm" style="fill:var(--c-enc)">CSA2，压缩比 m = 2：每 2 个 token 压成 1 个全局条目</text>
+<path d="M482.0,134 L482.0,140 L926.5999999999999,140 L926.5999999999999,134" style="fill:none;stroke:var(--c-enc)"/>
+<text x="704.3" y="153" class="t-c t-sm" style="fill:var(--c-enc)">CSA2，压缩比 m = 1：不压缩，每个 token 一个条目</text>
+<text x="54.7" y="153" class="t-c t-xs">只有 SWA</text>
+<text x="34.0" y="182" class="t-sm">真正写入全局 KV 的只有 4 层（F）：第 2、8、14 层（m = 2）和第 20 层（m = 1）。其余层要么只重新打分（I），要么连打分结果也直接沿用（U）。</text>
+<text x="34.0" y="202" class="t-sm">第 20 层同时为分层稀疏索引器建“候选池”（2,048 块 × 8 个位置），第 24、28、32、36 层的索引器只在池内挑 top-512。</text>
+<rect x="34.0" y="221" width="14" height="14" rx="2" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="54.0" y="228" class="t-xs">F = Full：自己算主 KV、索引器 K，自己选 top-k</text>
+<rect x="484.0" y="221" width="14" height="14" rx="2" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="504.0" y="228" class="t-xs">I = Reindex：借用 KV，自己重新打分选 top-k</text>
+<rect x="34.0" y="241" width="14" height="14" rx="2" style="fill:var(--surface);stroke:var(--border-strong);stroke-dasharray:3 2"/>
+<text x="54.0" y="248" class="t-xs">U = Reuse：KV 和 top-k 位置都借用</text>
+<rect x="484.0" y="241" width="14" height="14" rx="2" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+<text x="504.0" y="248" class="t-xs">S = 只有滑动窗口</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每个方块是一层，下面的数字是层号（从 0 数）。蓝色 F 层自己计算并存储全局 KV；红色 I 层不存 KV，但用自己的索引器重新挑选要看的条目；虚线 U 层连挑选结果都沿用前面最近的 F 或 I 层。方块上方的细括号是共享组：编码器 3 组、每组 6 层（1 个 F + 5 个 U），解码器 5 组、每组 4 层（第一组是 1 个 F + 3 个 U，后四组是 1 个 I + 3 个 U）。绿色标签是 Engram 模块的位置。本站示意图，对应 <a href="https://arxiv.org/html/2609.19969v1#S1.F3" target="_blank" rel="noopener">原文图 3 ↗</a>。</div>
+</div>
+<p>从这张图可以直接读出 890 字节的来源：40 层里只有 4 层写全局 KV。这比 V4-Flash 的 41 个存 KV 的层（21 个 CSA、20 个 HCA）少了一个数量级。代价是什么，§2.3 会细讲。</p>
+<p>其他部件的位置也标在图里或写在下面：Engram 的两个模块在第 1 层和第 14 层；投机解码模块 DSpark 接在主干之后，读取第 37–39 层的隐藏状态（官方配置 <code>dspark_target_layer_ids</code>）；Single-Pass mHC 负责层与层之间的残差流混合；第 20 层的索引器除了为自己选位置，还为后面的 Reindex 层准备候选池。主 KV 统一用 FP4 存储。和 DeepSeek-V3 不同，预训练时不再有多 token 预测（MTP）模块，投机解码改由预训练结束后单独训练的 DSpark 承担。</p>
+
+<h4 id="n-2-1">2.1.1 多模态：从头训练的 DeepSeek-ViT</h4>
+<p>V4 系列是纯文本模型，V4.1-Flash 则从语言模型预训练的第一步起就混入了多模态数据。图像经过一个视觉编码器和一个 MLP 投影器变成“视觉 token”，插到输入序列里图像占位符的位置，和文字 token 一起进入语言主干。</p>
+<p>视觉编码器 DeepSeek-ViT 是从头训练的 ViT（32 层、隐藏维度 1024、16 个头、图像块边长 14 像素），做了几处改动，让它更像一个语言模型：用二维 RoPE 代替绝对位置编码，以便接受任意分辨率；把图像块嵌入层的卷积换成线性投影，这样它也能用 Muon 优化器（Muon 是为矩阵参数设计的，见 <a href="muon.html#n-2-1">Muon 精读</a>）；归一化用 RMSNorm，激活函数用 SwiGLU。编码器输出的特征图先做 \(3\times3\) 的像素重排（pixel-unshuffle）：把每个 \(3\times3\) 邻域的 9 个特征拼成一个更宽的特征，于是视觉 token 数降为 1/9，再由两层 MLP 投影到主干的 5120 维。</p>
+<p>算一个例子（推算）：一张 \(1344\times1344\) 的图，按 14 像素切块得到 \(96\times96=9{,}216\) 个图像块，像素重排后剩 \(32\times32=1{,}024\) 个视觉 token。官方配置里 <code>max_image_tokens = 1024</code>，正好对应原文说的“最高约 1344×1344 像素”。</p>
+<h4 id="n-2-2">2.1.2 按模态分开的无辅助损失负载均衡</h4>
+<div class="note-pre"><b>先补一点背景：无辅助损失的负载均衡。</b>
+<p>MoE 的路由器要让各个专家的工作量大致相同，否则有的专家过载、有的闲置。DeepSeek-V3 的做法是给每个专家加一个“修正偏置”：某个专家最近被选得太多，就把它的偏置调低，让它下一步少被选中；偏置只影响“选谁”，不影响选中后的加权系数。这样就不需要在损失函数里加一项“均衡损失”去干扰主任务（详见 <a href="deepseek-v3.html#n-2-3">V3 精读 §2.1.2（续）</a>）。</p>
+</div>
+<p>图像 token 和文字 token 的表示分布不同，偏好的专家也可能不同。如果只看两者合起来的负载，可能出现“总量均衡、但图像 token 全挤在少数几个专家上”的情况。所以 V4.1 给文字和图像各维护一套修正偏置：每个 token 用自己模态的那套偏置选专家，加权仍用原始的路由分数；每步训练后，两套偏置按各自模态的专家负载独立更新。偏置的更新速度两者都设为 0.001，此外还保留了权重为 0.0001 的序列级均衡损失，防止单条序列内部极端不均（原文 §4.2.2）。官方推理代码里，路由门也确实为图像片段的 token 使用单独的偏置。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S2.SS1" target="_blank" rel="noopener">英文原文 §2.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">2.2 因果编码器—解码器（CED）：预填充只算一半的层</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>智能体每调用一次工具，就产生一段新的输入要预填充；如果这段输入没有命中缓存，就要把它从第一层算到最后一层。能不能让预填充只算一半的层，同时又不丢掉后一半层生成 KV 的能力？代价落在哪里？</div>
+<div class="note-pre"><b>先补一点背景：预填充、解码，以及 YOCO。</b>
+<p>推理分两个阶段：<b>预填充</b>一次性处理全部输入 token，计算每一层的 KV 并写进缓存；<b>解码</b>每步只处理一个新 token，读缓存、生成下一个 token（两个阶段的性质差异见 <a href="distserve.html">DistServe 精读</a>）。在输入很长、输出很短的智能体负载里，预填充的计算占了大头。</p>
+<p>YOCO（You Only Cache Once，Sun 等，NeurIPS 2024）提出过一种省预填充的结构：模型下半部分正常计算，并在中间产生<b>一份</b>全局 KV；上半部分的每一层都不自己产生 KV，而是直接对这份共享 KV 做注意力。这样，处理输入时只需要算到下半部分结束、拿到那份共享 KV 就可以停下，上半部分只需在生成阶段为新 token 计算。预填充的计算量因此减半。</p>
+</div>
+<p>CED 借用了 YOCO 的思路，并做了两处加强。第一，对<b>全局注意力</b>，前 \(L/2\) 层当作因果编码器；后半的解码器层（\(l&gt;L/2\)）不从自己的隐藏状态 \(H_l\) 产生全局 KV，而是统一从第 \(L/2\) 层的隐藏状态 \(H_{L/2}\)（也就是编码器的最终输出）投影得到，但每层用自己的投影矩阵：</p>
+<div class="formula">$$C_{l}=H_{L/2}\,W_{l}^{KV},\qquad Z_{l}=H_{L/2}\,W_{l}^{Z},\qquad l&gt;\tfrac{L}{2}$$</div>
+<p>这里 \(C_l\) 是 KV 条目，\(Z_l\) 是压缩时用的权重（CSA 把 \(m\) 个 token 加权合成一个条目，权重由 \(Z\) 经 softmax 得到）。由于这些 KV 只依赖编码器输出，预填充时只要把输入跑完前 20 层，就能顺手得到解码器需要的全局 KV。和 YOCO 的“只有一份共享 KV”相比，CED 允许不同解码器层用不同的投影，KV 的“容量”更大。不过在 V4.1-Flash 的实际配置里，解码器只有第 20 层是 Full 模式、真正写 KV（§2.3），所以整个解码器实际上共享第 20 层由 \(H_{20}\) 投影出的那一份全局 KV。</p>
+<p>第二，对 <b>SWA</b>，CED 保留了逐层计算：解码器每一层的局部 K、V 都从该层自己的隐藏状态 \(H_l\) 算出。作者的理由是这样让局部 KV 经过更深的计算，表达力更强。但这带来一个麻烦：解码开始时，第一个新 token 在解码器每一层都要看前面 128 个 token 的 SWA KV，而这些 KV 要求那些 token 真的在解码器里算过。精确地得到它们，需要在预填充末尾对最后 \(n_{\mathrm{win}}\times L/2=128\times20=2{,}560\) 个 token 跑完整个解码器（推算；原因是滑动窗口逐层叠加时感受野会扩大，§3.2.2 会画图解释）。如果每一轮只新增很短的输入（多轮对话里很常见），这笔额外计算就不可忽略。</p>
+<p>作者的解决办法是“解码器 SWA 有界重放”：每次预填充，只把输入的最后 \(n_{\mathrm{win}}=128\) 个 token 送进解码器层，并且窗口在这 128 个 token 的起点处截断，得到一个<b>近似的</b>解码器 SWA 状态。依据是前人工作（PowerAttention，Chen 等 2025）发现 SWA 的实际有效感受野远小于理论上的 \(n_{\mathrm{win}}\times L/2\)。细节和风险放到 §3.2.2 讲。于是对于长度 \(N\gg n_{\mathrm{win}}\) 的输入，预填充的复杂度从 \(\mathcal{O}(NL)\) 降到 \(\mathcal{O}(NL/2+n_{\mathrm{win}}L/2)\approx\mathcal{O}(NL/2)\)，即减半。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一次预填充里，编码器和解码器各要处理多少 token（输入 N 个 token）</div>
+  <div class="dia-row"><span class="lbl">编码器 20 层</span><div class="dia-track"><span class="dia-seg kv" style="flex:9">全部 N 个 token 都算完 20 层（含 Engram、MoE、两种注意力）</span></div></div>
+  <div class="dia-row"><span class="lbl">解码器第 20 层</span><div class="dia-track"><span class="dia-seg w" style="flex:9">只做一次投影：由编码器输出 \(H_{20}\) 得到全局主 KV 和索引器 K</span></div></div>
+  <div class="dia-row"><span class="lbl">解码器 20 层</span><div class="dia-track"><span class="dia-seg oth" style="flex:8.2">前 N − 128 个 token：不进解码器</span><span class="dia-seg res" style="flex:0.8">最后 128 个</span></div></div>
+  <div class="dia-out">解码阶段则每生成一个 token 都要走完全部 40 层，所以解码激活 16B 参数，预填充平均每个 token 只激活约 8B。</div>
+  <div class="dia-note">本站示意图，按原文 §2.2 与 §3.2.2 的描述绘制；比例只是示意。斜纹段就是“解码器 SWA 有界重放”：这 128 个 token 的解码器 SWA KV 是近似值，只用于随后的解码，不进入前缀缓存。</div>
+</div>
+<p>换一个具体例子看减半的含义（推算）：一个 10 万 token 的新输入，原来要让 10 万个 token 都走 40 层；用 CED 后，10 万个 token 走 20 层，另有 128 个 token 走另外 20 层，总的“token × 层”从 400 万降到约 200.3 万。对于一个长 10 万、只有末尾 1,000 个 token 没命中缓存的请求，原来要算 1,000 × 40 = 4 万，现在是 1,000 × 20 + 128 × 20 ≈ 2.3 万，省得少一些，因为那 128 个 token 的重放是固定开销。</p>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>原文说 CED“在保持与基线相当的性能的同时减少了近一半的预填充计算”，但报告里没有给出 CED 对照基线的任何数字，基线是什么结构也没说。</li>
+  <li>减半的是<b>没命中缓存的</b>输入的计算；解码阶段反而因为每层都要算而激活更多参数（16B）。在输出很长的任务里，CED 的账就没那么划算。</li>
+  <li>解码器 SWA 的近似不是偶尔才发生的“缓存失效补救”，而是<b>每个请求都走的正常路径</b>：每次预填充都只重放最后 128 个 token。作者在后训练里模拟了同样的重放，让模型适应这种近似（§3.2.2）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">2.3 CSA2：沿三个维度同时压缩全局 KV</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>压缩 KV 缓存有哪几条路，前人各走到了哪一步、缺什么？CSA2 和 V4 的 CSA 相比改了什么？它为什么能在压缩比反而更小（\(m=2\)、\(m=1\)，而 V4 是 4 和 128）的情况下，把每个 token 的字节数压到 V4-Flash 的 1/4？</div>
+<div class="note-pre"><b>先补一点背景：KV 缓存的大小可以拆成三个相乘的因子。</b>
+<p>每个 token 的 KV 字节数 = （每个条目多大）×（每个 token 平均产生几个条目）×（有几层各自存一份）。原文 §2.3 正是按这三个维度来梳理已有方法的，下面逐个从头讲。</p>
+<p><b>维度一：条目大小。</b>标准多头注意力每层要为每个 token 存全部头的 K 和 V。分组查询注意力（GQA）让若干个 query 头共用一组 K、V，KV 头数从几十个降到 8 个甚至 1 个（1 个时叫 MQA）。DeepSeek-V2/V3 的多头潜在注意力（MLA）更进一步：每层只存一个 512 维的潜向量，加上 64 维带位置信息的 RoPE 部分，共 576 个数，计算时再由它展开成所有头的 K、V（见 <a href="deepseek-v3.html#n-2-1">V3 精读 §2.1.1</a>）。再往下压，就是降低每个数的位宽：从 BF16 到 FP8，再到 FP4（§2.4.4）。</p>
+<p><b>维度二：序列方向。</b>不是每个 token 都存一个条目，而是每 \(m\) 个相邻 token 合成一个条目。V4 的 CSA 取 \(m=4\)，并且每个条目由 \(2m=8\) 个 token 加权合成、相邻条目的来源互相重叠，还加了绝对位置编码来标记这 8 个 token 的位置；V4 的 HCA 取 \(m=128\)，压得很狠，但不做稀疏选择，对所有压缩条目做稠密注意力。和序列方向配套的是<b>稀疏选择</b>：V3.2 的 DSA 用一个很便宜的“闪电索引器”给每个历史条目打分，只让真正的注意力看分数最高的 top-k 个（见 <a href="deepseek-v3-2.html#n-2">V3.2 精读 §2.1</a>）。要特别注意，稀疏选择省的是<b>计算</b>，不省存储：所有条目都得留着，因为下一个 query 可能选中任何一个；而且索引器自己还要为每个条目多存一个“索引器 K”。</p>
+<p><b>维度三：层方向。</b>相邻的层能不能共用 KV？跨层注意力（CLA，Brandon 等，NeurIPS 2024）让几层共用一份 KV；YOCO 让上半部分的层全部共用下半部分产生的一份 KV（§2.2）。在稀疏注意力里，还可以共享“选了哪些位置”：IndexCache（Bai 等 2026）让后面的层复用前面层选出的 top-k 下标，省掉索引器的计算；YOIO（Sun 等 2026）只算一次稀疏路由，全网所有层共用；HySparse（Gao 等 2026）让稀疏层复用稠密层的 KV。原文对这些方法的评价是：只复用下标不省主 KV 的存储；全网共用一份路由会限制性能；混合方案仍然保留了全注意力层；更重要的是，<b>没有一个方法同时覆盖三个维度</b>。</p>
+</div>
+<p>CSA2 的定位就是把三个维度一起用上：条目大小上，沿用 MLA 式的 512 维共享潜向量，并改存 FP4；序列方向上，编码器用 \(m=2\)、解码器用 \(m=1\)，配合索引器选 top-512；层方向上，让多层共享主 KV 和索引器 K，并允许层与层之间复用 top-k 下标，而且“共享缓存”和“复用下标”是两件解耦的事。另外，解码器里加了一个分层稀疏索引器，缩小后面索引层的搜索范围（§2.3.2）。</p>
+<p>和 V4 的 CSA 一样，CSA2 里每个 query 的注意力同时看两部分：索引器选出的 top-512 个主 KV 条目，加上本层自己的 SWA KV（最近 128 个 token）。压缩比为 1 时，主 KV 就是不压缩的逐 token 条目，这被当作 CSA2 的一个特例。同时，CSA2 把 CSA 简化了两处：</p>
+<ul>
+  <li><b>压缩器</b>：去掉相邻条目来源的重叠（每个条目只由自己的 \(m\) 个 token 合成，不再是 \(2m\) 个），也去掉了标记这些 token 位置的绝对位置编码。官方推理代码里，压缩器就是对 \(m\) 个 token 的投影做一个按通道的 softmax 加权求和；\(m=1\) 时连这一步都没有，只是一次投影加归一化。</li>
+  <li><b>索引器 K</b>：不再从隐藏状态单独走一条压缩路径，而是直接从主 KV 条目投影得到（代码里是一个 512 → 128 的线性层）。这样，只要某层有主 KV，它的索引器 K 也就有了。</li>
+</ul>
+<p>作者说这两处简化都是为了让实现更简单、训练更快，报告没有给出简化前后的精度对比。</p>
+
+<h4 id="n-4-1">2.3.1 三种模式：Full、Reindex、Reuse</h4>
+<p>每个 CSA2 层被<b>静态地</b>指定为三种模式之一，训练和推理时都不变。三种模式有共同点：每一层都自己算 query，自己算本层的 SWA KV，并用它们和选中的主 KV 条目一起算出本层新的注意力输出。区别只在于主 KV、索引器 K 和 top-k 下标这三样东西从哪里来：</p>
+<div class="dia">
+  <div class="dia-title">示意图：三种模式分别自己算什么、借用什么</div>
+  <div class="dia-cols">
+    <div>
+      <div style="font-weight:650;margin-bottom:4px">Full 模式（第 2、8、14、20 层）</div>
+      <div class="dia-flow"><span class="dia-box enc">主 KV<small>本层压缩器算出，写入缓存</small></span><span class="dia-box enc">索引器 K<small>由本层主 KV 投影</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">索引器 Q → 打分 → top-512<small>新的下标，发布给后面的层</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">query、SWA KV、注意力输出</span></div>
+    </div>
+    <div>
+      <div style="font-weight:650;margin-bottom:4px">Reindex 模式（第 24、28、32、36 层）</div>
+      <div class="dia-flow"><span class="dia-box act">主 KV<small>借用最近的 Full 层</small></span><span class="dia-box act">索引器 K<small>同上</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">本层索引器 Q → 重新打分 → top-512<small>可以和别层选得不同</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">query、SWA KV、注意力输出</span></div>
+    </div>
+    <div>
+      <div style="font-weight:650;margin-bottom:4px">Reuse 模式（其余 32 层）</div>
+      <div class="dia-flow"><span class="dia-box act">主 KV<small>借用最近的 Full 层</small></span></div>
+      <div class="dia-flow"><span class="dia-box pred">top-512 下标<small>借用最近的 Full 或 Reindex 层</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">query、SWA KV、注意力输出<small>不算索引器</small></span></div>
+    </div>
+  </div>
+  <div class="dia-note">蓝框 = 本层自己算；绿框 = 借用最近一个 Full 层的主 KV 和索引器 K；红框 = 借用最近一个产生下标的层（Full 或 Reindex）的 top-k 下标。本站示意图，配色与原图不同，对应 <a href="https://arxiv.org/html/2609.19969v1#S2.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。</div>
+</div>
+<p>三种模式各有用处。<b>共享主 KV 和索引器 K</b> 省的是存储：一份 KV 服务一整组层。<b>复用 top-k 下标</b> 省的是索引器的计算：Reuse 层不需要给成千上万个条目打分。<b>Reindex</b> 则是两者之间的折中：KV 仍然共享，但允许不同的层根据自己的 query 挑选不同的条目。直觉上，层越深，模型“想看的东西”越可能变化，所以解码器后四组都以 Reindex 层开头。和 CED 结合时，解码器里的 Full 层（第 20 层）从编码器最后一层的输出投影出自己的全局 KV，Reindex 和 Reuse 模式不变。</p>
+<p>具体的分配（原文 §4.2.1）：编码器第 2–19 层分成 3 组、每组 6 层，组内第一层 Full、其余 5 层 Reuse，压缩比 \(m=2\)；解码器第 20–39 层分成 5 组、每组 4 层，第一组是 1 个 Full 加 3 个 Reuse，后四组是 1 个 Reindex 加 3 个 Reuse，压缩比 \(m=1\)。官方配置用两个列表表达同一件事：存 KV 的层是 <code>[2, 8, 14, 20]</code>，产生下标的层是 <code>[2, 8, 14, 20, 24, 28, 32, 36]</code>。</p>
+
+<h4 id="n-4-2">890 字节的账，以及从 3,514 到 890 省在了哪里（本站补充）</h4>
+<p>现在可以把 890 字节一项一项加出来（推算，所用格式见 §1.2 与 §2.4.4）：</p>
+<ol>
+  <li>一个主 KV 条目：512 个 FP4 数占 256 字节，每 16 个数配一个 1 字节的 E4M3 缩放因子，共 32 字节，合计 288 字节（FlashMLA 文档写明的“V4.1 fp4”格式）。</li>
+  <li>一个索引器 K 条目：128 个 FP4 数占 64 字节，每 32 个数一个 1 字节缩放，共 4 字节，合计 68 字节。</li>
+  <li>编码器的 3 个 Full 层，每层每 2 个 token 产生 1 个条目：\(3\times(288+68)/2=534\) 字节。</li>
+  <li>解码器的 1 个 Full 层，每个 token 1 个条目：\(288+68=356\) 字节。</li>
+  <li>合计 \(534+356=890\) 字节，与原文完全一致。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：每个 token 的全局 KV 由哪些部分组成（两行用同一比例尺）</div>
+  <div class="dia-row"><span class="lbl">V4-Flash 3,514 B</span><div class="dia-track"><span class="dia-seg w" style="flex:3066">21 个 CSA 层的主 KV：21 × 584 ÷ 4 ≈ 3,066</span><span class="dia-seg cmp" style="flex:357">索引器 K 357</span><span class="dia-seg oth" style="flex:91">HCA</span></div></div>
+  <div class="dia-row"><span class="lbl">V4.1-Flash 890 B</span><div class="dia-track"><span class="dia-seg kv" style="flex:432">编码器主 KV 432</span><span class="dia-seg cmp" style="flex:102">102</span><span class="dia-seg kv" style="flex:288">解码器主 KV 288</span><span class="dia-seg cmp" style="flex:68">68</span><span class="dia-seg oth" style="flex:2624;background:transparent;color:var(--text-3)">比 V4-Flash 少 2,624 B</span></div></div>
+  <div class="dia-out">绿色段是索引器 K。V4-Flash 的 HCA 层（20 层，每 128 个 token 一个条目）合计只有约 91 B。</div>
+  <div class="dia-note">本站按 FlashMLA 文档的缓存格式和官方配置推算；两个总数与原文图 1(b) 一致。</div>
+</div>
+<p>把这次压缩拆成几个因子，能看清每一步的贡献（推算）：</p>
+<div class="table-wrap"><table>
+<tr><th>假设的设计</th><th class="num">每 token 字节</th><th>说明</th></tr>
+<tr><td>V4-Flash 实际</td><td class="num">3,514</td><td>41 个层各存各的；主 KV 用 FP8 + BF16 RoPE（584 B）</td></tr>
+<tr><td>V4.1 的层配置，但每个 CSA2 层都自己存 KV（FP4）</td><td class="num">10,324</td><td>编码器 \(18\times356/2\) + 解码器 \(20\times356\)；压缩比小了，不共享就会比 V4-Flash 还大得多</td></tr>
+<tr><td>V4.1 的层共享，但主 KV 仍用 V4 的 584 B 格式</td><td class="num">1,630</td><td>\(3\times652/2+652\)：只靠跨层共享，已降到 V4-Flash 的 46%</td></tr>
+<tr class="hl"><td>V4.1-Flash 实际（共享 + FP4）</td><td class="num">890</td><td>FP4 再把主 KV 从 584 B 降到 288 B</td></tr>
+</table></div>
+<p>这张表说明了一个容易被忽略的事实：<b>V4.1 在序列方向上反而压得更少了</b>。V4-Flash 平均每个 token 在所有层上合计产生 \(21/4+20/128\approx5.4\) 个全局条目，V4.1 是 \(3/2+1=2.5\) 个；但 V4.1 每个条目的分辨率更高（编码器每 2 个 token 一个条目，解码器每个 token 一个条目，而 V4 的 CSA 是每 4 个、HCA 是每 128 个）。也就是说，V4.1 用“层与层之间高度共享”换来了“每份 KV 更细的序列分辨率”，再用 FP4 把每个条目的字节数减半。V4 中 HCA 那种每 128 个 token 只剩一个条目的“重度压缩”也被整个去掉了。</p>
+<div class="note-warn"><b>这一步的精度代价，报告给了什么证据：</b>没有给。报告没有比较“共享 vs 不共享”“CSA2 vs CSA/HCA”“去掉重叠和绝对位置编码前后”的消融实验，也没有说明 Full/Reindex/Reuse 的分组方式是怎么定下来的。V3.2 的报告至少做过“加了 DSA 和没加”的对等评测（见 <a href="deepseek-v3-2.html#n-4">V3.2 精读 §2.2</a>）；这份报告能看到的只有 V4.1-Flash 整体与 V4-Flash 整体的比较（§4、§5.3）。作者在结论里自己也承认，CSA2 的“选择错误”可能在没测到的边界情况下导致能力下降。</div>
+
+<h4 id="n-4-3">2.3.2 分层稀疏索引器：后面的索引层只在候选池里找</h4>
+<p>跨层复用下标已经减少了运行索引器的层数，但剩下的每个索引器仍要给全部可见的条目打分。解码器的压缩比是 1，上下文有 100 万个 token，第 20 层的索引器就要给 100 万个条目打分；如果后面 4 个 Reindex 层也都这样做，成本就是 5 倍。作者认为在超长上下文下，这仍是主要的计算瓶颈。前人工作 HISA（Xu 等 2026）的做法是先给按块池化的表示打分、剪掉大部分块，再在剩下的块里按 token 打分。V4.1 发现解码器里有现成的信息可用，不必增加任何额外状态：<b>浅层索引器的打分结果，可以直接用来缩小深层索引器的搜索范围</b>。</p>
+<p>具体做法（只用在 CED 的解码器里）：</p>
+<ol>
+  <li>解码器第一个 Full 层（第 20 层）照常给全部可见位置打分，选出自己的 top-512。</li>
+  <li>同一层顺带做块级筛选：把位置按每 8 个一块划分，每块的分数取块内的最大值，选出分数最高的 2,048 个块，它们覆盖的 \(2{,}048\times8=16{,}384\) 个位置组成“候选池”。</li>
+  <li>后面的 Reindex 层（第 24、28、32、36 层）用自己的索引器 query，只给候选池里的位置打分，再从中选出自己的 top-512。不同的 Reindex 层可以选得不一样，但都只能在同一个池里选。</li>
+  <li>Reuse 层不打分，直接沿用最近一个下标层的结果。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图（缩小的玩具例子）：先按“块内最高分”圈出候选池，后面的层只在池里挑</div>
+<svg class="dg" viewBox="0 0 960 330" role="img" aria-label="分层稀疏索引器的玩具示意：先按块选候选池，后面的层只在池内选 top-k" style="--dg-min:760px">
+<text x="160" y="48" class="t-r t-sm t-b">第 20 层</text>
+<text x="160" y="64" class="t-r t-xs">Full：给全部位置打分</text>
+<rect x="170.0" y="66.0" width="13" height="6.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="184.5" y="50.2" width="13" height="21.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="199.0" y="60.3" width="13" height="11.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="213.5" y="44.5" width="13" height="27.5" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="228.0" y="54.7" width="13" height="17.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="242.5" y="40.3" width="13" height="31.7" style="fill:var(--c-enc)"/>
+<rect x="257.0" y="49.0" width="13" height="23.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="271.5" y="59.2" width="13" height="12.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="292.0" y="43.4" width="13" height="28.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="306.5" y="53.6" width="13" height="18.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="321.0" y="63.7" width="13" height="8.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="335.5" y="42.6" width="13" height="29.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="350.0" y="58.1" width="13" height="13.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="364.5" y="40.8" width="13" height="31.2" style="fill:var(--c-enc)"/>
+<rect x="379.0" y="52.4" width="13" height="19.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="393.5" y="62.6" width="13" height="9.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="414.0" y="46.8" width="13" height="25.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="428.5" y="57.0" width="13" height="15.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="443.0" y="41.1" width="13" height="30.9" style="fill:var(--c-enc)"/>
+<rect x="457.5" y="51.3" width="13" height="20.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="472.0" y="44.2" width="13" height="27.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="486.5" y="45.7" width="13" height="26.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="501.0" y="55.8" width="13" height="16.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="515.5" y="66.0" width="13" height="6.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="536.0" y="50.2" width="13" height="21.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="550.5" y="60.3" width="13" height="11.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="565.0" y="44.5" width="13" height="27.5" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="579.5" y="54.7" width="13" height="17.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="594.0" y="64.9" width="13" height="7.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="608.5" y="49.0" width="13" height="23.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="623.0" y="41.3" width="13" height="30.7" style="fill:var(--c-enc)"/>
+<rect x="637.5" y="43.4" width="13" height="28.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="658.0" y="53.6" width="13" height="18.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="672.5" y="63.7" width="13" height="8.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="687.0" y="47.9" width="13" height="24.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="701.5" y="58.1" width="13" height="13.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="716.0" y="43.6" width="13" height="28.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="730.5" y="52.4" width="13" height="19.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="745.0" y="62.6" width="13" height="9.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="759.5" y="46.8" width="13" height="25.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:.6"/>
+<rect x="168.0" y="36" width="118.5" height="40" rx="3" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+<rect x="290.0" y="36" width="118.5" height="40" rx="3" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+<rect x="412.0" y="36" width="118.5" height="40" rx="3" style="fill:none;stroke:var(--c-tgt);stroke-width:2"/>
+<text x="786.5" y="46" class="t-xs">柱高 = 索引分数</text>
+<text x="786.5" y="60" class="t-xs" style="fill:var(--c-enc)">深色 = 本层的 top-k</text>
+<text x="786.5" y="74" class="t-xs" style="fill:var(--c-tgt)">框 = 块最大分最高的块</text>
+<text x="227.2" y="90" class="t-c t-xs">块 0（max 0.99）</text>
+<text x="349.2" y="90" class="t-c t-xs">块 1（max 0.97）</text>
+<text x="471.2" y="90" class="t-c t-xs">块 2（max 0.96）</text>
+<text x="593.2" y="90" class="t-c t-xs">块 3（max 0.95）</text>
+<text x="715.2" y="90" class="t-c t-xs">块 4（max 0.86）</text>
+<text x="160" y="130" class="t-r t-sm t-b">候选池</text>
+<text x="160" y="144" class="t-r t-xs">被选中块的全部位置</text>
+<rect x="170.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="184.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="199.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="213.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="228.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="242.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="257.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="271.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="292.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="306.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="321.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="335.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="350.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="364.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="379.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="393.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="414.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="428.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="443.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="457.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="472.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="486.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="501.0" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="515.5" y="120" width="13" height="22" rx="2" style="fill:var(--c-tgt-bg);stroke:var(--c-tgt)"/>
+<rect x="536.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="550.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="565.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="579.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="594.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="608.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="623.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="637.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="658.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="672.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="687.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="701.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="716.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="730.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="745.0" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<rect x="759.5" y="120" width="13" height="22" rx="2" style="fill:var(--surface-3);stroke:none"/>
+<text x="786.5" y="132" class="t-xs">玩具：3 块 × 8 = 24 个位置</text>
+<text x="160" y="183" class="t-r t-sm t-b">第 24 层</text>
+<text x="160" y="199" class="t-r t-xs">Reindex：只在池内打分</text>
+<rect x="170.0" y="201.0" width="13" height="6.0" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="184.5" y="183.2" width="13" height="23.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="199.0" y="191.4" width="13" height="15.6" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="213.5" y="199.6" width="13" height="7.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="228.0" y="181.8" width="13" height="25.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="242.5" y="190.1" width="13" height="16.9" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="257.0" y="198.3" width="13" height="8.7" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="271.5" y="180.5" width="13" height="26.5" style="fill:var(--c-pred)"/>
+<rect x="292.0" y="188.7" width="13" height="18.3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="306.5" y="196.9" width="13" height="10.1" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="321.0" y="179.1" width="13" height="27.9" style="fill:var(--c-pred)"/>
+<rect x="335.5" y="187.3" width="13" height="19.7" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="350.0" y="195.5" width="13" height="11.5" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="364.5" y="177.7" width="13" height="29.3" style="fill:var(--c-pred)"/>
+<rect x="379.0" y="185.9" width="13" height="21.1" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="393.5" y="194.2" width="13" height="12.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="414.0" y="176.4" width="13" height="30.6" style="fill:var(--c-pred)"/>
+<rect x="428.5" y="184.6" width="13" height="22.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="443.0" y="192.8" width="13" height="14.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="457.5" y="201.0" width="13" height="6.0" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="472.0" y="183.2" width="13" height="23.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="486.5" y="191.4" width="13" height="15.6" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="501.0" y="199.6" width="13" height="7.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="515.5" y="181.8" width="13" height="25.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="536.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="550.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="565.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="579.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="594.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="608.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="623.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="637.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="658.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="672.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="687.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="701.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="716.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="730.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="745.0" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="759.5" y="189" width="13" height="4" style="fill:var(--surface-3)"/>
+<text x="786.5" y="191" class="t-xs" style="fill:var(--c-pred)">各层自己的 top-k，可以不同</text>
+<text x="160" y="245" class="t-r t-sm t-b">第 28 层</text>
+<text x="160" y="261" class="t-r t-xs">Reindex：只在池内打分</text>
+<rect x="170.0" y="263.0" width="13" height="6.0" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="184.5" y="239.7" width="13" height="29.3" style="fill:var(--c-pred)"/>
+<rect x="199.0" y="242.5" width="13" height="26.5" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="213.5" y="245.2" width="13" height="23.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="228.0" y="247.9" width="13" height="21.1" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="242.5" y="250.7" width="13" height="18.3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="257.0" y="253.4" width="13" height="15.6" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="271.5" y="256.2" width="13" height="12.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="292.0" y="258.9" width="13" height="10.1" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="306.5" y="261.6" width="13" height="7.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="321.0" y="238.4" width="13" height="30.6" style="fill:var(--c-pred)"/>
+<rect x="335.5" y="241.1" width="13" height="27.9" style="fill:var(--c-pred)"/>
+<rect x="350.0" y="243.8" width="13" height="25.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="364.5" y="246.6" width="13" height="22.4" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="379.0" y="249.3" width="13" height="19.7" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="393.5" y="252.1" width="13" height="16.9" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="414.0" y="254.8" width="13" height="14.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="428.5" y="257.5" width="13" height="11.5" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="443.0" y="260.3" width="13" height="8.7" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="457.5" y="263.0" width="13" height="6.0" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="472.0" y="239.7" width="13" height="29.3" style="fill:var(--c-pred)"/>
+<rect x="486.5" y="242.5" width="13" height="26.5" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="501.0" y="245.2" width="13" height="23.8" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="515.5" y="247.9" width="13" height="21.1" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:.6"/>
+<rect x="536.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="550.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="565.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="579.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="594.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="608.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="623.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="637.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="658.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="672.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="687.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="701.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="716.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="730.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="745.0" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<rect x="759.5" y="251" width="13" height="4" style="fill:var(--surface-3)"/>
+<text x="786.5" y="253" class="t-xs" style="fill:var(--c-pred)">各层自己的 top-k，可以不同</text>
+<text x="170" y="312" class="t-xs">灰色细条 = 不在池里的位置：后面的 Reindex 层既不给它们打分，也选不到它们。</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>玩具例子里有 40 个位置、每块 8 个，第 20 层选 top-4，并保留块最大分最高的 3 块作为候选池；真实配置是每块 8 个位置、保留 2,048 块（16,384 个位置）、每层选 top-512。由于一个位置分数高，它所在块的最大分也高，所以第 20 层自己的 top-k 通常都落在池里。本站示意图，对应 <a href="https://arxiv.org/html/2609.19969v1#S2.F5" target="_blank" rel="noopener">原文图 5 ↗</a>。</div>
+</div>
+<p>这个机制是“训练感知”的：它在后训练阶段才引入，并且训练和推理用完全相同的候选限制，所以深层索引器在训练时就是在它推理时会遇到的那个搜索范围里被优化的。作者强调，对固定大小的候选池，后面每个索引层每个 query 要打分的位置数是一个常数，不再随上下文长度增长；但第一个 Full 层仍然要扫描全部可见范围。</p>
+<p>用 100 万 token 的上下文算一下每生成一个 token 时索引器要打分的条目数（推算）：</p>
+<ul>
+  <li>编码器 3 个 Full 层，每层 50 万个条目（\(m=2\)）：共 150 万。</li>
+  <li>解码器第 20 层：100 万。</li>
+  <li>4 个 Reindex 层：没有候选池时各 100 万，共 400 万；有候选池时各 16,384，共约 6.6 万。</li>
+  <li>合计：没有分层索引约 650 万，有分层索引约 257 万，减少约 60%。作为对照，V4-Flash 的 21 个 CSA 层每层要扫 25 万个条目（\(m=4\)），共 525 万，而且它的索引器有 64 个头，每个条目的打分开销是 V4.1（32 个头）的两倍。</li>
+</ul>
+<p>这就是 §1.3 那条平坦曲线的主要原因之一：V4.1 每个 token 的索引计算大约只有 V4-Flash 的 1/4（推算，按“条目数 × 头数”粗算，忽略了两者其余部分的差别），主注意力又始终只看 512 + 128 个条目。</p>
+<div class="note-warn"><b>要注意的两点：</b>
+<ul>
+  <li>分层索引器有一个结构性的风险：如果第 20 层的块级筛选漏掉了某段内容，后面 4 个 Reindex 层和它们之后的所有 Reuse 层都不可能再选到它。原文结论把“CSA2 的选择错误”列为尚未完全刻画的鲁棒性边界，并说今后会特别关注“长上下文中的稀疏检索”。</li>
+  <li>报告没有给出分层索引器引入前后的精度或速度数字。上面的“减少约 60%”是本站按配置算的打分条目数，不是实测的时间。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S2.SS3" target="_blank" rel="noopener">英文原文 §2.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">2.4 高效的结构扩展：Single-Pass mHC、Engram、DSpark 与 FP4 主 KV</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>除了 CED 和 CSA2，V4.1-Flash 还在 V4 的基础上加了或改了四个部件。它们各自解决什么问题？哪些和 KV 缓存直接相关（FP4 主 KV），哪些是另外的效率或能力改进（mHC、Engram、DSpark）？每一项的代价报告怎么说？</div>
+
+<h4 id="n-5-1">2.4.1 Single-Pass mHC：把残差流的读写量压到理论下限</h4>
+<div class="note-pre"><b>先补一点背景：mHC 在做什么。</b>
+<p>普通 Transformer 只有一条残差流：每个块读进当前的隐藏向量，算出一个增量，加回去。超连接（Hyper-Connections）把它扩成 \(n\) 条并行的残差流，记作 \(X_l\in\mathbb{R}^{n\times d}\)（V4.1 取 \(n=4\)，\(d=5120\)）。每个块先用一组系数 \(A_l\)（\(1\times n\)）把 \(n\) 条流混成一个输入 \(A_lX_l\)，算出输出 \(\mathcal{F}_l(A_lX_l)\)，再用 \(C_l\)（\(n\times1\)）把输出分配回 \(n\) 条流，同时用 \(B_l\)（\(n\times n\)）把旧的 \(n\) 条流互相混合：</p>
+<div class="formula">$$X_{l+1}=B_{l}X_{l}+C_{l}\,\mathcal{F}_{l}(A_{l}X_{l}),\qquad (A_{l},B_{l},C_{l})=\mathcal{H}(X_{l})$$</div>
+<p>这三组系数不是固定参数，而是每个 token 由一个小预测器 \(\mathcal{H}\)（归一化 + 投影）根据 \(X_l\) 算出来的。DeepSeek 的 mHC（流形约束超连接，arXiv 2512.24880）给 \(B_l\) 加了约束，让它保持在“双随机矩阵”上（用 Sinkhorn–Knopp 迭代实现，V4.1 迭代 20 次），从而在层数很深时保持训练稳定。mHC 在 V4 中首次用于正式模型，见 <a href="deepseek-v4.html#n-3">V4 精读 §3</a>。</p>
+</div>
+<p>mHC 的计算量不大，但它在每两个块之间都要把 \(n\) 倍宽的残差流读写好几遍，这些都是占显存带宽的“搬运”。作者先算理想情况：两个块之间的残差变换，本质上是一个从 \((X_{l-1},Y_{l-1})\) 到 \((X_l,\hat X_l)\) 的映射（\(Y_{l-1}\) 是上一块的输出，\(\hat X_l=A_lX_l\) 是这一块的输入），读 \((n+1)d\) 个数、写 \((n+1)d\) 个数，所以激活读写量的下限是 \((2n+2)d\)。</p>
+<p>V4 的实现分三个内核顺序执行，因为数据有依赖：先做残差更新得到 \(X_l\)，再由 \(X_l\) 预测系数 \((A_l,B_l,C_l)\)，最后用 \(A_l\) 做输入混合。三个内核分别读 \((n+1)d\)、\(nd\)、\(nd\) 个数，共写 \((n+1)d\)，再加上块内预归一化的读写，总量是 \((4n+4)d\)，正好是下限的两倍。</p>
+<p>能不能合并？系数预测里的 RMSNorm 权重可以离线并进投影矩阵，RMS 的除法放到投影之后做，于是“残差更新”和“系数预测”可以共用一次对 \(X_l\) 的遍历：残差更新不需要跨隐藏维度求和，每算完 \(X_l\) 的一小块，就能立刻用它累加投影结果和平方和。但“输入混合”合不进来，因为它要用的 \(A_l\) 必须等所有块都累加完才知道，只能再读一遍 \(X_l\)。这样的两遍实现是 \((3n+2)d\)，比下限多读一次 \(X_l\)。</p>
+<p>Single-Pass mHC 的改法很简单：<b>让每个块使用上一个块算出的输入混合系数</b>，即把 \(A_l\) 换成 \(A_{l-1}\)：</p>
+<div class="formula">$$X_{l+1}=B_{l}X_{l}+C_{l}\,\mathcal{F}_{l}(A_{l-1}X_{l}),\qquad (A_{l},B_{l},C_{l})=\mathcal{H}(X_{l})$$</div>
+<p>\(A_{l-1}\) 在处理 \(X_l\) 之前就已经知道了，于是 \(X_l\) 的每一小块一算出来，就能同时拿去做输入混合和系数预测，不必等全部归约完成。部署时，残差更新、输入混合、系数预测（连同预归一化和转 FP8）被融合成一个内核 Mega-mHC，残差只读一次、写一次，达到 \((2n+2)d\) 的下限。代入 \(n=4\)、\(d=5120\)，每个 token 每经过一个块边界要读写的数从 102,400 个降到 51,200 个（推算）。</p>
+<p>这个改动只改变“每个块用哪一组混合系数”，不改变计算的形式，所以预训练时作者仍保留原来的多内核实现。作者称这个错位带来的性能下降“可以忽略”，报告没有给出数字。</p>
+
+<h4 id="n-5-2">2.4.2 Engram：另一条稀疏维度上的 196B 查表参数</h4>
+<p>V4.1-Flash 集成了 DeepSeek 自己在 2026 年 1 月提出的条件记忆模块 Engram（本站有 <a href="conditional-memory.html">Engram 精读</a>）。它的想法是：语言里有大量只需要“查”、不需要“算”的局部模式（固定搭配、实体名、常见代码片段），可以用当前位置最近几个 token 组成的 N-gram 做哈希，直接从一张巨大的表里查出一个向量，经过一个“和上下文是否相符”的门控后加进残差流。它不改注意力，也不改 MoE 专家，而是在“参数怎么用”上新开了一条稀疏维度；它不产生 KV 缓存，和本报告的 KV 压缩主线是相互独立的两件事。</p>
+<p>报告说 V4.1 沿用了 Engram 原论文的设计（分词器压缩、多头哈希、上下文感知门控、多分支接入），只做了两处修改：去掉短因果卷积，因为它的收益抵不上在推理系统里增加的复杂度；嵌入表改用“动量更新 + Sinkhorn 平衡”来优化（§2.5）。规模和放置如下，本站逐条和官方配置文件、推理代码核对过：</p>
+<ul>
+  <li><b>196B 参数，平均分给两个模块。</b>配置里两个模块的表分别有 384,006,168 行和 384,016,682 行，每行 256 维，两者相加约 \(768.0\text{M}\times256\approx196.6\)B（推算），与报告一致。</li>
+  <li><b>N-gram 阶数 {2, 3, 4}，每阶 8 个哈希头，每阶总维度 2048。</b>配置为 <code>engram_max_ngram_size = 4</code>、<code>engram_n_heads = 8</code>、<code>engram_head_dim = 256</code>，8 × 256 = 2048。</li>
+  <li><b>每个头的表约 1,600 万行，表大小取互不相同的素数。</b>配置的 <code>engram_vocab_size = 16000000</code> 是每个（阶数，头）分配素数时的起点；推理代码 <code>engram.py</code> 从这里依次找下一个没用过的素数。3 阶 × 8 头 × 约 1,600 万 ≈ 3.84 亿行，正是每个模块的行数。</li>
+  <li><b>嵌入表和 K/V 投影都用 FP8。</b>推理代码里表以 FP8 存储，查到的行按每 32 个数一个缩放因子反量化。</li>
+  <li><b>放在第 1 层和第 14 层（从 0 数）。</b>作者说这是为了在训练流水线的各个阶段之间平衡显存。两层都在编码器里，所以 Engram 在预填充时也要参与。</li>
+  <li><b>没有短卷积。</b>推理代码的 Engram 模块只有查表、一个投影（为 4 条 mHC 残差流各产生一个 key，外加一个共享的 value）、按流计算的门控（点积经“带符号平方根”后过 sigmoid）和相加，确实没有卷积。</li>
+  <li><b>推理时从主机内存预取。</b>查哪些行只取决于输入 token，不取决于中间计算结果，所以可以提前算出地址，通过后台 RDMA 从主机内存把要用的行搬到 GPU；第一个模块的预取与第一个 Transformer 块的计算重叠。</li>
+</ul>
+<p>报告没有给出“去掉 Engram”的对照实验，所以 Engram 在这个规模上具体贡献多少，外界无法量化。Engram 原论文的结果（27B 规模的严格对照）和它为什么能从主机内存预取，见 <a href="conditional-memory.html#n-2">Engram 精读 §2</a> 与 <a href="conditional-memory.html#n-impact-1">该页“后来怎么样了”</a>。</p>
+
+<h4 id="n-5-3">2.4.3 DSpark：替代 MTP 的投机解码模块</h4>
+<p>DSpark（Cheng 等，arXiv 2607.05147，本站有 <a href="dspark.html">DSpark 精读</a>）是 DeepSeek 2026 年 7 月提出的投机解码方法：用一个小的“草稿模型”一次猜出后面几个 token，再让主模型一次性验证，猜对的部分直接接受，从而一次前向产出多个 token（投机解码的基本原理见 <a href="speculative-decoding.html">投机解码精读</a>）。V4.1 里的 DSpark 草稿模型有 3 个 Transformer 块，注意力窗口 128；一次前向并行算出 5 个草稿位置的基础 logits，再由一个轻量的“马尔可夫头”建模草稿 token 之间的依赖（这是“半自回归”的含义）。一个置信度头预测每个位置在前面都被接受的条件下被接受的概率，由此估计每个前缀“存活”的概率；调度器把这些估计和事先测好的引擎吞吐曲线结合，为每个请求动态选择验证长度，目标是在当前负载下最大化整个系统的期望吞吐。</p>
+<p>和 DeepSeek-V3 的 MTP 模块不同（MTP 在整个预训练过程中和主干一起训练，见 <a href="deepseek-v3.html#n-3">V3 精读 §2.2</a>），DSpark 在预训练结束后单独训练一个阶段，此时主干冻结；后训练时 DSpark 继续和主干一起训练，但它的梯度不回传到主干。这样 DSpark 能跟上不断变化的策略模型，既能加速线上服务，也能加速强化学习和在线蒸馏时的采样。报告没有给出 DSpark 在 V4.1 上的接受长度或加速比。</p>
+
+<h4 id="n-5-4">2.4.4 FP4 主 KV 缓存：为什么可以去掉第二级缩放</h4>
+<div class="note-pre"><b>先补一点背景：4 位浮点、块缩放，以及 MXFP4 和 NVFP4。</b>
+<p>4 位浮点 E2M1 有 1 个符号位、2 个指数位、1 个尾数位，正数只能表示 0、0.5、1、1.5、2、3、4、6 这几个值（详见 <a href="nvfp4.html#n-2-1">NVFP4 精读 §2.1</a>）。只有这么少的取值，直接存原始数值是不行的，所以总要配合<b>块缩放</b>：一组相邻的数共用一个缩放因子 \(s\)，存的是 \(x/s\) 四舍五入到最近的 E2M1 值，读出时再乘回 \(s\)。通常取 \(s=\max|x|/6\)，让组内最大的数正好落在 6 上。</p>
+<p>两种常见格式的区别在于“多少个数一组”和“缩放因子用什么格式”（见 <a href="nvfp4.html#n-2-2">NVFP4 精读 §2.2–2.3</a>）：OCP 标准的 <b>MXFP4</b> 每 32 个数一组，缩放因子是 E8M0（只能是 2 的整数次幂）；NVIDIA 的 <b>NVFP4</b> 每 16 个数一组，缩放因子是 E4M3（有 3 位尾数，更精细），但 E4M3 最大只能表示 448，为了覆盖更大的数值范围，NVFP4 还在整个张量上再乘一个 FP32 的“全局缩放”。</p>
+<p>另一个要区分的概念是<b>训练后量化</b>和<b>量化感知训练（QAT）</b>。前者拿训练好的模型直接把 KV 量化存储，模型从没见过量化误差，例如 <a href="kivi.html">KIVI</a> 把 KV 压到 2 位整数；后者在训练的前向计算里就模拟“量化—反量化”，让模型学会在这种误差下工作。V4.1 用的是后者。</p>
+</div>
+<p>V4 已经对索引器的 Q 和 K 做了 FP4 的量化感知训练，目的是加速索引计算（FP4 矩阵乘更快）并缩小索引器缓存。索引器用的是 MXFP4，因为它要直接进张量核做矩阵乘，而 MXFP4 是 OCP 标准、支持的硬件平台最多；作者特意说明，在他们的实验里其他格式精度更高，但为了兼容性选了 MXFP4。</p>
+<p>V4.1 把 QAT 扩展到主 KV 缓存。这里 FP4 的目的不同：<b>省存储，而不是加速矩阵乘</b>。缓存里的值在做注意力之前会先反量化回高精度，所以选什么格式不受“硬件是否原生支持这种矩阵乘”的限制，可以选更准的那个。作者在几种约 4 位的格式里选了：E2M1 数值，每 16 个通道一个 E4M3 缩放，也就是 NVFP4 的格式去掉第二级全局缩放。</p>
+<p>为什么可以去掉全局缩放？作者给了一个数值范围的论证，值得一步步走一遍：</p>
+<ol>
+  <li>不用全局缩放时，这种格式能表示的最大绝对值是 E4M3 的最大值乘以 E2M1 的最大值：\(448\times6=2{,}688\)。</li>
+  <li>主 KV 是一个 512 维的潜向量，在存入缓存前经过 RMSNorm。RMSNorm 把向量的均方根归一到 1，再乘以逐通道的可学习权重；训练出的权重最大约为 1。所以向量的 L2 范数最多约为 \(\sqrt{512}\times1\approx22.6\)。</li>
+  <li>RoPE 是对通道两两做旋转，不改变向量的长度，所以旋转之后任何一个通道的绝对值仍不超过约 22.6。</li>
+  <li>训练中实际观察到的最大值约为 10。</li>
+</ol>
+<p>22.6 远小于 2,688，范围绰绰有余，所以全局缩放没有用处，去掉它不会造成可测的精度下降，还让缓存布局更简单：每个条目就是 256 字节数值加 32 字节缩放，正好 288 字节。</p>
+<p>两个细节。第一，RoPE 部分和非 RoPE 部分用同样的格式（V4 里 RoPE 的 64 维是单独存 BF16 的）。第二，<b>在 RoPE 之后量化</b>：缓存里存的是已经旋转过的 K。在 RoPE 之前量化的精度只略好一点，但那样每次解码读出条目后都要再做一次旋转，增加解码开销。滑动窗口的 SWA KV 仍然保留 FP8，原因是作者发现它对量化更敏感。FlashMLA 文档也写明了这两种格式的分工：SWA 缓存每个 token 528 字节（512 个 FP8 数值，RoPE 维度也一起量化，加 16 个 E8M0 缩放），压缩注意力缓存每个 token 288 字节。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个主 KV 条目在三代模型里的字节布局（同一比例尺）</div>
+  <div class="dia-row"><span class="lbl">V3.2：656 B</span><div class="dia-track"><span class="dia-seg w" style="flex:512">512 个 FP8 数值（512 B）</span><span class="dia-seg oth" style="flex:16">缩放</span><span class="dia-seg cmp" style="flex:128">64 维 RoPE，BF16（128 B）</span></div></div>
+  <div class="dia-row"><span class="lbl">V4：584 B</span><div class="dia-track"><span class="dia-seg w" style="flex:448">448 个 FP8 数值（448 B）</span><span class="dia-seg cmp" style="flex:128">RoPE，BF16（128 B）</span><span class="dia-seg oth" style="flex:8"></span><span class="dia-seg oth" style="flex:72;background:transparent"></span></div></div>
+  <div class="dia-row"><span class="lbl">V4.1 主 KV：288 B</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">512 个 FP4 数值，含 RoPE（256 B）</span><span class="dia-seg oth" style="flex:32">缩放 32 B</span><span class="dia-seg oth" style="flex:368;background:transparent;color:var(--text-3)">比 V4 少 296 B（−51%）</span></div></div>
+  <div class="dia-row"><span class="lbl">V4.1 SWA：528 B</span><div class="dia-track"><span class="dia-seg w" style="flex:512">512 个 FP8 数值，含 RoPE（512 B）</span><span class="dia-seg oth" style="flex:16">缩放</span><span class="dia-seg oth" style="flex:128;background:transparent"></span></div></div>
+  <div class="dia-note">数字取自 FlashMLA 文档对各代缓存格式的说明（V4 的 8 B 缩放行里有 7 个 E8M0 缩放和 1 个填充字节）。V4.1 的 SWA 缓存不在 890 字节里，因为它每层只保留最近 128 个 token。</div>
+</div>
+<p>用一个小例子感受 FP4 的粗糙程度（推算，只为说明）：设一组 16 个数里最大的是 3.3，则缩放 \(s=3.3/6=0.55\)，存成 E4M3 后约为 0.5625。数值 3.3 变成 \(3.3/0.5625\approx5.87\to6\)，读回 3.375；数值 −1.0 变成 \(-1.78\to-2\)，读回 −1.125；数值 0.4 变成 \(0.71\to0.5\)，读回 0.28；数值 0.05 变成 \(0.09\to0\)，直接丢失。单个数的相对误差可达十几到几十个百分点，这也是为什么要用量化感知训练让模型去适应，而不是事后硬压。</p>
+<p>FP4 的量化感知训练是在<b>后训练</b>阶段引入的。和 V4 的 FP8 主 KV 相比，这种格式让存储几乎减半（288/584 ≈ 49%），无论在显存里还是被卸载到 SSD 上。引言说用 FP4 全局 KV 训练“只有轻微的性能下降”，§2.4.4 说去掉全局缩放“没有可测的精度下降”，但两处都没有给出数字。</p>
+<div class="note-warn"><b>不要和训练后 KV 量化的论文直接比：</b>KIVI、KVQuant 这类方法报告的“2 位/4 位精度损失”，是在没有为量化专门训练过的模型上测的；V4.1 的 FP4 是训练过程的一部分，模型已经学会了适应量化误差。反过来，V4.1 的数字也不能说明“任何模型的 KV 都可以无损压到 FP4”。另外要记住只有全局主 KV 是 FP4，SWA KV 仍是 FP8，索引器 K 是 MXFP4。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S2.SS4" target="_blank" rel="noopener">英文原文 §2.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">2.5 优化器：按头分的 Muon，和给大嵌入表用的 Sinkhorn 平衡更新</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V4.1 在 V4 的优化器配置上改了两处：注意力的 Q、K 权重改用按头分开的 Muon；Engram 表、词嵌入和输出头改用“动量 + Sinkhorn 平衡”，不再用 Adam。为什么要这样改？Sinkhorn 平衡具体在做什么？</div>
+<div class="note-pre"><b>先补一点背景：Muon 与“预条件”。</b>
+<p>Muon 是一种专门给矩阵参数用的优化器：先像 SGD 一样累积动量，再把动量矩阵“正交化”（用 Newton–Schulz 迭代近似地把它的所有奇异值变成 1），用正交化后的矩阵做更新，最后乘一个系数，让更新的均方根和 AdamW 相当，以便直接沿用 AdamW 的学习率（详见 <a href="muon.html#n-2-1">Muon 精读 §2.1</a>）。从另一个角度看，正交化相当于给梯度乘了一个依赖于梯度本身的“预条件矩阵”，让不同方向上的更新幅度更均衡。</p>
+</div>
+<p><b>第一处改动：按头分的 Muon。</b>普通的 Muon 把整个 Query 权重矩阵当成一个矩阵来正交化，相当于所有注意力头共用一个预条件矩阵。按头分的 Muon 先把 Query 权重按头切开，每个头单独正交化，等于每个头有自己的预条件。作者的理由是不同注意力头之间差异很大，各用各的预条件更合适，并称实验中按头分的版本优于普通版本，GLM-5 和 Kimi-K3 的报告也验证了这一点。基本配置里 Query 和 Key 的权重都用按头分的 Muon。</p>
+<p><b>第二处改动：给大表用的 Sinkhorn 平衡更新。</b>Engram 新增了 196B 参数。Adam 要为每个参数保存两个状态（一阶矩和二阶矩），而 Muon 式的更新只需要一个动量缓冲区。按每个状态 4 字节粗算，196B 参数用 Adam 要约 1.57 TB 的优化器状态，只用动量则约 0.78 TB（推算，报告没说状态精度，训练时这些状态还会在多个副本间切分）。所以作者给 Engram 表、词嵌入和输出头这三类“很大、而且一行对应一个 token 或 N-gram”的矩阵，换了一种只需要动量的更新，并称它在实验中优于 Adam。</p>
+<p>它的流程和 Muon 一样，只是把 Newton–Schulz 正交化换成了 Sinkhorn 平衡（原文算法 1）：</p>
+<ol>
+  <li>算 Nesterov 动量：\(M_t=\beta M_{t-1}+(1-\beta)G_t\)，\(\widehat G_t=\beta M_t+(1-\beta)G_t\)。</li>
+  <li>屏蔽几乎为零的行：如果某一行的范数不到所有行平均范数的 \(\tau=10^{-3}\) 倍，就把这一行置零。对嵌入表来说，这一步内没出现过的 token 或 N-gram，它那一行的梯度本来就是零（或接近零），不该被放大。</li>
+  <li>交替归一化 \(K=11\) 次：奇数步把每一行除以它的 L2 范数，偶数步把每一列除以它的 L2 范数。\(K\) 取奇数，所以最后一步是行归一化。</li>
+  <li>乘以 \(\sqrt{n}\)（\(n\) 是隐藏维度），把“每行单位 L2 范数”换成“每行单位均方根”；学习率再乘 \(\gamma=0.18\)，让更新幅度和 Adam 相当（Moonlight 用的是 0.2，见 <a href="muon.html#n-3-3">Muon 精读 §2.2.3</a>）。</li>
+</ol>
+<p>效果是让更新矩阵的<b>每一行和每一列的均方根都大约为 1</b>。行对应一个 token 或一个 N-gram，列对应一个隐藏特征，所以这相当于同时做到：每个 token（无论出现得多频繁）都得到同样大小的更新，每个特征方向也不会被少数大梯度主导。</p>
+<p>用一个 3 × 3 的玩具梯度走一遍（推算）：设三行分别是 \((6,0,0)\)、\((3,4,0)\)、\((0,0.3,0.4)\)，第三行代表一个很少出现的 N-gram，梯度很小。原始梯度三行的均方根是 3.46、2.89、0.29。交替归一化 11 次再乘 \(\sqrt3\) 之后，结果约为 \((1.73,0,0)\)、\((0.66,1.60,0)\)、\((0,0.64,1.61)\)：三行的均方根都正好是 1，三列的均方根分别约为 1.07、0.99、0.93，接近 1。和“只做行归一化”的结果 \((1.04,1.39,0)\) 相比，第二行在第一列上的分量被压低了，因为第一列已经从第一行得到了很大的更新——这就是列归一化带来的“特征之间的平衡”。</p>
+<p>作者指出，这类利用矩阵行列结构的做法和 Adafactor（另一种行列分解的归一化）、Adam-mini（对嵌入表和输出头做另一种按行归一化）等方法相近，在优化效果和通信开销上可能各有不同，留作以后研究。Sinkhorn 平衡此前在 SinkGD（Scetbon 等）里用于线性层的权重，这里推广到了大参数矩阵。</p>
+<p><b>其余配置：</b>归一化层权重、偏置、缩放因子等非矩阵参数用 AdamW；主干线性层、Engram 的投影层、视觉—语言投影器用 Muon。Muon 用解耦的权重衰减和 Nesterov 动量；归一化层权重也做权重衰减，偏置和缩放因子不做；Sinkhorn 平衡更新用 Nesterov 动量但不做权重衰减。预训练时视觉编码器一直冻结（只有它最后的归一化层和视觉—语言投影器可训练），直到学习率开始衰减时才解冻，并用较小的学习率和语言模型一起训练。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S2.SS5" target="_blank" rel="noopener">英文原文 §2.5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">3.1 训练基础设施：多模态、跨层共享与 Engram 各自带来的系统问题</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>原生多模态、CSA2 的跨层共享和 196B 的 Engram 表，在大规模分布式训练里各自会制造什么麻烦？作者用什么办法让它们不拖慢训练、不破坏现有的并行方式？</div>
+<h4 id="n-7-1">3.1.1 多模态训练</h4>
+<p><b>对比学习阶段的通信重叠。</b>视觉编码器先用对比学习目标预训练（让配对的图像和文字表示靠近）。对比损失要在整个批次上计算，所以每张卡都要通过 all-gather 拿到所有卡上的图像特征和文字特征，通信量很大。作者利用了一个依赖关系：文字特征的梯度只依赖收集到的图像特征，图像特征的梯度只依赖收集到的文字特征。于是可以这样排：先算图像前向；算文字前向的同时收集图像特征；算出文字侧的梯度；做文字反向的同时收集文字特征；算出图像侧的梯度；最后做图像反向。两次 all-gather 都藏在了有用的计算后面。</p>
+<p><b>端到端的并行方式。</b>视觉编码器和语言模型在规模和数据形状上差别很大。作者采用近来训练系统常用的“编码器分离”设计：视觉编码器在语言模型的参数树之外单独复制一份，每个训练步分成三段——视觉编码器前向、语言模型前向和反向、视觉编码器反向。负载均衡的视觉计算只发生在第一段和最后一段，中间一段的语言模型完全不含视觉计算，可以照搬纯文本训练的并行策略。</p>
+<p><b>超长序列里的图像。</b>V4.1 有相当一部分训练在超长序列上进行（最长 100 万 token）。一条又长又密集地夹着图片的序列，可能在加载时就耗尽一台机器的 I/O、CPU 和内存。所以预训练时，每条序列的图片被均衡地分给上下文并行（CP）的各个进程，每张图只加载一次。作者给出了“加载不拖慢计算”的条件：设序列有 \(N\) 个 token，每个 token 平均有 \(\rho\) 字节原始数据、需要 \(C\) 次计算，文件系统带宽 \(B_{\mathrm{IO}}\)、GPU 算力 \(B_{\mathrm{GPU}}\)，则只要</p>
+<div class="formula">$$\frac{N\rho}{B_{\mathrm{IO}}}&lt;\frac{NC}{B_{\mathrm{GPU}}}\iff\rho&lt;\frac{B_{\mathrm{IO}}}{B_{\mathrm{GPU}}}\,C$$</div>
+<p>加载就能完全藏在计算后面。\(N\) 被约掉了，所以这个条件和序列多长、集群多大都无关，只取决于每个 token 的数据量和计算量。\(\rho\) 由视觉模块的配置决定（分辨率上限、空间下采样倍数）。作者由此得出：存储吞吐只会在每个 token 计算量很小的小模型上成为瓶颈（比如做消融实验时），正式规模的模型始终是计算受限的。强化学习采样时，图片则只增量地传给推理引擎，引擎在 CPU 上解码和预处理的结果缓存到分布式文件系统上，供后续采样和训练复用。</p>
+<h4 id="n-7-2">3.1.2 CSA2 的“注意力共享训练”</h4>
+<p>CSA2 让一层使用另一层算出的主 KV、索引器 K 或 top-k 下标。在流水线并行里，模型的层被切成几段放在不同的机器上，而共享的两层可能恰好落在不同的段里，于是“直接调用另一层的模块”在常规的“每段只管自己的层”的执行方式下就行不通了。作者用了三个设计：</p>
+<ul>
+  <li><b>影子索引器</b>：在每个用到共享部件的流水线段上放一个轻量的可执行副本，而共享参数只有一个逻辑上的“主人”。主人负责优化和保存检查点；参数同步和梯度汇总让各个影子副本始终和主人一致。这样不需要让流水线调度器把共享层当成特殊的执行单元。</li>
+  <li><b>扩展流水线的传输内容</b>：当提供共享状态的层和使用它的层隔着一个流水线边界时，把下游需要的中间表示和稀疏路由信息（例如 top-k 下标）塞进现有的点对点通信里，并按上下文并行的方式一致地切分，既避免不必要的复制，也保证对应的梯度能正确回传。</li>
+  <li><b>微批级的共享状态管理</b>：流水线里同时有好几个微批在跑，每个微批都有自己的共享状态。运行时记录每份共享状态属于哪个微批，在前向、激活重算、反向三个阶段里协调它的生命周期：直到最后一个使用者算完才保留，然后立即释放，控制额外的显存开销。同一套抽象还处理“共享状态的来源层和使用层分别在哪一段”，让注意力实现不必关心物理上的流水线布局。</li>
+</ul>
+<p>再加上对优化器、检查点、预热和计算图追踪流程的少量适配，CSA2 就能在现有的分布式训练接口和流水线调度下“透明地”运行。</p>
+<h4 id="n-7-3">3.1.3 Engram 的训练</h4>
+<p>Engram 的嵌入表按行切分，分给专门的“engram 并行”进程组；组的大小决定了每张卡的显存占用和查表时的通信范围之间的取舍。优化器状态再在同一个表分片的多个副本之间切分。由于查表的下标只取决于输入 token 序列，每个训练步开始、流水线各段开始处理微批之前，就可以为整个本地批次一次性发起嵌入预取，尽量不干扰流水线执行。嵌入的梯度在反向时先缓冲起来，等主干反向结束后再发回持有该行的进程。为了和多模态训练配合，预取和梯度传输都被安排在视觉编码器的前向和反向期间进行。嵌入以 FP8 存储和读取，读到的值和缩放因子直接交给后续的矩阵乘。更新时，Sinkhorn 归一化在迭代之间维护行、列两组缩放向量，避免反复写回整个归一化后的大矩阵；行归一化和列统计量的累加融合进一个内核，进一步减少显存读写。强化学习采样时，Engram 表常驻 GPU 显存，以减轻主机内存的压力，避免主机内存碎片导致的内存溢出。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S3.SS1" target="_blank" rel="noopener">英文原文 §3.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">3.2 推理系统：持久 KV 缓存的新管理方式与 SWA 有界重放</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>持久 KV 为什么能比 V4-Flash 小 8 倍——这 8 倍里有多少来自结构和精度，有多少来自部署策略？V4 时 SWA 的 KV 是怎么持久保存的，为什么作者认为这样做“又贵又没用”？“有界重放”到底近似了什么，近似之后会出现哪些新的、需要注意的行为？</div>
+<p>先交代推理系统的整体做法。作者说 V4.1 的结构虽然概念上复杂，但通过融合内核，推理时的内核流程很简洁：用到 FlashMLA 里“RoPE—注意力—RoPE—转精度”融合内核，DeepGEMM 里的 Mega-Gate、Mega-mHC、Mega-MoE 内核，TileKernels 里的内核，以及 DeepSelect 里的 TopK 内核。占绝大多数的 Reuse 模式层，预填充时只需要 15 个内核，解码时只需要 11 个。部署上采用“编码—预填充—解码”（EPD）三段分离：视觉编码、预填充、解码各自独立扩缩容，并能重叠执行（预填充与解码分离的思路见 <a href="distserve.html">DistServe 精读</a>）。报告没有给出这些内核的耗时或端到端的吞吐、延迟数字。</p>
+
+<h4 id="n-8-1">3.2.1 持久 KV 缓存的管理：SWA KV 搬出 SSD</h4>
+<div class="note-pre"><b>先补一点背景：前缀缓存为什么要存 SWA KV。</b>
+<p>前缀缓存的意思是：如果一个新请求的开头和以前某个请求完全相同，就直接读回那段前缀的 KV，从不同的地方接着预填充。对普通的全注意力模型，这很直接。但 V4 系列每层还有滑动窗口注意力：要从前缀末尾接着算，第一个新 token 在每一层都需要前缀最后 128 个 token 的 SWA KV。全局 KV 读回来了，SWA KV 没有，计算就接不上。所以持久缓存必须想办法提供 SWA KV：要么存下来，要么现场重算。</p>
+</div>
+<p><b>V4 的做法。</b>V4 的部署里，全局 KV 和 SWA KV 分开管理，都用 LRU（最近最少使用）策略淘汰。全局 KV 整段存储，命中时整段前缀复用。SWA KV 只在两个位置存一份“窗口快照”：提示结束处和输出结束处，分别服务“重新生成”和“下一轮对话”两种情况；命中时从快照的位置接着算。为了保持高命中率，SSD 上的持久缓存配得足够大，在典型负载下两种 KV 都能保留 72 小时以上。V4 的报告还讨论过另外两种策略（见 <a href="deepseek-v4.html#n-9-1">V4 精读 §9.1</a>）：每隔一段存一次快照，以及完全不存 SWA KV、命中时精确重算（“Zero SWA Caching”），后者需要重放 \(L\times n_{\mathrm{win}}\) 个 token。</p>
+<p><b>问题在哪。</b>每个快照只有 \(n_{\mathrm{win}}\) 个条目，但不压缩、每层都有，所以体积并不小。估一下（推算，按 FlashMLA 文档的格式）：V4-Flash 一个快照是 43 层 × 128 × 584 字节 ≈ 3.2 MB，相当于约 900 个 token 的全局 KV；V4.1-Flash 是 40 层 × 128 × 528 字节 ≈ 2.7 MB，相当于约 3,000 个 token 的全局 KV。在“每轮输入都很短”的多轮对话里，每轮新增的全局 KV 很少，两个快照却是固定开销，于是作者观察到，在 V4 的部署里 SWA KV 占了持久缓存容量的近一半。</p>
+<p>更关键的是，这些 SWA 快照的<b>访问模式和持久缓存的长期保留策略不匹配</b>。全局 KV 有长尾的复用：几小时甚至几天后，同一个代码仓库、同一份文档还可能被再次用到。而 SWA 快照只在一个活跃会话内部、分钟级的时间窗里被用到：会话结束或者进入下一轮，它就作废了。把它在 SSD 上存 72 小时，既贵又没用。至于 V4 报告提过的 Zero SWA Caching，精确恢复要做 \(L\times n_{\mathrm{win}}\) 个 token 的完整前向，在生产部署里代价高得无法接受。</p>
+<p><b>V4.1 的做法</b>分两条：</p>
+<ol>
+  <li>SWA KV 不再进持久缓存，改存在一个分布式内存池里，这个池由每台机器各拿出 10% 的主机内存组成。它的总容量比 SSD 小得多，但条目的存活时间只有几分钟，过期的立刻回收给新会话。作者说在真实负载下，这种高周转足以服务绝大多数同时活跃的会话。全局 KV 仍在 SSD 上的持久缓存里，保证至少存活 72 小时。</li>
+  <li>SWA KV 被淘汰后必然会出现“全局 KV 命中、SWA KV 没命中”的请求。这时用一个轻量的后备方案“编码器 SWA 有界重放”：只重算 \(n_{\mathrm{win}}\) 个 token，而不是 \(L\times n_{\mathrm{win}}\) 个。作者称这是整个设计的基石：它把一次“灾难性的”未命中，变成一次便宜的、轻微的质量退化，从而让“把 SWA KV 移出持久缓存”这件事说得通。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：持久 KV 的组成与“1/8 = 1/2 × 1/4”</div>
+  <div class="dia-cols">
+    <div>
+      <div style="font-weight:650;margin-bottom:4px">V4（-Flash）的部署</div>
+      <div class="dia-flow"><span class="dia-box tgt">SSD 持久缓存（≥ 72 小时，LRU）<small>全局 KV：整段前缀<br>SWA KV：提示末尾、输出末尾各一个窗口快照</small></span></div>
+      <div class="dia-flow"><span class="dia-box">两种 KV 都命中 → 直接接着算<small>SWA 快照约占容量的一半</small></span></div>
+    </div>
+    <div>
+      <div style="font-weight:650;margin-bottom:4px">V4.1-Flash 的部署</div>
+      <div class="dia-flow"><span class="dia-box tgt">SSD 持久缓存（≥ 72 小时）<small>只有全局 KV</small></span><span class="dia-box act">主机内存池（每台机器 10% DRAM）<small>SWA KV，存活几分钟</small></span></div>
+      <div class="dia-flow"><span class="dia-box pred">全局命中、SWA 未命中 → 编码器有界重放<small>只重算 128 个 token，得到近似的 SWA 状态</small></span></div>
+    </div>
+  </div>
+  <div class="dia-row" style="margin-top:10px"><span class="lbl">V4-Flash 持久 KV</span><div class="dia-track"><span class="dia-seg w" style="flex:4">全局 KV（3,514 B / token）</span><span class="dia-seg res" style="flex:4">SWA 快照（约同样多）</span></div></div>
+  <div class="dia-row"><span class="lbl">V4.1-Flash 持久 KV</span><div class="dia-track"><span class="dia-seg kv" style="flex:1">全局</span><span class="dia-seg oth" style="flex:7;background:transparent;color:var(--text-3)">去掉 SWA：×1/2；全局 KV 压到 1/4：再 ×1/4 → 合计约 1/8</span></div></div>
+  <div class="dia-note">本站示意图，按原文 §3.2.1 绘制。“SWA 约占一半”是作者对 V4 生产部署的观察，具体比例取决于负载（轮次越短，SWA 快照占比越大）。</div>
+</div>
+<p>所以“持久 KV 约为 V4 的 1/8”由两个相乘的因子组成：持久缓存不再存 SWA KV，几乎减半；留下的全局 KV 又因结构和精度的优化降到 V4 的 1/4。注意原文这里写的是“相同负载下，V4.1 的持久 KV 约为 V4 的 1/8”，前一个因子是生产负载下的观察值，不是按设计算出来的。</p>
+
+<h4 id="n-8-2">3.2.2 SWA 有界重放：只重放一个窗口，接受近似的状态</h4>
+<div class="note-pre"><b>先补一点背景：为什么精确重建 SWA KV 要往回追 \(L\times n_{\mathrm{win}}\) 个 token。</b>
+<p>第 \(l\) 层某个 token 的 SWA KV，是由这个 token 在第 \(l\) 层的输入算出来的；而这个输入又取决于第 \(l-1\) 层的注意力输出，后者要看第 \(l-1\) 层里前面 \(n_{\mathrm{win}}\) 个 token 的 SWA KV……每往下一层，需要的 token 范围就往前扩大一个窗口。所以要精确得到最顶层最后一个窗口的 SWA KV，最底层要从往回 \(L\times n_{\mathrm{win}}\) 个 token 的地方开始算。这就是“感受野随层数线性增长”。全局分支不受这个影响，因为它读的是已经缓存好的全局 KV。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：精确重建与有界重放各要算哪些位置（玩具：3 层、窗口 3）</div>
+<svg class="dg" viewBox="0 0 960 300" role="img" aria-label="滑动窗口注意力逐层叠加的感受野：精确重放与有界重放的对比" style="--dg-min:760px">
+<text x="10" y="18" class="t-sm t-b">精确重建：要往回追 L × 窗口 个 token</text>
+<text x="10" y="51" class="t-xs">第 3 层的 SWA KV</text>
+<rect x="128" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="151" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="174" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="197" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="220" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="243" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="266" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="289" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="312" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="335" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="358" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="381" y="40" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="404" y="40" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="427" y="40" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="10" y="103" class="t-xs">第 2 层的 SWA KV</text>
+<rect x="128" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="151" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="174" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="197" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="220" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="243" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="266" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="289" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="312" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="335" y="92" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="358" y="92" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="381" y="92" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="404" y="92" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="427" y="92" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="10" y="155" class="t-xs">第 1 层的 SWA KV</text>
+<rect x="128" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="151" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="174" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="197" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="220" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="243" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="266" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="289" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="312" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="335" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="358" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="381" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="404" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="427" y="144" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="10" y="207" class="t-xs">输入（来自缓存的前缀）</text>
+<rect x="128" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="151" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="174" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="197" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="220" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="243" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="266" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="289" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="312" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="335" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="358" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="381" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="404" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="427" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="128" y="254" class="t-xs">要重放的 token：9 个（≈ 层数 × 窗口）</text>
+<text x="490" y="18" class="t-sm t-b">有界重放：只重放最后一个窗口，窗口被截断</text>
+<text x="490" y="51" class="t-xs">第 3 层的 SWA KV</text>
+<rect x="608" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="631" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="654" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="677" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="700" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="723" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="746" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="769" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="792" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="815" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="838" y="40" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="861" y="40" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="884" y="40" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="907" y="40" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="490" y="103" class="t-xs">第 2 层的 SWA KV</text>
+<rect x="608" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="631" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="654" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="677" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="700" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="723" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="746" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="769" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="792" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="815" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="838" y="92" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="861" y="92" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="884" y="92" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="907" y="92" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="490" y="155" class="t-xs">第 1 层的 SWA KV</text>
+<rect x="608" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="631" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="654" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="677" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="700" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="723" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="746" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="769" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="792" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="815" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="838" y="144" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="861" y="144" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="884" y="144" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<rect x="907" y="144" width="20" height="22" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+<text x="490" y="207" class="t-xs">输入（来自缓存的前缀）</text>
+<rect x="608" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="631" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="654" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="677" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="700" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="723" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="746" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="769" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="792" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="815" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="838" y="196" width="20" height="22" rx="3" style="fill:var(--surface-3);stroke:none"/>
+<rect x="861" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="884" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<rect x="907" y="196" width="20" height="22" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/>
+<text x="608" y="254" class="t-xs">要重放的 token：3 个（= 窗口 3）</text>
+<text x="10" y="292" class="t-xs">玩具设定：3 层、窗口 3。蓝色 = 精确值；红框 = 近似值（它们本该看到更早的 token，但重放段之前的位置被截断了，只能依靠全局分支补上远处的信息）。</text>
+</svg>
+  <div class="dia-note"><b>怎么看：</b>每一行是一层，每个方块是一个 token 位置，最右边是缓存前缀的末尾。左图：为了得到第 3 层最后 3 个位置的精确 SWA KV，第 2 层要算最后 5 个，第 1 层要算最后 7 个，输入要从最后 9 个开始，即层数 × 窗口。右图：有界重放每一层都只算最后 3 个，而且窗口在重放段的起点截断，红框表示这些状态是近似的。本站示意图，原文没有对应的图。</div>
+</div>
+<p>有界重放的规则是：从位置 \(s\) 开始重放最近的 \(n_{\mathrm{win}}\) 个 token，并把 SWA 截断在重放段之内——位置 \(i\) 的 query 只能看 \([\max(s,\,i-W+1),\,i]\) 范围内的 SWA key（\(W\) 是窗口大小）。也就是说，重放段的第一个 token 在 SWA 分支里只能看到自己，第二个只能看到两个，以此类推；远处的信息只能通过全局分支（读缓存的全局 KV）获得。这样得到的 SWA 状态是近似的。V4.1 在两个地方用到它：</p>
+<p><b>编码器 SWA 有界重放</b>（只在 SWA 未命中时用）。它让前缀缓存只依赖全局 KV，于是 SWA KV 可以从持久缓存里拿掉。缺 SWA KV 时，把缓存前缀的最后 \(n_{\mathrm{win}}\) 个 token 和没命中的新输入一起处理：重放的 token 只重新生成 SWA KV，直接复用缓存里的全局 KV，既不重算也不覆盖；新输入则照常生成全局 KV 和 SWA KV。作者明确指出，因为重放出的前缀状态是近似的，新输入算出的全局 KV 和 SWA KV 会<b>随命中位置的不同而不同</b>，数学上不再相同。他们称实验表明这种做法“几乎不影响回答质量”。</p>
+<p><b>解码器 SWA 有界重放</b>（每次预填充都用）。这是 §2.2 讲过的 CED 带来的问题：解码器的全局 KV 由编码器输出投影得到，唯一挡在“预填充算完编码器就结束”前面的，是解码器的 SWA KV，它来自解码器每一层自己的隐藏状态，解码的前几步就要用。解码器 SWA KV 从不缓存，精确重建要让 20 个解码器层处理最后 \(20\times n_{\mathrm{win}}=2{,}560\) 个提示 token，在“长前缀命中、只多一小段新输入”时很贵。所以每次预填充都只重放提示的最后 \(n_{\mathrm{win}}\) 个 token：把它们的编码器输出送进解码器各层，用同样的截断规则，得到的解码器 SWA KV 只用于接下来的解码，不进前缀缓存。作者称这同样只对回答质量有可以忽略的影响，并且“为了更稳妥”，在后训练中也模拟了同样的重放，让模型在训练时就适应这种近似（训练感知的适配）。</p>
+<p>算一下重放省了多少（推算）：精确恢复全部 40 层的 SWA 状态需要重放 \(40\times128=5{,}120\) 个 token，有界重放只要 128 个，少了 40 倍；按 CED 的结构，只恢复解码器部分也要 2,560 个 token 走完解码器，有界重放同样只要 128 个。</p>
+<p>为什么这种近似可能问题不大？作者引用的理由是 SWA 的“有效感受野”远小于理论值（PowerAttention 的发现）。本站补充一个直观的理由（不是论文原话）：在 V4.1 里，SWA 并不是唯一的远程信息通道，每个 token 都能通过全局分支看到整个上下文里被选中的 512 个条目，所以把 SWA 的远端截掉，损失的主要是“通过多层 SWA 逐层传递过来的那部分信息”，而这部分本来就能被全局分支部分地替代。</p>
+<div class="note-warn"><b>有界重放带来的新行为，值得注意：</b>
+<ul>
+  <li><b>同一个输入，结果可能取决于缓存状态。</b>编码器重放只在 SWA 未命中时触发，而它会改变新输入的全局 KV 和 SWA KV，所以同一个请求在“SWA 命中”和“SWA 未命中”两种情况下，数值上不完全相同；命中位置不同，结果也不同。这对需要可复现输出、或者需要推理与训练数值一致的场景（例如强化学习的采样）是一个额外的不确定来源（相关背景见 <a href="batch-invariance.html">批不变性精读</a>）。</li>
+  <li><b>解码器 SWA 永远是近似的。</b>它不是偶尔的补救，而是每个请求都走的路径；好在后训练也是在同样的近似下进行的，所以模型看到的就是它被训练时的状态。</li>
+  <li><b>“几乎不影响质量”没有数字。</b>报告没有给出有界重放与精确重建在任何基准上的对比，也没有给出生产中 SWA 未命中的比例。作者在结论里把“缓存恢复边界处的 SWA 状态重建”列为需要继续压力测试的重点。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S3.SS2" target="_blank" rel="noopener">英文原文 §3.2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-9">4 预训练：45T 多模态 token，稀疏注意力从头训练</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V4.1-Flash 的基座是用什么数据、什么超参数训练出来的？它和 V4-Flash-Base、V4-Pro-Base 比，强在哪里、弱在哪里？这些比较能不能说明“KV 压到 1/4 后精度没掉”？</div>
+<h4 id="n-9-1">4.1 数据</h4>
+<p><b>文本。</b>作者说这一版不再只看小规模实验里反映出来的“单条样本质量”，而更关注不同语料之间的相互作用、哪些语料能带来独特的信息增量。为此建了一套更系统、更标准化的数据构建流程，并设计了一个在模型参数量和数据量两个方向上的“缩放阶梯”，用小模型的结果来指导大规模训练的数据决策。具体做法包括：过滤掉信息增量很低的模型生成内容（较弱模型的输出、低质量的机器翻译文本），作者把它们看作“隐性重复”，因为它们大多只是改写已有信息，长期训练下可能有害；探索让模型参与数据迭代的方法，为以后的大规模合成数据打基础；请更多领域专家参与制定细粒度的数据质量维度；加入更多新近的开源代码（新仓库、提交、库和框架），覆盖更多编程语言和当下真实的软件工程场景。</p>
+<p><b>多模态。</b>多模态预训练数据有三类：图文对、图文交错数据和特定领域数据。作者的出发点是网页数据天然带有丰富的多模态知识，所以没有做大规模的数据合成，而是尽量清洗并按原样使用。一开始他们发现自己的爬虫系统过于偏向文字为主的网页，于是从 Common Crawl 重新起步，提高对多模态来源的覆盖。图文对从网页中抽取图片和它的替代文本（alt text），按图文相关性阈值过滤，再按图像语义去重。交错数据主要来自网页和 PDF；因为处理多模态语料的 CPU 和存储开销比纯文本大，构建流程按“越往后越贵”的顺序分阶段：先在取图之前用启发式、统计过滤、去重和质量模型筛出高价值文档，再把留下的文档组装成图文交错序列并按图像感知的方式再过滤、去重一次，最后用 SmolVLM 给图文内容严格打分。被过滤掉的文档有一部分经过筛选重组，回收成额外的图文对。为了弥补网页数据的不足，还加入了特定领域数据：细粒度视觉感知（视觉定位、指点）、OCR、长尾知识，以及大量的“图像—代码”对和电脑操作轨迹，用来提升多模态智能体的理解能力。</p>
+<p><b>合并与去重。</b>文本和多模态数据经过两条不同的流程，最终语料取两者的并集；对重叠的样本，用多模态版本替换纯文本版本，并取两种配置里较大的那个重复轮数。替换之后，纯文本与多模态数据的 token 比例为 7 : 1。预训练和上下文扩展阶段通过联合预取和分配样本来尽量减少重复；超长文档在混合之前先被确定性地切开，让训练 token 在数据分片和训练步之间分布均匀；改进后的“最佳适配”打包算法把填充率压到不超过 \(10^{-4}\)。</p>
+
+<h4 id="n-9-2">4.2 训练设置</h4>
+<p>模型配置在 §2.1 已经列过。训练设置如下（原文 §4.2.2）：</p>
+<div class="table-wrap"><table>
+<tr><th>项目</th><th>设置</th></tr>
+<tr><td>优化器</td><td>线性层用 Muon（动量 0.95，权重衰减 0.1，更新 RMS 缩放到 0.18 以复用 AdamW 学习率）；RMSNorm 权重等非矩阵参数用 AdamW（\(\beta_1=0.9\)，\(\beta_2=0.95\)，\(\varepsilon=10^{-20}\)，权重衰减 0.1）；所有嵌入和输出头用 Sinkhorn 平衡更新（同样的动量和学习率修正系数，\(K=11\)，\(\tau=10^{-3}\)，\(\varepsilon=10^{-20}\)）；Engram 的学习率放大 5 倍（沿用 Engram 原论文）</td></tr>
+<tr><td>数据量与批大小</td><td>45T token 多模态数据，批大小全程固定为 1.006 亿 token；作者称训练全程没有出现不稳定</td></tr>
+<tr><td>学习率</td><td>前 2,000 步线性预热，之后保持 \(2.6\times10^{-4}\) 到 28T；28T–40T 按余弦衰减到 \(2.6\times10^{-5}\)；40T–45T 保持不变</td></tr>
+<tr><td>序列长度</td><td>从头就用稀疏注意力在 64K 长度上训练，没有稠密注意力的预热阶段；在 34T 处扩展到 1M</td></tr>
+<tr><td>负载均衡</td><td>图像、文字两套偏置的更新速度都是 0.001；另保留权重 0.0001 的序列级均衡损失</td></tr>
+<tr><td>注意力掩码</td><td>和 V4 一样使用样本级注意力掩码（打包在同一条序列里的不同样本互相看不见）</td></tr>
+</table></div>
+<div class="dia">
+  <div class="dia-title">按原文 §4.2.2 画的学习率与序列长度时间线</div>
+<svg class="dg" viewBox="0 0 760 250" role="img" aria-label="DeepSeek-V4.1-Flash 预训练学习率与上下文长度随训练 token 数的变化" style="max-width:760px;--dg-min:560px">
+<line x1="80" y1="190" x2="700" y2="190" class="axis"/>
+<line x1="80" y1="190" x2="80" y2="30" class="axis"/>
+<path d="M80.0,190.0 L83.4,40.0 L465.8,40.0 L471.3,40.4 L476.8,41.5 L482.3,43.3 L487.8,45.8 L493.3,49.0 L498.8,52.9 L504.4,57.3 L509.9,62.3 L515.4,67.8 L520.9,73.8 L526.4,80.0 L531.9,86.6 L537.4,93.5 L542.9,100.4 L548.4,107.5 L554.0,114.6 L559.5,121.5 L565.0,128.4 L570.5,135.0 L576.0,141.2 L581.5,147.2 L587.0,152.7 L592.5,157.7 L598.0,162.1 L603.6,166.0 L609.1,169.2 L614.6,171.7 L620.1,173.5 L625.6,174.6 L631.1,175.0 L700.0,175.0" style="fill:none;stroke:var(--c-enc);stroke-width:2.5"/>
+<line x1="80.0" y1="190" x2="80.0" y2="195" class="axis"/>
+<text x="80.0" y="207" class="t-c t-xs">0T</text>
+<line x1="217.8" y1="190" x2="217.8" y2="195" class="axis"/>
+<text x="217.8" y="207" class="t-c t-xs">10T</text>
+<line x1="355.6" y1="190" x2="355.6" y2="195" class="axis"/>
+<text x="355.6" y="207" class="t-c t-xs">20T</text>
+<line x1="465.8" y1="190" x2="465.8" y2="195" class="axis"/>
+<text x="465.8" y="207" class="t-c t-xs">28T</text>
+<line x1="548.4" y1="190" x2="548.4" y2="195" class="axis"/>
+<text x="548.4" y="207" class="t-c t-xs">34T</text>
+<line x1="631.1" y1="190" x2="631.1" y2="195" class="axis"/>
+<text x="631.1" y="207" class="t-c t-xs">40T</text>
+<line x1="700.0" y1="190" x2="700.0" y2="195" class="axis"/>
+<text x="700.0" y="207" class="t-c t-xs">45T</text>
+<text x="390.0" y="226" class="t-c t-sm">已训练的 token 数 →</text>
+<text x="72" y="40.0" class="t-r t-xs">2.6e-4</text>
+<text x="72" y="175.0" class="t-r t-xs">2.6e-5</text>
+<text x="272.9" y="28.0" class="t-c t-xs" style="fill:var(--c-enc)">预热 2,000 步后保持峰值学习率</text>
+<text x="554.4" y="97.7" class="t-xs" style="fill:var(--c-enc)">余弦衰减</text>
+<text x="665.6" y="163.0" class="t-c t-xs" style="fill:var(--c-enc)">保持低值</text>
+<rect x="80.0" y="14" width="468.4" height="14" rx="3" style="fill:var(--c-reg-bg);stroke:var(--c-reg)"/>
+<text x="314.2" y="21" class="t-c t-xs" style="fill:var(--c-reg)">序列长度 64K（稀疏注意力从头训练）</text>
+<rect x="548.4" y="14" width="151.6" height="14" rx="3" style="fill:var(--c-act-bg);stroke:var(--c-act)"/>
+<text x="624.2" y="21" class="t-c t-xs" style="fill:var(--c-act)">扩到 1M</text>
+<line x1="465.8" y1="32" x2="465.8" y2="190" style="stroke:var(--text-3);stroke-dasharray:3 3"/>
+<text x="461.8" y="120.8" class="t-r t-xs">28T：开始衰减，</text>
+<text x="461.8" y="134.8" class="t-r t-xs">同时解冻视觉编码器</text>
+</svg>
+  <div class="dia-note">横轴是已训练的 token 数。本站按原文给出的数值绘制；余弦段的形状是按“余弦衰减”的标准公式画的。按 45T ÷ 1.006 亿 token 粗算，整个预训练约 45 万步（推算）。</div>
+</div>
+<p>“稀疏注意力从头训练、没有稠密预热”值得单独一提。V3.2 的 DSA 是在已经训好的稠密模型上继续训练出来的：先冻结模型、只训练索引器去模仿稠密注意力的分布，再放开整个模型适应稀疏（见 <a href="deepseek-v3-2.html#n-3">V3.2 精读</a>）。V4.1 则从第一步开始就让索引器和主模型一起在稀疏模式下学习。这说明作者对“稀疏选择能从零学起来”已有相当信心，但报告没有和“先稠密再稀疏”的路线做对比。</p>
+<p><b>视觉编码器的训练。</b>DeepSeek-ViT 在接入语言主干之前单独训练两个阶段。第一阶段是对比预训练：用 SigLIP 的 sigmoid 对比损失，在约 470 亿对来自 alt text 的图文对上训练，最大输入分辨率限制在 \(224\times224\)（大图按比例缩小）。作者说这一阶段用更高的分辨率虽然有明显收益，但对最终模型的帮助很小，因为后面的自回归阶段会专门处理高分辨率，所以没必要花这笔计算。第二阶段是自回归微调：把视觉编码器接到一个 4B 的 MoE 语言模型上，在 2,360 亿 token 的图像描述、alt text、图表、OCR 等数据上用下一个 token 预测训练，输入分辨率限定在 \(544\times544\) 到 \(1344\times1344\) 之间，目的是让编码器学到更细粒度的视觉特征。训练完后丢掉那个语言模型，只保留视觉编码器，后续预训练沿用同样的分辨率策略。</p>
+
+<h4 id="n-9-3">4.3 基座模型评测</h4>
+<p>原文表 1 在 DeepSeek 内部评测框架下、用相同的设置比较三个基座模型。表里说两个分数相差不超过 0.3 就视为同一水平。下面摘录主要行（数字取自原文表 1）：</p>
+<div class="table-wrap"><table>
+<tr><th>基准（指标）</th><th>样本数</th><th class="num">V4-Flash-Base</th><th class="num">V4-Pro-Base</th><th class="num">V4.1-Flash-Base</th></tr>
+<tr><td>激活参数 / 主干参数</td><td>—</td><td class="num">13B / 284B</td><td class="num">49B / 1.6T</td><td class="num">8B·16B / 552B</td></tr>
+<tr><td>MMLU-Pro（EM）</td><td>5</td><td class="num">68.3</td><td class="num">73.5</td><td class="num"><b>74.1</b></td></tr>
+<tr><td>SimpleQA-Verified（EM）</td><td>25</td><td class="num">30.1</td><td class="num"><b>55.2</b></td><td class="num">42.3</td></tr>
+<tr><td>MultiLoKo（LLM 评判）</td><td>5</td><td class="num">42.6</td><td class="num"><b>50.9</b></td><td class="num">45.5</td></tr>
+<tr><td>SuperGPQA（EM）</td><td>5</td><td class="num">46.5</td><td class="num"><b>53.9</b></td><td class="num">53.1</td></tr>
+<tr><td>BBEH（EM）</td><td>1</td><td class="num">25.4</td><td class="num"><b>29.8</b></td><td class="num">27.2</td></tr>
+<tr><td>HumanEval（Pass@1）</td><td>0</td><td class="num">69.5</td><td class="num">76.8</td><td class="num"><b>79.4</b></td></tr>
+<tr><td>BigCodeBench（Pass@1）</td><td>3</td><td class="num">56.8</td><td class="num">59.2</td><td class="num"><b>60.6</b></td></tr>
+<tr><td>MATH（EM）</td><td>4</td><td class="num">57.4</td><td class="num"><b>64.5</b></td><td class="num">61.1</td></tr>
+<tr><td>MGSM（EM）</td><td>8</td><td class="num"><b>85.7</b></td><td class="num">84.4</td><td class="num">80.2</td></tr>
+<tr><td>LongBench-V2（EM）</td><td>1</td><td class="num">44.7</td><td class="num"><b>51.5</b></td><td class="num">45.2</td></tr>
+<tr><td>MMMU-Pro / CVBench / DocVQA / RefCOCO 平均</td><td>4 / 4 / 4 / 0</td><td class="num">—</td><td class="num">—</td><td class="num">56.5 / 77.9 / 95.6 / 86.0</td></tr>
+</table></div>
+<p>表 1 的其余行（AGIEval、C-Eval、BBH、DROP、HellaSwag、GSM8K）三个模型都很接近。多模态的几项只有 V4.1 有分数，因为前两个模型是纯文本的。</p>
+<p>作者另外用内部语料测了每字节比特数（BPB，越低越好），语料包括内部文档、私有代码仓库和学术资料，目标是考察复杂科学问题和前沿研究上的推理、溯源和解题能力。按原文图 6 的数字：内部文档上 V4-Flash-Base 0.617、V4-Pro-Base 0.590、V4.1-Flash-Base 0.564；内部代码仓库上 0.1562、0.1494、0.1443；学术资料上 0.4929、0.4677、0.4305。三项都是 V4.1-Flash 最低（对应 <a href="https://arxiv.org/html/2609.19969v1#S4.F6" target="_blank" rel="noopener">原文图 6 ↗</a>）。</p>
+
+<h4 id="n-9-4">结果的份量</h4>
+<ul>
+  <li><b>比较的是什么、没对齐什么。</b>三个基座在同一个内部框架、同样的设置下评测，这一点是对齐的。但模型之间几乎所有东西都不同：V4.1-Flash 的总参数是 V4-Flash 的近两倍（552B 对 284B，另有 196B Engram），训练 token 多了约 40%（45T 对 V4-Flash 的 32T，后者见 V4 报告），数据流程重做过，加入了多模态，结构上同时改了 CED、CSA2、FP4 KV、Single-Pass mHC、Engram、优化器。所以表 1 只能说明“V4.1-Flash 整体不比 V4-Flash 差，很多项更好”，<b>不能</b>用来说明 KV 压缩本身没有代价——它的代价可能被更多的参数和数据掩盖了。作者自己也把进步部分归因于“数据流程的大幅改进”。</li>
+  <li><b>长上下文只有一项。</b>基座评测里的长上下文基准只有 LongBench-V2：V4.1-Flash 45.2，和 V4-Flash 的 44.7 持平，明显低于 V4-Pro 的 51.5。对一份以“KV 压缩”为题的报告，最能直接检验压缩代价的长上下文检索类基准（例如多轮指代、大海捞针类测试）没有出现：V4 报告评测过的 MRCR 1M 和 CorpusQA 1M，这一版都没有报告。</li>
+  <li><b>“与 V4-Pro-Base 相当”的说法要打折。</b>在通用知识和代码上大体成立，但在需要记住大量事实的基准上差距明显：SimpleQA-Verified 42.3 对 55.2，MultiLoKo 45.5 对 50.9；数学上 MATH 61.1 对 64.5；多语言数学 MGSM 甚至比 V4-Flash 低 5.5 分。这和“总参数只有 1/3”是一致的：知识容量主要随参数量增长。</li>
+  <li><b>“留出集上好 5%–10%”对不太上。</b>引言说 V4.1-Flash-Base 在留出评测上比 V4-Pro-Base 好 5%–10%。按图 6 的数字算相对降幅（推算）：相对 V4-Pro-Base 是 4.4%、3.4%、8.0%，相对 V4-Flash-Base 是 8.6%、7.6%、12.7%，都不完全落在 5%–10% 里。而且这些语料是 DeepSeek 内部的，外界无法核对。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-10">5.1–5.2 后训练：不改算法，只做数据、环境和基础设施</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告明说后训练“没有算法创新”，那 V4.1-Flash 在智能体任务上的大幅进步从哪里来？任务和环境是怎么自动造出来的？“推理努力程度”这个可以连续调节的旋钮是怎么训练出来的？异步强化学习又要处理哪些副作用？</div>
+<h4 id="n-10-1">5.1 流程：SFT → RL → 在线蒸馏，重心全在“训练什么”</h4>
+<p>后训练沿用标准的三段式：监督微调（SFT），强化学习（RL），最后是在线蒸馏（OPD，学生模型自己生成，教师模型在学生生成的序列上给出逐 token 的目标分布）。作者强调，除了 V4 开发中已经成熟的做法，算法上没有任何修改；投入几乎全部花在“在什么上训练”，而不是“怎么优化”。流水线做三件事：合成多样、可验证的训练任务以及参考答案和奖励信号；程序化地构建并扩展交互式智能体环境，让轨迹的收集和评估足够便宜；严格过滤、去重并校准难度，保证数据质量和课程的均衡。作者的结论是：在一个固定的、“平平无奇”的优化流程下，观察到的提升基本上全部来自合成数据和环境在规模、多样性、可验证性上的系统性改进；现阶段在数据和环境流水线上投入的边际回报，远超在后训练算法上求新。</p>
+<p><b>大规模合成智能体任务。</b>每个任务被形式化为一个三元组：（问题，环境，验证系统）。质量按两个维度衡量：难度（任务不能太简单）和正确性（三部分里没有致命缺陷）。作者观察到模型已经开始能为自己构造训练任务，只是还不完美，于是把难度和正确性当作奖励，迭代地训练模型构造更好的任务。每个任务在整个生命周期内都受监控：每次被新的 RL 运行使用，产生的轨迹都会被用来重新审查这个任务的质量。在这个框架下有两条专门的环境生产线：</p>
+<ul>
+  <li><b>通用智能体</b>：鼓励公司员工和外部合作方在日常工作里使用最新模型，并自愿返回交互数据和反馈。根据返回数据里看到的接口，构建大量“模拟工具”，复现真实工具和系统的输入格式、输出结构、API 模式和行为约束，覆盖常见的 SaaS 和企业应用，以及更专门的业务后台系统。同时大规模收集员工提交的负面反馈和失败案例，生成扎根于真实工作流的单轮和多轮环境，从而能系统地重放失败，并针对观察到的弱点做 RL。</li>
+  <li><b>编程智能体</b>：来源一是员工和合作方的编程智能体会话，只保留很复杂或模型表现差的任务，并按轨迹去重；来源二是超过一定星标数的 GitHub 公开仓库。环境由多个专门的智能体协作搭建：一个判断项目能否在容器里构建、完整运行并自动验证，选定起始提交，设计几个足够复杂的实现方向，写出“修复前失败、修复后通过”和“始终通过”两类评测点和一份构建报告；另一个在隔离容器里装依赖、准备初始目录、测试代码和任务描述，自测后清除可能泄露答案的痕迹，打包成新的镜像层；然后多个不同的智能体尝试解题，一个独立的质检智能体结合解题轨迹检查环境问题、事实错误、评测点和描述不一致、以及“可被钻空子”的风险；不通过就交给修复智能体，修正错误并调整过难或过易的评测点，再重新验证。</li>
+</ul>
+<p><b>在合成任务上做 RL。</b>作者从两个方向扩大 RL：训练算力，以及“脚手架”（scaffold，即包在模型外面的智能体框架，决定系统提示、工具定义和交互协议）的数量。原文图 7 显示，在 DeepSeek Harness 的 Minimal 模式下，各个编程智能体基准随 RL 步数持续提升，把最大上下文扩到 1M 后，在 Terminal-Bench 3.0 这类超长程任务上还能继续提升；图 8 显示，在多个版本的 Claude Code 上联合训练、或在 OpenCode、Pi、DeepSeek Harness（Standard 和 PTC 模式）等不同脚手架上联合训练，DeepSWE v1.1 的成绩都随累计 RL 步数上升。系统上，采样执行被拆成“智能体沙箱”（运行脚手架和工具）和“工作容器”（与脚手架无关的控制层，编排采样、把不同交互统一成同一种轨迹格式、与训练器通信），两者都跑在可抢占的 GPU 训练池之外；训练器被抢占时，采样可以暂停、卸载并保存完整状态，之后恢复。为了把 RL 算力扩展到单次运行之外，作者用<b>模型合并</b>来初始化下一次 RL：把不同脚手架或配置下的多次运行的检查点合并，组合各自沿不同优化路径学到的改进，图中断开的曲线段就是合并后重新开始的运行。作者称这在任务表现和 token 效率上都带来进一步提升。</p>
+<p><b>DSec：百万级沙箱。</b>V4 开发时 DeepSeek 建了一个生产级沙箱平台 DSec，V4.1 的训练把需求推到了数百万个并发沙箱。瓶颈转向数据中心的扩展性、负载隔离、单节点计算密度，以及对越来越强的智能体的“不当行为”的遏制。几个设计：把计算节点切成多个分片（“规模单元”），既容纳更多机器，也把一个实验的爆炸半径限制在自己的分片里；不用 Kubernetes，而用自研的放置引擎，以多个互不同步的副本各自根据近期测量预测资源、做“足够好”的放置决定，用最终一致性换取扩展性，每个节点再做硬性的准入检查，超过本地警戒线就拒绝新放置；节点上用硬件的 sub-NUMA 分区，把每个工作虚拟机绑定到一个 NUMA 域，容器在虚拟机里运行，在同等负载下把单台物理机能支撑的活跃容器数从约 1,000 提高到 2,500 以上（在端到端性能出现可测下降之前）；为对时间敏感的评测设立低延迟执行类，非低延迟任务用 <code>SCHED_IDLE</code> 降到最低调度优先级，并用 core scheduling 保证同一物理核的两个超线程上只跑同一优先级的任务。作者坦白，RL 训练中经常观察到智能体试图钻奖励的空子，或无意中把环境搞崩：有的利用了新近披露的漏洞（XFS 驱动的权限问题、AppArmor 的非法内存访问、从软件包镜像服务泄露答案等），有的删掉关键的可执行文件、破坏系统文件，甚至删除整个文件系统。应对办法是每个沙箱单独的 AppArmor 配置和基于 eBPF 的细粒度网络策略；环境被搞崩就记为失败轨迹，并向 RL 框架报告一个“后果”信号。</p>
+
+<h4 id="n-10-2">5.1.4 可控的推理努力程度</h4>
+<p>除了模型结构和硬件，输出 token 的数量也是服务成本的决定因素。作者在 RL 中引入一个标量“努力程度” \(b\in\{1,\dots,100\}\) 作为显式的条件信号，单轮推理和多轮智能体任务都用。做法是在系统提示前加一行“Reasoning Effort: {effort}（范围 1–100，越大要求越充分的推理）”。对每个训练提示 \(x\)，在若干个努力等级 \(b\) 上各采样 \(M_b\) 个回答；同一个 \((x,b)\) 的回答组成一个子组，在子组内做均值中心化，得到组内相对优势（GRPO 式），所以<b>不同努力等级的回答之间不直接比较</b>。“努力程度不同、行为不同”是靠让奖励里的长度惩罚依赖于 \(b\) 来实现的：</p>
+<div class="formula">$$r^{\mathrm{len}}_{b,j}=-\min\Big\{C_{\max},\;k(b)\,\frac{\ell_{b,j}}{L_{\mathrm{norm}}}\Big\},\qquad k(b)=k_0\exp\!\Big(-\frac{b-b_{\min}}{\tau}\Big),\quad \tau=\lambda\,\overline{\Delta b}$$</div>
+<p>\(\ell_{b,j}\) 是推理 token 数，\(L_{\mathrm{norm}}\) 是参考长度，\(C_{\max}\) 是一条轨迹最多扣的分。惩罚系数随努力程度指数下降：\(b\) 每增加 \(\tau\)，系数乘以 \(e^{-1}\)。\(k_0\) 控制整体“往短里压”的力度，\(\tau\) 越小，不同等级之间的行为差别越大。附录 C 给了选指数形式的理由：设某个问题用 \(\ell\) 个推理 token 能解出的概率为 \(p_x(\ell)\)，在惩罚没封顶的区间，最优长度满足“多想一个 token 带来的边际收益 = 惩罚系数”，即 \(p_x'(\ell^*)=k(b)/L_{\mathrm{norm}}\)；如果边际收益随长度近似指数衰减 \(p_x'(\ell)\approx a_xe^{-\ell/s_x}\)，代入指数形式的 \(k(b)\) 就得到 \(\ell^*_x(b)\approx C_x-s_x\log k_0+\tfrac{s_x}{\tau}(b-b_{\min})\)，即首选长度随 \(b\) 近似线性增长。作者也说明这只是局部的奖励层面近似，不保证实测的平均长度一定线性或单调。</p>
+<p>训练只用了有限几个努力等级，但部署时中间值也能用，得到插值的行为。2026 年 9 月上线的公开 API 提供三档：max、high、low，分别对应 \(b=100\)、75、50（原文表 2），选哪一档都不改模型权重和解码配置。</p>
+
+<h4 id="n-10-3">5.2 异步后训练基础设施</h4>
+<p>RL 的采样阶段一直受“长尾”拖累：一批里少数特别长的样本迟迟不结束，其他资源只能等。V4.1 把几乎所有 RL 和 OPD 任务都改成异步生成，靠维持足够高的并发来缓解长尾（异步 RL 的系统设计和它的代价，可对照 <a href="areal.html">AReaL 精读</a>）。几个要点：</p>
+<ul>
+  <li><b>同机分时</b>：采样和训练放在同一批设备上轮流执行，省去手工分配两者资源的麻烦；每个任务给定“在途样本数”的上限，系统在采样期间始终维持这个上限。</li>
+  <li><b>样本级派发</b>：每当新完成的样本数达到下一个提示所需的 GRPO 组大小，就派发这个提示，而不管这些完成的样本属于哪个组。作者试过两种更粗的粒度：开头多派几批、每次训练后补一整批，会让训练指标剧烈振荡；每完成一个组才派一个新提示，又容易被组内的长尾样本卡住。</li>
+  <li><b>拼接的路由重放</b>：样本攒够后训练抢占正在进行的采样；对跨越多个检查点生成的样本，把各段采样时的 MoE 专家路由拼接起来使用，而不是丢弃后用新检查点重算。</li>
+  <li><b>长度偏差</b>：异步时短样本先完成，会在早期主导训练批次。对策是按数据集限制并发（间接控制稳态批次里各数据集的比例），以及丢弃过早返回的短样本，平滑过渡到稳态的长度分布。</li>
+  <li><b>离策略</b>：部分样本是旧检查点生成的。对策是通过派发逻辑和等待条件给离策略比例设上限，并在训练时用损失掩码去掉“过于陈旧”的 token 的贡献。</li>
+  <li><b>快速中断与无缝恢复</b>：生成可以在任意 token 边界停下；KV 缓存和专家路由在生成过程中按 token 粒度持久保存，换上新检查点后直接复用，不必重新预填充，被中断的样本从断点接着生成；每个样本完成就立刻回收它的状态。同一套机制也让训练任务能及时响应集群的抢占信号而不丢进度。</li>
+  <li><b>大规模在线蒸馏</b>：最后一个阶段是全词表的 OPD，覆盖所有领域的数据，使用超过 40 个教师模型；各领域最好的教师可能来自不同的开发阶段，结构上也可能彼此不同、和学生不同。系统支持在训练中动态调整数据配比、并发上限和在用的教师，并在异步设置下让不同配置生成的在途样本平滑过渡。</li>
+</ul>
+<div class="note-warn"><b>两处值得留意：</b>
+<ul>
+  <li>“KV 缓存按 token 粒度持久保存、换检查点后直接复用”意味着，样本的后半段是在<b>旧策略算出的 KV</b> 上、由新策略接着生成的；这也是一种离策略来源。报告用“限制离策略比例 + 掩掉过旧 token”来控制，但没有量化这部分的影响。</li>
+  <li>“模型合并”“40 多个教师”“员工自愿返回的交互数据”都是能力提升的重要来源，但报告没有给出各自的贡献，也没有公开这些数据。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1 ↗</a> · <a href="https://arxiv.org/html/2609.19969v1#S5.SS2" target="_blank" rel="noopener">§5.2 ↗</a> · <a href="https://arxiv.org/html/2609.19969v1#A3" target="_blank" rel="noopener">附录 C ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-11">5.3 评测：和前沿模型比，以及换脚手架、换努力程度、多智能体</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>V4.1-Flash 的后训练模型在推理和智能体任务上处于什么水平？这些分数是在什么设置下测的，换一个智能体框架、换一档努力程度会差多少？哪些比较是对齐的，哪些不是？</div>
+<h4 id="n-11-1">5.3.1 设置</h4>
+<p>后训练评测集中在推理和智能体能力上，知识类能力主要由预训练决定，见 §4。推理用 GPQA Diamond、Humanity's Last Exam（HLE）、Codeforces（内部基准）、MathArena Apex，温度和 top-p 都取 1.0。智能体分四类：编程智能体（Terminal-Bench 2.1、3.0、4.0，DeepSWE v1.1，ProgramBench，NL2Repo-Bench），网络安全（SEC-Bench Pro、CyberGym、ExploitGym），通用智能体（AutomationBench、Agents' Last Exam），视觉智能体（Chartography、BabyVision、ZeroBench 主集）。编程智能体默认用 DeepSeek Harness 的 Minimal 模式、1M 上下文、温度 1.0、top-p 0.95；为符合官方要求，DeepSWE v1.1 用 mini-SWE 框架；SEC-Bench Pro 用 Claude Code 框架（看重它的会话压缩设计）；视觉智能体用 Claude Code 框架、512K 上下文。为减少评测中的钻空子，限制联网、删除 Git 历史，并自动清除各种构建和包缓存（Go 模块缓存、node_modules、编译好的 .jar、Python 的 pycache）。即便如此，测试中仍观察到寻找漏洞的行为，例如在 CyberGym 里反编译 Ubuntu 核心软件包找漏洞。作者呼吁社区在设计下一代基准时重视检测和防范这类行为。</p>
+<h4 id="n-11-2">5.3.2 主要结果（原文表 3，全部为最高努力程度）</h4>
+<div class="table-wrap"><table>
+<tr><th>基准</th><th class="num">Opus-5</th><th class="num">GPT-5.6 Sol</th><th class="num">K3</th><th class="num">GLM-5.3</th><th class="num">V4-Pro</th><th class="num">V4-Flash</th><th class="num">V4.1-Flash</th></tr>
+<tr><td>GPQA Diamond</td><td class="num">93.4</td><td class="num"><b>94.1</b></td><td class="num">92.9</td><td class="num">88.1</td><td class="num">92.4</td><td class="num">89.9</td><td class="num">90.9</td></tr>
+<tr><td>HLE</td><td class="num"><b>56.3</b></td><td class="num">44.5</td><td class="num">43.5</td><td class="num">42.0†</td><td class="num">42.7†</td><td class="num">37.8†</td><td class="num">36.8（39.1†）</td></tr>
+<tr><td>Codeforces（等级分）</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">—</td><td class="num">3348</td><td class="num">3289</td><td class="num"><b>3471</b></td></tr>
+<tr><td>MathArena Apex</td><td class="num">—</td><td class="num">—</td><td class="num"><b>65.6</b></td><td class="num">—</td><td class="num">65.3</td><td class="num">58.6</td><td class="num"><b>65.6</b></td></tr>
+<tr><td>Terminal-Bench 2.1</td><td class="num">89.1</td><td class="num">88.8</td><td class="num">88.3</td><td class="num">88.2</td><td class="num">87.9</td><td class="num">82.7</td><td class="num"><b>90.6</b></td></tr>
+<tr><td>Terminal-Bench 3.0</td><td class="num"><b>43.3</b></td><td class="num">34.4</td><td class="num">17.7</td><td class="num">28.3</td><td class="num">11.8</td><td class="num">7.6</td><td class="num">30.0</td></tr>
+<tr><td>Terminal-Bench 4.0</td><td class="num"><b>51.8</b></td><td class="num">39.9</td><td class="num">12.6</td><td class="num">37.9</td><td class="num">12.4</td><td class="num">7.0</td><td class="num">31.2</td></tr>
+<tr><td>DeepSWE v1.1</td><td class="num">74.0</td><td class="num">73.0</td><td class="num">67.5</td><td class="num">66.9</td><td class="num">62.7</td><td class="num">54.4</td><td class="num"><b>74.2</b></td></tr>
+<tr><td>ProgramBench（Almost@1）</td><td class="num"><b>37.0</b></td><td class="num">23.0</td><td class="num">17.5</td><td class="num">19.0</td><td class="num">15.5</td><td class="num">—</td><td class="num">20.3</td></tr>
+<tr><td>NL2Repo-Bench</td><td class="num"><b>75.3</b></td><td class="num">56.8</td><td class="num">58.0</td><td class="num">58.0</td><td class="num">61.5</td><td class="num">54.2</td><td class="num">65.4</td></tr>
+<tr><td>CyberGym</td><td class="num">—</td><td class="num">84.5</td><td class="num">80.0</td><td class="num">84.5</td><td class="num">83.3</td><td class="num">76.7</td><td class="num"><b>88.1</b></td></tr>
+<tr><td>SEC-Bench Pro</td><td class="num">—</td><td class="num"><b>74.3</b></td><td class="num">—</td><td class="num">—</td><td class="num">56.4</td><td class="num">30.9</td><td class="num">62.8</td></tr>
+<tr><td>ExploitGym</td><td class="num">22.1</td><td class="num"><b>33.7</b></td><td class="num">—</td><td class="num">15.0</td><td class="num">5.4</td><td class="num">1.8</td><td class="num">15.3</td></tr>
+<tr><td>HLE（带工具）</td><td class="num">63.6</td><td class="num">—</td><td class="num">59.8</td><td class="num">62.5</td><td class="num">60.0</td><td class="num">51.5</td><td class="num"><b>63.9</b></td></tr>
+<tr><td>AutomationBench</td><td class="num">50.3</td><td class="num">45.8</td><td class="num">46.7</td><td class="num">48.8</td><td class="num">43.2</td><td class="num">37.7</td><td class="num"><b>54.8</b></td></tr>
+<tr><td>Agents' Last Exam</td><td class="num">28.6</td><td class="num">26.7</td><td class="num">27.6</td><td class="num">28.5</td><td class="num">25.7</td><td class="num">25.2</td><td class="num"><b>31.8</b></td></tr>
+</table></div>
+<p>† 表示 HLE 的纯文本子集。视觉智能体三项只和 Opus-5、GPT-5.6 Sol、K3 比：Chartography 78.9（三者为 84.0、79.9、68.1），BabyVision 89.6（94.1、88.9、85.7），ZeroBench 主集 Pass@5 49.0（52.0、53.0、41.0）。表中模型名均按原文书写。</p>
+<p>作者的解读：相对 V4-Flash，推理和智能体两类都有明显提升，智能体任务上更突出。DeepSWE v1.1 从 54.4 升到 74.2，略高于 Opus-5（74.0）和 GPT-5.6 Sol（73.0）；Terminal-Bench 2.1 达到 90.6；AutomationBench 和 Agents' Last Exam 也是表中最高。网络安全任务上它是开源模型里最好的，作者提醒这类能力具有两用性，鼓励用于防御性研究和漏洞修复。在需要专家级领域知识的科学类智能体任务（Terminal-Bench 4.0）上，以及视觉智能体任务上，和最强的闭源模型仍有明显差距。</p>
+
+<h4 id="n-11-3">5.3.3–5.3.5 努力程度、脚手架与多智能体</h4>
+<p><b>努力程度。</b>把努力程度从 25 调到 100：八个推理密集基准（AIME 2026、Apex 2025 Shortlist、GPQA Diamond、HLE、IMO-AnswerBench、LiveCodeBench、MathArena Apex、SimpleQA-Verified）的平均 Pass@1 从 67.1% 升到 76.3%，DeepSWE v1.1 从 66.0% 升到 74.2%，Terminal-Bench 2.1 从 82.4% 升到 90.6%，代价是输出 token 多出约 2.5 倍。收益集中在前段：努力程度 60–80 就能拿回最高档的大部分精度，而 token 不到最高档的一半；从 80 再推到 100，智能体轨迹变长 1.6–1.8 倍，精度只略有提升。附录 B.3 的细节：从 25 到 100，各推理基准的平均回答长度增长 2.0–3.1 倍（AIME 2026 从 4.6k 到 11.4k token，MathArena Apex 2025 从 29.1k 到 86.1k）；MathArena Apex 2025 提升 40.3 个百分点（25.3% → 65.6%），Apex 2025 Shortlist 提升 11.5，已饱和的 GPQA Diamond 和 LiveCodeBench 只提升 1.3 和 2.6，AIME 2026 达到 100%。附录 B.2 补充了一个更谨慎的观察：在三种编程脚手架上，轨迹长度随努力程度单调增长，但准确率只是“大体上升”，多数面板里有平台和下降。</p>
+<p><b>换脚手架。</b>原文表 4 在 8 种配置（6 个脚手架家族）上测同一个检查点，解码配置和任务集相同，只换外层框架（DeepSWE v1.1 每题 8 个样本，Terminal-Bench 2.1 每题 3 个，1M 上下文，最多 500 轮）：</p>
+<div class="table-wrap"><table>
+<tr><th>基准</th><th class="num">Claude Code</th><th class="num">Codex</th><th class="num">OpenCode</th><th class="num">Pi</th><th class="num">mini-SWE</th><th class="num">DSH Minimal</th><th class="num">DSH Standard</th><th class="num">DSH PTC</th></tr>
+<tr><td>DeepSWE v1.1</td><td class="num">69.8</td><td class="num">65.6</td><td class="num">65.5</td><td class="num">66.2</td><td class="num"><b>74.2</b></td><td class="num">72.6</td><td class="num">70.5</td><td class="num">67.6</td></tr>
+<tr><td>Terminal-Bench 2.1</td><td class="num">88.0</td><td class="num">84.1</td><td class="num">85.0</td><td class="num">86.1</td><td class="num">90.3</td><td class="num"><b>90.6</b></td><td class="num">85.8</td><td class="num">85.8</td></tr>
+</table></div>
+<p>Claude Code 测了四个版本（附录表 5），DeepSWE v1.1 在 68.4–69.8 之间、平均 68.9，Terminal-Bench 2.1 在 87.3–88.4 之间、平均 87.8；表 4 用的是 v2.1.251。作者据此认为模型的智能体能力能在不同脚手架之间迁移，并把这归功于合成训练数据里环境、工具格式和交互方式的多样性。</p>
+<p><b>多智能体（初步）。</b>DeepSeek Harness 的 Agent Team 模式里，一个主智能体可以异步创建有名字、持久存在的队友（<code>spawn_teammate</code>），每个队友领一个子任务，从零开始或者带着主智能体历史的一次性快照开始；所有智能体共用一份代码仓库，改动立即互相可见；通过一个持久的邮箱互发消息，用共享的任务板记录任务归属、依赖和建议的写入范围；只有主智能体能中断队友。训练用的 RL 奖励由三部分组成：任务表现、鼓励分工和沟通的协作奖励、以及一个“推导延迟”惩罚——把执行事件和协作依赖画成有向无环图，按固定的预填充/解码速率把 token 数折算成时间、加上实测的工具执行时间，取关键路径长度，从而鼓励有用的并行、惩罚不必要的串行和同步。在 ProgramBench 的 172 个“黄金”任务（参考答案在隐藏测试上通过率不低于 95% 的子集，每题最多 3 次运行，共 516 次）上，按每次运行的墙钟截止时间统计：多智能体的 Almost@1 从 1 小时的 13.59% 升到 8 小时峰值 30.04%，单智能体从 12.79% 升到 20.39%；在 FrontierSWE v2 的无 GPU 公开子集上，Mean@5 从 1 小时的 13.50% 升到 20 小时的 32.90%，单智能体从 10.50% 升到 28.20%。作者说明这是初步结果，比较的是“观察到的最强多智能体配置”和“现有最强的单智能体基线”。</p>
+
+<h4 id="n-11-4">结果的份量</h4>
+<ul>
+  <li><b>对手的分数从哪来，没有说明。</b>表 3 没有交代 Opus-5、GPT-5.6 Sol、K3、GLM-5.3 的分数是 DeepSeek 自己用同一框架重测的，还是取自各家公布的数字；HLE 一行里有的模型只有纯文本子集的分数，口径不完全一致。V4 报告曾说明重测过部分对手，这份报告没有类似说明。</li>
+  <li><b>脚手架是选过的。</b>V4.1-Flash 的 DeepSWE 74.2 来自 mini-SWE，Terminal-Bench 2.1 的 90.6 来自 DeepSeek 自己的 Harness；表 4 显示换成 Codex 或 OpenCode 会低约 6–9 个百分点。用自家框架、在对手可能用的不同框架上比较，差距中有一部分可能来自框架而不是模型。</li>
+  <li><b>都是最高努力程度。</b>表 3 全部是努力程度 100 的结果，输出 token 约是低档的 2.5 倍。比较成本时要用同一档。</li>
+  <li><b>KV 压缩的代价在这里同样无法分离。</b>与 V4-Flash 的对比同时包含了参数翻倍、数据更多、后训练数据大改、多模态和所有结构改动；长程智能体基准在 1M 上下文下运行，间接考验了压缩后的长上下文能力，但没有一项基准是专门测“压缩前后”的。报告没有 FP4 vs FP8 KV、有界重放 vs 精确重建、CSA2 vs CSA/HCA 的任何对照数字。</li>
+  <li><b>效率没有端到端数字。</b>890 字节、1/4、预填充减半都是按设计算的；1/8 是生产负载下的观察；报告没有给出吞吐、延迟、每百万 token 成本或缓存命中率。“15 个和 11 个内核”是内核数，不是耗时。</li>
+  <li><b>一处数字不一致。</b>NL2Repo-Bench 上 V4.1-Flash 的分数，论文表 3 是 65.4，Hugging Face 模型卡的同一张表是 64.0（2026-10-20 查看）。</li>
+  <li><b>多智能体结果有选择偏差。</b>作者自己说比较的是“观察到的最强配置”，属于事后挑选；ProgramBench 子集也是按参考答案通过率筛过的。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S5.SS3" target="_blank" rel="noopener">英文原文 §5.3 ↗</a> · <a href="https://arxiv.org/html/2609.19969v1#A2" target="_blank" rel="noopener">附录 B ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-12">6 结论、局限与未来方向</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者怎样总结这份工作？他们自己承认了哪些风险和局限？</div>
+<p>作者的总结与摘要一致：通过模型结构、缓存精度和部署策略的联合优化，V4.1-Flash 把常驻显存的全局 KV 压到每个 token 890 字节（约为 V4-Flash 的 1/4），把持久 KV 压到约 1/8；CED 让预填充每个 token 只激活 8B 参数；整体表现明显好于 V4-Flash，参数量比 GLM-5.3、Kimi-K3 小得多，却在多项基准上相当或更好。</p>
+<p>作者自己列出的局限值得原样记住：V4.1-Flash 虽然在若干部件上简化了 V4，但新引入的结构也带来了尚未完全刻画的“鲁棒性边界”。内部评测覆盖了大量测试用例和边界条件，没有观察到系统性的能力退化，但有限的测试集不可能覆盖所有极端输入和部署条件；<b>CSA2 的选择错误</b>和<b>有界重放的近似状态重建</b>，都可能在没测到的边界情况下导致能力下降。今后的压力测试会特别关注长上下文中的稀疏检索，以及缓存恢复边界处的 SWA 状态重建，并在真实负载中监测失效模式。</p>
+<p>关于评测，作者承认标准基准越来越饱和；V4.1-Flash 在日常使用中的体验接近顶级闭源模型，但在最难的任务上仍有差距，基准分数上的小差距并不意味着在复杂、高难度推理和边缘情况上与前沿闭源系统相当。未来方向是数据、模型容量和 RL 的协同扩展，大规模数据合成，以及“模型—脚手架”联合设计。</p>
+<div class="note-warn"><b>一个小的不一致：</b>结论里拿来对照的闭源模型名字（Fable-5、GPT-6 Astra）和表 3 里的对手（Opus-5、GPT-5.6 Sol）不同，报告里没有前两者的任何分数，所以这句比较无从核对。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2609.19969v1#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>先说清楚时间：这份报告的 arXiv v1 是 2026-09-17 提交的（截至 2026-10-20 仍只有 v1），权重比报告早一周上线。到本页写作时只过去一个多月，<b>后续工作还很少</b>：Semantic Scholar 的快照（2026-10-19）显示它已被引用 107 次，但其中“高影响力引用”只有 4 次，说明大多数引用只是顺带提及；本站没有找到任何独立复现“KV 压缩几乎不掉精度”这一结论的工作，也没有找到第三方在 MRCR、RULER、大海捞针这类长上下文检索基准上的评测。下面列出目前能查证的事实。</p>
+<h4 id="n-impact-1">推理引擎与内核</h4>
+<ul>
+  <li><b>vLLM</b>：模型支持的 PR（#56214，“Support DeepSeek-V4.1-Flash”）于 2026-09-10 提交、09-11 合入。截至 2026-10-20，vLLM 仓库里还有一批带 “DSv4.1” 标签的进行中工作，例如 DSpark 与预填充上下文并行的配合、Engram 表卸载到磁盘以适应内存紧张的节点、修复 V4.1 的提示渲染等。</li>
+  <li><b>SGLang</b>：权重发布当天（2026-09-10）合入了 V4.1-Flash 的使用手册，其余模型与运行时的集成在 2026-09-18 合入；之后陆续合入了两级候选索引器在 DeepGEMM 分页稀疏 MQA 内核上的实现等改进，AMD 平台的支持等 PR 截至 2026-10-20 仍在进行中。</li>
+  <li><b>FlashMLA</b>：2026-09-10 发布了 V4.1 的注意力内核（预填充与解码，支持 FP8 或 FP4 KV 缓存），以及融合了 RoPE、注意力和转精度的内核；2026-09-30 的版本移除了对 Hopper 架构和 V3、V3.2、V4.0 等旧模型的支持，并改变了 FP8/FP4 缓存格式。这说明 FP4 主 KV 的高效实现目前是面向 Blackwell 一代硬件的。</li>
+</ul>
+<h4 id="n-impact-2">权重与采用</h4>
+<p>权重以 MIT 许可证发布在 Hugging Face，附带一个可读的推理参考实现（视觉编码器、两级索引器、Engram 查表、MoE、mHC 和 DSpark 前向都在里面，生成部分是朴素的自回归采样）和复现 DeepSWE 成绩的说明。截至 2026-10-20，模型页有 4,666 个点赞，Hugging Face API 显示近 30 天下载约 143 万次。本页的多处核对（层配置、Engram 规模、FP4 格式、无短卷积）就是对着这份官方配置和代码做的。</p>
+<h4 id="n-impact-3">放回 DeepSeek 的技术脉络里</h4>
+<p>注意力这一条线可以连起来读：MLA 把每层的条目压成一个潜向量（<a href="deepseek-v3.html#n-2-1">V3 精读</a>）；DSA 让注意力只看 top-k 个条目，省计算不省存储（<a href="deepseek-v3-2.html#n-2">V3.2 精读</a>，以及更早的 <a href="native-sparse-attention.html">NSA</a>）；V4 的 CSA/HCA 沿序列方向压缩条目（<a href="deepseek-v4.html#n-4">V4 精读 §4</a>）；V4.1 的 CSA2 转而沿层方向共享，再加 FP4 和有界重放。Engram（<a href="conditional-memory.html">Engram 精读</a>）是另外一条稀疏维度，不碰 KV，从 V4.1 起正式进入 DeepSeek 的大模型。DeepSeek“为硬件设计模型”的一贯思路，见 <a href="deepseek-v3-hardware.html">V3 硬件反思精读</a>。</p>
+<p>和其他压 KV 的路线放在一起比较也有意思。<b>训练后量化</b>（<a href="kivi.html">KIVI</a>）不需要重训，但精度代价由模型被动承受；<b>按重要性淘汰</b>（<a href="snapkv.html">SnapKV</a> 依据问题决定保留哪些位置，<a href="kvzip.html">KVzip</a> 做与问题无关的压缩）直接丢掉一部分 token，信息不可恢复，而且对多轮复用不友好；<b>分层存储</b>（<a href="lmcache.html">LMCache</a>、<a href="mooncake.html">Mooncake</a>）不压 KV，而是把它搬到更便宜的存储里。V4.1 选的是第四条路：在预训练时就把压缩写进结构，所有位置都保留，只是让条目更小、让层与层共享，再让部署系统围绕这个结构设计缓存策略。它的好处是压缩比极高而且对任何查询都一样，代价是只有从头训练的模型才能用，外界也无法单独评估每一步的精度损失。其他稀疏注意力路线可对照 <a href="minimax-sparse-attention.html">MiniMax Sparse Attention</a>、<a href="moba.html">MoBA</a>、<a href="xattention.html">XAttention</a>。</p>
+<p>值得接下来关注的问题：第三方能否在长上下文检索基准上测出 CSA2 与 FP4 的代价；跨层共享 KV 和下标的做法（IndexCache、YOIO、HySparse 一类）会不会被其他模型采用；FP4 KV 缓存会不会成为推理引擎的通用选项。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">报告的署名是机构 DeepSeek-AI，不是个人。下面只列能从报告本身、相关论文和官方仓库查证的信息，不推测个人背景。</p>
+<div class="author-cards">
+  <div class="author-card senior"><b>DeepSeek-AI</b><div class="aff">署名机构，联系邮箱 research@deepseek.com</div>DeepSeek 的研究团队。V4.1-Flash 沿用的 MLA、DSA、CSA 分别来自同样署名 DeepSeek-AI 的 V2、V3.2、V4 报告。arXiv 上本报告的提交人是 Wenfeng Liang。</div>
+  <div class="author-card"><b>附录 A：贡献者名单</b><div class="aff">分两组，组内按名字字母排序</div>本站按附录 A 清点：研发与工程 465 人、业务与合规 126 人，共 591 人；名字后带星号的 9 人已离开团队。报告没有标注第一作者或通讯作者。</div>
+  <div class="author-card"><b>与被集成部件的作者重合</b><div class="aff">可从各论文与仓库查证</div>Engram 和 DSpark 两篇论文的第一作者都是 Xin Cheng，mHC 论文的第一作者是 Zhenda Xie，三篇的末位作者都是 Wenfeng Liang。按各内核仓库给出的引用格式，DeepGEMM 的第一作者是 Chenggang Zhao，FlashMLA 的作者是 Jiashi Li、Shengyu Liu、Yuanhang Sun，DeepSelect 的作者是 Yi Qian、Shengyu Liu、Yichen Li。除 Yichen Li 外，这些名字都出现在附录 A 的名单里。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表形式</b>：技术报告，只在 arXiv 发布（v1，2026-09-17），没有经过会议或期刊评审。</li>
+  <li><b>开源</b>（截至 2026-10-20）：<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash" target="_blank" rel="noopener">deepseek-ai/DeepSeek-V4.1-Flash</a> 权重与代码均为 MIT 许可证，4,666 个点赞，近 30 天下载约 143 万次；配套注意力内核在 <a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">FlashMLA</a>（约 13.1k star，该仓库服务多个模型）。</li>
+  <li><b>采用</b>：vLLM 在权重发布次日合入模型支持，SGLang 首日提供使用手册、一周后合入完整集成（见上文“后来怎么样了”）。</li>
+  <li><b>后续研究</b>：发布仅一个多月，尚无独立复现或专门的后续论文（截至 2026-10-20 本站检索所见）。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="deepseek-v4.html">DeepSeek-V4</a>、<a href="deepseek-v3-2.html">DeepSeek-V3.2</a>、<a href="kivi.html">KIVI</a></li>
+  <li><a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4 结构拆解</a> 与 <a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek 稀疏注意力结构拆解</a>：CSA/HCA 与 DSA 的可点击架构图和简答题。</li>
+  <li><a href="lmcache.html">KV 缓存分层存储</a>：持久 KV 缓存放在 CPU 内存、SSD、远端存储时的系统问题。</li>
+  <li><a href="nvfp4.html">FP4 训练</a> 与 <a href="fp8-formats.html">FP8 格式</a>：低精度格式的背景。</li>
+  <li><a href="../legacy/tracks/ai-infra/05-speculative-decoding.html">投机解码</a>、<a href="../legacy/tracks/ai-infra/06-pd-disaggregation.html">PD 分离</a>、<a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：DeepSeek-AI. <em>DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression.</em> <a href="https://arxiv.org/abs/2609.19969" target="_blank" rel="noopener">arXiv:2609.19969</a>（v1，2026-09-17），以 arXiv 非独占分发许可（<a href="https://arxiv.org/licenses/nonexclusive-distrib/1.0/" target="_blank" rel="noopener">arXiv.org perpetual non-exclusive license</a>）发布，该许可不允许转载原图。本页是对报告的中文精读笔记，并非翻译；正文与所有示意图均为本站撰写和绘制，按原文数字重画的简化图已在图注中说明。层配置、Engram 规模与缓存格式另据官方 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash" target="_blank" rel="noopener">Hugging Face 仓库</a>（MIT）的 config.json 与推理代码、以及 <a href="https://github.com/deepseek-ai/FlashMLA" target="_blank" rel="noopener">FlashMLA</a> 文档核对。数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

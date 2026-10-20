@@ -34,6 +34,13 @@
     - KV cache 与量化：[SnapKV](papers/snapkv.html)、[KIVI](papers/kivi.html)、[QuaRot](papers/quarot.html)
     - 投机解码：[Medusa](papers/medusa.html)、[EAGLE 1 / 2 / 3](papers/eagle.html)
     - 训练系统：[MegaScale](papers/megascale.html)
+  - 2025–26 与旧版路线补全：
+    - 调度、缓存与服务：[Orca](papers/orca.html)、[FlashInfer](papers/flashinfer.html)、[LMCache](papers/lmcache.html)、[KVzip](papers/kvzip.html)、[DSpark](papers/dspark.html)、[批不变性](papers/batch-invariance.html)
+    - 算子与稀疏注意力：[FlashAttention-4](papers/flashattention-4.html)、[XAttention](papers/xattention.html)、[MoBA](papers/moba.html)、[MiniMax 稀疏注意力](papers/minimax-sparse-attention.html)
+    - 低精度与优化器：[FP8 格式](papers/fp8-formats.html)、[NVFP4 预训练](papers/nvfp4.html)、[Muon](papers/muon.html)
+    - 高效架构：[Gated DeltaNet](papers/gated-deltanet.html)、[Kimi Linear](papers/kimi-linear.html)、[门控注意力](papers/gated-attention.html)
+    - DeepSeek 系列：[V3 硬件反思](papers/deepseek-v3-hardware.html)、[V3.2（DSA）](papers/deepseek-v3-2.html)、[V4](papers/deepseek-v4.html)、[V4.1-Flash](papers/deepseek-v4-1-flash.html)、[条件记忆](papers/conditional-memory.html)
+    - RL 训练系统：[AReaL](papers/areal.html)
 - 统一多模态：[视觉生成能扩展 UMM 的知识吗](papers/visual-generation-knowledge.html)
 - 扩散 LLM。每页的“结果的份量”写明和自回归模型比时对齐了什么（参数、训练 token、步数、批大小、对照系统）。
   - 噪声与目标：

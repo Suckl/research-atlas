@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>门控注意力（Gated Attention）精读</title>
+<meta name="description" content="Qwen 团队 NeurIPS 2025 最佳论文《Gated Attention for Large Language Models》的逐节精读：注意力输出上的 sigmoid 门为什么有效，它怎样消除注意力汇和超大激活、让大学习率训练更稳、让长上下文外推更好，以及这些对量化、KV 缓存和 Qwen3-Next 混合架构意味着什么。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="gated-attention">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · NeurIPS 2025（Oral，最佳论文奖）</div>
+  <h1>门控注意力：在注意力输出后加一道门，模型为什么更好、更稳，而且没有“注意力汇”</h1>
+  <p class="en-title">Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free</p>
+  <div class="paper-authors">Zihan Qiu<sup>1,*</sup>, Zekun Wang<sup>1,*</sup>, Bo Zheng<sup>1,*</sup>, Zeyu Huang<sup>2,*</sup>, Kaiyue Wen<sup>3</sup>, Songlin Yang<sup>4</sup>, Rui Men<sup>1</sup>, Le Yu<sup>1</sup>, Fei Huang<sup>1</sup>, Suozhi Huang<sup>5</sup>, Dayiheng Liu<sup>1</sup>, Jingren Zhou<sup>1</sup>, Junyang Lin<sup>1</sup></div>
+  <div class="paper-affil"><sup>1</sup>Qwen Team, Alibaba Group　<sup>2</sup>University of Edinburgh　<sup>3</sup>Stanford University　<sup>4</sup>MIT　<sup>5</sup>Tsinghua University　<sup>*</sup>论文以星号标注，正文未写明含义（通常表示共同一作）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2505.06708" target="_blank" rel="noopener">arXiv 2505.06708 ↗</a>
+    <a class="pill" href="https://proceedings.neurips.cc/paper_files/paper/2025/hash/904e89bb4e632e75fb47f093b620b257-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2025 ↗</a>
+    <a class="pill" href="https://github.com/qiuzh20/gated_attention" target="_blank" rel="noopener">Code: qiuzh20/gated_attention ↗</a>
+    <a class="pill" href="https://huggingface.co/QwQZh/gated_attention" target="_blank" rel="noopener">模型：QwQZh/gated_attention ↗</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>988</b><span>GitHub star（qiuzh20/gated_attention，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页依据 NeurIPS 2025 会议版（proceedings 里的 PDF），并逐节对照 arXiv v1（2025-05-10，截至 2026-10-20 arXiv 上只有这一个版本）；两版有出入的地方在相应位置注明。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍；附录里的实验并进它们所支撑的那一节一起讲。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 arXiv 非独占许可发布，原图不能转载，所以本页的图都是本站自己画的示意图，或根据论文表格里的数字重画的简图，并附上原图链接。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。第 7 节“从 Infra 的角度看”是本站补充的内容，论文本身没有这一节。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>“门”（gate）是神经网络里最老的部件之一：用一个取值在 0 到 1 之间的数去乘另一路信号，决定这路信号放过多少。LSTM 用门决定记住什么、忘掉什么；今天几乎所有开源大模型的前馈层都是带门的 SwiGLU；Mamba、各种线性注意力（包括本站的 <a href="gated-deltanet.html">Gated DeltaNet</a>）也都在输出上加了门。可是大模型里最核心的那个部件，标准的 softmax 注意力，在主流模型里一直是“不带门”的。偶尔有新设计在注意力里加了门，门又总是和别的改动（路由、稀疏选择）捆在一起，没人能说清楚：好处到底来自门本身，还是来自那些别的改动。</p>
+<p>这篇来自阿里 Qwen 团队的论文，专门把“门”从别的因素里剥离出来研究。作者在标准 softmax 注意力的五个不同位置加门，再改变门的粒度、是否各头独立、乘法还是加法、用什么激活函数，一共比较了 30 多个变体。实验规模在学术论文里很少见：一个总参数 15B、每个 token 激活 2.54B 的混合专家（MoE）模型，以及 1.7B 的稠密模型，训练数据最多 3.5T token。结论非常简单：<b>在每个注意力头的输出（也就是 softmax 加权求和之后、输出投影 \(W_O\) 之前）乘上一个由当前 token 算出来的 sigmoid 门</b>，效果最好。在 MoE 模型上训 400B token，平均困惑度从 6.026 降到 5.761，MMLU 从 58.79 升到 60.82；在 1.7B 稠密模型上，训练时的损失尖峰几乎消失；把学习率加到 8e-3 时，基线严重退化甚至发散，加门的模型不但能稳定训练，效果还更好。</p>
+<p>更有意思的是作者对“为什么有效”的解释。第一，注意力里 value 投影和输出投影是两个紧挨着的线性层，中间没有任何非线性，合起来只是一个低秩的线性映射；门在中间插进了非线性。第二，训练出来的门分数大多接近 0，而且随 query 变化，相当于让每个头“这一次可以不发言”。有了这个能力，模型就不再需要靠把注意力堆到第一个 token 上来“假装不发言”：分给第一个 token 的注意力从平均 46.7% 降到 4.8%，这就是标题里的 <b>attention-sink-free</b>（没有注意力汇）；同时残差流里的超大激活值从 1053 降到 94。没有了注意力汇，模型用 YaRN 外推到 128K 上下文时，RULER 分数从 31.65 提高到 58.82。</p>
+<p>这是一篇架构论文，但和推理、训练系统关系很深：注意力汇和超大激活正是量化（见 <a href="quarot.html">QuaRot 精读</a>、<a href="kivi.html">KIVI 精读</a>）和 KV 缓存压缩（见 <a href="snapkv.html">SnapKV 精读</a>里讲的 StreamingLLM）里那些“特殊处理”的来源；大学习率下的稳定性直接关系到大规模训练会不会中途崩掉；门本身几乎不花算力、不改注意力内核、不增加 KV 缓存。这个设计后来进入了 Qwen3-Next 和 Qwen3.5，和 <a href="gated-deltanet.html">Gated DeltaNet</a> 一起组成 3:1 的混合架构。不过要先说清楚：论文本身<b>没有</b>做任何量化或 KV 压缩实验，这些方面的好处是本站根据论文的测量推断的，后面会一一标明。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>门加在注意力的哪五个位置？为什么偏偏是“SDPA 输出之后”这个位置最好？</li>
+  <li>“value 投影和输出投影合起来是低秩映射”是什么意思？门怎么缓解它，又有哪些它解释不了的现象？</li>
+  <li>门分数的“稀疏”指什么？为什么必须依赖当前 query、必须每个头各自一套？</li>
+  <li>注意力汇和超大激活是什么？它们为什么让量化和 KV 缓存压缩变麻烦？门是怎么把它们消掉的？</li>
+  <li>“更稳、能用更大的学习率”是在什么模型、什么设置下测出来的？</li>
+  <li>每组比较里，什么是对齐的（训练 token、超参、参数量），什么没有对齐？这些数字能说明多少问题？</li>
+  <li>Qwen3-Next / Qwen3.5 是怎样用它的？它的推理代价是多少？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2505.06708" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：门到处都在用，但门本身贡献了多少，没人单独量过</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>门控机制在各种网络里都很成功，但大家通常把它当作一个更大设计的一部分加进去，很少单独研究它。作者为什么认为这是个问题？他们拿什么例子说明“门的作用被别的设计掩盖了”？他们打算怎么研究，最后得出了哪些结论？</div>
+
+<div class="note-pre"><b>先补一点背景：神经网络里的“门”是什么。</b>
+<p>一个门由两部分组成：一路被调节的信号 \(Y\)，和一路用来算门分数的输入 \(X\)。门分数通常是 \(\sigma(XW_\theta)\)，其中 \(W_\theta\) 是可学习的权重，\(\sigma\) 是 sigmoid 函数 \(\sigma(z)=1/(1+e^{-z})\)，它把任何实数压到 0 和 1 之间。输出是两者逐元素相乘：\(Y'=Y\odot\sigma(XW_\theta)\)。门分数接近 1，信号几乎原样通过；接近 0，信号几乎被抹掉。所以门不能“创造”信息，只能根据 \(X\) 决定 \(Y\) 的每一维放过多少。</p>
+<p>几个熟悉的例子：</p>
+<ul>
+  <li><b>LSTM、GRU</b>：用遗忘门、输入门、输出门控制每一步记住多少旧状态、写入多少新信息。这是门最早的用途，目的是让梯度能穿过很多个时间步。</li>
+  <li><b>Highway Network</b>：在层与层之间加门，决定这一层的输出和输入各占多少，让非常深的前馈网络也能训练。</li>
+  <li><b>SwiGLU</b>：今天 LLaMA、Qwen 这类模型的前馈层，算的是 \(\big(\mathrm{SiLU}(xW_1)\odot xW_3\big)W_2\)。其中一路 \(xW_3\) 被另一路 \(\mathrm{SiLU}(xW_1)\) 逐元素调节，这也是一种门（只不过用的是 SiLU，它的取值不限于 0 到 1）。</li>
+  <li><b>Mamba、线性注意力</b>：这些模型在输出上普遍有一道门。例如 Gated DeltaNet 层的输出是 \(\mathrm{RMSNorm}(o_t)\odot\mathrm{SiLU}(z_t)\)，再乘输出投影（见旧版 <a href="../legacy/tracks/ai-infra/11-gated-deltanet.html">Gated DeltaNet 拆解</a>）。</li>
+</ul>
+<p>而标准的 softmax 注意力（Transformer 原始论文那一种）没有门：每个头的输出直接拼起来乘 \(W_O\)，再加回残差流。</p>
+</div>
+
+<p>作者认为，对门的理解不够，会让人误判别的设计到底有没有用。他们举了两个例子。</p>
+<p>第一个是 <b>Switch Heads</b>：它把注意力头做成“专家”，每个 token 用 sigmoid 路由从一组 key / value / 输出专家里选 top-k 个。原论文的结论是这种稀疏激活有好处，专家越多越好。但作者在附录 A.1 里做了一组对照（都在 15A2B 的 MoE 模型上训 400B token）：</p>
+<div class="table-wrap"><table>
+<tr><th>变体（附录表 6）</th><th class="num">新增参数</th><th class="num">困惑度</th><th class="num">MMLU</th><th class="num">GSM8k</th></tr>
+<tr><td>基线（32 个 query 头，4 个 KV 头）</td><td class="num">—</td><td class="num">6.026</td><td class="num">58.79</td><td class="num">52.92</td></tr>
+<tr><td>Switch kv，8 个专家选 8 个</td><td class="num">38M</td><td class="num">5.847</td><td class="num">59.17</td><td class="num">52.54</td></tr>
+<tr><td>Switch kv，4 选 4</td><td class="num">13M</td><td class="num">5.935</td><td class="num">58.14</td><td class="num">53.27</td></tr>
+<tr><td>Switch v，4 选 4</td><td class="num">13M</td><td class="num">5.820</td><td class="num">59.02</td><td class="num">52.77</td></tr>
+<tr><td>Switch v，8 选 2</td><td class="num">25M</td><td class="num">5.870</td><td class="num">59.10</td><td class="num">53.53</td></tr>
+<tr class="hl"><td>Switch v，1 选 1（只剩一个专家，等于给 value 加一道逐头的门）</td><td class="num">3M</td><td class="num">5.808</td><td class="num">59.32</td><td class="num">53.53</td></tr>
+</table></div>
+<p>最好的反而是“1 选 1”：只有一个专家，根本谈不上路由和选择，剩下的只是 sigmoid 路由分数乘在 value 输出上，也就是一道门。这说明 Switch Heads 的收益里，相当一部分可能来自门本身，而不是来自“选专家”。第二个例子是 <b>NSA</b>（原生稀疏注意力，见本站 <a href="native-sparse-attention.html">NSA 精读</a>）：它用三条分支（压缩、选择、滑动窗口）分别算注意力，再用由输入算出的 sigmoid 门把三条分支的输出加权合起来。NSA 的论文展示了整体的提升，但没有把“门”的贡献和“稀疏注意力”的贡献分开。</p>
+<p>所以作者回到最简单的情形：标准 softmax 注意力，只加门，不做别的改动。他们比较门放在五个位置（后面第 2 节画了图）：query 投影之后（\(G_4\)）、key 投影之后（\(G_3\)）、value 投影之后（\(G_2\)）、SDPA 输出之后（\(G_1\)）、最后的输出投影之后（\(G_5\)）；还比较了逐元素和逐头、各头独立和各头共享、乘法和加法等变体。主要发现有两条：</p>
+<ul>
+  <li>在 SDPA 输出上加<b>各头独立</b>的门（\(G_1\)）提升最大：困惑度最多降约 0.2，MMLU 最多提高约 2 分。</li>
+  <li>这道门还让训练更稳定：损失尖峰几乎消失，可以用更大的学习率，模型的扩展性也更好。</li>
+</ul>
+<p>作者把它有效的原因归结为两点。一是<b>非线性</b>：value 投影 \(W_V\) 和输出投影 \(W_O\) 是连续的两个线性层，可以合并成一个低秩的线性映射，在 \(G_1\) 或 \(G_2\) 加门就给这个映射加入了非线性（第 4.1 节）。二是<b>稀疏</b>：有效的门，分数大多接近 0，而且随输入变化，给 SDPA 的输出带来了依赖输入的稀疏性（第 4.2 节）。这种稀疏的门还消除了<b>超大激活</b>和<b>注意力汇</b>（第 4.3 节），并让模型在上下文外推时在 RULER 上提高 10 分以上（第 4.4 节）。</p>
+<div class="note-pre"><b>原文图 1 画了什么（本站转述）。</b>
+<p>图 1 分三块。左边是一个注意力层的结构图，标出了五个加门的位置，\(G_1\) 旁边写着“最有效”（本页第 2 节的示意图画的是同一件事）。中间是 15A2B MoE 模型上各个位置加门后的测试困惑度和 MMLU，\(G_1\) 两项都最好，\(G_2\) 困惑度也降得很多（本页第 3.2 节把表 1 的数字重画成了条形图）。右边是 1.7B 稠密模型在相同超参下训练几万亿 token 的损失曲线（平滑系数 0.9）：基线的曲线上有多处向上的尖刺，加门的曲线几乎没有，而且最终损失更低。原图见 <a href="https://arxiv.org/html/2505.06708#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a>。</p>
+</div>
+<p>会议版在引言末尾加了一条“实用建议”：想要最好的效果，就用逐元素的 \(G_1\) 门，并把学习率适度调大。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>这里的“稀疏”是指<b>门分数的数值大多接近 0</b>，不是稀疏注意力那种“跳过一部分 token 不算”。加门之后，每个 query 仍然和所有 key 算一遍注意力，计算量一点没少，反而多了一点算门的开销。不要把“sparsity”读成“加速”。</li>
+  <li>这里的门也不是在挑选 token 或挑选专家。它只是对每个头的输出（逐元素或整体）乘一个 0 到 1 之间的数。</li>
+  <li>图 1 右边那条训练曲线的长度，arXiv 版图注写 3.5T token，会议版图注写 3T token；正文表 2 的设置是 3.5T。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2505.06708#A1.SS1" target="_blank" rel="noopener">附录 A.1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 门控注意力层：门可以加在哪里，可以长什么样</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个标准的多头注意力层，从输入到输出要经过哪几步？门可以插在其中哪几个位置？除了位置，门还有哪些可以变的地方（粒度、各头是否共享、乘还是加、用什么激活函数）？每种门要多少额外参数？</div>
+
+<h4 id="n-2-1">2.1 先把多头 softmax 注意力拆成四步</h4>
+<div class="note-pre"><b>先补一点背景：pre-norm、多头注意力和 GQA。</b>
+<p><b>pre-norm。</b>现在的大模型每一层都写成 \(h\leftarrow h+\mathrm{Attn}(\mathrm{Norm}(h))\)、\(h\leftarrow h+\mathrm{FFN}(\mathrm{Norm}(h))\)：残差流 \(h\) 先做一次归一化（通常是 RMSNorm），再送进注意力或前馈层，结果直接加回残差流。论文里的输入 \(X\)，指的就是<b>归一化之后</b>送进注意力的那个隐状态。门分数也用这个 \(X\) 算（论文脚注 1）。</p>
+<p><b>多头。</b>注意力被分成 \(h\) 个头，每个头有自己的一套 query / key / value 投影，各自在一个 \(d_k\) 维的小空间里算注意力（本文所有模型 \(d_k=128\)）。各头的输出拼接起来，再乘输出投影 \(W_O\) 变回模型维度 \(d_{\text{model}}\)。</p>
+<p><b>GQA（分组查询注意力）。</b>为了让推理时的 KV 缓存小一些，很多模型让若干个 query 头共用同一组 key / value 头。论文 MoE 模型有 32 个 query 头、4 个 KV 头，所以每 8 个 query 头共用一个 \(W_V\) 和 \(W_K\)。KV 缓存只按 4 个头存，是不分组时的 1/8。这个细节在第 4.1 节会再出现：共用 \(W_V\) 让“低秩”问题更严重。</p>
+</div>
+<p>给定输入 \(X\in\mathbb{R}^{n\times d_{\text{model}}}\)（\(n\) 个 token），注意力层分四步：</p>
+<ol>
+  <li><b>QKV 线性投影</b>：\(Q=XW_Q,\ K=XW_K,\ V=XW_V\)。</li>
+  <li><b>缩放点积注意力（SDPA）</b>：\(\mathrm{Attention}(Q,K,V)=\mathrm{softmax}\big(QK^\top/\sqrt{d_k}\big)V\)。softmax 保证每一行的注意力权重非负、加起来等于 1。</li>
+  <li><b>多头拼接</b>：每个头各算一遍第 2 步，结果拼成 \(\mathrm{Concat}(\mathrm{head}_1,\dots,\mathrm{head}_h)\)。</li>
+  <li><b>输出层</b>：拼接结果乘 \(W_O\in\mathbb{R}^{hd_k\times d_{\text{model}}}\)，得到这一层的输出，加回残差流。</li>
+</ol>
+<p>拿论文 MoE 模型的尺寸走一遍（附录表 7）：\(d_{\text{model}}=2048\)，32 个 query 头，所以 \(Q\) 的宽度是 \(32\times128=4096\)，比 \(d_{\text{model}}\) 还宽；4 个 KV 头，所以 \(K\)、\(V\) 的宽度各是 \(4\times128=512\)；SDPA 的输出拼起来宽 4096，乘 \(W_O\)（\(4096\times2048\)）回到 2048。</p>
+
+<h4 id="n-2-2">2.2 门的统一写法，和五个要比较的方面</h4>
+<p>论文把所有门写成同一个式子：</p>
+<div class="formula">$$Y'=g(Y,X,W_\theta,\sigma)=Y\odot\sigma(XW_\theta)$$</div>
+<p>\(Y\) 是被调节的那一路（比如某一步的输出），\(X\) 是用来算门分数的输入（pre-norm 之后的隐状态），\(W_\theta\) 是门的参数，\(\sigma\) 是激活函数。门分数 \(\sigma(XW_\theta)\) 像一个动态的滤网：根据当前输入，决定 \(Y\) 的每一维保留多少。作者从五个方面比较不同的门：</p>
+<ol>
+  <li><b>位置</b>。\(G_4\)、\(G_3\)、\(G_2\) 分别在 query、key、value 投影之后；\(G_1\) 在 SDPA 的输出之后（拼接和 \(W_O\) 之前）；\(G_5\) 在 \(W_O\) 之后，也就是整个注意力层的输出上。</li>
+  <li><b>粒度</b>。<b>逐头</b>（headwise）：每个头只有一个标量门分数，整个头的输出一起放大或缩小；<b>逐元素</b>（elementwise）：门分数是和 \(Y\) 同样宽的向量，每一维单独调节。</li>
+  <li><b>各头独立还是共享</b>。<b>独立</b>（head-specific）：每个头有自己的门分数；<b>共享</b>（head-shared）：所有头用同一套门分数。论文的共享做法是先算出各头的分数，再沿头的维度取平均。</li>
+  <li><b>乘法还是加法</b>。乘法门 \(Y'=Y\odot\sigma(X\theta)\)；加法门 \(Y'=Y+\sigma(X\theta)\)。</li>
+  <li><b>激活函数</b>。主要比较 sigmoid 和 SiLU。sigmoid 的输出在 0 到 1 之间；SiLU 的输出没有上界，所以只用在加法门里。为了拆解原因，第 4.1 节还会把门换成恒等映射或 RMSNorm。</li>
+</ol>
+<p>没有特别说明时，论文默认用<b>各头独立、乘法、sigmoid</b> 的门。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：一个注意力层里的五个加门位置（以论文的 MoE 尺寸标注宽度）</div>
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="注意力层结构：输入 X 经 Q、K、V 投影进入 SDPA，再拼接、乘输出投影；G4、G3、G2 分别在三个投影之后，G1 在 SDPA 输出之后，G5 在输出投影之后；门分数都由同一个 X 计算" style="--dg-min:760px">
+    <g class="data"><rect class="box" x="16" y="170" width="118" height="60" rx="10"/><text class="t-c t-b" x="75" y="192">输入 X</text><text class="t-c t-xs" x="75" y="212">pre-norm 之后，宽 2048</text></g>
+    <g class="enc"><rect class="box" x="182" y="54" width="128" height="46" rx="8"/><text class="t-c" x="246" y="70">Q 投影</text><text class="t-c t-xs" x="246" y="88">32 头 × 128 = 4096</text></g>
+    <g class="enc"><rect class="box" x="182" y="177" width="128" height="46" rx="8"/><text class="t-c" x="246" y="193">K 投影</text><text class="t-c t-xs" x="246" y="211">4 头 × 128 = 512</text></g>
+    <g class="enc"><rect class="box" x="182" y="300" width="128" height="46" rx="8"/><text class="t-c" x="246" y="316">V 投影</text><text class="t-c t-xs" x="246" y="334">4 头 × 128 = 512</text></g>
+    <path class="edge" d="M134,190 C158,190 158,77 180,77"/>
+    <path class="edge" d="M134,200 L180,200"/>
+    <path class="edge" d="M134,210 C158,210 158,323 180,323"/>
+    <g><circle cx="346" cy="77" r="17" style="fill:var(--surface);stroke:var(--text-3);stroke-width:1.5"/><text class="t-c t-sm" x="346" y="78">G4</text></g>
+    <g><circle cx="346" cy="200" r="17" style="fill:var(--surface);stroke:var(--text-3);stroke-width:1.5"/><text class="t-c t-sm" x="346" y="201">G3</text></g>
+    <g><circle cx="346" cy="323" r="17" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.8"/><text class="t-c t-sm" x="346" y="324" style="fill:var(--c-enc)">G2</text></g>
+    <path class="edge no-head" d="M310,77 L329,77"/><path class="edge no-head" d="M310,200 L329,200"/><path class="edge no-head" d="M310,323 L329,323"/>
+    <g class="tgt"><rect class="box" x="410" y="150" width="160" height="100" rx="10"/><text class="t-c t-b" x="490" y="178">SDPA（逐头）</text><text class="t-c t-sm" x="490" y="202">softmax(QKᵀ/√d)·V</text><text class="t-c t-xs" x="490" y="226">每个头输出 128 维</text></g>
+    <path class="edge" d="M363,77 C390,77 388,170 408,170"/>
+    <path class="edge" d="M363,200 L408,200"/>
+    <path class="edge" d="M363,323 C390,323 388,230 408,230"/>
+    <g><circle cx="612" cy="200" r="21" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2.2"/><text class="t-c t-b" x="612" y="201" style="fill:var(--c-pred)">G1</text></g>
+    <text class="t-c t-sm" x="612" y="140" style="fill:var(--c-pred)">最有效</text>
+    <path class="edge" d="M570,200 L589,200"/>
+    <g class="tgt"><rect class="box" x="664" y="170" width="132" height="60" rx="10"/><text class="t-c" x="730" y="192">拼接各头 → W_O</text><text class="t-c t-xs" x="730" y="212">4096 → 2048</text></g>
+    <path class="edge" d="M633,200 L662,200"/>
+    <g><circle cx="830" cy="200" r="17" style="fill:var(--surface);stroke:var(--text-3);stroke-width:1.5"/><text class="t-c t-sm" x="830" y="201">G5</text></g>
+    <path class="edge no-head" d="M796,200 L813,200"/>
+    <g class="data"><rect class="box" x="872" y="176" width="76" height="48" rx="8"/><text class="t-c t-sm" x="910" y="194">加回</text><text class="t-c t-sm" x="910" y="210">残差流</text></g>
+    <path class="edge" d="M847,200 L870,200"/>
+    <path class="edge idx" d="M75,230 L75,380 L612,380 L612,223" style="marker-end:url(#ah-pred);stroke:var(--c-pred)"/>
+    <text class="t-sm" x="110" y="368" style="fill:var(--c-pred)">门分数 σ(X_i W_θ)：用当前 token 自己的 X_i 算，不依赖其他 token，也不进 KV 缓存</text>
+    <text class="t-xs" x="16" y="30">每个圆圈处都可以乘一个门 σ(X W_θ)；圆圈大小与颜色只表示论文结论的强弱：G1 最好，G2 次之，G3 / G4 / G5 基本无效</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2505.06708#S1.F1" target="_blank" rel="noopener">原文图 1 左 ↗</a>。为了看清楚，只画了 G1 的门分数从哪里来；其余位置的门分数同样由 X 算出，只是乘在不同的信号上。</div>
+</div>
+
+<p><b>每种门要多少参数？</b>论文表 1 列了“新增参数”一栏，可以按 MoE 模型的尺寸核对一遍（推算，24 层）：</p>
+<ul>
+  <li>\(G_1\) 逐元素：门分数要和 SDPA 输出一样宽（4096），所以 \(W_\theta\) 是 \(2048\times4096\)，每层约 8.39M，24 层约 201M，和表 1 的 201M 一致。</li>
+  <li>\(G_1\) 逐头：每个 query 头一个标量，\(W_\theta\) 是 \(2048\times32\)，24 层约 1.57M，表 1 写 1.6M。</li>
+  <li>\(G_2\) 逐元素：门乘在 value 上，value 只有 4 个头、宽 512，所以是 \(2048\times512\)，24 层约 25.2M，表 1 写 25M；\(G_2\) 逐头只有 \(2048\times4\)，约 0.2M。</li>
+  <li>\(G_5\)：门乘在整个注意力层的输出上，宽 2048，所以是 \(2048\times2048\)，24 层约 100.7M，表 1 写 100M。</li>
+  <li>“各头共享”的 \(G_1\)（表 1 第 12 行）仍记 201M，因为它先按各头独立的方式算出全部分数，再在头之间取平均，参数没少。</li>
+</ul>
+<p>官方代码（<code>modeling_qwen3.py</code>）的写法值得一提：它没有单独建一个门的线性层，而是<b>把 \(W_\theta\) 拼进了 query 投影</b>。逐元素门把 <code>q_proj</code> 的输出宽度翻倍，逐头门只多出“头数”那么几列；一次矩阵乘同时算出 query 和门分数，再按头切开。注意力算完以后，执行 <code>attn_output * sigmoid(gate_score)</code>，再进 <code>o_proj</code>。后来 Hugging Face Transformers 里 Qwen3-Next 的注意力也是这样实现的（见“后来怎么样了”）。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>\(G_1\) 的门分数由第 \(i\) 个 token 自己的 \(X_i\) 算出，也就是 <b>query 这一侧</b>的信息。它和别的 token 无关，所以既不需要存进 KV 缓存，也不改变注意力本身怎么算。\(G_2\) 不同：它乘在每个被看的 token \(j\) 的 value 上，门分数由 \(X_j\) 算出，是 <b>key/value 这一侧</b>的信息。这个区别在第 4.2 节是关键。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · 代码：<a href="https://github.com/qiuzh20/gated_attention/blob/main/modeling_qwen3.py" target="_blank" rel="noopener">modeling_qwen3.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 实验：15B MoE 和 1.7B 稠密模型上，哪种门最好、稳定性改善多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者用什么模型、什么数据、什么训练设置来比较 30 多个变体？在 MoE 模型上，五个位置、各种粒度和激活函数的门谁好谁坏？好处会不会只是因为“多了参数”？在稠密模型上，门对训练稳定性有什么影响，能不能让模型承受更大的学习率？</div>
+
+<h4 id="n-3-1">3.1 实验设置：三套模型、一份数据、同一套评测</h4>
+<div class="note-pre"><b>先补一点背景：论文用的 MoE 模型是什么样的。</b>
+<p>混合专家（MoE）模型把前馈层换成很多个小前馈网络（“专家”），每个 token 由一个路由器挑出其中几个来算，其余的不参与。这样总参数可以很大，而每个 token 实际用到的参数（激活参数）很少。论文的 MoE 模型记作 <b>15A2B</b>：总参数 15B，每个 token 激活 2.54B。它有 128 个专家，每个 token 用 softmax 路由选 top-8。几个配套技术：<b>细粒度专家</b>（DeepSeekMoE 的做法，把专家切得更小、数量更多）；<b>全局批次负载均衡损失</b>（global-batch LBL，Qwen 团队自己的工作，在整个全局批次上统计各专家的负载，而不是在每个小批次里统计）；<b>z-loss</b>（ST-MoE 提出的，惩罚路由器 logit 过大，防止数值不稳）。注意力部分用 GQA。关于 MoE 的更多背景见本站 <a href="deepseek-v3.html">DeepSeek-V3 精读</a>。</p>
+</div>
+<p>会议版附录表 7 给出了三套模型的结构：</p>
+<div class="table-wrap"><table>
+<tr><th>结构参数</th><th>1.7B，28 层</th><th>1.7B，48 层</th><th>15A2B MoE</th></tr>
+<tr><td>层数</td><td>28</td><td>48</td><td>24</td></tr>
+<tr><td>query 头 / KV 头</td><td>16 / 8</td><td>16 / 8</td><td>32 / 4</td></tr>
+<tr><td>头维度 \(d_k\)</td><td>128</td><td>128</td><td>128</td></tr>
+<tr><td>隐藏维度 \(d_{\text{model}}\)</td><td>2048</td><td>1536</td><td>2048</td></tr>
+<tr><td>前馈宽度</td><td>6144</td><td>4608</td><td>每个专家 768</td></tr>
+<tr><td>专家数 / 每 token 激活</td><td>—</td><td>—</td><td>128 / 8</td></tr>
+<tr><td>输入输出嵌入共享</td><td>是</td><td>是</td><td>否</td></tr>
+<tr><td>QK 归一化</td><td>是</td><td>是</td><td>是</td></tr>
+</table></div>
+<p>本站比对了一下公开配置：28 层的 1.7B 稠密模型和 Qwen3-1.7B 的结构完全相同（隐藏维度 2048、前馈 6144、16/8 个头、共享嵌入）；15A2B 的每层结构和 Qwen3-30B-A3B 相同（隐藏维度 2048、32/4 个头、128 个专家选 8 个、专家宽 768），只是层数从 48 减到 24。也就是说，这些实验模型就是 Qwen3 系列的缩小版。两个 1.7B 模型参数量相当，48 层那个更深更窄，用来考验深层网络的训练稳定性。</p>
+<p><b>数据和训练。</b>所有模型都在一个高质量数据集的子集上训练，内容包括多语言、数学和通用知识，序列长度 4096，优化器是 AdamW（没有特别说明的超参取默认值）；附录 A.9 说实验基于 Megatron-LM。这个数据集的总量，arXiv 版写 3.5T token，会议版写 4T token；正文里最长的一次训练是 3.5T token。具体的学习率和批大小在每组实验里分别交代。作者说，门带来的参数和计算量都不大，训练时的墙钟时间开销不到 2%（没有说明是在什么硬件、什么模型上测的）。</p>
+<p><b>评测。</b>两类指标。一类是少样本下游任务：Hellaswag（英文常识）、MMLU（通用知识）、GSM8k（数学推理）、HumanEval（代码）、C-Eval 和 CMMLU（中文）。另一类是在若干个留出测试集上的困惑度（PPL），领域包括英文、中文、代码、数学、法律、文学，表格里报的是平均困惑度。困惑度越低越好，下游任务分数越高越好。</p>
+
+<h4 id="n-3-2">3.2 MoE 模型：五个位置、四种变化，谁最好</h4>
+<p><b>训练设置。</b>所有 MoE 变体用同一套学习率计划：1000 步内预热到最大学习率 2e-3，再按余弦衰减到 3e-5；全局批大小 1024 条序列，一共 10 万步。按序列长度 4096 算，就是 \(10^5\times1024\times4096\approx4.19\times10^{11}\)，约 400B token（推算），和表 1 标题写的 400B 一致。</p>
+<p><b>怎么排除“只是多了参数”。</b>逐元素的 \(G_1\) 门新增了 201M 参数，任何一个模型多了 2 亿参数，效果变好都不奇怪。所以作者在基线之外加了三个“扩参数”的对照：KV 头从 4 个加到 8 个（+50M）；query 头从 32 个加到 48 个（+201M，和 \(G_1\) 逐元素门正好一样多，而且同样都在注意力里）；专家总数和激活数各加 4 个（+400M）。这三个对照新增的参数都不少于大多数门。</p>
+<div class="table-wrap"><table>
+<tr><th>表 1 的行</th><th>激活函数</th><th>门分数形状</th><th class="num">新增参数</th><th class="num">平均 PPL</th><th class="num">Hellaswag</th><th class="num">MMLU</th><th class="num">GSM8k</th><th class="num">C-Eval</th></tr>
+<tr><td>(1) 基线（q=32，k=4）</td><td>—</td><td>—</td><td class="num">0</td><td class="num">6.026</td><td class="num">73.07</td><td class="num">58.79</td><td class="num">52.92</td><td class="num">60.26</td></tr>
+<tr><td>(2) KV 头 k=8</td><td>—</td><td>—</td><td class="num">50M</td><td class="num">5.979</td><td class="num">73.51</td><td class="num">59.78</td><td class="num">52.16</td><td class="num">62.26</td></tr>
+<tr><td>(3) query 头 q=48</td><td>—</td><td>—</td><td class="num">201M</td><td class="num">5.953</td><td class="num">73.59</td><td class="num">58.45</td><td class="num">53.30</td><td class="num">59.67</td></tr>
+<tr><td>(4) 加 4 个专家</td><td>—</td><td>—</td><td class="num">400M</td><td class="num">5.964</td><td class="num">73.19</td><td class="num">58.84</td><td class="num">52.54</td><td class="num">63.19</td></tr>
+<tr class="hl"><td>(5) \(G_1\) SDPA 逐元素</td><td>sigmoid</td><td>\(n\times q\times d_k\)</td><td class="num">201M</td><td class="num">5.761</td><td class="num">74.64</td><td class="num">60.82</td><td class="num">55.27</td><td class="num">62.20</td></tr>
+<tr><td>(6) \(G_2\) value 逐元素</td><td>sigmoid</td><td>\(n\times k\times d_k\)</td><td class="num">25M</td><td class="num">5.820</td><td class="num">74.38</td><td class="num">59.17</td><td class="num">53.97</td><td class="num">61.00</td></tr>
+<tr><td>(7) \(G_3\) key 逐元素</td><td>sigmoid</td><td>\(n\times k\times d_k\)</td><td class="num">25M</td><td class="num">6.016</td><td class="num">72.88</td><td class="num">59.18</td><td class="num">50.49</td><td class="num">61.74</td></tr>
+<tr><td>(8) \(G_4\) query 逐元素</td><td>sigmoid</td><td>\(n\times q\times d_k\)</td><td class="num">201M</td><td class="num">5.981</td><td class="num">73.01</td><td class="num">58.74</td><td class="num">53.97</td><td class="num">62.14</td></tr>
+<tr><td>(9) \(G_5\) 输出层之后</td><td>sigmoid</td><td>\(n\times d_{\text{model}}\)</td><td class="num">100M</td><td class="num">6.017</td><td class="num">73.32</td><td class="num">59.41</td><td class="num">50.87</td><td class="num">59.43</td></tr>
+<tr class="hl"><td>(10) \(G_1\) SDPA 逐头</td><td>sigmoid</td><td>\(n\times q\)</td><td class="num">1.6M</td><td class="num">5.792</td><td class="num">74.50</td><td class="num">60.05</td><td class="num">54.44</td><td class="num">62.61</td></tr>
+<tr><td>(11) \(G_2\) value 逐头</td><td>sigmoid</td><td>\(n\times k\)</td><td class="num">0.2M</td><td class="num">5.808</td><td class="num">74.38</td><td class="num">59.32</td><td class="num">53.53</td><td class="num">62.61</td></tr>
+<tr><td>(12) \(G_1\) 各头共享</td><td>sigmoid</td><td>\(n\times d_k\)</td><td class="num">201M</td><td class="num">5.801</td><td class="num">74.34</td><td class="num">60.06</td><td class="num">53.15</td><td class="num">61.01</td></tr>
+<tr><td>(13) \(G_2\) 各头共享</td><td>sigmoid</td><td>\(n\times d_k\)</td><td class="num">25M</td><td class="num">5.867</td><td class="num">74.10</td><td class="num">59.02</td><td class="num">53.03</td><td class="num">60.61</td></tr>
+<tr><td>(14) \(G_1\) 加法门</td><td>SiLU</td><td>\(n\times q\times d_k\)</td><td class="num">201M</td><td class="num">5.821</td><td class="num">74.81</td><td class="num">60.06</td><td class="num">53.30</td><td class="num">60.98</td></tr>
+<tr><td>(15) \(G_1\) 逐元素，换 SiLU</td><td>SiLU</td><td>\(n\times q\times d_k\)</td><td class="num">201M</td><td class="num">5.822</td><td class="num">74.22</td><td class="num">60.49</td><td class="num">54.59</td><td class="num">62.34</td></tr>
+</table></div>
+<p style="font-size:.85rem;color:var(--text-3)">表中数字全部来自论文表 1（15A2B MoE，400B token，所有方法 \(d_k=128\)）。第 11 行的门分数形状，arXiv 版写 \(n\times q\)，会议版写 \(n\times k\)；按 0.2M 的参数量推算，应当是 \(n\times k\)（4 个 KV 头）。</p>
+
+<div class="dia">
+  <div class="dia-title">简图：表 1 各变体的平均困惑度（越短越好；横轴从 5.70 开始）</div>
+  <svg class="dg" viewBox="0 0 960 500" role="img" aria-label="表 1 中 15 个变体的平均困惑度条形图：G1 逐元素最低 5.761，基线 6.026，三个扩参数对照在 5.95 到 5.98 之间，G3、G4、G5 接近基线" style="--dg-min:720px">
+    <line x1="858.9" y1="44" x2="858.9" y2="452" style="stroke:var(--text-3);stroke-dasharray:4 4"/>
+    <text class="t-xs" x="852" y="38" style="text-anchor:end">基线 6.026</text>
+    <text class="t-r t-sm" x="290" y="60">(1) 基线</text>
+    <rect x="300" y="51" width="558.9" height="18" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="865" y="60">6.026</text>
+    <text class="t-r t-sm" x="290" y="87">(2) KV 头 4→8（+50M）</text>
+    <rect x="300" y="78" width="478.3" height="18" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="784" y="87">5.979</text>
+    <text class="t-r t-sm" x="290" y="114">(3) query 头 32→48（+201M）</text>
+    <rect x="300" y="105" width="433.7" height="18" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="740" y="114">5.953</text>
+    <text class="t-r t-sm" x="290" y="141">(4) 加 4 个专家（+400M）</text>
+    <rect x="300" y="132" width="452.6" height="18" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="759" y="141">5.964</text>
+    <text class="t-r t-sm" x="290" y="168" style="fill:var(--c-pred)">(5) G1 逐元素 sigmoid</text>
+    <rect x="300" y="159" width="104.6" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="411" y="168">5.761</text>
+    <text class="t-r t-sm" x="290" y="195" style="fill:var(--c-pred)">(10) G1 逐头 sigmoid（+1.6M）</text>
+    <rect x="300" y="186" width="157.7" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="464" y="195">5.792</text>
+    <text class="t-r t-sm" x="290" y="222" style="fill:var(--c-pred)">(12) G1 各头共享</text>
+    <rect x="300" y="213" width="173.1" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text class="t-xs" x="479" y="222">5.801</text>
+    <text class="t-r t-sm" x="290" y="249" style="fill:var(--c-pred)">(14) G1 加法 SiLU</text>
+    <rect x="300" y="240" width="207.4" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text class="t-xs" x="514" y="249">5.821</text>
+    <text class="t-r t-sm" x="290" y="276" style="fill:var(--c-pred)">(15) G1 逐元素 SiLU</text>
+    <rect x="300" y="267" width="209.1" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text class="t-xs" x="516" y="276">5.822</text>
+    <text class="t-r t-sm" x="290" y="303" style="fill:var(--c-enc)">(6) G2 逐元素（+25M）</text>
+    <rect x="300" y="294" width="205.7" height="18" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text class="t-xs" x="512" y="303">5.820</text>
+    <text class="t-r t-sm" x="290" y="330" style="fill:var(--c-enc)">(11) G2 逐头（+0.2M）</text>
+    <rect x="300" y="321" width="185.1" height="18" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text class="t-xs" x="491" y="330">5.808</text>
+    <text class="t-r t-sm" x="290" y="357" style="fill:var(--c-enc)">(13) G2 各头共享</text>
+    <rect x="300" y="348" width="286.3" height="18" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-dasharray:4 3"/><text class="t-xs" x="593" y="357">5.867</text>
+    <text class="t-r t-sm" x="290" y="384">(7) G3 key 之后</text>
+    <rect x="300" y="375" width="541.7" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/><text class="t-xs" x="848" y="384">6.016</text>
+    <text class="t-r t-sm" x="290" y="411">(8) G4 query 之后</text>
+    <rect x="300" y="402" width="481.7" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/><text class="t-xs" x="788" y="411">5.981</text>
+    <text class="t-r t-sm" x="290" y="438">(9) G5 输出层之后</text>
+    <rect x="300" y="429" width="543.4" height="18" rx="3" style="fill:var(--surface-2);stroke:var(--border-strong)"/><text class="t-xs" x="850" y="438">6.017</text>
+    <line class="axis" x1="300" y1="456" x2="900" y2="456"/>
+    <line class="axis" x1="300" y1="456" x2="300" y2="462"/><text class="t-c t-xs" x="300" y="474">5.70</text>
+    <line class="axis" x1="471.4" y1="456" x2="471.4" y2="462"/><text class="t-c t-xs" x="471.4" y="474">5.80</text>
+    <line class="axis" x1="642.9" y1="456" x2="642.9" y2="462"/><text class="t-c t-xs" x="642.9" y="474">5.90</text>
+    <line class="axis" x1="814.3" y1="456" x2="814.3" y2="462"/><text class="t-c t-xs" x="814.3" y="474">6.00</text>
+    <text class="t-c t-sm" x="600" y="492">平均困惑度（15A2B MoE，400B token）</text>
+  </svg>
+  <div class="dia-note">本站根据论文表 1 的数字重画。灰色是基线和三个扩参数对照，橙色是 \(G_1\) 的各种变体，蓝色是 \(G_2\) 的变体，虚线边框表示“各头共享”或“换了激活函数 / 加法”这类削弱版。注意横轴截断在 5.70：条形长度只反映差距，不反映困惑度本身的大小。原文对应 <a href="https://arxiv.org/html/2505.06708#S1.F1" target="_blank" rel="noopener">图 1 中图 ↗</a> 与 <a href="https://arxiv.org/html/2505.06708#S3.T1" target="_blank" rel="noopener">表 1 ↗</a>。</div>
+</div>
+
+<p>从表 1 能读出四条结论，每一条都对应一组对比：</p>
+<ol>
+  <li><b>\(G_1\) 和 \(G_2\) 有效，其他位置基本无效。</b>在 SDPA 输出（\(G_1\)）或 value 输出（\(G_2\)）上加门，困惑度比基线低 0.2 以上，下游任务也普遍更好。加在 key（\(G_3\)）、query（\(G_4\)）或整个输出层之后（\(G_5\)）几乎没用，\(G_3\) 和 \(G_5\) 的 GSM8k 甚至比基线低 2 分左右。最关键的一组对照是第 3 行和第 5 行：两者都在注意力里多了 201M 参数，多出 16 个 query 头只把困惑度降到 5.953，而 \(G_1\) 门降到 5.761。可见收益不是“多了参数”带来的。</li>
+  <li><b>各头独立很重要。</b>逐头的 \(G_1\)、\(G_2\) 门只多了不到 2M 参数（不到 15B 总参数的万分之二），提升却几乎和逐元素的一样大（5.792、5.808）。反过来，让所有头共用一套门分数，提升就变小了（第 12 行对第 10 行，第 13 行对第 11 行）。作者认为这说明不同的头需要不同的门。</li>
+  <li><b>乘法比加法好。</b>加法门（第 14 行）比基线好，但不如乘法门。</li>
+  <li><b>sigmoid 比 SiLU 好。</b>把最好的配置（第 5 行）的激活函数换成 SiLU（第 15 行），提升变小。</li>
+</ol>
+<p>作者的总结是：\(G_1\) 和 \(G_2\) 都能把困惑度降 0.2 以上，超过各种扩参数的对照，而 \(G_1\) 在困惑度和下游任务上都更好；只要不同的头有不同的门分数，粒度（逐头还是逐元素）和激活函数的选择影响都不大。为什么是这两个位置、为什么要各头独立，留到第 4 节分析。</p>
+<div class="note-warn"><b>这组对比里，什么对齐了，什么没有：</b>
+<ul>
+  <li><b>对齐了的</b>：同一份数据、同样的 400B token、同一套学习率计划和批大小，结构上只差门本身（或扩参数的那一处改动）。</li>
+  <li><b>没对齐的</b>：学习率计划没有为每个变体单独调过。更重要的是<b>激活计算量</b>没有对齐：注意力层对每个 token 都是稠密计算的，所以逐元素 \(G_1\) 门的 201M 参数全部是“激活参数”，大约是 2.54B 激活参数的 8%（推算）；q=48 的对照同样多了 201M 激活参数，这一组是公平的，但和“加 4 个专家”那一组的激活量论文没有交代。不过逐头 \(G_1\) 门只多了 1.6M 参数、几乎不增加计算，效果仍然排第二，这一点最有说服力。</li>
+  <li>每个变体只训了一次，没有误差棒（会议版的检查清单里明确回答“没有”，理由是预训练太贵）。表里相邻几行的困惑度只差 0.01–0.02，这种差距是否超出随机种子带来的波动，论文没法回答。</li>
+</ul></div>
+
+<h4 id="n-3-3">3.3 稠密模型：门让训练更稳，能吃下更大的学习率</h4>
+<div class="note-pre"><b>先补一点背景：损失尖峰，以及为什么大家想用大学习率和大批次。</b>
+<p>训练大模型时，损失曲线大体平滑下降，但有时会突然往上跳一下，叫<b>损失尖峰</b>（loss spike）。轻的几百步后自己恢复，重的会让训练彻底发散，只能退回较早的检查点、调小学习率或跳过一些数据重新来过。在几千张 GPU 上跑的训练里，每次回退都意味着成百上千 GPU·小时白费（大规模训练系统怎么处理这类故障，见本站 <a href="megascale.html">MegaScale 精读</a>）。</p>
+<p>另一方面，人们又想用更大的学习率和批大小、更深的网络：更大的学习率往往收敛到更好的结果；更大的批次让每一步能分给更多 GPU 并行算，提高分布式训练效率；更深的网络表达力更强。可这几样恰恰都更容易引发尖峰。所以“能不能在激进的超参下稳定训练”本身就是一项很有价值的性质。</p>
+<p><b>sandwich norm</b>（三明治归一化，来自 CogView）是一种常见的稳定手段：在 pre-norm 的基础上，注意力和前馈层的<b>输出</b>在加回残差流之前再做一次归一化，相当于把子层夹在两次归一化中间。这样，某一层就算算出了特别大的数，也不会原样灌进残差流。</p>
+</div>
+<p><b>设置和对齐方式。</b>稠密模型的实验沿用 Qwen2.5 技术报告的做法。加门时，作者把前馈层<b>变窄</b>，让总参数量和基线一样。本站核对了官方放出的三个 1.7B（28 层）模型的配置：基线的前馈宽度是 6144，逐元素门版本是 5504，逐头门版本仍是 6144（逐头门每层只多 \(2048\times16\) 个参数，可以忽略）。按此推算，逐元素门每层多出 \(2048\times2048\approx4.19\)M 个门参数，前馈层少了 \(3\times2048\times640\approx3.93\)M 个参数，两者基本抵消。大部分实验用的是<b>为基线调好的</b>超参：28 层模型训 400B token 时，最大学习率 4e-3、批大小 1024；训 3.5T token 时，最大学习率 4.5e-3、批大小 2048。</p>
+<p>作者观察到，加门以后训练中的损失尖峰明显减少（原文图 1 右）。于是他们又专门设计了一组更激进的设置来考验稳定性：网络加深到 48 层、最大学习率加大、批大小加大。结果见表 2：</p>
+<div class="table-wrap"><table>
+<tr><th>表 2 的行</th><th class="num">最大学习率</th><th class="num">平均 PPL</th><th class="num">HumanEval</th><th class="num">MMLU</th><th class="num">GSM8k</th><th class="num">Hellaswag</th><th class="num">C-Eval</th><th class="num">CMMLU</th></tr>
+<tr><td colspan="9"><b>28 层，1.7B，400B token，批大小 1024</b></td></tr>
+<tr><td>(1) 基线</td><td class="num">4.0e-3</td><td class="num">7.499</td><td class="num">28.66</td><td class="num">50.21</td><td class="num">27.82</td><td class="num">64.94</td><td class="num">49.15</td><td class="num">49.52</td></tr>
+<tr class="hl"><td>(2) \(G_1\) 逐元素</td><td class="num">4.0e-3</td><td class="num">7.404</td><td class="num">29.27</td><td class="num">51.15</td><td class="num">28.28</td><td class="num">65.48</td><td class="num">50.72</td><td class="num">50.72</td></tr>
+<tr><td colspan="9"><b>28 层，1.7B，3.5T token，批大小 2048</b></td></tr>
+<tr><td>(3) 基线</td><td class="num">4.5e-3</td><td class="num">6.180</td><td class="num">34.15</td><td class="num">59.10</td><td class="num">69.07</td><td class="num">68.02</td><td class="num">68.19</td><td class="num">64.95</td></tr>
+<tr class="hl"><td>(4) \(G_1\) 逐元素</td><td class="num">4.5e-3</td><td class="num">6.130</td><td class="num">37.80</td><td class="num">59.61</td><td class="num">70.20</td><td class="num">68.84</td><td class="num">68.52</td><td class="num">65.76</td></tr>
+<tr><td colspan="9"><b>48 层，1.7B，400B token，批大小 1024</b></td></tr>
+<tr><td>(5) 基线</td><td class="num">4.0e-3</td><td class="num">7.421</td><td class="num">28.05</td><td class="num">52.04</td><td class="num">32.98</td><td class="num">65.96</td><td class="num">51.11</td><td class="num">51.86</td></tr>
+<tr><td>(6) 基线</td><td class="num">8.0e-3</td><td class="num">9.195</td><td class="num">21.34</td><td class="num">44.28</td><td class="num">15.24</td><td class="num">57.00</td><td class="num">43.11</td><td class="num">42.63</td></tr>
+<tr><td>(7) 基线 + sandwich norm</td><td class="num">8.0e-3</td><td class="num">7.407</td><td class="num">30.49</td><td class="num">52.07</td><td class="num">32.90</td><td class="num">66.00</td><td class="num">52.04</td><td class="num">51.72</td></tr>
+<tr class="hl"><td>(8) \(G_1\) 逐元素</td><td class="num">4.0e-3</td><td class="num">7.288</td><td class="num">31.71</td><td class="num">52.44</td><td class="num">32.37</td><td class="num">66.28</td><td class="num">52.06</td><td class="num">52.29</td></tr>
+<tr class="hl"><td>(9) \(G_1\) 逐头</td><td class="num">4.0e-3</td><td class="num">7.370</td><td class="num">31.10</td><td class="num">53.83</td><td class="num">34.12</td><td class="num">65.59</td><td class="num">55.07</td><td class="num">52.38</td></tr>
+<tr class="hl"><td>(10) \(G_1\) 逐元素</td><td class="num">8.0e-3</td><td class="num">7.325</td><td class="num">31.10</td><td class="num">54.47</td><td class="num">36.62</td><td class="num">66.40</td><td class="num">53.91</td><td class="num">53.80</td></tr>
+<tr><td colspan="9"><b>48 层，1.7B，1T token，批大小 4096</b></td></tr>
+<tr><td>(11) 基线</td><td class="num">5.3e-3</td><td class="num">7.363</td><td class="num">29.88</td><td class="num">54.44</td><td class="num">32.22</td><td class="num">65.43</td><td class="num">53.72</td><td class="num">53.37</td></tr>
+<tr><td>(12) 基线</td><td class="num">8.0e-3</td><td class="num" colspan="7">训练发散，无结果</td></tr>
+<tr class="hl"><td>(13) \(G_1\) 逐元素</td><td class="num">5.3e-3</td><td class="num">7.101</td><td class="num">34.15</td><td class="num">55.70</td><td class="num">36.69</td><td class="num">67.17</td><td class="num">54.51</td><td class="num">54.68</td></tr>
+<tr class="hl"><td>(14) \(G_1\) 逐元素</td><td class="num">8.0e-3</td><td class="num">7.078</td><td class="num">31.71</td><td class="num">56.47</td><td class="num">39.73</td><td class="num">67.38</td><td class="num">55.52</td><td class="num">55.77</td></tr>
+</table></div>
+
+<div class="dia">
+  <div class="dia-title">简图：48 层 1.7B 模型在两种学习率下的平均困惑度（越短越好；横轴从 7.0 开始）</div>
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="表 2 中 48 层模型的困惑度条形图：400B token 时基线在学习率 8e-3 下困惑度升到 9.195，加门后在 8e-3 下为 7.325；1T token、批大小 4096 时基线在 8e-3 下发散，加门后为 7.078" style="--dg-min:720px">
+    <text class="t-sm t-b" x="20" y="28">400B token，批大小 1024</text>
+    <text class="t-r t-sm" x="320" y="54">(5) 基线，LR 4e-3</text>
+    <rect x="330" y="44" width="104.3" height="20" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="441" y="54">7.421</text>
+    <text class="t-r t-sm" x="320" y="82" style="fill:var(--c-loss)">(6) 基线，LR 8e-3</text>
+    <rect x="330" y="72" width="543.9" height="20" rx="3" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text class="t-xs t-r" x="866" y="82" style="fill:var(--c-loss)">9.195：大学习率下明显变差</text>
+    <text class="t-r t-sm" x="320" y="110">(7) 基线 + sandwich norm，LR 8e-3</text>
+    <rect x="330" y="100" width="100.9" height="20" rx="3" style="fill:var(--surface-3);stroke:var(--text-3);stroke-dasharray:4 3"/><text class="t-xs" x="438" y="110">7.407</text>
+    <text class="t-r t-sm" x="320" y="138" style="fill:var(--c-pred)">(8) G1 逐元素，LR 4e-3</text>
+    <rect x="330" y="128" width="71.4" height="20" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="408" y="138">7.288</text>
+    <text class="t-r t-sm" x="320" y="166" style="fill:var(--c-pred)">(9) G1 逐头，LR 4e-3</text>
+    <rect x="330" y="156" width="91.7" height="20" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-dasharray:4 3"/><text class="t-xs" x="428" y="166">7.370</text>
+    <text class="t-r t-sm" x="320" y="194" style="fill:var(--c-pred)">(10) G1 逐元素，LR 8e-3</text>
+    <rect x="330" y="184" width="80.5" height="20" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="417" y="194">7.325</text>
+    <text class="t-sm t-b" x="20" y="232">1T token，批大小 4096</text>
+    <text class="t-r t-sm" x="320" y="258">(11) 基线，LR 5.3e-3</text>
+    <rect x="330" y="248" width="90.0" height="20" rx="3" style="fill:var(--surface-3);stroke:var(--text-3)"/><text class="t-xs" x="427" y="258">7.363</text>
+    <text class="t-r t-sm" x="320" y="286" style="fill:var(--c-loss)">(12) 基线，LR 8e-3</text>
+    <text class="t-sm" x="336" y="286" style="fill:var(--c-loss)">✕ 训练发散，没有结果</text>
+    <text class="t-r t-sm" x="320" y="314" style="fill:var(--c-pred)">(13) G1 逐元素，LR 5.3e-3</text>
+    <rect x="330" y="304" width="25.0" height="20" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="362" y="314">7.101</text>
+    <text class="t-r t-sm" x="320" y="342" style="fill:var(--c-pred)">(14) G1 逐元素，LR 8e-3</text>
+    <rect x="330" y="332" width="19.3" height="20" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text class="t-xs" x="356" y="342">7.078</text>
+    <line class="axis" x1="330" y1="362" x2="900" y2="362"/>
+    <line class="axis" x1="330" y1="362" x2="330" y2="368"/><text class="t-c t-xs" x="330" y="378">7.0</text>
+    <line class="axis" x1="453.9" y1="362" x2="453.9" y2="368"/><text class="t-c t-xs" x="453.9" y="378">7.5</text>
+    <line class="axis" x1="577.8" y1="362" x2="577.8" y2="368"/><text class="t-c t-xs" x="577.8" y="378">8.0</text>
+    <line class="axis" x1="701.7" y1="362" x2="701.7" y2="368"/><text class="t-c t-xs" x="701.7" y="378">8.5</text>
+    <line class="axis" x1="825.6" y1="362" x2="825.6" y2="368"/><text class="t-c t-xs" x="825.6" y="378">9.0</text>
+    <text class="t-c t-sm" x="615" y="394">平均困惑度</text>
+  </svg>
+  <div class="dia-note">本站根据论文表 2 第 5–14 行重画。原文的训练损失曲线（基线有多处尖峰、加门后几乎没有）见 <a href="https://arxiv.org/html/2505.06708#S1.F1" target="_blank" rel="noopener">原文图 1 右 ↗</a>，表格见 <a href="https://arxiv.org/html/2505.06708#S3.T2" target="_blank" rel="noopener">表 2 ↗</a>。</div>
+</div>
+<p>表 2 有两层意思。</p>
+<p><b>第一，换什么设置，门都有好处。</b>不同结构（28 层对 28 层，第 1、2 行；48 层对 48 层，第 5、8 行）、不同训练量（3.5T token，第 3、4 行）、不同超参（1T token、批大小 4096，第 11、13 行），加门的模型困惑度都更低。3.5T token 时提升变小了（6.180 → 6.130），但 HumanEval 从 34.15 升到 37.80，GSM8k 从 69.07 升到 70.20。</p>
+<p><b>第二，门让模型能用更大的学习率，而且大学习率真的带来了提升。</b>48 层模型把学习率从 4e-3 加到 8e-3：基线严重退化，困惑度从 7.421 升到 9.195，GSM8k 从 32.98 掉到 15.24（第 6 行）；在批大小 4096 的设置下，基线在 8e-3 直接发散（第 12 行）。给基线加上 sandwich norm 能让它重新收敛（第 7 行，7.407），但和小学习率的基线（7.421）相比几乎没有提升。加门的模型则不同：学习率加到 8e-3 后，400B token 的设置下 MMLU 从 52.44 升到 54.47、GSM8k 从 32.37 升到 36.62（困惑度略升，7.288 → 7.325）；1T token 的设置下困惑度从 7.101 降到 7.078，MMLU 从 55.70 升到 56.47，GSM8k 从 36.69 升到 39.73。</p>
+<p>作者的结论是：逐元素的 SDPA 输出门是增强注意力最有效的方法；它让模型在基线会不稳定的大学习率、大批次下也能稳定训练。会议版补了一句很实用的话：这说明加门以后，最优超参会移动；实践中可以从基线的最优批大小出发，把学习率适度调大，再联合调批大小和学习率可能还有收益。</p>
+<p>附录 A.6 还记录了一个失败的尝试。既然 sandwich norm 和门都能消除超大激活（第 4.3 节）、都能改善稳定性，作者想试试更简单的办法：在注意力和前馈层的输出进入残差流之前，直接把数值<b>截断</b>到 \((-c, c)\)。结果不管 \(c\) 取 300 还是 100，模型在学习率 8e-3 下都还是不收敛。作者由此推断，pre-norm 模型训练不稳定，并不只是因为残差流里有大激活；任何一层输出过大的值都可能引起问题，根本原因还需要进一步研究。</p>
+<div class="note-warn"><b>读这一组结果要注意：</b>
+<ul>
+  <li>超参是<b>为基线调的</b>，这对基线有利，所以门在这些设置下仍然更好，是一个偏保守的结论。但“学习率 8e-3”这一档也只试了这一个值，加门模型自己的最优学习率在哪，论文没有扫描。</li>
+  <li>“更稳定”的证据有两类：一类是图 1 右的损失曲线（只有一对曲线，没有量化尖峰的次数或幅度）；另一类是两次基线发散或严重退化（第 6、12 行）。没有多个随机种子，也没有统计“多少次训练里发散了几次”。</li>
+  <li>下游分数的波动不小。HumanEval 只有 164 道题，34.15 到 37.80 相差 3.65 分，大约是 6 道题（推算）；第 8 行到第 10 行学习率加倍，HumanEval 反而从 31.71 降到 31.10。看单项任务的小幅变化时，要把这种噪声考虑进去，困惑度和多个任务的整体趋势更可靠。</li>
+  <li>稠密模型在参数量上对齐了（前馈层变窄），每个 token 的计算量也大致对齐；但 3.5T token 那组只有 28 层、学习率 4.5e-3 一个设置。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2505.06708#A1.SS5" target="_blank" rel="noopener">附录：截断实验 ↗</a> · 会议版附录表 7 与 A.6 见 <a href="https://proceedings.neurips.cc/paper_files/paper/2025/file/904e89bb4e632e75fb47f093b620b257-Paper-Conference.pdf" target="_blank" rel="noopener">NeurIPS PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 分析：非线性、稀疏性，以及没有注意力汇</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个这么简单的门，为什么能同时提高效果和稳定性？作者的分析分四步：先说明门补上了注意力里缺的非线性（4.1）；再说明有效的门分数很稀疏、而且依赖 query（4.2）；然后说明这种稀疏性消除了超大激活和注意力汇（4.3）；最后说明没有注意力汇的模型更容易外推到长上下文（4.4）。本节用的 MoE 模型和第 3.2 节相同（15A2B，400B token），分析数据是测困惑度用的那批测试文本。</div>
+
+<h4 id="n-4-1">4.1 非线性：value 投影和输出投影之间缺了一层非线性</h4>
+<div class="note-pre"><b>先补一点背景：两个线性层连在一起，等于一个低秩的线性层。</b>
+<p>一个线性层就是乘一个矩阵。两个线性层连着乘，\(x\mapsto (xA)B=x(AB)\)，结果只是乘了一个新矩阵 \(AB\)，叠两层并没有比一层更强。而且如果中间那一维很窄，比如 \(A\) 是 \(2048\times128\)、\(B\) 是 \(128\times2048\)，那么 \(AB\) 虽然是 \(2048\times2048\) 的大矩阵，它的<b>秩</b>最多只有 128：不管输入是什么，输出都只能落在一个 128 维的子空间里。秩可以理解为“这个映射真正能独立调动的方向数”。</p>
+<p>前馈层为什么不怕这个？因为前馈层的两个矩阵中间夹了激活函数（SwiGLU），\(\big(\phi(xW_1)\big)W_2\) 不能合并成一个矩阵。非线性让“先压窄、再展宽”的结构变成真正有表达力的网络。论文引用了 Montúfar 等人（2014）关于深层网络“线性区域数”的理论工作，来说明在两个线性映射之间加入非线性能提升表达能力。</p>
+</div>
+<p>把多头注意力里第 \(k\) 个头对第 \(i\) 个 token 的贡献写开（论文式 6）：</p>
+<div class="formula">$$o^{k}_{i}=\Big(\sum_{j=0}^{i}S^{k}_{ij}\cdot X_{j}W_{V}^{k}\Big)W^{k}_{O}=\sum_{j=0}^{i}S^{k}_{ij}\cdot X_{j}\big(W_{V}^{k}W^{k}_{O}\big)$$</div>
+<p>这里 \(S^k_{ij}\) 是第 \(k\) 个头里第 \(i\) 个 token 对第 \(j\) 个 token 的注意力权重，\(X_jW_V^k\) 是第 \(j\) 个 token 在这个头的 value，\(W_O^k\) 是输出投影矩阵里对应这个头的那一块（先拼接再乘 \(W_O\)，等于每个头先各乘自己那一块再相加）。因为注意力权重只是一个标量，它可以挪到前面去，于是 \(W_V^k\) 和 \(W_O^k\) 直接相乘，合并成一个 \(d_{\text{model}}\times d_{\text{model}}\) 的矩阵，秩最多是 \(d_k=128\)，远小于 \(d_{\text{model}}=2048\)。在 GQA 下，同一组里的几个 query 头还共用同一个 \(W_V\)（MoE 模型里是 8 个头共用一个），表达力更受限制。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个头里 “W_V → 加权求和 → W_O” 这条路，以及门插在哪里</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="一个注意力头的 value 路径：x_j 经 W_V 压到 128 维，按注意力权重加权求和，再经 W_O 展回 2048 维；G2 在加权之前，G1 在加权之后、W_O 之前，G5 在 W_O 之后；没有门时 W_V 和 W_O 合并成一个秩不超过 128 的矩阵" style="--dg-min:760px">
+    <text class="t-sm t-b" x="20" y="28">一个头 k 对第 i 个 token 输出的贡献</text>
+    <g class="data"><rect class="box" x="20" y="60" width="100" height="50" rx="8"/><text class="t-c" x="70" y="78">x_j</text><text class="t-c t-xs" x="70" y="96">2048 维</text></g>
+    <path class="edge" d="M120,85 L138,85"/>
+    <g class="enc"><polygon class="box" points="140,50 250,72 250,98 140,120"/><text class="t-c" x="188" y="80">W_V^k</text><text class="t-c t-xs" x="188" y="98">2048→128</text></g>
+    <path class="edge" d="M250,85 L266,85"/>
+    <g class="data"><rect class="box" x="268" y="66" width="80" height="38" rx="6"/><text class="t-c" x="308" y="79">v_j</text><text class="t-c t-xs" x="308" y="95">128 维</text></g>
+    <path class="edge no-head" d="M348,85 L360,85"/>
+    <circle cx="378" cy="85" r="18" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.8"/><text class="t-c t-sm" x="378" y="86" style="fill:var(--c-enc)">G2</text>
+    <path class="edge" d="M396,85 L408,85"/>
+    <g class="tgt"><rect class="box" x="410" y="56" width="140" height="58" rx="8"/><text class="t-c" x="480" y="76">Σ_j S_ij · v_j</text><text class="t-c t-xs" x="480" y="96">token 间加权，128 维</text></g>
+    <path class="edge no-head" d="M550,85 L562,85"/>
+    <circle cx="582" cy="85" r="20" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:2.2"/><text class="t-c t-sm t-b" x="582" y="86" style="fill:var(--c-pred)">G1</text>
+    <path class="edge" d="M602,85 L618,85"/>
+    <g class="tgt"><polygon class="box" points="620,72 730,50 730,120 620,98"/><text class="t-c" x="680" y="80">W_O^k</text><text class="t-c t-xs" x="680" y="98">128→2048</text></g>
+    <path class="edge" d="M730,85 L746,85"/>
+    <g class="data"><rect class="box" x="748" y="60" width="100" height="50" rx="8"/><text class="t-c" x="798" y="78">o_i 的一份</text><text class="t-c t-xs" x="798" y="96">2048 维</text></g>
+    <path class="edge no-head" d="M848,85 L866,85"/>
+    <circle cx="884" cy="85" r="18" style="fill:var(--surface);stroke:var(--text-3);stroke-width:1.5"/><text class="t-c t-sm" x="884" y="86">G5</text>
+    <text class="t-c t-xs" x="378" y="136" style="fill:var(--c-enc)">G2：乘 σ(x_j W_θ)</text>
+    <text class="t-c t-xs" x="378" y="150" style="fill:var(--c-enc)">由被看的 token j 决定</text>
+    <text class="t-c t-xs" x="582" y="136" style="fill:var(--c-pred)">G1：乘 σ(x_i W_θ)</text>
+    <text class="t-c t-xs" x="582" y="150" style="fill:var(--c-pred)">由当前 query i 决定</text>
+    <text class="t-c t-xs" x="884" y="136">G5：已在 W_O 之后</text>
+    <text class="t-c t-xs" x="884" y="150">中间仍无非线性</text>
+    <line x1="20" y1="172" x2="940" y2="172" style="stroke:var(--border);stroke-dasharray:4 4"/>
+    <text class="t-sm t-b" x="20" y="194">没有门的时候，这条路可以合并成：</text>
+    <g class="data"><rect class="box" x="20" y="212" width="100" height="44" rx="8"/><text class="t-c" x="70" y="234">x_j</text></g>
+    <path class="edge" d="M120,234 L138,234"/>
+    <g class="enc"><rect class="box" x="140" y="208" width="290" height="52" rx="8"/><text class="t-c" x="285" y="226">W_V^k W_O^k：2048 × 2048 的矩阵</text><text class="t-c t-xs" x="285" y="246">但秩最多 128，输出只能落在 128 维子空间里</text></g>
+    <path class="edge" d="M430,234 L448,234"/>
+    <g class="tgt"><rect class="box" x="450" y="208" width="200" height="52" rx="8"/><text class="t-c" x="550" y="226">Σ_j S_ij ·（…）</text><text class="t-c t-xs" x="550" y="246">权重是标量，可以挪到最外面</text></g>
+    <path class="edge" d="M650,234 L668,234"/>
+    <g class="data"><rect class="box" x="670" y="212" width="110" height="44" rx="8"/><text class="t-c" x="725" y="234">o_i 的一份</text></g>
+    <text class="t-xs" x="20" y="290">GQA：MoE 模型 32 个 query 头只有 4 个 KV 头，每 8 个 query 头共用同一个 W_V^k，这 8 个头的合并矩阵共用同一个“入口”。</text>
+    <text class="t-xs" x="20" y="310">在 G1 或 G2 乘一个依赖输入的门，W_V 和 W_O 就不能再合并成一个固定矩阵；G5 在 W_O 之后，合并照样成立。</text>
+  </svg>
+  <div class="dia-note">本站示意图，按论文式 (6)–(8) 画出。论文正文没有对应的原图。</div>
+</div>
+<p>既然缺的是非线性，就有两种补法（论文式 7、式 8）：</p>
+<div class="formula">$$o^{k}_{i}=\Big(\sum_{j=0}^{i}S^{k}_{ij}\cdot \mathrm{NonLin}\big(X_{j}W_{V}^{k}\big)\Big)W^{k}_{O}\tag{7}$$
+$$o^{k}_{i}=\mathrm{NonLin}\Big(\sum_{j=0}^{i}S^{k}_{ij}\cdot X_{j}W_{V}^{k}\Big)W^{k}_{O}\tag{8}$$</div>
+<p>第一种在加权求和之前，对每个 value 单独做非线性，对应 \(G_2\)；第二种在加权求和之后、乘 \(W_O\) 之前做非线性，对应 \(G_1\)。这也顺带解释了为什么 \(G_5\) 没用：它在 \(W_O\) 之后，\(W_V\) 和 \(W_O\) 之间还是没有非线性。</p>
+<p>为了验证“关键是非线性”，作者在同样的 MoE 设置下做了几个变体（表 3）：</p>
+<div class="table-wrap"><table>
+<tr><th>表 3 的行</th><th>放在 \(G_1\) / \(G_2\) 的操作</th><th class="num">新增参数</th><th class="num">平均 PPL</th><th class="num">MMLU</th><th class="num">GSM8k</th></tr>
+<tr><td>(1) 基线</td><td>—</td><td class="num">0</td><td class="num">6.026</td><td class="num">58.79</td><td class="num">52.92</td></tr>
+<tr class="hl"><td>(2) SDPA 逐元素门</td><td>\(G_1\)：乘 sigmoid 门</td><td class="num">201M</td><td class="num">5.761</td><td class="num">60.82</td><td class="num">55.27</td></tr>
+<tr><td>(3) value 逐元素门</td><td>\(G_2\)：乘 sigmoid 门</td><td class="num">25M</td><td class="num">5.820</td><td class="num">59.17</td><td class="num">53.97</td></tr>
+<tr><td>(4) SDPA 加法门</td><td>\(G_1\)：加 \(\mathrm{SiLU}(XW)\)</td><td class="num">201M</td><td class="num">5.821</td><td class="num">60.06</td><td class="num">53.30</td></tr>
+<tr><td>(5) SDPA 组归一化</td><td>\(G_1\)：每个头单独做 RMSNorm</td><td class="num">≈0</td><td class="num">5.847</td><td class="num">60.15</td><td class="num">53.75</td></tr>
+<tr><td>(6) SDPA SiLU</td><td>\(G_1\)：直接过一次 SiLU，不加参数</td><td class="num">0</td><td class="num">5.975</td><td class="num">59.55</td><td class="num">53.19</td></tr>
+<tr><td>(7) SDPA 加法门，去掉 SiLU</td><td>\(G_1\)：加 \(XW\)（线性）</td><td class="num">201M</td><td class="num">5.882</td><td class="num">59.20</td><td class="num">52.77</td></tr>
+</table></div>
+<p>几组对比的读法：</p>
+<ul>
+  <li><b>RMSNorm 也有效（第 5 行）。</b>受 RetNet、Differential Transformer 对 SDPA 输出做组归一化的启发，作者在每个头的输出上单独做 RMSNorm（拼接之前）。归一化要除以向量自己的长度，是非线性的操作，而且几乎不加参数，困惑度却降到 5.847。这说明“在这个位置插一个非线性”本身就有用。</li>
+  <li><b>加法门的收益来自 SiLU（第 4、7 行）。</b>加法门的门分数要先过 SiLU，这引入了一点非线性，所以它有效（5.821）；把 SiLU 去掉，变成加一个线性项，收益就缩小了（5.882）。</li>
+  <li><b>只过一次 SiLU、不加参数（第 6 行）</b>：困惑度降了一点（5.975），但大多数下游任务分数没变。</li>
+</ul>
+<p>作者的小结是：有效的门之所以有效，很可能是因为在 \(W_V\) 和 \(W_O\) 之间引入了非线性。但 \(G_1\) 和 \(G_2\) 都引入了非线性，效果却不一样，所以一定还有别的因素，这就引出了下一节。</p>
+<div class="note-warn"><b>容易误解的地方（本站补充）：</b>
+<ul>
+  <li>门插在 \(W_O\) <b>之前</b>，所以每个头最终的输出仍然落在 \(W_O^k\) 那 128 维的行空间里，“输出只能在 128 维子空间里”这件事并没有改变。门改变的是：从输入到这 128 个系数的映射，不再是一个固定的线性映射，而会随当前 token 变化。把“缓解低秩问题”理解成“提高了秩”是不准确的。</li>
+  <li>逐头门是一个说明问题的反例：它只给整个头乘一个标量，完全不改变输出的方向，非线性程度非常有限，可它的效果（5.792）几乎和逐元素门（5.761）一样好，远好于 RMSNorm（5.847）。“补非线性”解释不了这一点，下一节的“稀疏性”才是主要原因。</li>
+</ul></div>
+
+<h4 id="n-4-2">4.2 稀疏性：有效的门，分数大多接近 0，而且由 query 决定</h4>
+<p>作者在测试文本上统计了各种门的门分数（表 4 的“门分数”一栏是所有层的平均值）。原文图 3 画了三种门的门分数分布：SDPA 逐元素门的均值是 0.116，分布高度集中在 0 附近；value 逐元素门的均值是 0.221；各头共享的 SDPA 门均值是 0.271。三种门的大部分分数都小于 0.5，其中 SDPA 输出门最“稀疏”（原图见 <a href="https://arxiv.org/html/2505.06708#S4.F3" target="_blank" rel="noopener">原文图 3 ↗</a>）。</p>
+<div class="table-wrap"><table>
+<tr><th>表 4 的行</th><th>激活函数</th><th class="num">门分数均值</th><th class="num">M-Act</th><th class="num">F-Attn</th><th class="num">PPL</th><th class="num">MMLU</th><th class="num">GSM8k</th></tr>
+<tr><td>(1) 基线</td><td>—</td><td class="num">—</td><td class="num">1053</td><td class="num">0.467</td><td class="num">6.026</td><td class="num">58.79</td><td class="num">52.92</td></tr>
+<tr class="hl"><td>(2) SDPA 逐元素门</td><td>sigmoid</td><td class="num">0.116</td><td class="num">94</td><td class="num">0.048</td><td class="num">5.761</td><td class="num">60.82</td><td class="num">55.27</td></tr>
+<tr class="hl"><td>(3) SDPA 逐头门</td><td>sigmoid</td><td class="num">0.172</td><td class="num">98</td><td class="num">0.073</td><td class="num">5.792</td><td class="num">60.05</td><td class="num">54.44</td></tr>
+<tr><td>(4) SDPA 逐元素门，各头共享</td><td>sigmoid</td><td class="num">0.271</td><td class="num">286</td><td class="num">0.301</td><td class="num">5.801</td><td class="num">60.06</td><td class="num">53.15</td></tr>
+<tr><td>(5) value 逐元素门</td><td>sigmoid</td><td class="num">0.221</td><td class="num">125</td><td class="num">0.297</td><td class="num">5.820</td><td class="num">59.17</td><td class="num">51.33</td></tr>
+<tr><td>(6) SDPA 与输入无关的门</td><td>sigmoid</td><td class="num">0.335</td><td class="num">471</td><td class="num">0.364</td><td class="num">5.917</td><td class="num">59.02</td><td class="num">52.40</td></tr>
+<tr><td>(7) SDPA 逐元素门</td><td>NS-sigmoid</td><td class="num">0.653</td><td class="num">892</td><td class="num">0.451</td><td class="num">5.900</td><td class="num">60.05</td><td class="num">52.75</td></tr>
+</table></div>
+<p style="font-size:.85rem;color:var(--text-3)">M-Act：每层输出隐状态里最大激活值（取整）在各层上的平均；F-Attn：分给第一个 token 的注意力比例，越高说明注意力汇越严重。第 5 行的 GSM8k 是 51.33，而表 1、表 3 里同一个模型（value 逐元素门）的 GSM8k 是 53.97，论文两处不一致，原因不明。</p>
+<p>结合表 4，作者得出四点：</p>
+<ol>
+  <li><b>有效的门分数是稀疏的。</b>SDPA 输出门（逐元素、逐头）的平均门分数最低（0.116、0.172），效果也最好。</li>
+  <li><b>各头独立的稀疏性很重要。</b>强制各头共享门分数后，门分数整体变高（0.271），收益也变小。这和以往的观察一致：不同的头负责输入的不同方面（有的头做指代，有的头做复制，著名的“归纳头”就是一类），它们在什么时候该“闭嘴”，自然也不一样。附录 A.5 的逐层统计也显示，共享以后大多数层的门分数都升高了。</li>
+  <li><b>依赖 query 很重要。</b>value 门（\(G_2\)）的分数比 SDPA 输出门高（0.221），效果也更差。区别在于门分数由谁决定：SDPA 输出门由当前 query 的 \(X_i\) 决定，value 门由每个被看的 token 的 \(X_j\) 决定。作者的解释是，稀疏的门最好由 query 来决定，这样它才能为<b>这一个</b> query 过滤掉无关的上下文。为了进一步验证，他们做了一个“与输入无关”的门：一组 \(q\times d_k\) 的可学习参数，零初始化，过 sigmoid 后乘在 SDPA 输出上。它对每个 token 都一样，只提供了非线性，没有依赖输入的稀疏性。结果它比基线好（5.917），但门分数高（0.335），远不如依赖输入的门。</li>
+  <li><b>不稀疏的门更差。</b>作者把 sigmoid 换成 \(\mathrm{NS\text{-}sigmoid}(x)=0.5+0.5\cdot\mathrm{sigmoid}(x)\)，门分数被限制在 0.5 到 1 之间：非线性还在，但门再也不能把输出压到接近 0。结果收益明显变小（5.900），门分数均值 0.653。</li>
+</ol>
+<p>附录（会议版 A.3，arXiv 版 A.2）进一步看了门对 SDPA 输出数值的影响，数字如下：</p>
+<div class="dia">
+  <div class="dia-title">简图：SDPA 逐元素门前后，输出数值的大小和“接近 0 的比例”（MoE 模型，各层平均）</div>
+  <div class="dia-row"><span class="lbl">门之前</span><div class="dia-track"><span class="dia-seg kv" style="flex:3">3%</span><span class="dia-seg oth" style="flex:97">绝对值不小于 0.01 的元素（平均绝对值 0.71）</span></div></div>
+  <div class="dia-row"><span class="lbl">乘门之后</span><div class="dia-track"><span class="dia-seg kv" style="flex:44">44% 小于 0.01</span><span class="dia-seg oth" style="flex:56">其余（平均绝对值 0.05）</span></div></div>
+  <div class="dia-row"><span class="lbl">乘“平均门分数”</span><div class="dia-track"><span class="dia-seg kv" style="flex:33">33% 小于 0.01</span><span class="dia-seg oth" style="flex:67">其余</span></div></div>
+  <div class="dia-row"><span class="lbl">基线（没有门）</span><div class="dia-track"><span class="dia-seg oth" style="flex:100">SDPA 输出的平均绝对值 0.04，和加门模型乘门之后的 0.05 很接近</span></div></div>
+  <div class="dia-out">换成更严的阈值 0.001：门之前 0.3%，乘门之后 12.6%，乘平均门分数 8.0%。</div>
+  <div class="dia-note">本站根据会议版附录图 4、图 5 图例里的平均值重画（原图是逐层曲线）。“乘平均门分数”是作者做的对照：把门之前的输出统一乘以门分数的平均值，看看单纯“整体缩小”能带来多少接近 0 的元素。原图见 <a href="https://arxiv.org/html/2505.06708#A1.F4" target="_blank" rel="noopener">附录图 4 ↗</a>、<a href="https://arxiv.org/html/2505.06708#A1.F5" target="_blank" rel="noopener">附录图 5 ↗</a>。</div>
+</div>
+<p>这组数字有两个读法。第一，乘门之后接近 0 的元素比例（44%）明显高于“统一乘平均门分数”的对照（33%），说明门不是简单地把输出整体缩小，而是有选择地把某些头、某些维度压到接近 0，稀疏性来自门分数本身的分布。第二，加门模型乘门之后的平均幅度（0.05），和基线 SDPA 输出的平均幅度（0.04）几乎一样。作者据此推测：门在加门模型里扮演的角色，可能和注意力汇在基线模型里扮演的角色相同，都是“把无关的信息挡在外面”。下一节专门讲这件事。</p>
+
+<h4 id="n-4-3">4.3 门消除了超大激活和注意力汇</h4>
+<div class="note-pre"><b>先补一点背景：注意力汇（attention sink）。</b>
+<p>softmax 让每个 query 分给所有 key 的权重加起来必须等于 1。可是有些时候，一个头对当前 token 来说根本没有需要读的东西，最好的输出是“什么也不加”。在标准注意力里，它没法把权重总和设成 0，只能找个地方把这 1 份权重“倒掉”。训练出来的模型普遍学会了把这部分权重倒在序列的第一个 token 上：每个位置都能看到它，而模型可以让它的 value 几乎是 0，这样“看了它”就约等于“什么也没看”。StreamingLLM（Xiao 等，ICLR 2024）系统地描述了这个现象，并把这些 token 叫作<b>注意力汇</b>。</p>
+<p>注意力汇对推理系统有实实在在的影响。StreamingLLM 发现，只保留最近一段窗口的 KV 时，一旦第一个 token 被挤出窗口，输出就会崩坏；额外留住开头几个 token，模型才能稳定地一直生成（详见 <a href="snapkv.html#n-2">SnapKV 精读 §2</a>）。NSA 选块时固定选中开头那一块，也是同样的原因（见 <a href="native-sparse-attention.html">NSA 精读</a>）。也就是说，很多 KV 缓存的淘汰、压缩策略都得给注意力汇“开特例”。</p>
+</div>
+<div class="note-pre"><b>先补一点背景：超大激活（massive activation），以及它们为什么让量化变难。</b>
+<p>Sun 等人（2024）发现，LLM 残差流里有极少数数值大得离谱的激活：它们只出现在固定的几个维度上，只出现在少数几个 token 上（第一个 token、句号或换行这类分隔符），数值比中位数大几个数量级，而且几乎不随输入内容变化，像是模型内部的一组固定偏置。他们还发现，这些 token 正是吸走大量注意力的 token，两种现象紧密相关。论文表 4 的 M-Act 一栏度量的就是它：基线模型每层隐状态最大值的平均是 1053。</p>
+<p>超大激活对低精度很不友好，原因和 <a href="quarot.html#n-1">QuaRot 精读 §1</a> 讲的离群值一样：对称量化的刻度由一组数里绝对值最大的那个决定。举个例子（推算）：用 INT8 对一组激活做逐张量量化，刻度 \(s=\max|x|/127\)。如果这组数里有一个 1053，\(s\approx8.29\)，那么幅度在 1 左右的普通激活全部被舍成 0；如果最大值是 94，\(s\approx0.74\)，幅度 1 的激活被量化成 1，误差 0.26。逐 token 量化能把这个问题局限在那几个 token 的那一行里，但那一行本身照样量不准；而 KV 缓存量化（见 <a href="kivi.html#n-4-1">KIVI 精读 §4.1</a>）还要面对 key 里固定通道的离群值。后来的一些量化工作干脆把这些“枢纽 token”的 KV 单独留成全精度（例如 IntactKV）。</p>
+<p>训练时也一样。BF16 只有 8 位有效数字（7 位尾数加隐含的 1），在 512 到 1024 之间，相邻两个可表示的数相差 4（推算：\(512\times2^{-7}=4\)）。如果残差流里某一维已经是 1000 左右，再往上加一个大小为 1 的更新，在 BF16 里就被舍掉了。论文引用 Budzinskiy 等人（2025）的数值误差分析，认为超大激活会让 BF16 训练更容易受数值误差影响。</p>
+</div>
+<p>第 4.2 节的发现是：门以依赖输入的方式给 SDPA 输出带来了稀疏性。作者由此假设：这种机制能为当前 query 过滤掉无关的上下文，于是模型不再需要注意力汇。会议版还补充了一个旁证：更早的一项工作（Explicit Sparse Transformer，Zhao 等，2019；Junyang Lin 是作者之一）发现，在只看 top-k 个最相关 token 的显式稀疏注意力里，注意力汇不会出现。为了验证，作者统计了两样东西：分给第一个 token 的注意力比例（F-Attn），以及各层隐状态最大激活值的平均（M-Act）。</p>
+<div class="dia">
+  <div class="dia-title">简图：分给第一个 token 的注意力比例（MoE 模型，测困惑度的文本，所有头平均）</div>
+  <div class="dia-row"><span class="lbl">基线，各层平均</span><div class="dia-track"><span class="dia-seg frag" style="flex:46.7">第 1 个 token：46.7%</span><span class="dia-seg oth" style="flex:53.3">其余所有 token</span></div></div>
+  <div class="dia-row"><span class="lbl">加门，各层平均</span><div class="dia-track"><span class="dia-seg frag" style="flex:4.8"></span><span class="dia-seg kv" style="flex:95.2">第 1 个 token 只剩 4.8%，其余 95.2% 分给真正的上下文</span></div></div>
+  <div class="dia-row"><span class="lbl">基线，第 21 层</span><div class="dia-track"><span class="dia-seg frag" style="flex:83">第 1 个 token：83%</span><span class="dia-seg oth" style="flex:17">其余</span></div></div>
+  <div class="dia-row"><span class="lbl">加门，第 21 层</span><div class="dia-track"><span class="dia-seg frag" style="flex:4"></span><span class="dia-seg kv" style="flex:96">其余 token 96%（第 1 个 token 只剩 4%）</span></div></div>
+  <div class="dia-note">本站根据原文图 2 图注里的数字重画（这些数字与表 4 的 F-Attn 一致，说明是 MoE 模型）。原图左边是逐层的“第一个 token 注意力占比”曲线，右边是基线与加门模型在几层上的平均注意力热图：基线的热图第一列很深，加门后注意力分到了各个 token 上；在最后一层，门还加强了模型原本就有的“只盯住个别 token”的倾向。原图见 <a href="https://arxiv.org/html/2505.06708#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a>。</div>
+</div>
+<div class="dia">
+  <div class="dia-title">简图：门分数越稀疏，注意力汇越弱（表 4 的七个模型）</div>
+  <svg class="dg" viewBox="0 0 960 380" role="img" aria-label="散点图：横轴为门分数均值，纵轴为分给第一个 token 的注意力；G1 逐元素和逐头的点在左下角，接近零；G2 和各头共享的点在 0.3 附近；与输入无关的门和 NS-sigmoid 门更高；基线为 0.467 的水平虚线" style="--dg-min:720px">
+    <line class="grid-ln" x1="90" y1="264" x2="880" y2="264"/><line class="grid-ln" x1="90" y1="208" x2="880" y2="208"/><line class="grid-ln" x1="90" y1="152" x2="880" y2="152"/><line class="grid-ln" x1="90" y1="96" x2="880" y2="96"/><line class="grid-ln" x1="90" y1="40" x2="880" y2="40"/>
+    <line class="axis" x1="90" y1="320" x2="880" y2="320"/><line class="axis" x1="90" y1="40" x2="90" y2="320"/>
+    <text class="t-r t-xs" x="82" y="320">0</text><text class="t-r t-xs" x="82" y="264">0.1</text><text class="t-r t-xs" x="82" y="208">0.2</text><text class="t-r t-xs" x="82" y="152">0.3</text><text class="t-r t-xs" x="82" y="96">0.4</text><text class="t-r t-xs" x="82" y="40">0.5</text>
+    <text class="t-c t-xs" x="90" y="336">0</text><text class="t-c t-xs" x="202.9" y="336">0.1</text><text class="t-c t-xs" x="315.7" y="336">0.2</text><text class="t-c t-xs" x="428.6" y="336">0.3</text><text class="t-c t-xs" x="541.4" y="336">0.4</text><text class="t-c t-xs" x="654.3" y="336">0.5</text><text class="t-c t-xs" x="767.1" y="336">0.6</text><text class="t-c t-xs" x="880" y="336">0.7</text>
+    <text class="t-c t-sm" x="485" y="360">门分数的平均值（越小越稀疏）</text>
+    <text class="t-c t-sm" x="28" y="180" transform="rotate(-90 28 180)">分给第一个 token 的注意力</text>
+    <line x1="90" y1="58.5" x2="880" y2="58.5" style="stroke:var(--c-loss);stroke-dasharray:6 4"/>
+    <text class="t-xs" x="100" y="50" style="fill:var(--c-loss)">基线（没有门）：0.467，M-Act 1053</text>
+    <circle cx="220.9" cy="293.1" r="7" style="fill:var(--c-pred)"/><text class="t-r t-xs" x="210" y="306">G1 逐元素（M-Act 94）</text>
+    <circle cx="284.1" cy="279.1" r="7" style="fill:var(--c-pred);opacity:.7"/><text class="t-xs" x="296" y="279">G1 逐头（M-Act 98）</text>
+    <circle cx="395.9" cy="151.4" r="7" style="fill:var(--c-pred);opacity:.45;stroke:var(--c-pred)"/><text class="t-xs" x="408" y="146">G1 各头共享（M-Act 286）</text>
+    <circle cx="339.4" cy="153.7" r="7" style="fill:var(--c-enc)"/><text class="t-r t-xs" x="327" y="168">G2 value 门（M-Act 125）</text>
+    <circle cx="468.1" cy="116.2" r="7" style="fill:var(--c-tgt)"/><text class="t-xs" x="480" y="116">与输入无关的门（M-Act 471）</text>
+    <circle cx="827.0" cy="67.4" r="7" style="fill:var(--c-tgt);opacity:.7"/><text class="t-r t-xs" x="815" y="84">NS-sigmoid 门，分数在 0.5–1（M-Act 892）</text>
+  </svg>
+  <div class="dia-note">本站根据论文表 4 的“门分数”“F-Attn”“M-Act”三栏重画。每个点是一个单独训练的模型，括号里是它的 M-Act。这是七个点的对照，不是因果证明：注意 G2 value 门的 M-Act 已经很低（125），注意力汇却仍然明显（0.297）。</div>
+</div>
+<p>表 4 和上图给出三条观察：</p>
+<ol>
+  <li><b>依赖 query、各头独立的 SDPA 输出门（逐头和逐元素），把第一个 token 的注意力从 0.467 压到 0.048–0.073，M-Act 也从 1053 降到 94–98。</b></li>
+  <li><b>各头共享的门，或者只在 value 上加门，能降低超大激活（286、125），却没能降低第一个 token 的注意力（0.301、0.297）。</b>这一方面再次说明各头独立很重要；另一方面说明，超大激活并不是注意力汇出现的必要条件。</li>
+  <li><b>降低门对输入的依赖（与输入无关的门），或者用 NS-sigmoid 削弱稀疏性，超大激活和注意力汇都变严重了</b>（M-Act 471、892，F-Attn 0.364、0.451）。</li>
+</ol>
+<p>作者据此得出结论：依赖输入、各头独立的 SDPA 输出门带来了显著的稀疏性，从而缓解了注意力汇；SDPA 输出越稀疏，模型里的激活就越小。这也可能解释了门为什么让训练更稳定：超大激活少了，BF16 训练中的数值误差影响就小了。</p>
+<p><b>超大激活从哪里来。</b>作者还看了它们在网络里是怎么产生和传播的（会议版附录 A.4，arXiv 版 A.3，附录图 6）。在基线模型里，第 6 层（正文写“例如第 5 层”，可能是从 0 还是从 1 开始数的差别）的前馈层输出了超大的值，这些值被加进残差流后，就一路留在后面所有层的残差里；与此对应，从第 6 层开始出现明显的注意力汇。加门之后，前面几层的输出整体都很小，最大激活随层数逐渐增长（量级在几百以内），任何一层都没有明显的注意力汇。value 门的模型超大激活和 SDPA 门差不多，但仍有一定程度的注意力汇；各头共享和 NS-sigmoid 两个变体，超大激活和注意力汇都和基线相当。附录图 6 里 NS-sigmoid 模型的第一个 token 注意力均值标的是 0.481，而表 4 写的是 0.451，两处数字不一致。</p>
+<div class="dia">
+  <div class="dia-title">示意图：基线模型里，超大激活是怎么一步步变成注意力汇的（作者的解释）</div>
+  <div class="dia-flow"><span class="dia-box">① 浅层（第 5–6 层）的前馈层<small>对开头的 token 输出几个超大的值</small></span><span class="dia-arrow">→</span><span class="dia-box">② 加进残差流<small>后面每一层的残差里都带着它</small></span><span class="dia-arrow">→</span><span class="dia-box">③ pre-norm 归一化后送进注意力<small>这个 token 的表示几乎被那几个维度主导，变成一个固定的方向</small></span><span class="dia-arrow">→</span><span class="dia-box pred">④ 它的 key 成了所有 query 都会去“倒权重”的地方<small>注意力汇</small></span></div>
+  <div class="dia-flow"><span class="dia-box reg">sandwich norm：前馈层输出先归一化再加回残差流，从第②步截断</span><span class="dia-box enc">SDPA 输出门：头可以靠门“闭嘴”，第④步不再被需要；论文观察到第①步的超大值也随之消失</span></div>
+  <div class="dia-note">本站根据论文 §4.3 与附录 A.4 的文字整理，不是原图。超大激活从浅层前馈层产生、经残差流传播，这一点与 Yona 等（2025）对“重复 token 现象”的分析一致，论文引用了它。</div>
+</div>
+<p>这条传播路径也解释了表 2 里 sandwich norm 为什么能稳定训练：前馈层的输出先归一化，大值就进不了残差流。但附录 A.6 的截断实验（第 3.3 节）表明，单纯把残差流里的值截断并不能解决不稳定，所以“超大激活导致训练不稳定”只是一个可能的解释，不是被证实的因果关系。</p>
+<p>会议版还新增了附录 A.7：如果不是从头训练，而是在一个已经训好的模型上<b>继续训练时才加门</b>，那么门既消除不了已经存在的超大激活和注意力汇，对最终效果也没什么影响。作者认为，门的作用主要体现在它对训练动态的影响上，所以对不是从头训练的模型作用有限。</p>
+<div class="note-warn"><b>这一节的结论要打几个折扣：</b>
+<ul>
+  <li>“没有注意力汇”是按<b>第一个 token</b> 分到的注意力来度量的。Sun 等人发现超大激活也会出现在句号、换行等分隔符上，这些位置的注意力论文没有统计。</li>
+  <li>论文只测了激活的大小，<b>没有做任何量化实验</b>。“M-Act 从 1053 降到 94，所以更好量化”是合理的推论，但在这篇论文里没有被验证；最接近的证据来自 Quantizable Transformers（第 5 节），那是在 BERT、ViT 这样的编码器模型上做的。</li>
+  <li>“超大激活不是注意力汇的必要条件”这个结论来自两个变体（value 门和各头共享的门）。会议版 §5.2 把这句话写成了“超大激活是注意力汇的必要条件”，和 §4.3、附录 A.4 以及 arXiv 版都矛盾，应当是笔误。</li>
+  <li>附录 A.7 意味着这个改动<b>没法改装到现有模型上</b>：想要没有注意力汇的模型，得从预训练开始就带着门。</li>
+</ul></div>
+
+<h4 id="n-4-4">4.4 没有注意力汇，长上下文外推更好</h4>
+<div class="note-pre"><b>先补一点背景：RoPE 的底数、YaRN 和 RULER。</b>
+<p>RoPE 把位置编码成 query、key 各维度上的旋转角度，不同维度转速不同，转速由一个“底数”（base）控制（见 <a href="roformer.html">RoFormer 精读</a>）。模型在 4K 长度上训练后，想处理更长的输入，常见的做法分两步。第一步是把底数调大（论文从 10,000 调到 1,000,000），让各维度转得更慢，再用长文本继续训练一段。第二步是在推理时用 <b>YaRN</b> 这类方法按频率对 RoPE 做插值缩放，<b>不再训练</b>就把可用长度再拉长几倍（插值、NTK 与 YaRN 的原理见 <a href="roformer.html#n-10-2">RoFormer 精读 §10.2</a>）。这样外推的代价是：模型看到的位置角度和训练时不一样了，原来学到的注意力模式未必还能照常工作。</p>
+<p><b>RULER</b>（Hsieh 等，2024）是一个合成的长上下文评测，包含多种“大海捞针”式检索、多跳追踪、信息聚合和问答任务，可以把输入拉到任意指定长度，报告平均准确率（百分制）。它比困惑度更能反映模型在长输入里能不能准确找到信息。</p>
+</div>
+<p><b>实验设置。</b>作者拿训练了 3.5T token 的基线和加门模型，把 RoPE 底数从 10K 调到 1M，用 32K 长度的数据继续训练 80B token，得到上下文长度 32K 的模型；再用 YaRN 把上下文扩展到 128K（不再训练）。两个模型经历的续训数据和步骤完全相同。论文没有明说用的是哪个模型：正文报告过 3.5T token 训练结果的只有第 3.3 节的 28 层 1.7B 稠密模型，但引言又说稠密和 MoE 模型都训到了 3.5T token，所以无法确定。</p>
+<div class="dia">
+  <div class="dia-title">简图：RULER 分数随上下文长度的变化（论文表 5）</div>
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="折线图：32K 以内基线与加门模型分数接近；用 YaRN 扩展到 128K 后，基线在 32K 处跌到 37.94、128K 处 31.65，加门模型在 32K 处 72.88、128K 处 58.82" style="--dg-min:720px">
+    <line class="grid-ln" x1="120" y1="265" x2="880" y2="265"/><line class="grid-ln" x1="120" y1="190" x2="880" y2="190"/><line class="grid-ln" x1="120" y1="115" x2="880" y2="115"/><line class="grid-ln" x1="120" y1="40" x2="880" y2="40"/>
+    <line class="axis" x1="120" y1="340" x2="880" y2="340"/>
+    <text class="t-r t-xs" x="110" y="340">20</text><text class="t-r t-xs" x="110" y="265">40</text><text class="t-r t-xs" x="110" y="190">60</text><text class="t-r t-xs" x="110" y="115">80</text><text class="t-r t-xs" x="110" y="40">100</text>
+    <text class="t-c t-xs" x="120" y="356">4K</text><text class="t-c t-xs" x="272" y="356">8K</text><text class="t-c t-xs" x="424" y="356">16K</text><text class="t-c t-xs" x="576" y="356">32K</text><text class="t-c t-xs" x="728" y="356">64K</text><text class="t-c t-xs" x="880" y="356">128K</text>
+    <text class="t-c t-sm" x="40" y="190" transform="rotate(-90 40 190)">RULER 平均分</text>
+    <line x1="576" y1="40" x2="576" y2="340" style="stroke:var(--text-3);stroke-dasharray:3 4"/>
+    <text class="t-c t-xs" x="576" y="30">续训长度 32K</text>
+    <text class="t-c t-xs" x="804" y="30">只靠 YaRN 外推</text>
+    <polyline points="120,81.7 272,92.9 424,103.2 576,116.9" style="fill:none;stroke:var(--c-loss);stroke-width:1.6;stroke-dasharray:5 4"/>
+    <polyline points="120,75.4 272,88.3 424,97.7 576,115.9" style="fill:none;stroke:var(--c-enc);stroke-width:1.6;stroke-dasharray:5 4"/>
+    <polyline points="120,104.1 272,146.8 424,185.4 576,272.7 728,274.3 880,296.3" style="fill:none;stroke:var(--c-loss);stroke-width:2.8"/>
+    <polyline points="120,84.5 272,115.0 424,127.2 576,141.7 728,165.2 880,194.4" style="fill:none;stroke:var(--c-enc);stroke-width:2.8"/>
+    <circle cx="576" cy="272.7" r="4" style="fill:var(--c-loss)"/><circle cx="728" cy="274.3" r="4" style="fill:var(--c-loss)"/><circle cx="880" cy="296.3" r="4" style="fill:var(--c-loss)"/>
+    <circle cx="576" cy="141.7" r="4" style="fill:var(--c-enc)"/><circle cx="728" cy="165.2" r="4" style="fill:var(--c-enc)"/><circle cx="880" cy="194.4" r="4" style="fill:var(--c-enc)"/>
+    <text class="t-c t-xs" x="576" y="290" style="fill:var(--c-loss)">37.94</text><text class="t-c t-xs" x="728" y="292" style="fill:var(--c-loss)">37.51</text><text class="t-r t-xs" x="874" y="314" style="fill:var(--c-loss)">31.65</text>
+    <text class="t-c t-xs" x="590" y="158" style="fill:var(--c-enc)">72.88</text><text class="t-c t-xs" x="728" y="150" style="fill:var(--c-enc)">66.60</text><text class="t-r t-xs" x="874" y="180" style="fill:var(--c-enc)">58.82</text>
+    <line x1="140" y1="380" x2="170" y2="380" style="stroke:var(--c-loss);stroke-width:2.8"/><text class="t-xs" x="176" y="380">基线，YaRN 扩到 128K</text>
+    <line x1="330" y1="380" x2="360" y2="380" style="stroke:var(--c-enc);stroke-width:2.8"/><text class="t-xs" x="366" y="380">加门，YaRN 扩到 128K</text>
+    <line x1="520" y1="380" x2="550" y2="380" style="stroke:var(--c-loss);stroke-width:1.6;stroke-dasharray:5 4"/><text class="t-xs" x="556" y="380">基线，32K 模型</text>
+    <line x1="680" y1="380" x2="710" y2="380" style="stroke:var(--c-enc);stroke-width:1.6;stroke-dasharray:5 4"/><text class="t-xs" x="716" y="380">加门，32K 模型</text>
+  </svg>
+  <div class="dia-note">本站根据论文表 5 的数字重画。32K 模型在 64K、128K 没有分数（超出它的上下文）。原表见 <a href="https://arxiv.org/html/2505.06708#S4.T5" target="_blank" rel="noopener">原文表 5 ↗</a>。</div>
+</div>
+<div class="table-wrap"><table>
+<tr><th>RULER</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th><th class="num">64K</th><th class="num">128K</th></tr>
+<tr><td>基线（32K 模型）</td><td class="num">88.89</td><td class="num">85.88</td><td class="num">83.15</td><td class="num">79.50</td><td class="num">—</td><td class="num">—</td></tr>
+<tr><td>加门（32K 模型）</td><td class="num">90.56</td><td class="num">87.11</td><td class="num">84.61</td><td class="num">79.77</td><td class="num">—</td><td class="num">—</td></tr>
+<tr><td>基线，YaRN 扩到 128K</td><td class="num">82.90（−6.0）</td><td class="num">71.52（−14.4）</td><td class="num">61.23（−21.9）</td><td class="num">37.94（−41.56）</td><td class="num">37.51</td><td class="num">31.65</td></tr>
+<tr class="hl"><td>加门，YaRN 扩到 128K</td><td class="num">88.13（−2.4）</td><td class="num">80.01（−7.1）</td><td class="num">76.74（−7.87）</td><td class="num">72.88（−6.89）</td><td class="num">66.60</td><td class="num">58.82</td></tr>
+</table></div>
+<p>三点观察：</p>
+<ol>
+  <li><b>在 32K 以内，加门模型只比基线略好</b>（4K 时 +1.67，32K 时只 +0.27）。作者认为这说明在训练长度以内，注意力汇不一定伤害长上下文能力。</li>
+  <li><b>用 YaRN 扩到 128K 后，两个模型在原来 32K 以内的分数都下降了</b>，这和以往修改 RoPE 来扩展上下文的工作观察一致；但加门模型降得少得多：32K 处基线掉了 41.56 分，加门模型只掉了 6.89 分。</li>
+  <li><b>在 64K 和 128K，加门模型大幅领先</b>（66.60 对 37.51，58.82 对 31.65）。</li>
+</ol>
+<p>作者的假设是：基线模型依靠注意力汇来调整注意力分布。用 YaRN 改变 RoPE 之后，注意力和隐状态的分布都变了，而注意力汇这种机制在不重新训练的情况下很难跟着调整，所以性能明显下降。加门的模型主要靠依赖输入的门分数来控制信息流，对这种改变更鲁棒。论文在“局限”里也承认，这只是一个经验观察，没有严格的理论解释。</p>
+<div class="note-warn"><b>读这组结果要注意：</b>
+<ul>
+  <li>两个模型的续训过程完全对齐，但 YaRN 是<b>免训练</b>地扩展了 4 倍。实际的长上下文模型通常还会在更长的数据上再训一段；那种情况下差距会不会还这么大，论文没有测。</li>
+  <li>只用了 RULER 一个基准，而且只测了一对模型；“提高 10 分以上”指的是 64K、128K 这两档，32K 以内几乎没差别。</li>
+  <li>没有和其他“去掉注意力汇”的方法（例如可学习的汇、softmax 加一）在外推上做对比，所以这里能说明的是“有没有门”的差别，而不是“门是最好的去汇方法”。</li>
+</ul></div>
+
+<h4 id="n-4-5">4.5 结果的份量（第 3、4 节合起来看）</h4>
+<p>把第 3、4 节的数字放在一起，下面几点决定了它们能说明多少问题。</p>
+<p><b>对齐做得比多数架构论文认真。</b>MoE 的每组比较都用同样的数据、同样的 400B token、同一套学习率计划和批大小；为了排除“多了参数”的解释，专门加了三个扩参数的对照，其中 q=48 和逐元素 \(G_1\) 门新增的参数一样多、而且都在注意力里。稠密模型通过收窄前馈层对齐了参数量，超参是为基线调的，这对基线有利。最有说服力的一点是：逐头的 \(G_1\) 门只多了 1.6M 参数、几乎不增加计算，效果仍排第二。</p>
+<p><b>但统计上的把握有限。</b>每个设置只训了一次，没有误差棒。主效应（加门后困惑度更低）在 MoE 和稠密、400B 和 3.5T token 的每组比较里方向都一致，可信度较高；注意力汇和超大激活的具体数字则只在 MoE 模型上给出。变体之间 0.01–0.06 的困惑度差别（比如逐元素和逐头、sigmoid 和 SiLU），单靠这些实验分不清是不是噪声。下游任务里 HumanEval 这类小测试集的波动尤其大。</p>
+<p><b>规模停在“中等”。</b>大部分消融在 15A2B 上只训了 400B token；正文给出 3.5T token 结果的只有 28 层的 1.7B 稠密模型（基线与逐元素门各一个）；“稳定性”的证据是一对损失曲线和两次基线发散。更大规模上的证据来自 Qwen3-Next 和 Qwen3.5 的采用（见“后来怎么样了”），但那是产品决策，没有公开对应的消融。</p>
+<p><b>机制分析是相关性，不是因果。</b>门分数、F-Attn、M-Act 都是在 MoE 模型、困惑度测试文本上统计的，七个变体七个点；“稀疏性消除了注意力汇”“超大激活不是注意力汇的必要条件”都是从这几个点读出来的。“超大激活导致训练不稳定”被附录 A.6 的截断实验部分否定了，作者自己也说根本原因需要进一步研究。</p>
+<p><b>效率数字几乎没有细节。</b>“墙钟时间开销不到 2%”没有说明硬件、内核、是训练还是推理、哪个模型；论文没有测任何推理延迟或吞吐。第 7 节会按参数量估一下推理时的额外开销（推算）。</p>
+<p><b>和 Infra 最相关的几点，论文都没有直接测。</b>量化精度、KV 缓存淘汰（例如 StreamingLLM 式的“保留开头几个 token”）、FP8 训练，这些是从 M-Act 和 F-Attn 推出来的预期，不是实验结果。</p>
+<p><b>版本之间的出入。</b>训练数据总量（arXiv 3.5T、会议版 4T）、图 1 右的训练长度（3.5T、3T）、value 门的 GSM8k（表 1 的 53.97、表 4 的 51.33）、NS-sigmoid 的 F-Attn（表 4 的 0.451、附录图 6 的 0.481），以及会议版 §5.2 关于“必要条件”的笔误。这些都不影响主结论，但引用具体数字时最好注明出处。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2505.06708#A1" target="_blank" rel="noopener">附录 A ↗</a> · 会议版新增的附录 A.7 见 <a href="https://proceedings.neurips.cc/paper_files/paper/2025/file/904e89bb4e632e75fb47f093b620b257-Paper-Conference.pdf" target="_blank" rel="noopener">NeurIPS PDF ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 相关工作：门的来历，以及“去掉注意力汇”的几条路</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在注意力上加门，以前有没有人做过？和这篇论文最接近的是哪项工作，区别在哪？关于注意力汇，前人有哪些解释、提出过哪些消除它的办法？这些办法从系统实现的角度看有什么不同？</div>
+<p><b>门控机制的谱系。</b>LSTM 和 GRU 用门控制每个时间步保留和丢弃的信息，从而缓解梯度消失和爆炸；Highway Network 把门推广到前馈网络，让很深的网络也能训练；SwiGLU 把门引入 Transformer 的前馈层，成为开源大模型的标准部件。状态空间模型（Mamba 系列）和线性注意力（FLASH、RetNet、Lightning Attention、Gated DeltaNet）都用门来调节 token 混合模块的输出。直接在 softmax 注意力输出上加门的工作也有：AlphaFold2（会议版新增的引用）和 Forgetting Transformer；GaAN 在图学习里用门控制每个注意力头的重要性；Attention on Attention（图像描述）用一个依赖 query 的 sigmoid 门调节注意力输出。Switch Heads、NSA、MoSA 用 sigmoid 门做“选择”。作者的观点是：这些工作展示了门的效果，却没有说清楚门为什么有效；那些以“选择”为卖点的方法，最好和“带同样门的标准 Transformer”比一比，才能看出选择机制本身贡献了多少。</p>
+<div class="note-pre"><b>先补一点背景：Quantizable Transformers，和这篇论文最接近的工作。</b>
+<p>Bondarenko、Nagel、Blankevoort（高通，NeurIPS 2023）的论文副标题是“帮助注意力头什么也不做，从而去掉离群值”。他们研究 BERT、ViT 这类编码器为什么难以量化，发现激活里的极端离群值来自注意力头想要“不更新”时的行为：为了让某个头对当前 token 几乎不产生输出，模型把注意力集中到分隔符、背景图块这类信息量很低的 token 上；而要让 softmax 把几乎全部权重压到一个 token 上，就需要极大的注意力 logit，这又反过来要求残差流里出现极大的数。他们提出两种改动让头可以直接“什么也不做”：一种是允许输出精确 0 和 1 的截断 softmax，另一种就是在注意力输出上加门。这样训出来的模型离群值明显变少，更容易量化。</p>
+<p>本文作者自己的定位是：Quantizable Transformers 主要是为了量化去离群值；本文则系统比较了各种门的变体，揭示门通过非线性和稀疏性起作用、并改善训练稳定性，还把门控注意力放大到 15B MoE、3.5T token 的规模上验证。值得注意的是，两篇论文对机制的解释几乎一样（“头需要一种不发言的方式”），只是一个从量化出发，一个从效果和稳定性出发。</p>
+</div>
+<p><b>关于注意力汇的研究。</b>StreamingLLM 正式提出了注意力汇；在视觉 Transformer 里，Darcet 等人发现一些冗余的图块被模型当作“寄存器”来存放多余的注意力，于是干脆加入专门的寄存器 token；Massive Activation 一文说明这些吸走大量注意力的 token 带有超大激活；Gu 等人把注意力汇刻画为不携带信息的“key 偏置”，认为是 softmax 的归一化迫使模型这样做。本文补充的一点是：value 门消除了超大激活，注意力汇却还在，所以超大激活不是注意力汇的必要条件。</p>
+<p>前人提出过的去汇办法，按它们对推理系统的影响可以分成三类（分类是本站整理的）：</p>
+<div class="table-wrap"><table>
+<tr><th>做法</th><th>代表工作（论文引用）</th><th>对注意力内核和 KV 缓存的影响（本站分析）</th></tr>
+<tr><td><b>改 softmax 本身</b>：让权重不必加起来等于 1，或者允许全部为 0</td><td>不归一化的 sigmoid 注意力（Ramapuram 等，2024）；softmax 分母加 1（Miller，“Attention is off by one”，2023）；Softpick（修正版 softmax，2025）；推理时校准注意力分数（ACT，2024）</td><td>要改注意力内核里的 softmax 和在线归一化逻辑（FlashAttention 的在线 softmax 见 <a href="flashattention.html">FlashAttention 精读</a>），每个推理引擎都得跟着改；KV 缓存不变</td></tr>
+<tr><td><b>给汇一个专门的位置</b>：让模型把多余的权重倒在专设的地方，而不是倒在第一个真实 token 上</td><td>ViT 寄存器 token（Darcet 等，2024）；Hymba 的 meta token（2024）；gpt-oss 的可学习汇（2025）</td><td>额外的 token 会占用 KV 缓存的位置（数量很少）；可学习汇是在 softmax 分母里多加一项，内核需要支持这一项</td></tr>
+<tr><td><b>在注意力输出上加门</b>：让头靠门“闭嘴”，不再需要汇</td><td>Quantizable Transformers（2023）；本文</td><td>注意力内核完全不动；门分数和 query 一起算，KV 缓存不变；多一次逐元素乘法</td></tr>
+<tr><td><b>显式稀疏注意力</b>：只看 top-k 个 token</td><td>Explicit Sparse Transformer（Zhao 等，2019）</td><td>计算模式本身变了，需要专门的稀疏内核</td></tr>
+</table></div>
+<p>论文强调，它在稠密（1.7B）和 MoE（15B）模型上都消除了注意力汇，而且是在训练了 3.5T token 之后；它还第一次展示了消除注意力汇对扩展上下文长度的好处。</p>
+<div class="note-warn"><b>容易混淆的一点：</b>论文 §5.2 写稠密模型是“1B 参数”，而第 3 节一直称它为 1.7B；官方 Hugging Face 仓库里的目录名也叫 <code>1B_baseline</code>、<code>1B_gate_elementwise</code>。这些都是同一个 28 层模型（总参数约 1.7B，含共享的词嵌入）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 结论与局限</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者怎么总结这项工作？他们承认哪些地方还没弄清楚？</div>
+<p>作者的总结是：这项工作系统地研究了 softmax 注意力里的门控机制，揭示了门对效果、训练稳定性和注意力动态的显著影响。在 SDPA 之后加一个 sigmoid 门这样简单的改动，增强了非线性，引入了依赖输入的稀疏性，并消除了注意力汇；它还帮助模型在不重新训练的情况下扩展上下文长度。作者承诺放出“没有注意力汇”的模型，作为后续研究注意力机制的基础（模型已经放在 Hugging Face 上，见“影响力”）。</p>
+<p>作者承认的局限有两条：非线性对注意力动态和整个训练过程更广泛的影响，还没有充分研究；虽然观察到消除注意力汇能改善长上下文外推，但没有给出注意力汇如何影响长度泛化的严格理论解释。本站在第 4.5 节补充了另外几条：单次运行没有误差棒、规模停在 15B MoE / 1.7B 稠密、效率数字缺少细节、和量化及 KV 缓存相关的好处没有直接测试。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2505.06708#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2505.06708#Sx1" target="_blank" rel="noopener">Limitations ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 从 Infra 的角度看：为什么一篇架构论文值得做系统的人读（本站补充）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这篇论文没有写一行 CUDA，也没测一次推理延迟，为什么放在 AI Infra 这一类里？门控注意力在推理时要多花多少？它和注意力内核、KV 缓存、张量并行怎么相处？它可能给量化、KV 压缩、大规模训练带来什么，哪些已经被证实，哪些只是预期？这一节是本站根据论文数据和公开代码做的分析，不是论文内容。</div>
+
+<h4 id="n-7-1">7.1 实现：内核不动，KV 缓存不变</h4>
+<div class="dia">
+  <div class="dia-title">示意图：解码时一个 token 穿过门控注意力层（按 Qwen3-Next 的 Hugging Face 实现）</div>
+  <div class="dia-flow"><span class="dia-box">x_i（pre-norm 之后）</span><span class="dia-arrow">→</span><span class="dia-box enc">q_proj（加宽一倍）<small>一次矩阵乘同时得到 query 和门分数，每个头的两部分相邻存放</small></span><span class="dia-arrow">→</span><span class="dia-box">切开：query ｜ gate</span></div>
+  <div class="dia-flow"><span class="dia-box">query → QK 归一化 → RoPE</span><span class="dia-arrow">→</span><span class="dia-box tgt">注意力内核（FlashAttention / PagedAttention 等）<small>与不加门时完全相同</small></span><span class="dia-arrow">←</span><span class="dia-box">KV 缓存<small>k_proj、v_proj 不变，缓存大小不变</small></span></div>
+  <div class="dia-flow"><span class="dia-box tgt">注意力输出</span><span class="dia-arrow">→</span><span class="dia-box pred">⊙ sigmoid(gate)<small>一次逐元素乘法，可与相邻算子融合</small></span><span class="dia-arrow">→</span><span class="dia-box enc">o_proj</span><span class="dia-arrow">→</span><span class="dia-box">加回残差流</span></div>
+  <div class="dia-note">本站根据 Hugging Face Transformers 的 <code>Qwen3NextAttention</code> 和论文官方代码整理。官方代码同样把门拼进 q_proj，只是按 KV 组排列。</div>
+</div>
+<p>从系统实现看，SDPA 输出门有三个很“省心”的性质：</p>
+<ul>
+  <li><b>注意力内核一行都不用改。</b>门在 SDPA 之后才乘上去，所以 FlashAttention、PagedAttention、各种稀疏或分块的注意力内核都能原样使用。这和第 5 节表里“改 softmax”那一类方法形成鲜明对比，后者要改在线 softmax 的逻辑，每个推理引擎都得重写内核。</li>
+  <li><b>KV 缓存不变。</b>门分数只由当前 token 的 \(X_i\) 算出，不需要缓存，也不改变 key、value 的形状。解码时每一步只为新 token 算一次门。</li>
+  <li><b>张量并行时没有额外通信。</b>Megatron 式的张量并行按头切分注意力：q_proj 按列切，o_proj 按行切。门的列和它所属的头放在一起（官方代码按 KV 组交错，Hugging Face 的 Qwen3-Next 实现按头交错），所以按头切分时门会自然地跟着头走，乘门这一步在每张卡上本地完成。</li>
+</ul>
+<p><b>要多花多少（推算）。</b>门的代价主要是 q_proj 多出来的那部分权重：</p>
+<ul>
+  <li>论文的 15A2B MoE 模型：逐元素门 24 层共 201M 参数，全部是每个 token 都要用的“激活参数”，约为 2.54B 激活参数的 8%。如果按“批大小 1 的解码主要受读权重的带宽限制”粗算（忽略 KV 缓存的读取），每一步要多读约 8% 的权重字节。逐头门只有 1.6M 参数，可以忽略。</li>
+  <li>Qwen3-Next-80B-A3B：只有 12 层是门控注意力，每层门的参数是 \(2048\times(16\times256)\approx8.39\)M，合计约 101M，相对约 3B 的激活参数大约是 3%。</li>
+  <li>论文说的“墙钟时间开销不到 2%”没有说明场景，很可能是训练时的测量；训练和长上下文推理时，注意力本身的计算量很大，门那一点矩阵乘的占比会更小。</li>
+</ul>
+<p>所以在乎解码延迟的场景，逐头门是一个几乎零成本的选项，而它的效果只比逐元素门差一点（表 1：5.792 对 5.761）。Qwen3-Next 和 Qwen3.5 选的是逐元素门。</p>
+
+<h4 id="n-7-2">7.2 训练：稳定性就是算力</h4>
+<p>在几千张卡上训练时，一次发散或一次需要回退的损失尖峰，可能浪费成百上千 GPU·小时。论文的稠密实验表明，加门的模型在基线会发散的学习率（8e-3）下仍能收敛，而且大学习率反而带来更好的结果；这意味着同样的算力预算可以用更激进的超参。两点限制：一是附录 A.7 说明门必须<b>从头训练</b>时就加上，继续训练时才加没有用；二是稳定性的证据只来自 1.7B 稠密模型的少数几次训练（第 3.3 节）。</p>
+
+<h4 id="n-7-3">7.3 量化和低精度：值得期待，但这篇论文没测</h4>
+<p>QuaRot、KIVI 这些量化方法花了很大力气对付离群值：QuaRot 用 Hadamard 旋转把离群值摊平（<a href="quarot.html">QuaRot 精读</a>），KIVI 让 key 按通道量化（<a href="kivi.html">KIVI 精读</a>），还有一些方法专门把开头几个“枢纽 token”的 KV 留成全精度。这些麻烦有相当一部分来自注意力汇和超大激活。加门之后 M-Act 从 1053 降到 94、第一个 token 的注意力从 47% 降到 5%，按第 4.3 节的推算，激活的量化刻度能细一个数量级。这让人有理由期待门控注意力的模型更容易做 W8A8、FP8 甚至更低比特的推理和训练。但要强调：这篇论文<b>没有</b>任何量化实验，KV 缓存里 key 的通道离群值（KIVI 讨论的那一种）是否也会减少，论文也没有测。这方面的直接证据目前来自 Quantizable Transformers 在编码器模型上的结果。</p>
+
+<h4 id="n-7-4">7.4 KV 缓存与长上下文</h4>
+<p>StreamingLLM 式的 KV 淘汰必须保留开头几个 token，NSA 选块时固定选中开头那一块，都是在给注意力汇“开特例”。一个没有注意力汇的模型，理论上不再需要这些特例，KV 淘汰和稀疏注意力的策略可以更简单。不过这同样只是推论：论文没有测试任何 KV 淘汰或压缩方法在门控模型上的表现。论文实际测到的是第 4.4 节的结果：没有注意力汇的模型在免训练的 YaRN 外推下掉分少得多。对于长上下文服务来说，这意味着模型在超出训练长度时更“耐用”。</p>
+
+<h4 id="n-7-5">7.5 在混合架构里的位置</h4>
+<p>Qwen3-Next 和 Qwen3.5 把门控注意力和 <a href="gated-deltanet.html">Gated DeltaNet</a> 按 1:3 混合：每 4 层里只有 1 层是 softmax 注意力。Gated DeltaNet 层的状态大小固定，不随上下文变长；只有那 1/4 的门控注意力层带着随长度增长的 KV 缓存，负责精确地回看任意位置。所以在这种架构里，门控注意力层既是长上下文能力的关键，也是 KV 缓存和注意力计算开销的主要来源；门让这几层更稳、没有注意力汇，而且不增加它们的 KV 缓存。Gated DeltaNet 层自己的输出上也有一道门（RMSNorm 之后乘 SiLU(z)），两种层都带门，这大概不是巧合。</p>
+<p class="note-links">代码：<a href="https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_next/modeling_qwen3_next.py" target="_blank" rel="noopener">Transformers：modeling_qwen3_next.py ↗</a> · <a href="https://github.com/qiuzh20/gated_attention/blob/main/modeling_qwen3.py" target="_blank" rel="noopener">官方 modeling_qwen3.py ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇论文从 arXiv 首版到被产品采用只用了四个月，到获得最佳论文奖只用了半年多。截至 2026-10，SDPA 输出门已经是 Qwen 新一代模型的标准部件，也被其他团队的线性注意力设计借鉴。</p>
+<div class="dia">
+  <div class="dia-title">示意图：时间线（括号里是年月）</div>
+  <div class="dia-flow"><span class="dia-box">arXiv v1（2025-05）<small>代码与 1.7B 模型同时放出</small></span><span class="dia-arrow">→</span><span class="dia-box">gpt-oss（2025-08）<small>另一条路：可学习的汇</small></span><span class="dia-arrow">→</span><span class="dia-box pred">Qwen3-Next（2025-09）<small>3 层 Gated DeltaNet + 1 层门控注意力</small></span><span class="dia-arrow">→</span><span class="dia-box">NeurIPS Oral（2025-09）</span></div>
+  <div class="dia-flow"><span class="dia-box enc">Kimi Linear（2025-10）<small>线性注意力层用 sigmoid 输出门</small></span><span class="dia-arrow">→</span><span class="dia-box pred">NeurIPS 最佳论文奖（2025-11）</span><span class="dia-arrow">→</span><span class="dia-box pred">Qwen3.5（2026-02）<small>旗舰 397B-A17B 沿用 3:1 混合</small></span></div>
+  <div class="dia-note">本站整理。</div>
+</div>
+
+<h4 id="n-impact-1">NeurIPS 2025：Oral 和最佳论文奖</h4>
+<p>论文被 NeurIPS 2025 接收为 Oral（官方仓库的说明是：5,290 篇录用论文中的 77 篇）。2025-11-26，NeurIPS 宣布了 4 篇最佳论文和 3 篇亚军，这篇是最佳论文之一。评选委员会的评语大意是：论文用 30 多个大规模实验说明，在 SDPA 之后加一个各头独立的 sigmoid 门，能在稠密和 MoE 模型上稳定地提升效果，同时改善训练稳定性、减少注意力汇、帮助扩展上下文；这个建议很容易实现，预计会被广泛采用；委员会还特别称赞了在大模型研究越来越不公开的环境下，作者用工业级算力做实验并公开分享结果。</p>
+
+<h4 id="n-impact-2">Qwen3-Next：3:1 混合架构里的门控注意力</h4>
+<p>2025-09，Qwen 团队发布 Qwen3-Next-80B-A3B。按 Hugging Face 上的模型卡：总参数 80B，每个 token 激活约 3B；48 层，排列方式是 12 组“3 层（Gated DeltaNet → MoE）+ 1 层（门控注意力 → MoE）”；门控注意力有 16 个 query 头、2 个 KV 头，头维度 256，只有 64 维做旋转位置编码；MoE 有 512 个专家，每个 token 激活 10 个，外加 1 个共享专家；原生上下文 262,144，可扩展到约 100 万 token。Transformers 里的实现正是本文的逐元素 SDPA 输出门：q_proj 输出加宽一倍，切出 query 和门，注意力算完乘 <code>sigmoid(gate)</code> 再进 o_proj。模型卡还提到另一项稳定性措施：零中心、带权重衰减的层归一化（实现里 RMSNorm 的缩放参数初始化为 0、使用时加 1）。Qwen 的发布文章称，注意力输出门帮助消除了注意力汇和超大激活等问题，保证了模型的数值稳定（本站未能直接打开官方博客页面，这句依据 AINews 对发布文章的摘录）。</p>
+<p>模型卡给出的整体收益是：Qwen3-Next-80B-A3B-Base 在下游任务上超过 Qwen3-32B-Base，训练成本只有后者的 10%，上下文超过 32K 时推理吞吐是后者的 10 倍。要注意，这是整套架构（线性注意力混合、高稀疏 MoE、多 token 预测等）的结果，不是门控注意力单独的贡献。Gated DeltaNet 的原理见 <a href="gated-deltanet.html">Gated DeltaNet 精读</a>和旧版<a href="../legacy/tracks/ai-infra/11-gated-deltanet.html">结构拆解</a>。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Qwen3-Next-80B-A3B 的层排列（48 层 = 12 组）</div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">一组 × 12：</span><span class="dia-box enc">Gated DeltaNet → MoE</span><span class="dia-box enc">Gated DeltaNet → MoE</span><span class="dia-box enc">Gated DeltaNet → MoE</span><span class="dia-box pred">门控注意力 → MoE<small>16 Q / 2 KV 头，头维 256，RoPE 只用 64 维，SDPA 输出门</small></span></div>
+  <div class="dia-note">本站根据 Hugging Face 模型卡与 config.json（<code>full_attention_interval: 4</code>）整理。Qwen3.5-397B-A17B 的排列相同，组数为 15（60 层），门控注意力为 32 Q / 2 KV 头。</div>
+</div>
+
+<h4 id="n-impact-3">Qwen3.5：进入旗舰系列</h4>
+<p>2026-02 发布的 Qwen3.5 沿用了这套解码器。以旗舰 Qwen3.5-397B-A17B 为例（模型卡与 config.json）：60 层，排列为 15 组“3 层 Gated DeltaNet + 1 层门控注意力”，门控注意力有 32 个 query 头、2 个 KV 头，头维度 256，旋转位置编码 64 维，配置里 <code>attn_output_gate</code> 为 true；原生上下文 262,144。同系列的稠密模型也一样：Qwen3.5-27B 有 64 层，其中 16 层是门控注意力（24 个 query 头、4 个 KV 头）；Qwen3.5-9B 有 32 层，其中 8 层是门控注意力；两者配置里的 <code>attn_output_gate</code> 都是 true（本站查阅 config.json）。更多 Qwen3.5 架构的讨论见旧版 <a href="../legacy/tracks/ai-infra/11-gated-deltanet.html#q25">Gated DeltaNet 拆解的 Q25</a>。</p>
+
+<h4 id="n-impact-4">Kimi Linear：线性注意力层也用 sigmoid 输出门</h4>
+<p>月之暗面的 Kimi Linear（2025-10，见 <a href="kimi-linear.html">Kimi Linear 精读</a>）在它的线性注意力层 KDA 的输出上，先做逐头 RMSNorm，再乘一个依赖数据的 sigmoid 门，然后才进输出投影；门的投影矩阵做成低秩的，以便和其他设计在参数量上公平比较。论文明确引用了本文，说这样的门在效果上和满秩的门相当，还能缓解注意力汇。它的消融（表 1，训练与验证困惑度）显示：默认的 sigmoid 输出门验证困惑度 5.65；去掉输出门是 5.67；把 sigmoid 换成 swish（Gated DeltaNet 原来的选择）是 5.81，明显更差。他们说这和本文“sigmoid 门更好”的结论一致。这是一个来自其他团队、在不同层类型（线性注意力而不是 softmax 注意力）上与本文结论方向一致的公开消融，不过有门和没门的差距（5.65 对 5.67）很小。</p>
+
+<h4 id="n-impact-5">另一条路：gpt-oss 的可学习汇</h4>
+<p>OpenAI 在 2025-08 开源的 gpt-oss 走了第 5 节表里的第二条路：模型卡写明，每个注意力头在 softmax 的分母里有一个可学习的偏置，类似“softmax 加一”和注意力汇，让注意力可以完全不关注任何 token。会议版的相关工作把它列为“可学习的汇”。两种做法要解决的是同一个问题（让头能“不发言”），区别在于：门在 softmax 之后按 query 调节输出，不碰内核；可学习汇改的是 softmax 的分母，需要注意力内核支持。哪种更好，截至 2026-10 本站没有查到在同等规模下的公开对比。</p>
+
+<p>官方仓库在 2025-12-20 的更新里预告会补充更多关于门为什么有效的分析和可视化。截至 2026-10-20，本站没有查到其他团队在相近规模上对 softmax 注意力输出门做的完整公开复现。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、论文本身。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Zihan Qiu</b>（共同一作）<div class="aff">Qwen Team, Alibaba Group</div>官方代码仓库 qiuzh20/gated_attention 的维护者；本文 MoE 实验所用“全局批次负载均衡损失”论文（Demons in the Detail）的第一作者。</div>
+  <div class="author-card"><b>Zekun Wang</b>（共同一作）<div class="aff">Qwen Team, Alibaba Group</div>也是 Demons in the Detail 的作者之一。</div>
+  <div class="author-card"><b>Bo Zheng</b>（共同一作）<div class="aff">Qwen Team, Alibaba Group</div></div>
+  <div class="author-card"><b>Zeyu Huang</b>（共同一作）<div class="aff">University of Edinburgh</div>也是 Demons in the Detail 的作者之一。</div>
+  <div class="author-card"><b>Kaiyue Wen</b><div class="aff">Stanford University</div>据斯坦福大学人员目录，是计算机系博士生（2024 年秋入学）。</div>
+  <div class="author-card"><b>Songlin Yang</b><div class="aff">MIT</div>MIT CSAIL 博士生，导师 Yoon Kim（据 CSAIL 讲座介绍）；门控线性注意力 GLA（ICML 2024）和 Gated DeltaNet（ICLR 2025，本文引用 [18]）的第一作者，维护开源库 flash-linear-attention。</div>
+  <div class="author-card"><b>Rui Men</b><div class="aff">Qwen Team, Alibaba Group</div></div>
+  <div class="author-card"><b>Le Yu</b><div class="aff">Qwen Team, Alibaba Group</div></div>
+  <div class="author-card"><b>Fei Huang</b><div class="aff">Qwen Team, Alibaba Group</div></div>
+  <div class="author-card"><b>Suozhi Huang</b><div class="aff">Tsinghua University</div></div>
+  <div class="author-card senior"><b>Dayiheng Liu</b><div class="aff">Qwen Team, Alibaba Group</div>Qwen2.5 技术报告的作者之一（本文引用 [37]）。</div>
+  <div class="author-card senior"><b>Jingren Zhou</b><div class="aff">Qwen Team, Alibaba Group</div>据媒体报道，为阿里云首席技术官，通义实验室向其汇报。</div>
+  <div class="author-card senior"><b>Junyang Lin</b><div class="aff">Qwen Team, Alibaba Group</div>论文发表时为 Qwen 模型的技术负责人（据 TechCrunch 等报道）；本文引用的 Explicit Sparse Transformer（2019）和 CogView（2021，sandwich norm 的出处）的作者之一。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表与奖项</b>：NeurIPS 2025 主会，Oral；2025-11-26 获 NeurIPS 2025 最佳论文奖（4 篇最佳论文之一，另有 3 篇亚军，见 <a href="https://blog.neurips.cc/2025/11/26/announcing-the-neurips-2025-best-paper-awards/" target="_blank" rel="noopener">NeurIPS 官方博客 ↗</a>）。arXiv 只有 v1（2025-05-10）；会议版（proceedings PDF）补充了附录表 7（模型结构）、附录 A.7（继续训练时加门）和“实用建议”。</li>
+  <li><b>开源</b>：<a href="https://github.com/qiuzh20/gated_attention" target="_blank" rel="noopener">qiuzh20/gated_attention</a>，MIT 许可，988 个 star、61 个 fork（截至 2026-10-20），仓库创建于 2025-05-09；内容是基于 Qwen3 结构改写的 <code>modeling_qwen3.py</code>（支持逐头 / 逐元素门）和画注意力图的脚本。模型放在 Hugging Face 的 <a href="https://huggingface.co/QwQZh/gated_attention" target="_blank" rel="noopener">QwQZh/gated_attention</a>：28 层 1.7B 的基线、逐头门、逐元素门三个版本。</li>
+  <li><b>采用</b>：Qwen3-Next（2025-09）与 Qwen3.5（2026-02）的全注意力层都使用 SDPA 输出门；Hugging Face Transformers、vLLM、SGLang 都随这些模型支持了这种注意力层。Kimi Linear 在线性注意力层上采用了 sigmoid 输出门并引用本文。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="gated-deltanet.html">Gated DeltaNet 精读</a>：Qwen3-Next / Qwen3.5 混合架构里另外 3/4 的层。</li>
+  <li><a href="kimi-linear.html">Kimi Linear 精读</a>：另一种 3:1 混合，线性注意力层上的 sigmoid 输出门。</li>
+  <li><a href="quarot.html">QuaRot 精读</a>、<a href="kivi.html">KIVI 精读</a>：离群值为什么让量化变难，以及两种绕开它的办法。</li>
+  <li><a href="snapkv.html">SnapKV 精读</a>（含 StreamingLLM 与注意力汇）、<a href="native-sparse-attention.html">NSA 精读</a>（门控合并三条注意力分支）。</li>
+  <li><a href="roformer.html">RoFormer 精读</a>：RoPE、底数与 YaRN 外推。<a href="flashattention.html">FlashAttention 精读</a>：在线 softmax，以及“改 softmax”为什么要动内核。</li>
+  <li>旧版结构拆解：<a href="gated-deltanet.html">Gated DeltaNet 与 Qwen3.5 混合架构</a> · <a href="kimi-linear.html">Kimi Linear</a> · <a href="../legacy/tracks/ai-infra/10-rope.html">RoPE</a> · <a href="fp8-formats.html">FP8 格式</a> · <a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2505.06708" target="_blank" rel="noopener">arXiv:2505.06708</a> 与 <a href="https://proceedings.neurips.cc/paper_files/paper/2025/hash/904e89bb4e632e75fb47f093b620b257-Abstract-Conference.html" target="_blank" rel="noopener">NeurIPS 2025 会议版</a>。论文以 arXiv 非独占许可发布，本页没有使用原图；所有示意图和简图均由本站绘制，简图中的数字取自论文表格与图注，标“推算”的数字为本站计算。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>批不变性：攻克 LLM 推理的不确定性 精读</title>
+<meta name="description" content="Thinking Machines 博客《Defeating Nondeterminism in LLM Inference》（2025-09）的逐节精读：浮点不满足结合律、为什么“并发 + 原子加”不是主因、批大小如何改变 RMSNorm / 矩阵乘 / 注意力的归约顺序、批不变内核的代价，以及它对 on-policy RL 的意义和配套的截断重要性采样（TIS）工作。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="batch-invariance">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · Thinking Machines 博客 2025-09</div>
+  <h1>攻克大模型推理中的不确定性：批不变内核</h1>
+  <p class="en-title">Defeating Nondeterminism in LLM Inference</p>
+  <div class="paper-authors">Horace He<sup>1</sup>，与 Thinking Machines 的其他同事合作完成</div>
+  <div class="paper-affil"><sup>1</sup>Thinking Machines Lab　（博客署名只写了 Horace He 一人的名字；引用格式为 “He, Horace and Thinking Machines Lab”）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" target="_blank" rel="noopener">原文：Thinking Machines 博客 ↗</a>
+    <a class="pill" href="https://doi.org/10.64434/tml.20250910" target="_blank" rel="noopener">Connectionism 2025-09-10 · DOI ↗</a>
+    <a class="pill" href="https://github.com/thinking-machines-lab/batch_invariant_ops" target="_blank" rel="noopener">Code: thinking-machines-lab/batch_invariant_ops ↗</a>
+    <a class="pill" href="https://fengyao.notion.site/off-policy-rl" target="_blank" rel="noopener">配套：训推不一致与 TIS ↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/13-batch-invariance.html">结构拆解：示意图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>1,087</b><span>GitHub star（batch_invariant_ops，截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">这是一篇技术博客，不是 arXiv 论文，所以页首没有 Semantic Scholar 引用数。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按博客自己的章节顺序，用本站自己的话把整篇文章从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。原文的图版权归 Thinking Machines Lab 所有，所以本页的图全部是本站自绘的示意图；其中两张曲线图是按博客图所用的公开数据重画的简化版。标“推算”的数字是本站根据原文数据算出来的，不是原文原话。每节末尾有英文原文对应小节的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇文章解决什么问题</h3>
+<p>用大模型的人大多遇到过这种事：同一个问题问两遍，答案不一样。采样本来就带随机性，这不奇怪；奇怪的是，把温度调到 0、让模型每一步都只取概率最高的那个词，答案<b>仍然</b>会变。无论是调用商业 API，还是用 vLLM、SGLang 在自己的机器上跑开源模型，都是如此。</p>
+<p>流行的解释是“GPU 上并发执行的线程谁先算完不确定，浮点加法又不满足结合律，所以结果随机”。这篇博客认为这个解释抓错了重点：大模型前向计算里的内核，同样的输入跑一千遍，结果是逐位相同的。真正的原因是，内核对<b>某一条请求</b>的计算方式取决于<b>这一批里一共有多少请求</b>：批大了或小了，内核会换一种切分工作的方式，加法的顺序随之改变，最后几位二进制就不一样了。而批有多大，取决于服务器此刻有多忙，这对单个用户来说是不可知的，于是用户看到的就是“随机”。作者把“每条请求的结果与批大小无关”这个性质叫做<b>批不变性</b>（batch invariance），并演示了怎样把 RMSNorm、矩阵乘和注意力这三类内核改成批不变的。</p>
+<p>改造之后，在 Qwen3-235B 上用温度 0 对同一个提示采样 1000 次，得到的 1000 个回答完全一致（改造前有 80 种不同的回答）；代价是推理变慢，在作者的测试里总耗时从 26 秒变成 42 秒。文章最后把这件事接到强化学习上：如果连推理本身都做不到逐位可复现，训练端和推理端算出的概率就不可能逐位一致，于是名义上的“on-policy”训练其实偏离了 on-policy。作者让采样端和训练端逐位一致之后，两者之间的 KL 散度恒为 0。这条线索的另一半是同期 Yao 等人关于“训推不一致”和截断重要性采样（TIS）的工作，本页在“后来怎么样了”里专门讲它。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>浮点加法为什么不满足结合律？差几位二进制，为什么能让整段回答都变掉？</li>
+  <li>“并发 + 原子加”这个解释错在哪里？什么叫“逐次运行确定”，什么叫“批不变”，两者有什么区别？</li>
+  <li>批大小具体是怎样改变 RMSNorm、矩阵乘、注意力的加法顺序的？split-K、split-KV、分块预填充在其中扮演什么角色？</li>
+  <li>批不变内核放弃了哪些优化，慢了多少，慢在什么场景？</li>
+  <li>这件事为什么对 on-policy 强化学习重要？“消除差异”和“修正差异”（TIS）两条路各有什么代价？</li>
+</ul>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" target="_blank" rel="noopener">英文原文 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：温度为 0，为什么答案还会变</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>温度为 0 时采样在理论上是确定的，为什么实际的推理服务仍然不确定？流行的“并发 + 浮点”解释说了什么，为什么作者认为它不完整？在开始讲原因之前，作者先指出连“确定”这个词本身都需要拆开定义，这一节把这个拆分讲清楚。</div>
+
+<div class="note-pre"><b>先补一点背景：温度和贪心解码。</b>
+<p>语言模型每一步输出的是一组分数（logits）\(z_1,\dots,z_V\)，每个分数对应词表里的一个词。把分数变成概率要经过 softmax，温度 \(T\) 控制这个分布有多“尖”：</p>
+<div class="formula">$$p_i=\frac{\exp(z_i/T)}{\sum_{j=1}^{V}\exp(z_j/T)}$$</div>
+<p>\(T\) 越小，分数最高的词的概率越接近 1；\(T\to 0\) 时，采样就退化成“直接取分数最大的那个词”，叫<b>贪心解码</b>（greedy decoding）。所以温度为 0 时，只要每一步算出的 logits 完全一样，生成的文字就一定一样。反过来说，温度为 0 时答案会变，只能说明某一步算出的 logits 变了。</p>
+<p>logits 哪怕只变了最后几位二进制，在绝大多数步骤里也不会改变“谁最大”。但只要某一步恰好有两个候选词的分数非常接近，这点微小的差别就可能让它们的大小关系翻转。一旦这一步选了不同的词，后面每一步的输入都不同了，整段回答就会走向不同的方向。</p>
+</div>
+
+<p>作者首先承认这是一个普遍现象：OpenAI 社区里有不少讨论，vLLM 和 SGLang 的文档也都写明温度为 0 时不保证结果一致。对此最常见的解释，作者称为“<b>并发 + 浮点</b>”假说：GPU 上大量线程同时运行，谁先算完是不确定的；如果把各线程的结果按完成的先后加在一起，加法的顺序就是随机的；而浮点加法不满足结合律，顺序不同结果就不同。一篇 2025 年 6 月的 arXiv 论文（Yuan 等，2506.09501，研究数值精度对推理可复现性的影响）也是这样描述的。</p>
+<p>作者认为这个假说“不完全错，但没有说到点子上”。他给了一个反例：在 GPU 上把同样两个 2048×2048 的 BF16 矩阵相乘 1000 次，每一次的结果都和第一次逐位相同。这里明明用了浮点数，GPU 上也明明有大量并发，结果却是确定的。所以，并发本身并不必然带来不确定性，一定还有别的原因。</p>
+<p>为了说清楚这个原因，作者先指出下面四句话<b>同时成立</b>，这也是全文的提纲：</p>
+<ol>
+  <li>GPU 上确实有些内核是不确定的（同样的输入跑两次，结果不同）。</li>
+  <li>但语言模型前向计算用到的所有内核都是确定的。</li>
+  <li>因此推理服务器（比如 vLLM）的前向计算，也可以说是确定的：给定它这一步要处理的<b>全部</b>请求，输出是确定的。</li>
+  <li>然而从任何一个使用者的角度看，结果仍然是不确定的。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：“确定”要分三层来看，矛盾出在第三层</div>
+  <div class="dia-flow"><span class="dia-box tgt">内核层<small>同一个内核、同样的输入张量，跑多少遍结果都逐位相同（逐次运行确定）</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">↓</span><span style="font-size:.8rem;color:var(--text-2)">服务器把很多用户的请求拼成一批，一起送进这些内核</span></div>
+  <div class="dia-flow"><span class="dia-box tgt">服务器层<small>给定这一步的整批请求，前向输出是确定的</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">↓</span><span style="font-size:.8rem;color:var(--text-2)">但单个用户既不知道、也控制不了同批里还有谁</span></div>
+  <div class="dia-flow"><span class="dia-box pred">用户层<small>同批的其他请求是一个看不见的“输入”，它一变，我的结果就可能变：对我来说是不确定的</small></span></div>
+  <div class="dia-note">本站示意图，按原文引言里“四句同时成立的话”整理。第 3、4 节会分别解释前两层为什么成立，以及第三层的不确定性具体从哪里来。</div>
+</div>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>这篇文章并没有说“GPU 上不存在不确定的内核”，也没有说“浮点误差无关紧要”。它说的是：在大模型<b>推理</b>这个具体场景里，用户看到的不确定性，主要不是来自线程完成先后的随机性，而是来自“批的组成随服务器负载变化”与“内核结果依赖批大小”这两件事的叠加。训练的反向传播里确实有不确定的内核（第 3 节会提到），那不是这篇文章的主题。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" target="_blank" rel="noopener">英文原文·引言 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 “原罪”：浮点加法不满足结合律</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>我们习惯把神经网络看成数学函数，加法满足交换律和结合律，似乎应该有一个“数学上正确”的唯一答案。为什么计算机算出来的结果会依赖加法的顺序？这种依赖有多严重？作者把它称为一切数值差异的“原罪”，但也强调它本身并不回答“顺序为什么会变”。</div>
+
+<div class="note-pre"><b>先补一点背景：浮点数怎么表示一个数。</b>
+<p>计算机里的浮点数和科学计数法是一回事：一个数被写成“有效数字 × 底数的若干次方”。二进制浮点数的形式是</p>
+<div class="formula">$$x=(-1)^{s}\times(1.f)_{2}\times 2^{e}$$</div>
+<p>其中 \(s\) 是符号位，\(e\) 是指数，\(f\) 是小数点后的若干位二进制，叫<b>尾数</b>。尾数的位数是固定的，这意味着浮点数能保留的“有效数字”个数是固定的：数越大，相邻两个能表示的数之间的间隔就越大。这个间隔叫 <b>ulp</b>（unit in the last place，最后一位的单位）。大模型里常见的三种格式：</p>
+<ul>
+  <li><b>FP32</b>：8 位指数、23 位尾数。在 1 附近，ulp 是 \(2^{-23}\approx 1.2\times10^{-7}\)。</li>
+  <li><b>BF16</b>：8 位指数（和 FP32 一样，所以能表示的数的范围一样大）、只有 7 位尾数。在 1 附近，ulp 是 \(2^{-7}\approx 0.0078\)，也就是说只有两到三位十进制有效数字。</li>
+  <li><b>FP16</b>：5 位指数、10 位尾数。范围比 BF16 小得多，但精度高 8 倍。</li>
+</ul>
+<p>两个浮点数相加时，硬件先把指数对齐，把较小的数的尾数右移；相加的精确结果往往需要比尾数更多的位才能写下，于是必须<b>舍入</b>到最近的可表示数（默认规则是“就近舍入，恰好落在两个可表示数正中间时，取尾数末位为 0 的那个”）。舍掉的那一部分信息，就永远丢了。</p>
+</div>
+
+<p>作者用十进制讲了一个例子，便于用手算：假设一种“十进制浮点数”只能保留 3 位有效数字。123 加 456 等于 579，两数指数相同，和整数加法没有区别。但 1230 加 23.4 的精确结果是 1253.4，需要 5 位有效数字才能写下；只保留 3 位，就变成 1.25×10³，即 1250。效果相当于先把 23.4 舍成了 20 再相加，那 3.4 就丢了。只要两个数的“量级”（指数）不同，每次相加都可能丢信息，而在神经网络里，量级不同的数相加是家常便饭。</p>
+<p>丢信息本身还不是问题，问题在于<b>丢多少取决于加的顺序</b>。用同样的 3 位有效数字，本站构造一个更极端的例子：</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样六个数，换个顺序相加，结果差了 20（3 位有效数字的十进制浮点，本站例子）</div>
+  <div class="dia-row"><span class="lbl">先加大数</span><div class="dia-track"><span class="dia-seg w" style="flex:4">1230</span><span class="dia-seg frag" style="flex:1">+4 → 1234 → 舍成 1230</span><span class="dia-seg frag" style="flex:1">+4 → 1230</span><span class="dia-seg frag" style="flex:1">+4 → 1230</span><span class="dia-seg frag" style="flex:1">+4 → 1230</span><span class="dia-seg frag" style="flex:1">+4 → 1230</span></div></div>
+  <div class="dia-out">结果 1230：五个 4 每次都被舍掉，一个也没加进去。</div>
+  <div class="dia-row"><span class="lbl">先加小数</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">4+4=8</span><span class="dia-seg cmp" style="flex:1">+4=12</span><span class="dia-seg cmp" style="flex:1">+4=16</span><span class="dia-seg cmp" style="flex:1">+4=20</span><span class="dia-seg w" style="flex:4">20+1230=1250（3 位有效数字正好写得下）</span></div></div>
+  <div class="dia-out">结果 1250：和精确答案 1250 一致。</div>
+  <div class="dia-note">两种顺序在数学上是同一个和，在 3 位有效数字的浮点里却差了 20。真实的 BF16 也一样：256 附近的 ulp 是 2，所以 \((256+1)+1\) 每一步都被舍回 256，而 \(256+(1+1)=258\)（本站按 BF16 的舍入规则推算）。</div>
+</div>
+<p>作者还给了一个更直观的数字：把 \(10^{-10},10^{-5},10^{-2},1\) 这四个数和它们的相反数放在一起，一共 8 个数，精确的和显然是 0。用 Python 的双精度浮点把它们随机打乱顺序求和，重复一万次，得到了 <b>102 种</b>不同的结果，散布在大约 \(\pm 8\times10^{-17}\) 之间，而精确答案是 0。这说明，即使只有 8 个数，加法顺序能造成的结果也五花八门。</p>
+<p>把这个结论搬到大模型里：一次矩阵乘的每个输出元素都是几千项乘积之和，一次 RMSNorm 要把几千个平方加起来，一次注意力要在几千个位置上累加。这些加法只要换了顺序，结果的最后几位就可能不同。实际实现里，BF16 的矩阵乘通常在 FP32 里累加，最后再舍入成 BF16 输出；FP32 累加器里差一个 ulp，舍入后多半还是同一个 BF16 数，但只要碰上舍入的边界，输出就会差一个 BF16 的 ulp，也就是千分之几的相对误差。这样的差别经过几十层网络传下去，最终在 logits 上表现为一个很小但非零的扰动。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“浮点不满足结合律”只解释了<b>为什么</b>顺序不同会导致结果不同，并没有解释顺序<b>为什么会变</b>、什么时候会变、怎样避免。作者特意强调了这一点：结合律是原罪，但真正的嫌疑人要到内核的实现方式里去找。也不要把这里的问题理解成“精度不够”，把 BF16 换成 FP32 只能让差别变小，不能让它消失；要让结果逐位相同，只能让加法顺序固定。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#the-original-sin-floating-point-non-associativity" target="_blank" rel="noopener">英文原文 · The original sin ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 内核为什么不总按同一顺序相加：原子加什么时候才需要</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>“并发 + 浮点”假说说的是：并发线程完成的先后不确定，如果累加顺序跟着完成先后走（典型的就是原子加），累加顺序就不确定。那么大模型的前向计算里到底有没有原子加？作者的回答是：几乎没有，所以这个机制和推理的不确定性完全无关。这一节解释为什么现代内核很少需要原子加，以及由此得出的结论“前向计算是逐次运行确定的”。</div>
+
+<div class="note-pre"><b>先补一点背景：GPU 内核、SM 和“归约”。</b>
+<p>GPU 上的一次计算叫一个<b>内核</b>（kernel）。内核启动时会把工作分成很多个<b>线程块</b>（thread block），每个线程块被分配到一个 <b>SM</b>（streaming multiprocessor，流式多处理器）上执行。可以把 SM 理解成 GPU 里的“核”，博客里说的“core”指的就是 SM；比如 H100 SXM 有 132 个 SM（NVIDIA 规格，本站补充）。各个 SM 之间没有天然的同步机制，它们什么时候开始、什么时候结束，彼此并不知道。</p>
+<p><b>归约</b>（reduction）是指把一组数合并成一个数的运算，最常见的就是求和，也包括求最大值。矩阵乘里每个输出元素是一个求和，RMSNorm 里有一个求平方和，注意力里有求最大值和求和，所以大模型里到处都是归约。</p>
+<p><b>原子加</b>（atomic add，也叫 fetch-and-add）是硬件提供的一种操作：许多 SM 可以同时往同一个内存位置“加上一个数”，硬件保证每一份贡献都会被加进去、不会互相覆盖，但<b>不保证加的先后顺序</b>。顺序由谁先算完决定，而谁先算完每次运行都可能不同。</p>
+</div>
+
+<p>设想要用 100 个核对一个 100 维的向量求和（比如 <code>torch.sum</code>）。100 个元素可以并行读入，但最后总得汇总成一个数。最省事的办法是让每个核把自己那份原子地加到同一个结果上。这样做每次运行的结果都可能不同，因为加的顺序取决于各个核完成的先后。这就是人们通常说的“不确定性”：同样的输入、同样的程序跑两次，结果不同。作者把它叫做<b>逐次运行不确定</b>（run-to-run nondeterminism）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：原子加的顺序随运行而变，树形归约的顺序永远固定</div>
+  <svg class="dg" viewBox="0 0 760 250" role="img" aria-label="原子加与树形归约的对比" style="--dg-min:620px">
+    <text x="190" y="18" class="t-c t-b">原子加：谁先算完谁先加</text>
+    <g class="enc"><rect class="box" x="30" y="40" width="64" height="34" rx="6"/><text x="62" y="57" class="t-c">核 0：p₀</text></g>
+    <g class="enc"><rect class="box" x="110" y="40" width="64" height="34" rx="6"/><text x="142" y="57" class="t-c">核 1：p₁</text></g>
+    <g class="enc"><rect class="box" x="190" y="40" width="64" height="34" rx="6"/><text x="222" y="57" class="t-c">核 2：p₂</text></g>
+    <g class="enc"><rect class="box" x="270" y="40" width="64" height="34" rx="6"/><text x="302" y="57" class="t-c">核 3：p₃</text></g>
+    <g class="loss"><rect class="box" x="140" y="120" width="100" height="36" rx="6"/><text x="190" y="138" class="t-c">共享结果 S</text></g>
+    <path class="edge" d="M62,74 L170,120"/><path class="edge" d="M142,74 L182,120"/><path class="edge" d="M222,74 L198,120"/><path class="edge" d="M302,74 L210,120"/>
+    <text x="190" y="182" class="t-c t-sm">第 1 次运行：((p₂ + p₀) + p₃) + p₁</text>
+    <text x="190" y="202" class="t-c t-sm">第 2 次运行：((p₁ + p₃) + p₀) + p₂</text>
+    <text x="190" y="228" class="t-c t-xs">顺序随完成先后变化 → 结果最后几位可能不同</text>
+    <line x1="380" y1="10" x2="380" y2="240" class="grid-ln"/>
+    <text x="570" y="18" class="t-c t-b">树形（分段）归约：顺序写死在程序里</text>
+    <g class="enc"><rect class="box" x="410" y="40" width="64" height="34" rx="6"/><text x="442" y="57" class="t-c">p₀</text></g>
+    <g class="enc"><rect class="box" x="490" y="40" width="64" height="34" rx="6"/><text x="522" y="57" class="t-c">p₁</text></g>
+    <g class="enc"><rect class="box" x="610" y="40" width="64" height="34" rx="6"/><text x="642" y="57" class="t-c">p₂</text></g>
+    <g class="enc"><rect class="box" x="690" y="40" width="64" height="34" rx="6"/><text x="722" y="57" class="t-c">p₃</text></g>
+    <g class="act"><rect class="box" x="450" y="100" width="96" height="30" rx="6"/><text x="498" y="115" class="t-c">p₀ + p₁</text></g>
+    <g class="act"><rect class="box" x="634" y="100" width="96" height="30" rx="6"/><text x="682" y="115" class="t-c">p₂ + p₃</text></g>
+    <g class="loss"><rect class="box" x="530" y="160" width="120" height="34" rx="6"/><text x="590" y="177" class="t-c">两半再相加 = S</text></g>
+    <path class="edge" d="M442,74 L480,100"/><path class="edge" d="M522,74 L510,100"/><path class="edge" d="M642,74 L670,100"/><path class="edge" d="M722,74 L694,100"/>
+    <path class="edge" d="M498,130 L570,160"/><path class="edge" d="M682,130 L610,160"/>
+    <text x="590" y="222" class="t-c t-xs">不管哪个核先算完，最后都按同一棵树合并 → 每次运行逐位相同</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应原文 “When are atomic adds needed?” 一节里的动画。p₀…p₃ 是四个核各自算出的部分和。</div>
+</div>
+<p>作者指出，虽然原子加确实会让内核不确定，但绝大多数内核根本不需要它。原因有两个：</p>
+<ul>
+  <li><b>批这一维通常已经提供了足够的并行度。</b>如果不是对 1 个向量求和，而是同时对 500 个向量各自求和，就可以让每个核负责一整个向量，在核内部按固定顺序加完，核与核之间不需要任何汇总。大模型里，“很多个 token 各自做同样的事”是常态，所以这种做法几乎总是可行的。</li>
+  <li><b>就算必须把一次归约拆给多个核，也有确定的拆法。</b>比如把 100 个元素的求和拆成 5 段、每段 20 个，5 个核各算一段（这叫“分段”或“树形”归约）；剩下的 5 个部分和，可以再用一个很小的、不并行的“收尾”归约按固定顺序加起来，或者用信号量让各个线程块按固定次序依次累加（CUTLASS 文档里描述过这种做法）。这两种方式的加法顺序都写死在程序里，与谁先算完无关。</li>
+</ul>
+<p>因此，对绝大多数神经网络运算来说，放弃原子加几乎没有性能损失。仍然会因为避免原子加而明显变慢的常见运算只有少数几个，比如 PyTorch 的 <code>scatter_add</code>；大模型里常用的只有一个，就是 <b>FlashAttention 的反向传播</b>。作者顺带提了一个细节：广泛使用的 Triton 版 FlashAttention 反向，和 FlashAttention-2 论文里的算法并不一样，它为了避免原子加多做了一部分重计算，代价是多花约 40% 的浮点运算。</p>
+<p>但<b>前向</b>计算里没有任何必须用原子加的运算。所以大模型的前向计算是<b>逐次运行确定</b>的：从推理服务器的角度看，只要这一步处理的请求完全相同，输出就完全相同。这正是上面四句话里的第 2、3 句。作者引用了维基百科对“确定性算法”的定义（给定输入，总是产生同样的输出）来说明，在这个定义下推理服务器的前向计算确实是确定的。</p>
+<p>可是，一个系统里的某个部件是确定的，并不能保证整个系统在用户看来是确定的。作者举了批归一化（batch norm）做类比：如果一个请求的输出依赖于同批的其他请求，而每个请求都无从知道同批里会有谁，那么从每个请求自己的角度看，结果就是不确定的。接下来他要证明的正是：大模型推理恰好有这个问题。原因不是不同请求之间泄露了什么信息，而是前向计算缺乏“批不变性”，使得每个请求的输出依赖于这一步的批大小。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“前向里一个原子加都没有”说的是典型的稠密模型前向，不是说任何推理代码都不会用原子加。具体的推理引擎里确实有例外：vLLM 后来的批不变模式文档就提到，它把 LoRA 的 shrink 归约从原子加改成了“固定切成 8 段、按固定顺序相加”。另外，“逐次运行确定”也只在同一台机器、同一套软件版本下成立；作者在第 4 节明确说，换 GPU 型号或 PyTorch 版本，结果可以不同，那是另一种意义上的“不变性”，本文不处理。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#why-dont-kernels-always-add-numbers-in-the-same-order" target="_blank" rel="noopener">英文原文 · Why don't kernels… ↗</a> · <a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#when-are-atomic-adds-needed" target="_blank" rel="noopener">When are atomic adds needed? ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 批不变性与“确定性”：确定的内核怎么拼出不确定的系统</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>如果每个内核都是确定的，用户看到的不确定性到底从哪里来？作者给出的答案是“批不变性”的缺失：内核对批里每个元素算出的结果，会随批大小而变。这一节先用矩阵乘演示这个现象，再说明它为什么会在推理服务里变成用户可见的不确定性，并顺便指出这和 GPU 本身无关。</div>
+
+<div class="note-pre"><b>先补一点背景：推理服务里的“批”是怎么来的。</b>
+<p>推理服务为了提高吞吐量，会把多个用户的请求放在一起算。现代引擎（vLLM、SGLang 等）用的是<b>迭代级调度</b>（也叫连续批处理）：每生成一个 token 就重新组一次批，有请求结束就移出，有新请求到达就加入，长输入还可能被切成几段分几次算（分块预填充）。所以同一个请求在它生命周期的每一步里，和它同批的请求数、同批的 token 总数都在变，变化的节奏取决于其他用户什么时候来、要生成多长。详细的来龙去脉见本站 <a href="vllm.html#n-2-3">vLLM 精读 §2.3</a> 和 <a href="sarathi-serve.html#n-4-1">Sarathi-Serve 精读 §4.1</a>。</p>
+<p>对矩阵乘来说，这意味着：模型里每个线性层计算的是 \(C=AB\)，其中 \(A\) 的行数 \(M\) 等于这一步所有请求加起来的 token 数，\(B\) 是权重矩阵（\(K\) 行 \(N\) 列）。同一个请求的那一行，会因为别的请求多了或少了，而落在一个 \(M\) 不同的矩阵乘里。</p>
+</div>
+
+<p>作者先假设所有矩阵乘实现都是逐次运行确定的（他注明这并非绝对，但常见实现都满足）。即便如此，它们也不是<b>批不变</b>的：批大小一变，批里每个元素的结果都可能变。这在数学上很奇怪，因为矩阵乘对批里的每一行是独立的，其他行有多少、是什么，都不应该影响某一行的结果。</p>
+<p>但实验结果就是如此。作者构造了一个 2048×4096 的矩阵 \(a\) 和一个 4096×4096 的矩阵 \(b\)（元素取 −1000 到 1000 之间的等差数列），然后用两种方式计算 \(a\) 的第一行乘以 \(b\)：一种是只取 \(a\) 的第一行单独去乘，相当于批大小为 1；另一种是整个 \(a\) 乘 \(b\) 再取第一行，相当于批大小为 2048。两种结果的最大差值是 <b>1669.25</b>。作者特意说明，这个脚本反复运行，每次都给出同样的差值，所以它是逐次运行确定的；但换一种 GPU 或 PyTorch 版本，差值可能不一样，因为它不保证跨硬件、跨软件版本不变。</p>
+<div class="note-pre"><b>先补一点背景：几种容易混淆的“不变性”。</b>
+<ul>
+  <li><b>逐次运行确定</b>（run-to-run deterministic）：同一个内核、同样的输入，跑多少次结果都一样。第 3 节说的就是这个。</li>
+  <li><b>批不变</b>（batch-invariant）：批里某个元素的结果，不随批大小（以及同批其他元素是什么）而变。这是本文要实现的性质。</li>
+  <li><b>批内位置不变</b>（batch-position-invariant）：同一个元素放在批的第几行，结果都一样。大多数矩阵乘库至少满足这一条，但第 5.2 节会讲到一种连这条都不满足的做法。</li>
+  <li><b>跨硬件 / 跨软件版本不变</b>：换 GPU 或换库版本，结果也一样。本文不追求这一条。</li>
+</ul>
+</div>
+<p>一个不批不变的内核单独看并没有问题，问题出在它被放进推理服务之后。用户向推理服务发请求时，服务器此刻有多忙，在用户看来是不确定的；服务器的负载决定了内核在什么批大小下运行；而内核的结果依赖批大小。三者叠加，每个请求最终的结果就随服务器负载而变。作者把这个逻辑概括成一句话：把一个“内核对它不保持不变的属性”（批大小）和“这个属性本身的不确定性”（服务器负载）组合在一起，就得到一个不确定的系统。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同一个请求 X，在服务器空闲和繁忙时走了不同的计算路径</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">服务器空闲：这一步只有 X<small>矩阵乘的 M 很小</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">↓</span><span class="dia-box">库按形状挑了“小 M 专用”的内核<small>例如沿 K 切成几段并行（split-K），或用更小的张量核指令</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">↓</span><span class="dia-box tgt">X 那一行的每个输出：<small>(前一半之和) + (后一半之和)</small></span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">服务器繁忙：X 和另外 63 个请求同批<small>矩阵乘的 M 很大</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">↓</span><span class="dia-box">库挑了“大 M 专用”的内核<small>每个输出 tile 在一个 SM 里沿 K 从头加到尾</small></span></div>
+      <div class="dia-flow"><span class="dia-arrow">↓</span><span class="dia-box tgt">X 那一行的每个输出：<small>从第 1 项依次加到第 K 项</small></span></div>
+    </div>
+  </div>
+  <div class="dia-flow" style="margin-top:8px"><span class="dia-box pred">数学上相同，浮点上可能差最后一位 → 几十层之后 logits 有微小差别 → 若某一步两个候选词几乎平票，贪心解码选了不同的词 → 后面的文字全部不同</span></div>
+  <div class="dia-note">本站示意图。具体会挑哪种内核取决于库（cuBLAS、CUTLASS、Triton）的启发式规则；这里只示意“不同的 M 走不同的归约顺序”这一点。</div>
+</div>
+<p>作者由此得出全文最重要的判断：<b>几乎所有大模型推理服务不确定的首要原因，是负载（从而批大小）在不确定地变化。</b>这种不确定性不是 GPU 独有的：用 CPU 或 TPU 提供的推理服务，也会因为同样的原因而不确定。所以，要让推理服务确定，就必须让内核具备批不变性。下一节先看内核为什么本来不具备这个性质。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>例子里的差值 1669.25 看起来很大，那是因为作者故意用了很大的数（±1000 量级的元素、4096 项相加）来让差别显眼；它要说明的只是“差值不为 0”。在真实模型里，单个矩阵乘造成的差别通常只在最后一两位。还要注意，“批不变”比“确定”更强：一个系统可以对完全相同的整批输入给出确定的输出，却仍然不满足批不变性。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#batch-invariance-and-determinism" target="_blank" rel="noopener">英文原文 · Batch invariance and “determinism” ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 怎样让内核批不变：只需管三类归约</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个 Transformer 由很多内核组成，要让整个模型批不变，是不是每个内核都要重写？作者的回答是：只需要关心含有归约的那三类运算，即 RMSNorm、矩阵乘和注意力；而且它们的难度依次递增。这一节先讲总原则，再分三小节逐个讲。</div>
+<p>要让一个 Transformer 批不变，它的每个内核都必须批不变。幸运的是，<b>逐元素运算</b>（加法、乘法、激活函数这类每个元素各算各的运算）天然是批不变的，因为每个输出只依赖同一位置的输入，没有任何加法顺序可言。作者补充说，这一点在 PyTorch 的所有内核里都成立，但并不是天经地义：有些 CPU 内核会对数组的一部分用向量化指令、对剩下的部分用普通指令，两者的数值未必逐位相同。</p>
+<p>所以需要操心的只有三类含归约的运算：RMSNorm、矩阵乘和注意力。作者明确把<b>多卡并行带来的归约</b>（比如张量并行里的 all-reduce）排除在本文之外，只说同样的原则也适用；他顺带提到一个实用的事实：在 Blackwell 上，以及 CUDA 12.8 以上的 Hopper 上，NVLink-SHARP 交换机内的归约是确定的（来源是 NCCL 的 GitHub issue）。</p>
+<p>贯穿三小节的总原则可以写成一句话：<b>每个元素的归约顺序必须固定，不能随批大小而变。</b>这并不要求永远只用一种归约策略：如果被归约的元素个数变了（比如隐藏维度不同的另一个模型），换一种策略完全没问题。只有当“批有多大”影响了归约策略时，批不变性才会被破坏。</p>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#how-do-we-make-kernels-batch-invariant" target="_blank" rel="noopener">英文原文 · How do we make kernels batch-invariant? ↗</a></p>
+
+<h4 id="n-5-1">5.1 RMSNorm：小批时不要为了填满 GPU 而拆行</h4>
+<div class="note-pre"><b>先补一点背景：RMSNorm 在算什么。</b>
+<p>RMSNorm 是现代大模型里最常用的归一化层。它对每个 token 的隐藏向量 \(x\in\mathbb{R}^{d}\) 单独做归一化：先求所有分量平方的平均值，开方得到“均方根”，再用它去除每个分量，最后乘上一个可学习的权重 \(w\)：</p>
+<div class="formula">$$\mathrm{RMSNorm}(x)_i=\frac{x_i}{\sqrt{\frac{1}{d}\sum_{j=1}^{d}x_j^{2}+\epsilon}}\;w_i$$</div>
+<p>这里唯一的归约是那个求和 \(\sum_{j}x_j^{2}\)，它沿隐藏维度进行，每个 token（批里的每一行）各算各的。输入是一个形状为 [批大小, 隐藏维度] 的矩阵。</p>
+</div>
+<p>并行算法的一般原则是尽量减少核与核之间的通信。对 RMSNorm 来说，最自然的做法是让每个核负责一整行：一行的归约全部在一个核内部完成，核之间不需要交流。这叫<b>数据并行</b>策略，因为它只沿着“不需要通信的维度”（批这一维）做并行。作者提醒，这里关键的前提是内核启动的线程块数要多于 SM 数，GPU 才能被填满。</p>
+<p>批变大时，这个策略很容易保持：一个核依次处理好几行就行，每一行的归约方式和以前完全一样，所以批不变性得以保持。批大小为 200 能填满 GPU，批大小为 2000 就更不用说。</p>
+<p>麻烦出在批变小时。行数少于核数，就有一些核闲着。一个称职的内核工程师这时会自然地想到第 3 节说的办法：把每一行的归约拆给几个核（分段归约），或者用原子加，以便把 GPU 填满。这样性能是好了，但同一行在大批时由一个核从头加到尾，在小批时被拆成几段分头加再合并，<b>归约顺序变了</b>，批不变性就没了。</p>
+<div class="dia">
+  <div class="dia-title">示意图：RMSNorm 的三种情形（4 个核，每格是一行的一个分量块）</div>
+  <svg class="dg" viewBox="0 0 760 250" role="img" aria-label="RMSNorm 在不同批大小下的并行方式" style="--dg-min:640px">
+    <text x="125" y="16" class="t-c t-b">① 批 = 4：一核一行</text>
+    <g class="enc"><rect class="box" x="20" y="34" width="210" height="22" rx="4"/><text x="125" y="45" class="t-c t-sm">行 1 → 核 0，核内从左加到右</text></g>
+    <g class="act"><rect class="box" x="20" y="62" width="210" height="22" rx="4"/><text x="125" y="73" class="t-c t-sm">行 2 → 核 1</text></g>
+    <g class="pred"><rect class="box" x="20" y="90" width="210" height="22" rx="4"/><text x="125" y="101" class="t-c t-sm">行 3 → 核 2</text></g>
+    <g class="reg"><rect class="box" x="20" y="118" width="210" height="22" rx="4"/><text x="125" y="129" class="t-c t-sm">行 4 → 核 3</text></g>
+    <text x="125" y="168" class="t-c t-xs">4 个核全部在忙</text>
+    <text x="125" y="186" class="t-c t-xs">每行的加法顺序：固定</text>
+
+    <text x="380" y="16" class="t-c t-b">② 批 = 8：一核依次做两行</text>
+    <g class="enc"><rect class="box" x="275" y="34" width="210" height="16" rx="3"/><text x="380" y="42" class="t-c t-xs">行 1、行 5 → 核 0（先后）</text></g>
+    <g class="enc"><rect class="box" x="275" y="52" width="210" height="16" rx="3"/></g>
+    <g class="act"><rect class="box" x="275" y="72" width="210" height="16" rx="3"/><text x="380" y="80" class="t-c t-xs">行 2、行 6 → 核 1</text></g>
+    <g class="act"><rect class="box" x="275" y="90" width="210" height="16" rx="3"/></g>
+    <g class="pred"><rect class="box" x="275" y="110" width="210" height="16" rx="3"/><text x="380" y="118" class="t-c t-xs">行 3、行 7 → 核 2</text></g>
+    <g class="pred"><rect class="box" x="275" y="128" width="210" height="16" rx="3"/></g>
+    <g class="reg"><rect class="box" x="275" y="148" width="210" height="16" rx="3"/><text x="380" y="156" class="t-c t-xs">行 4、行 8 → 核 3</text></g>
+    <g class="reg"><rect class="box" x="275" y="166" width="210" height="16" rx="3"/></g>
+    <text x="380" y="200" class="t-c t-xs">每行仍由一个核从头加到尾：批不变 ✓</text>
+
+    <text x="635" y="16" class="t-c t-b">③ 批 = 2：拆行填满 GPU</text>
+    <g class="enc"><rect class="box" x="530" y="34" width="104" height="22" rx="4"/><text x="582" y="45" class="t-c t-xs">行 1 前半 → 核 0</text></g>
+    <g class="act"><rect class="box" x="636" y="34" width="104" height="22" rx="4"/><text x="688" y="45" class="t-c t-xs">行 1 后半 → 核 1</text></g>
+    <g class="pred"><rect class="box" x="530" y="62" width="104" height="22" rx="4"/><text x="582" y="73" class="t-c t-xs">行 2 前半 → 核 2</text></g>
+    <g class="reg"><rect class="box" x="636" y="62" width="104" height="22" rx="4"/><text x="688" y="73" class="t-c t-xs">行 2 后半 → 核 3</text></g>
+    <g class="loss"><rect class="box" x="560" y="110" width="150" height="26" rx="5"/><text x="635" y="123" class="t-c t-sm">两段部分和再相加</text></g>
+    <path class="edge" d="M582,56 L615,110"/><path class="edge" d="M688,56 L655,110"/>
+    <text x="635" y="160" class="t-c t-xs">GPU 填满了，但行 1 的加法顺序</text>
+    <text x="635" y="176" class="t-c t-xs">和①②不同：批不变 ✗</text>
+    <text x="380" y="236" class="t-c t-sm">规则：归约策略可以随“被归约的长度”变，不能随“批里有几行”变</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应原文 RMSNorm 一节的三张图（数据并行、大批数据并行、分段归约），没有复制原图。</div>
+</div>
+<p>怎么办？作者给出两个选择。最简单的是<b>干脆不管小批的情形</b>：小批时这个内核本来就算得很快，就算因为有核闲着而慢一些，也不至于成为灾难。如果非要优化，另一个办法是<b>始终使用一种在极小批时也有足够并行度的归约策略</b>，比如无论批多大都把每一行固定拆成同样的几段、按同样的顺序合并。这样大批时并行度会过剩，但在整个批大小范围内都能得到不错（虽然不是最优）的性能，而且因为拆法不随批大小变化，批不变性得以保持。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>批不变并不等于“禁止拆分归约”，而是“拆法不能依赖批大小”。一个永远把每行拆成 4 段、按固定顺序合并的 RMSNorm 也是批不变的；破坏批不变性的，是那种“批小就拆、批大就不拆”的自适应逻辑。作者引用 Quack 的博文说明，归约可以有线程级、warp 级、线程块级、cluster 级等多种层次，选哪一种都可以，只要选择本身不随批大小变化。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#batch-invariant-rmsnorm" target="_blank" rel="noopener">英文原文 · Batch-invariant RMSNorm ↗</a></p>
+
+<h4 id="n-5-2">5.2 矩阵乘：禁用 split-K，所有形状用同一套配置</h4>
+<div class="note-pre"><b>先补一点背景：矩阵乘内核怎么分工，什么是 split-K。</b>
+<p>矩阵乘 \(C=AB\) 的每个输出元素是一次长度为 \(K\) 的点积：</p>
+<div class="formula">$$C_{mn}=\sum_{k=1}^{K}A_{mk}B_{kn}$$</div>
+<p>可以把它看成“先逐元素相乘，再沿 \(K\) 归约”。高效的 GPU 矩阵乘不会一个元素一个元素地分配工作，而是把输出矩阵切成二维的 <b>tile</b>（比如 128×128），每个 tile 交给一个 SM，由它沿 \(K\) 方向把这块输出完整地累加出来。之所以要按 tile 而不是按单个元素分，是因为要让每次从显存读进来的数据被反复使用（提高算术强度），并且要喂饱<b>张量核</b>（Tensor Core，GPU 上专门做小矩阵乘的硬件单元），它一条指令就处理一个小矩阵块。这仍然是“数据并行”：每个输出元素的归约在一个 SM 内部完成。</p>
+<p>问题在于 tile 的数量。例如 [1024, K] × [K, 1024] 的矩阵乘、用 128×128 的 tile，只能切出 8×8 = 64 个 tile，而 H100 SXM 有 132 个 SM（本站补充），一半以上的 SM 没活干。这时库通常会改用 <b>split-K</b>：沿 \(K\) 方向把每次点积切成几段，分给几个 SM 各算一段，最后把几段部分和加起来：</p>
+<div class="formula">$$C_{mn}=\underbrace{\sum_{k\le K/2}A_{mk}B_{kn}}_{\text{SM}_{1}}+\underbrace{\sum_{k&gt;K/2}A_{mk}B_{kn}}_{\text{SM}_{2}}$$</div>
+<p>这样 64 个 tile 就变成了 128 份工作，GPU 被填满了，但每个输出元素的加法顺序也变了。cuBLAS 这类库会根据 \(M,N,K\) 的具体形状，用启发式规则挑选 tile 大小、是否 split-K、切几段，所以 \(M\)（也就是批里的 token 数）一变，挑出来的方案就可能变。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：数据并行的 tile 划分 vs split-K</div>
+  <svg class="dg" viewBox="0 0 760 240" role="img" aria-label="矩阵乘的 tile 划分与 split-K" style="--dg-min:640px">
+    <text x="190" y="16" class="t-c t-b">① 数据并行：一个 tile 一个 SM</text>
+    <rect x="60" y="40" width="260" height="130" class="panel"/>
+    <g class="enc"><rect class="box" x="64" y="44" width="60" height="38" rx="3"/><text x="94" y="63" class="t-c t-xs">SM 0</text></g>
+    <g class="act"><rect class="box" x="128" y="44" width="60" height="38" rx="3"/><text x="158" y="63" class="t-c t-xs">SM 1</text></g>
+    <g class="pred"><rect class="box" x="192" y="44" width="60" height="38" rx="3"/><text x="222" y="63" class="t-c t-xs">SM 2</text></g>
+    <g class="reg"><rect class="box" x="256" y="44" width="60" height="38" rx="3"/><text x="286" y="63" class="t-c t-xs">SM 3</text></g>
+    <g class="tgt"><rect class="box" x="64" y="86" width="60" height="38" rx="3"/><text x="94" y="105" class="t-c t-xs">SM 4</text></g>
+    <g class="loss"><rect class="box" x="128" y="86" width="60" height="38" rx="3"/><text x="158" y="105" class="t-c t-xs">SM 5</text></g>
+    <g class="enc"><rect class="box" x="192" y="86" width="60" height="38" rx="3"/><text x="222" y="105" class="t-c t-xs">SM 6</text></g>
+    <g class="act"><rect class="box" x="256" y="86" width="60" height="38" rx="3"/><text x="286" y="105" class="t-c t-xs">SM 7</text></g>
+    <text x="190" y="148" class="t-c t-xs">输出 C（M × N）被切成 tile</text>
+    <text x="40" y="105" class="t-c t-xs" transform="rotate(-90 40 105)">M（token 数）</text>
+    <text x="190" y="190" class="t-c t-sm">每个 tile 在一个 SM 里沿 K 从头加到尾</text>
+    <text x="190" y="210" class="t-c t-xs">M 变大只是 tile 变多，每个元素的加法顺序不变</text>
+    <line x1="380" y1="10" x2="380" y2="230" class="grid-ln"/>
+    <text x="570" y="16" class="t-c t-b">② split-K：M 太小时沿 K 再切一刀</text>
+    <rect x="420" y="40" width="300" height="34" class="panel"/>
+    <g class="enc"><rect class="box" x="424" y="44" width="70" height="26" rx="3"/><text x="459" y="57" class="t-c t-xs">tile 0</text></g>
+    <g class="act"><rect class="box" x="498" y="44" width="70" height="26" rx="3"/><text x="533" y="57" class="t-c t-xs">tile 1</text></g>
+    <g class="pred"><rect class="box" x="572" y="44" width="70" height="26" rx="3"/><text x="607" y="57" class="t-c t-xs">tile 2</text></g>
+    <g class="reg"><rect class="box" x="646" y="44" width="70" height="26" rx="3"/><text x="681" y="57" class="t-c t-xs">tile 3</text></g>
+    <text x="570" y="90" class="t-c t-xs">M 只够切出一排 tile，SM 闲着一大半</text>
+    <g class="enc"><rect class="box" x="440" y="110" width="120" height="30" rx="4"/><text x="500" y="125" class="t-c t-xs">SM 0：tile 0 的 K 前半</text></g>
+    <g class="enc"><rect class="box" x="580" y="110" width="120" height="30" rx="4"/><text x="640" y="125" class="t-c t-xs">SM 4：tile 0 的 K 后半</text></g>
+    <g class="loss"><rect class="box" x="510" y="166" width="120" height="28" rx="4"/><text x="570" y="180" class="t-c t-xs">部分和相加 → tile 0</text></g>
+    <path class="edge" d="M500,140 L550,166"/><path class="edge" d="M640,140 L590,166"/>
+    <text x="570" y="214" class="t-c t-xs">SM 用满了，但加法顺序变成 (前半) + (后半)：批不变 ✗</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应原文矩阵乘一节的“Data Parallel Matmul”“Split-K Matmul”两张图。</div>
+</div>
+<p>作者指出，矩阵乘和 RMSNorm 一样，标准策略是数据并行；也和 RMSNorm 一样，当“批”的维度太小时，不得不沿归约维度 \(K\) 切分，这就是 split-K，它破坏批不变性。矩阵乘比 RMSNorm 更麻烦的地方在于，它有两个“批”维度（\(M\) 和 \(N\)），而且每个核需要的工作量大得多才能用好张量核，所以更容易出现“tile 太少”的局面。</p>
+<p>作者还提到一种更“糟糕”的策略：<b>stream-K</b>。它为了让各个 SM 的负载更均衡，对不同的输出 tile 用不同的方式沿 \(K\) 切分。这样一来，同一个元素放在批里的不同位置，就会被不同地切分，于是连“批内位置不变”都保证不了。而大多数矩阵乘库虽然不是批不变的，至少是批内位置不变的。</p>
+<div class="note-pre"><b>再补一点背景：张量核指令和“量化效应”。</b>
+<p>张量核指令一次处理一个固定形状的小矩阵块，例如 Hopper 上的 <code>wgmma.mma_async…m64n128k16</code> 一次算 64×128 的输出、沿 \(K\) 累加 16 项（Hopper 的这些指令见本站 <a href="flashattention-3.html#n-2-3">FlashAttention-3 精读 §2.3</a>）。不同的指令内部可能用不同的顺序累加。批很小时，用一条 256 行的大指令去算 32 行有效数据，绝大部分算力都浪费了；批大小为 1 时，最快的内核通常根本不用张量核。所以库在小批时会换成更小的指令，甚至不用张量核，这又是一种随批大小而变的归约顺序。</p>
+<p>另外，tile 是整块分配的，这会带来两种“量化效应”（本站用自己的例子说明）：一是 <b>tile 量化</b>，比如 \(M=129\) 而 tile 高 128，就要用两个 tile 行，第二行只有 1/128 是有用的；二是 <b>wave 量化</b>，比如 132 个 SM 恰好算完 132 个 tile 是一“波”，若有 133 个 tile，就要再来一波，而这一波里只有 1 个 SM 在干活，多 1% 的工作量几乎让时间翻倍。库通常靠针对不同形状换 tile 大小来抹平这些锯齿。</p>
+</div>
+<p>那么怎样让矩阵乘批不变？作者的答案很朴素：<b>只编译一种内核配置，所有形状都用它。</b>也就是固定 tile 大小、固定张量核指令、不用 split-K。这样会损失一些性能，但在大模型推理里通常不是灾难，原因是：split-K 主要在 \(M\) 和 \(N\) 都很小时才需要，而大模型里 \(N\)（模型维度）通常很大，就算 \(M\) 很小，沿 \(N\) 也能切出不少 tile。</p>
+<div class="dia">
+  <div class="dia-title">示意图（按博客图的数据重画）：批不变矩阵乘与 cuBLAS 的吞吐量，横轴是批大小 M</div>
+  <svg class="dg" viewBox="0 0 760 270" role="img" aria-label="cuBLAS 与批不变矩阵乘的 TFLOPs 随批大小变化" style="--dg-min:620px">
+    <line x1="70" y1="230" x2="730" y2="230" class="axis"/>
+    <line x1="70" y1="230" x2="70" y2="40" class="axis"/>
+    <line x1="70" y1="166.7" x2="730" y2="166.7" class="grid-ln"/>
+    <line x1="70" y1="103.3" x2="730" y2="103.3" class="grid-ln"/>
+    <line x1="70" y1="40" x2="730" y2="40" class="grid-ln"/>
+    <text x="62" y="230" class="t-r t-xs">0</text>
+    <text x="62" y="166.7" class="t-r t-xs">250</text>
+    <text x="62" y="103.3" class="t-r t-xs">500</text>
+    <text x="62" y="40" class="t-r t-xs">750</text>
+    <text x="70" y="246" class="t-c t-xs">0</text>
+    <text x="235" y="246" class="t-c t-xs">2048</text>
+    <text x="400" y="246" class="t-c t-xs">4096</text>
+    <text x="565" y="246" class="t-c t-xs">6144</text>
+    <text x="730" y="246" class="t-c t-xs">8192</text>
+    <text x="400" y="262" class="t-c t-xs">批大小（矩阵乘的 M）</text>
+    <text x="20" y="135" class="t-c t-xs" transform="rotate(-90 20 135)">TFLOPs</text>
+    <polyline style="fill:none;stroke:var(--c-enc);stroke-width:1.4" points="71,224 71,218 73,206 74,194 75,184 76,172 78,161 79,149 80,138 82,132 83,117 84,114 85,107 87,88 88,101 89,82 91,72 93,74 96,64 98,73 101,63 104,66 106,74 109,64 111,60 114,62 116,56 119,55 122,57 124,80 127,76 129,70 132,64 134,76 137,82 140,60 142,73 145,63 147,63 150,63 152,60 155,56 158,58 160,59 163,57 165,63 168,67 171,62 173,61 176,62 178,70 181,75 183,66 186,65 189,66 191,61 194,60 196,76 199,73 201,74 204,69 207,66 209,66 212,68 214,48 217,65 220,72 222,59 225,69 227,70 230,67 232,62 235,61 238,71 240,68 243,72 245,71 248,67 250,66 253,64 256,61 258,70 261,74 263,64 266,70 269,63 271,66 274,60 276,64 279,67 281,70 284,65 287,70 289,69 292,68 294,67 297,66 299,63 302,62 305,68 307,66 310,67 312,64 315,68 318,60 320,61 323,70 325,60 328,67 330,73 333,68 336,67 338,68 341,65 343,65 346,63 348,61 351,66 354,64 356,62 359,61 361,67 364,71 366,67 369,68 372,63 374,66 377,59 379,65 382,69 385,67 387,67 390,63 392,63 395,62 397,62 400,60 403,65 405,66 408,63 410,61 413,66 415,68 418,64 421,66 423,63 426,66 428,60 431,69 434,66 436,64 439,62 441,61 444,64 446,63 449,62 452,61 454,64 457,72 459,67 462,69 464,65 467,68 470,61 472,65 475,61 477,64 480,59 482,62 485,62 488,62 490,60 493,61 495,59 498,62 501,65 503,61 506,66 508,70 511,67 513,68 516,65 519,65 521,61 524,63 526,60 529,63 531,62 534,63 537,62 539,66 542,59 544,65 547,59 550,65 552,62 555,62 557,62 560,61 562,60 565,59 568,62 570,66 573,61 575,64 578,58 580,62 583,60 586,63 588,59 591,63 593,59 596,63 599,58 601,61 604,62 606,60 609,65 611,64 614,65 617,64 619,64 622,63 624,62 627,62 629,62 632,70 635,60 637,68 640,62 642,62 645,59 648,62 650,60 653,67 655,62 658,64 660,60 663,63 666,63 668,62 671,63 673,62 676,63 678,68 681,61 684,66 686,60 689,62 691,59 694,62 696,60 699,63 702,59 704,66 707,66 709,65 712,63 715,62 717,64 720,61 722,62 725,66 727,62"/>
+    <polyline style="fill:none;stroke:var(--c-pred);stroke-width:1.4" points="71,228 71,226 73,221 74,216 75,210 76,203 78,197 79,191 80,186 82,193 83,187 84,178 85,169 87,160 88,154 89,149 91,143 93,157 96,137 98,116 101,104 104,130 106,100 109,84 111,77 114,147 116,135 119,126 122,121 124,126 127,113 129,107 132,102 134,108 137,97 140,91 142,85 145,88 147,83 150,80 152,75 155,125 158,115 160,107 163,103 165,112 168,102 171,96 173,91 176,105 178,93 181,89 183,88 186,93 189,82 191,78 194,80 196,109 199,102 201,97 204,95 207,100 209,94 212,90 214,92 217,91 220,88 222,87 225,84 227,84 230,82 232,79 235,77 238,102 240,98 243,93 245,91 248,96 250,91 253,91 256,87 258,92 261,88 263,87 266,84 269,85 271,84 274,79 276,79 279,99 281,92 284,95 287,89 289,89 292,89 294,88 297,83 299,87 302,86 305,84 307,81 310,84 312,81 315,79 318,80 320,99 323,94 325,94 328,88 330,91 333,91 336,86 338,86 341,88 343,84 346,84 348,81 351,81 354,82 356,81 359,76 361,93 364,89 366,87 369,87 372,84 374,87 377,85 379,84 382,86 385,83 387,81 390,81 392,84 395,81 397,80 400,77 403,84 405,81 408,77 410,77 413,88 415,87 418,87 421,85 423,87 426,85 428,85 431,83 434,83 436,83 439,81 441,79 444,80 446,79 449,78 452,77 454,88 457,86 459,84 462,86 464,85 467,84 470,84 472,82 475,82 477,81 480,81 482,79 485,83 488,83 490,80 493,79 495,90 498,88 501,85 503,86 506,84 508,85 511,83 513,82 516,82 519,81 521,81 524,79 526,81 529,79 531,78 534,78 537,86 539,86 542,85 544,85 547,84 550,83 552,83 555,80 557,81 560,82 562,80 565,80 568,82 570,81 573,80 575,76 578,86 580,86 583,83 586,81 588,86 591,84 593,82 596,82 599,81 601,81 604,81 606,81 609,81 611,81 614,79 617,80 619,88 622,86 624,83 627,85 629,84 632,83 635,82 637,80 640,81 642,83 645,83 648,80 650,82 653,80 655,79 658,80 660,85 663,85 666,84 668,85 671,84 673,83 676,83 678,81 681,82 684,81 686,80 689,79 691,82 694,79 696,80 699,78 702,84 704,84 707,83 709,82 712,83 715,83 717,80 720,83 722,82 725,82 727,81"/>
+    <line x1="520" y1="186" x2="548" y2="186" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="554" y="186" class="t-sm">cuBLAS</text>
+    <line x1="520" y1="206" x2="548" y2="206" style="stroke:var(--c-pred);stroke-width:2.5"/><text x="554" y="206" class="t-sm">批不变 Triton 内核</text>
+    <text x="96" y="222" class="t-xs">小批区：批不变内核只有 cuBLAS 的约 1/3</text>
+    <text x="250" y="140" class="t-xs">锯齿：越过 tile / wave 边界时突然掉速</text>
+  </svg>
+  <div class="dia-note">本站按博客矩阵乘性能图所用的公开数据（批大小 8 到 8184，步长 8）重画的简化版，曲线每隔 32 取一个点（256 以下每隔 16）。博客没有写这张图用的 GPU 型号和 \(N\)、\(K\) 的大小。</div>
+</div>
+<p>作者报告的结果是：批不变的矩阵乘比 cuBLAS 大约慢 20%，而且这个 Triton 内核并没有做深度优化（比如没有用 Hopper 的 TMA 异步搬运）。按博客图的数据算，批不变内核的吞吐量在所有批大小上平均是 cuBLAS 的 83%（推算）。但这个平均值掩盖了两个规律，作者也点了出来：</p>
+<ul>
+  <li><b>小批时损失很大。</b>批大小在 64 及以下时，批不变内核只有 cuBLAS 的 35%–43%；到批大小 512 以上，两者之比的中位数约为 87%，近九成的批大小在 80% 以上（均为推算，读自图的数据）。原因是固定的大指令在小批时浪费严重，并行度也不够。</li>
+  <li><b>锯齿形的掉速。</b>批大小每越过某个边界，批不变内核的吞吐量就突然下跌一截，再慢慢爬回来。例如批大小 1024 时约为 611 TFLOPs，1032 时跌到约 388 TFLOPs（读自图的数据）。这就是上面说的 tile 量化和 wave 量化，cuBLAS 会通过换 tile 大小来抹平，而批不变内核为了固定配置放弃了这种手段。</li>
+</ul>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“只用一种配置”是作者为了讲清楚而选的最简单做法，不是唯一做法。严格说来，批不变只要求每个输出元素沿 \(K\) 的累加顺序固定；只要沿 \(K\) 的切法和张量核指令不变，单独改变 \(M\)、\(N\) 方向的 tile 大小原则上不影响每个元素的结果（这是本站的理解）。vLLM 后来的批不变模式文档就提到，在部分 GPU 上它会按运行时的批大小选用调好的 tile 配置。另外，“慢 20%”是单个矩阵乘的数字，小批解码时的实际损失要大得多，第 7.2 节的端到端数字也要放在这个背景下读。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#batch-invariant-matrix-multiplication" target="_blank" rel="noopener">英文原文 · Batch-invariant matrix multiplication ↗</a></p>
+
+<h4 id="n-5-3">5.3 注意力：先写入 KV 缓存，再用固定段长切分 KV</h4>
+<div class="note-pre"><b>先补一点背景：FlashAttention、KV 缓存、分块预填充。</b>
+<p><b>FlashAttention</b> 把注意力按块计算：对每一块 query，依次扫过一块一块的 key/value，用“在线 softmax”边扫边合并，从来不把完整的注意力矩阵写到显存里（详见本站 <a href="flashattention.html#n-3-2">FlashAttention 精读 §3.2</a>）。FlashAttention-2 的并行方式是沿 query 切分、沿 key/value 归约，一块 query 的整个归约在一个 SM 里完成，所以它也是一种“数据并行”策略。</p>
+<p><b>KV 缓存</b>：生成时，之前所有 token 的 key 和 value 被存下来，每一步只算新 token 的 K、V 并追加进去；vLLM 把它切成固定大小的块，用一张“页表”（块表）记录每个块在显存里的位置（见 <a href="vllm.html#n-4-2">vLLM 精读 §4.2</a>）。<b>前缀缓存</b>让多个请求共享相同前缀的 KV（见 <a href="sglang.html#n-3">SGLang 精读 §3</a>）。<b>分块预填充</b>把一段很长的输入拆成几段、分几步算（见 <a href="sarathi-serve.html#n-4-1">Sarathi-Serve 精读 §4.1</a>）。</p>
+<p>这些优化的共同点是：<b>同一条序列，在不同的时候会被切成不同的样子交给注意力内核。</b>同一个 token 的注意力，有时它前面的 KV 全在缓存里（解码），有时一部分在缓存里、一部分正在这一步里算（分块预填充），有时全都在这一步里算（不切分的预填充）。</p>
+</div>
+<p>作者说，矩阵乘做到批不变之后，注意力还有两个额外的麻烦，“恰好因为它里面有两个矩阵乘”。第一，RMSNorm 和矩阵乘只沿特征维归约，注意力还要沿<b>序列</b>维归约。第二，正因为要沿序列归约，注意力要面对推理引擎各种改变“序列怎么被切开”的优化。所以对注意力来说，批不变的要求更强：数值结果不仅不能随“同时处理多少条请求”而变，还不能随“每条请求在引擎里被怎样切段”而变。作者举的要求是：处理一条序列的第 1000 个 query token 时，不管 KV 缓存里此刻有 0 个 token（整段预填充）还是 999 个 token（逐个解码），它的归约顺序都必须一模一样。</p>
+<p><b>第一个问题：缓存部分和新算部分分开归约。</b>有的实现（比如 vLLM 当时的 Triton 注意力内核）把“KV 缓存里已有的 K/V”和“这一步正在处理的 token 的 K/V”分成两部分分别归约，这样做无法批不变。原因藏在边界上：设内核每次处理 32 个位置的 K/V，缓存里有 80 个，这一步新算 48 个，一共 128 个。缓存部分要用 3 块（两块满的、一块只有 16 个有效位置），新算部分要用 2 块（一块满的、一块只有 16 个有效），一共 5 块。而如果这 128 个位置是一口气算的（缓存为空），只需要 4 块整块。块的边界不同，在线 softmax 合并的顺序就不同。</p>
+<div class="dia">
+  <div class="dia-title">示意图：同样 128 个位置的 KV，分两部分处理要 5 块，一起处理只要 4 块（块大小 32）</div>
+  <div class="dia-row"><span class="lbl">缓存 80 + 新算 48，分开归约</span><div class="dia-track"><span class="dia-seg kv" style="flex:32">缓存块 1（32）</span><span class="dia-seg kv" style="flex:32">缓存块 2（32）</span><span class="dia-seg kv" style="flex:16">块 3（16）</span><span class="dia-seg res" style="flex:16">屏蔽</span><span class="dia-seg cmp" style="flex:32">新算块 4（32）</span><span class="dia-seg cmp" style="flex:16">块 5（16）</span><span class="dia-seg res" style="flex:16">屏蔽</span></div></div>
+  <div class="dia-out">5 次块级合并，第 3、5 块各有一半是补上去再屏蔽掉的空位。</div>
+  <div class="dia-row"><span class="lbl">128 个一起处理（或先写入缓存）</span><div class="dia-track"><span class="dia-seg kv" style="flex:32">块 1（32）</span><span class="dia-seg kv" style="flex:32">块 2（32）</span><span class="dia-seg kv" style="flex:32">块 3（32）</span><span class="dia-seg kv" style="flex:32">块 4（32）</span><span class="dia-seg oth" style="flex:32">（对齐用的空白）</span></div></div>
+  <div class="dia-out">4 次块级合并：块的边界只取决于位置编号，不取决于这一步新算了几个 token。</div>
+  <div class="dia-note">本站示意图，对应原文注意力一节 “FlashAttention with a KV Cache” 那张图的例子（80 + 48 = 128，块大小 32）。蓝色是缓存里的 K/V，绿色是这一步新算的 K/V，斜纹是屏蔽掉的空位。</div>
+</div>
+<p>修法很简单：<b>在调用注意力内核之前，先把这一步新算的 K/V 写进 KV 缓存、更新好页表</b>，然后让内核只从缓存里读。这样无论这一步处理了多少个 token，内核看到的 K/V 永远是同一种布局，块的边界永远从位置 0 开始每 32 个一切。再加上上一小节说的“固定 tile 大小”等要求，注意力的批不变就做到了。</p>
+<div class="note-pre"><b>先补一点背景：split-KV（FlashDecoding）为什么在解码时必不可少。</b>
+<p>解码阶段每条序列每步只有 1 个新的 query。如果不沿 KV 切分，注意力内核只能沿“批 × 注意力头 × query 长度”这几个维度并行，而 query 长度是 1。批不大时，能切出来的工作份数远少于 SM 数。更糟的是，如果某条序列的 KV 缓存很长，它的注意力本身就要算很久，却只能由很少几个 SM 来算。</p>
+<p>于是解码内核会<b>沿 KV 维度切分</b>：把一条序列的 KV 切成若干段，每段由一个 SM 算出局部结果（局部最大值 \(m_s\)、局部指数和 \(\ell_s\)、未归一化的局部输出 \(\tilde o_s\)），最后再合并：</p>
+<div class="formula">$$m=\max_{s}m_{s},\qquad \ell=\sum_{s}e^{m_{s}-m}\,\ell_{s},\qquad o=\frac{1}{\ell}\sum_{s}e^{m_{s}-m}\,\tilde o_{s}$$</div>
+<p>这就是 split-KV，也叫 FlashDecoding。合并的数学结果与切几段无关，但浮点结果与切在哪里有关。</p>
+</div>
+<p><b>第二个问题：split-KV 的切法随负载而变。</b>和 RMSNorm、矩阵乘不同，这种情形没法“干脆不管”：长上下文的解码即使只有一个请求，注意力也可能很慢，必须拆开并行。常见的切法是先算出需要多少份并行度、再把 KV 平均切成这么多段。比如 KV 长 1000、需要 4 段，每段 250。作者指出这样做破坏批不变性，因为切几段取决于这一步处理了这条序列的多少个 query token、同批有多少请求。他还点名了 FlashInfer 的“均衡调度”算法：它会选出“仍能填满所有 SM 的最大段长”，所以段长随负载而变（FlashInfer 的调度见本站 <a href="../legacy/tracks/ai-infra/02-flashinfer.html">FlashInfer 拆解页</a>）。</p>
+<p>作者特别强调，对注意力而言，“无论批多大都固定切成同样的段数”也不够。原因在于同一个 token 在不同的步里，所在的那次注意力调用要处理的 KV 总长度不同：段数固定，段长就随总长度变，段的边界也就跟着移动。正确的做法是<b>固定段长</b>：每段固定 256 个位置，总长度变了只是段数变。KV 长 1000 时，切成 256、256、256 和最后一段 232。这样，任何一个位置在任何一步里都落在同样的段边界之间，归约顺序就固定了。</p>
+<div class="dia">
+  <div class="dia-title">示意图：固定段数 vs 固定段长（第 1000 个 token 的注意力，在两个不同的步里）</div>
+  <div class="dia-row"><span class="lbl">固定 4 段，总长 1000</span><div class="dia-track"><span class="dia-seg kv" style="flex:250">0–249</span><span class="dia-seg cmp" style="flex:250">250–499</span><span class="dia-seg kv" style="flex:250">500–749</span><span class="dia-seg cmp" style="flex:250">750–999</span></div></div>
+  <div class="dia-row"><span class="lbl">固定 4 段，总长 1200</span><div class="dia-track"><span class="dia-seg kv" style="flex:300">0–299</span><span class="dia-seg cmp" style="flex:300">300–599</span><span class="dia-seg kv" style="flex:300">600–899</span><span class="dia-seg cmp" style="flex:100">900–999</span><span class="dia-seg res" style="flex:200">（因果屏蔽）</span></div></div>
+  <div class="dia-out">同一个 token 的 1000 个 KV，两次被切在不同的位置：归约顺序不同 ✗</div>
+  <div class="dia-row"><span class="lbl">固定段长 256，总长 1000</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">0–255</span><span class="dia-seg cmp" style="flex:256">256–511</span><span class="dia-seg kv" style="flex:256">512–767</span><span class="dia-seg cmp" style="flex:232">768–999</span></div></div>
+  <div class="dia-row"><span class="lbl">固定段长 256，总长 1200</span><div class="dia-track"><span class="dia-seg kv" style="flex:256">0–255</span><span class="dia-seg cmp" style="flex:256">256–511</span><span class="dia-seg kv" style="flex:256">512–767</span><span class="dia-seg cmp" style="flex:232">768–999</span><span class="dia-seg res" style="flex:200">（因果屏蔽）</span></div></div>
+  <div class="dia-out">边界永远在 256 的倍数上：这个 token 的归约顺序在两步里完全相同 ✓</div>
+  <div class="dia-note">本站示意图。“总长 1000、4 段各 250”和“段长 256、最后一段 232”是原文的例子；“总长 1200”是本站为了展示“同一个 token 在不同的步里”而加的情形。</div>
+</div>
+<p>作者坦白，固定段长的 split-KV 需要改动 FlexAttention 的内部实现，这些改动<b>没有包含在他们发布的代码里</b>，说会在不久后合并进上游。这一点在读第 6、7 节时要记住。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>固定段长并不意味着“任何情况下都要拆”。只要拆法与批大小、与这一步处理了多少 token 无关，拆不拆都可以是批不变的；SGLang 后来对 FlashAttention-3 后端的处理就是干脆把段数固定为 1（完全不拆）。另外，“先写缓存再算”保证的是归约边界一致；被读出来的 K/V 本身要一致，还要求算出 K/V 的那些投影矩阵乘也是批不变的，所以三类内核必须一起改，缺一个都不行。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#batch-invariant-attention" target="_blank" rel="noopener">英文原文 · Batch-invariant attention ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 实现：用 torch.Library 把算子换掉，在 vLLM 上演示</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>上面这些批不变内核怎样接进一个现成的推理引擎，而不必大改模型代码？作者发布了什么代码，里面有什么、没有什么？</div>
+<p>原文这一节很短：作者在 vLLM 上演示了确定性推理，做法是利用 vLLM 的 <b>FlexAttention 后端</b>处理注意力，再用 PyTorch 的 <b><code>torch.Library</code></b> 机制把相关的 PyTorch 算子“无侵入”地替换成批不变版本。批不变内核库发布在 GitHub 的 <code>thinking-machines-lab/batch_invariant_ops</code>，另附一个让 vLLM 以“确定性”模式运行的例子。</p>
+<div class="note-pre"><b>先补一点背景：torch.Library 和 FlexAttention 是什么。</b>
+<p>PyTorch 的每个张量运算最终都会调用一个底层算子（比如 <code>aten::mm</code> 就是矩阵乘），由“分发器”根据设备类型找到具体实现。<code>torch.library.Library</code> 允许在运行时为某个算子在某种设备上注册一个新的实现。这样，模型代码一行不改，所有调用 <code>torch.mm</code> 的地方就都会走到新实现上。</p>
+<p>FlexAttention 是 PyTorch 提供的一个注意力编程接口：用户用几行 Python 描述注意力的打分修改和掩码，编译器生成融合的注意力内核。Horace He 是 FlexAttention 论文（arXiv 2412.05496）的作者之一，所以作者选它来实现需要定制切分方式的批不变注意力，是很自然的。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：batch_invariant_ops 的接入方式（按 2026-10 时仓库主分支的代码整理）</div>
+  <div class="dia-flow"><span class="dia-box enc">模型代码（不改动）<small>调用 torch.mm / addmm / log_softmax / mean</small></span><span class="dia-arrow">→</span><span class="dia-box reg">torch.Library 覆盖 4 个 aten 算子<small>mm、addmm、_log_softmax、mean.dim</small></span><span class="dia-arrow">→</span><span class="dia-box tgt">Triton 内核<small>矩阵乘：持久化内核，BF16 固定 128×128×64 的 tile，K 方向整段在一个程序内累加，不用 split-K；log_softmax / mean：每行一个程序，按固定块长循环</small></span></div>
+  <div class="dia-flow"><span class="dia-box enc">注意力<small>不在这 4 个算子里</small></span><span class="dia-arrow">→</span><span class="dia-box act">vLLM 的 FlexAttention 后端<small>仓库里只提供了一个固定的注意力块大小（16×16）接口；固定段长的 split-KV 改动未随代码发布</small></span></div>
+  <div class="dia-note">本站根据 <a href="https://github.com/thinking-machines-lab/batch_invariant_ops" target="_blank" rel="noopener">仓库代码 ↗</a> 整理。RMSNorm 在 PyTorch 写法里通过 <code>mean</code> 求平方和的平均，所以覆盖 <code>mean.dim</code> 就让它批不变了。</div>
+</div>
+<p>仓库里的矩阵乘是一个“持久化”内核：启动的程序数等于 SM 数和 tile 数中较小的那个，每个程序依次处理若干个 tile。对每个 tile，它沿 \(K\) 方向以固定的块长从头累加到尾，累加器用 FP32。因为 tile 大小和 \(K\) 方向的块长都是写死的，每个输出元素的累加顺序只取决于 \(K\)，与 \(M\)（批大小）无关，这就是批不变的来源。仓库的测试脚本复现了第 4 节的实验：标准 PyTorch 下“单独算第一行”和“整批算再取第一行”有差别，打开批不变模式后差别为 0。</p>
+<p>vLLM 那边的接入是一个概念验证的拉取请求（vLLM PR #24583，2025-09-10 提交，后来没有合并而是关闭，正式支持另起炉灶，见“后来怎么样了”）。仓库的说明写道：用 Qwen3-8B、温度 0、让 1000 个请求各生成 100 个 token，不打这个补丁时得到 18 种不同的输出，打上之后只有 1 种。这个例子要求 PyTorch 2.9 以上，并且关闭了 CUDA Graph（<code>--enforce-eager</code>）。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>发布的库只覆盖了矩阵乘、log_softmax 和求平均这几个 PyTorch 算子，本身不包含批不变的注意力内核；博客里 Qwen3-235B 的实验依赖的是作者内部对 FlexAttention 的改动和 vLLM 的补丁。所以“装上这个库就能让任意模型在任意引擎上确定”是不对的：融合内核（比如引擎自带的融合 RMSNorm、MoE 内核）不经过这些 aten 算子，不会被替换。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#implementation" target="_blank" rel="noopener">英文原文 · Implementation ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 实验：有多不确定，慢了多少，对 RL 有什么用</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>不改内核时，温度为 0 的推理到底有多不确定？改成批不变之后是否真的完全确定？要付出多少速度？以及作者最关心的应用：能不能让强化学习的采样端和训练端逐位一致，这样做有什么好处？</div>
+
+<h4 id="n-7-1">7.1 有多不确定：1000 次采样里有 80 种回答</h4>
+<p>作者用 Qwen3-235B-A22B-Instruct-2507（总参数 2350 亿、每个 token 激活 220 亿的 MoE 模型，非思考模式），以温度 0 对同一个提示“Tell me about Richard Feynman”采样 1000 次，每次生成 1000 个 token。结果出人意料：1000 个回答里有 <b>80 种</b>不同的版本，最常见的那一种出现了 78 次。</p>
+<p>更有意思的是分叉的位置。所有回答的前 102 个 token 都完全相同，第一次分叉出现在第 103 个 token：所有回答都生成了“费曼于 1918 年 5 月 11 日出生于……”这半句，然后 992 个回答接着写“Queens, New York”（纽约皇后区），另外 8 个写成“New York City”（纽约市）。两种写法都说得通，模型在这一步对两个候选的打分想必非常接近，于是一点点数值扰动就翻转了选择。打开批不变内核后，1000 个回答完全相同。作者说，这本来就是我们对一个贪心采样器在数学上的预期，但没有批不变内核就做不到。</p>
+<div class="dia">
+  <div class="dia-title">示意图：1000 次温度为 0 的采样在哪里分叉（Qwen3-235B，提示“Tell me about Richard Feynman”）</div>
+  <svg class="dg" viewBox="0 0 760 230" role="img" aria-label="1000 次采样的分叉树" style="--dg-min:640px">
+    <g class="tgt"><rect class="box" x="10" y="80" width="230" height="56" rx="8"/><text x="125" y="100" class="t-c t-sm">前 102 个 token：1000 次全部相同</text><text x="125" y="120" class="t-c t-xs">…… born on May 11, 1918, in</text></g>
+    <path class="edge" d="M240,100 C280,100 290,58 330,58"/>
+    <path class="edge" d="M240,118 C280,118 290,160 330,160"/>
+    <g class="enc"><rect class="box" x="330" y="38" width="190" height="40" rx="7"/><text x="425" y="52" class="t-c t-sm">“Queens, New York”</text><text x="425" y="68" class="t-c t-xs">992 次</text></g>
+    <g class="pred"><rect class="box" x="330" y="140" width="190" height="40" rx="7"/><text x="425" y="154" class="t-c t-sm">“New York City”</text><text x="425" y="170" class="t-c t-xs">8 次</text></g>
+    <path class="edge" d="M520,52 L560,30"/><path class="edge" d="M520,58 L560,58"/><path class="edge" d="M520,64 L560,86"/>
+    <path class="edge" d="M520,156 L560,146"/><path class="edge" d="M520,164 L560,182"/>
+    <text x="566" y="30" class="t-xs">后面还会继续分叉……</text>
+    <text x="566" y="58" class="t-xs">共 80 种不同的完整回答</text>
+    <text x="566" y="86" class="t-xs">最常见的一种出现 78 次</text>
+    <text x="566" y="146" class="t-xs">……</text>
+    <text x="380" y="216" class="t-c t-sm">打开批不变内核：1000 次全部相同，只有一种回答</text>
+  </svg>
+  <div class="dia-note">本站示意图，数字取自原文 “How nondeterministic are completions?” 一节。分叉之后的树形结构是示意，原文只给了“80 种、最多 78 次、第 103 个 token 处 992 对 8”这几个数。</div>
+</div>
+
+<h4 id="n-7-2">7.2 性能：从 26 秒到 42 秒</h4>
+<p>作者说，他们没有在批不变内核的性能上下太多功夫，这里只想确认性能“还能用”。测试设置是：一张 GPU 上用 API 服务器跑 Qwen3-8B，发 1000 条请求，每条的输出长度在 90 到 110 个 token 之间，记录全部完成所需的时间。</p>
+<div class="dia">
+  <div class="dia-title">示意图：1000 条请求的总耗时（秒，越短越好；Qwen3-8B，单卡）</div>
+  <div class="dia-row"><span class="lbl">vLLM 默认</span><div class="dia-track"><span class="dia-seg kv" style="flex:26">26 s</span><span class="dia-seg oth" style="flex:29"></span></div></div>
+  <div class="dia-row"><span class="lbl">确定性 vLLM（未优化）</span><div class="dia-track"><span class="dia-seg frag" style="flex:55">55 s（约 2.1 倍，推算）</span></div></div>
+  <div class="dia-row"><span class="lbl">+ 改进的注意力内核</span><div class="dia-track"><span class="dia-seg res" style="flex:42">42 s（约 1.6 倍，推算）</span><span class="dia-seg oth" style="flex:13"></span></div></div>
+  <div class="dia-note">数字取自原文 Performance 一节的表格。倍数是本站推算：55 ÷ 26 ≈ 2.12，42 ÷ 26 ≈ 1.62，即后者多花约 62% 的时间（SGLang 团队后来引用的“61.5% 的减速”就是这个比值）。</div>
+</div>
+<p>作者解释，大部分减速来自 vLLM 里 FlexAttention 的集成还没有被认真优化。无论如何，性能“不是灾难性的”。按每条约 100 个输出 token 粗算，默认配置约每秒 3800 个 token，确定性配置约每秒 2400 个 token（推算，假设平均输出 100 个 token、只计输出）。</p>
+
+<h4 id="n-7-3">7.3 真正的 on-policy RL：采样端和训练端逐位一致</h4>
+<div class="note-pre"><b>先补一点背景：大模型 RL 为什么会有“两套引擎”，什么是 on-policy。</b>
+<p>用强化学习训练大模型（RLHF、RLVR 等）时，每一轮先让当前模型对一批题目生成回答（叫 <b>rollout</b> 或采样），再根据奖励计算梯度、更新参数。生成回答最花时间，所以几乎所有框架（verl、OpenRLHF、slime、AReaL 等）都用高度优化的推理引擎（vLLM、SGLang）来生成，再用训练框架（FSDP、Megatron）重新计算这些回答在当前参数下的概率并求梯度。同一份参数被加载进两套代码里，见本站 <a href="hybridflow.html#n-2-1">HybridFlow 精读 §2.1</a> 与 <a href="hybridflow.html#n-5">§5</a>。</p>
+<p>策略梯度的基本形式是：样本应当来自当前策略 \(\pi_\theta\) 本身，</p>
+<div class="formula">$$\nabla_\theta J(\theta)=\mathbb{E}_{y\sim\pi_\theta}\big[A(y)\,\nabla_\theta\log\pi_\theta(y)\big]$$</div>
+<p>其中 \(A(y)\) 是回答 \(y\) 的优势（大致是“比平均好多少”）。样本来自正在被优化的同一个策略，就叫 <b>on-policy</b>；样本来自别的策略（比如旧参数、别的模型），就叫 <b>off-policy</b>，这时需要额外的修正（通常是重要性采样，见“后来怎么样了”），否则梯度是有偏的。</p>
+<p>问题在于，推理引擎和训练框架用的内核、精度、并行方式、批大小都不同。哪怕参数一模一样，两边对同一个 token 算出的概率也不一样，记为 \(\pi_{\text{samp}}\neq\pi_{\text{train}}\)。于是样本实际来自 \(\pi_{\text{samp}}\)，梯度却按 \(\pi_{\text{train}}\) 计算，名义上的 on-policy 训练就悄悄变成了 off-policy。衡量两者差多远的常用指标是两个分布之间的 KL 散度，</p>
+<div class="formula">$$\mathrm{KL}(\pi_{\text{samp}}\,\|\,\pi_{\text{train}})=\mathbb{E}_{y\sim\pi_{\text{samp}}}\big[\log\pi_{\text{samp}}(y)-\log\pi_{\text{train}}(y)\big]$$</div>
+<p>两个分布完全相同时它等于 0。</p>
+</div>
+<p>作者的论证很简洁：如果连两次相同的推理请求都得不到逐位相同的结果，训练和推理之间就更不可能逐位相同。反过来，有了确定性推理，就可以进一步修改训练端，让采样和训练逐位一致，从而实现<b>真正的 on-policy RL</b>。作者在这里引用了 Yao 等人的博客作为“研究者已经指出训推数值差异会把 on-policy 变成 off-policy”的出处。</p>
+<p>实验设置：在 Big-Math 数据集上做 RLVR（用可验证奖励的强化学习），策略从 “Qwen 2.5-VL instruct 8B” 初始化，单个 rollout 最长 4096 个 token。作者比较了三种跑法：</p>
+<ul>
+  <li><b>不做 off-policy 修正</b>（不加重要性权重）：奖励在训练中途崩溃。</li>
+  <li><b>加 off-policy 修正项</b>（重要性权重）：训练平稳进行，采样端与训练端的 KL 大致在 0.001 附近，偶有尖峰。</li>
+  <li><b>采样端与训练端逐位一致</b>：完全 on-policy，KL 恒为 0，训练同样平稳。作者特意说明，图里那条贴着 0 的直线不是程序错误。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图（按博客图的数据重画）：三种跑法的平均奖励（上）与采样端—训练端 KL（下）</div>
+  <svg class="dg" viewBox="0 0 760 470" role="img" aria-label="三种 RL 跑法的奖励与 KL 曲线" style="--dg-min:620px">
+    <line x1="70" y1="200" x2="720" y2="200" class="axis"/>
+    <line x1="70" y1="200" x2="70" y2="40" class="axis"/>
+    <line x1="70" y1="146.7" x2="720" y2="146.7" class="grid-ln"/>
+    <line x1="70" y1="93.3" x2="720" y2="93.3" class="grid-ln"/>
+    <line x1="70" y1="40" x2="720" y2="40" class="grid-ln"/>
+    <text x="62" y="200" class="t-r t-xs">0</text>
+    <text x="62" y="146.7" class="t-r t-xs">0.2</text>
+    <text x="62" y="93.3" class="t-r t-xs">0.4</text>
+    <text x="62" y="40" class="t-r t-xs">0.6</text>
+    <text x="20" y="120" class="t-c t-xs" transform="rotate(-90 20 120)">平均奖励</text>
+    <polyline style="fill:none;stroke:var(--c-act);stroke-width:1.8" points="72,191 90,119 111,103 131,101 151,87 172,86 192,93 212,82 232,86 253,82 273,87 293,77 314,83 334,79 354,81 375,81 395,84 415,77 436,78 456,70 476,82 497,76 517,83 537,77 558,86 578,79 598,76 618,74 639,74 659,76 679,75 690,75 700,84 704,76 710,77 714,77 716,77 718,80 720,80"/>
+    <polyline style="fill:none;stroke:var(--c-loss);stroke-width:1.8" points="72,191 90,119 111,105 131,100 151,90 172,89 192,96 212,82 232,89 253,84 273,88 293,79 314,86 334,77 354,80 375,83 395,84 415,74 436,82 456,69 476,82 497,74 517,78 537,73 558,82 578,78 598,74 618,75 639,74 659,77 679,76 690,79 700,84 704,80 710,93 714,104 716,129 718,156 720,165"/>
+    <polyline style="fill:none;stroke:var(--c-enc);stroke-width:1.8" points="72,189 90,121 111,106 131,101 151,89 172,89 192,95 212,83 232,87 253,83 273,88 293,77 314,83 334,76 354,80 375,81 395,80 415,68 436,77 456,69 476,78 497,71 517,80 537,70 558,83 578,76 598,73 618,73 639,72 659,79 679,77 690,77 700,81 704,74 710,78 714,78 716,76 718,80 720,78"/>
+    <text x="640" y="182" class="t-r t-xs" style="fill:var(--c-loss)">第 318 步：不修正的那次奖励跌到约 0.10 →</text>
+    <line x1="70" y1="430" x2="720" y2="430" class="axis"/>
+    <line x1="70" y1="430" x2="70" y2="270" class="axis"/>
+    <line x1="70" y1="376.7" x2="720" y2="376.7" class="grid-ln"/>
+    <line x1="70" y1="323.3" x2="720" y2="323.3" class="grid-ln"/>
+    <line x1="70" y1="270" x2="720" y2="270" class="grid-ln"/>
+    <text x="62" y="430" class="t-r t-xs">0</text>
+    <text x="62" y="376.7" class="t-r t-xs">0.002</text>
+    <text x="62" y="323.3" class="t-r t-xs">0.004</text>
+    <text x="62" y="270" class="t-r t-xs">0.006</text>
+    <text x="16" y="350" class="t-c t-xs" transform="rotate(-90 16 350)">KL</text>
+    <polyline style="fill:none;stroke:var(--c-act);stroke-width:1.8" points="72,413 90,418 111,421 131,421 151,423 172,423 192,423 212,422 232,422 253,422 273,420 293,421 314,421 334,421 354,421 375,419 395,416 415,415 436,418 456,419 476,419 497,420 517,420 537,420 558,420 578,420 598,420 618,419 639,419 659,418 679,420 690,420 700,420 704,419 710,419 714,418 716,418 718,418 720,419"/>
+    <polyline style="fill:none;stroke:var(--c-loss);stroke-width:1.8" points="72,413 90,418 111,421 131,422 151,423 172,422 192,422 212,422 232,422 253,422 273,422 293,419 314,421 334,420 354,418 375,419 395,419 415,419 436,420 456,420 476,420 497,419 517,420 537,419 558,418 578,418 598,419 618,419 639,418 659,419 679,415 690,414 700,410 704,403 710,387 714,368 716,343 718,317 720,300"/>
+    <line x1="70" y1="430" x2="720" y2="430" style="stroke:var(--c-enc);stroke-width:2.6"/>
+    <text x="70" y="448" class="t-c t-xs">0</text>
+    <text x="232" y="448" class="t-c t-xs">80</text>
+    <text x="395" y="448" class="t-c t-xs">160</text>
+    <text x="557" y="448" class="t-c t-xs">240</text>
+    <text x="720" y="448" class="t-c t-xs">320</text>
+    <text x="395" y="464" class="t-c t-xs">训练步数</text>
+    <line x1="100" y1="250" x2="124" y2="250" style="stroke:var(--c-enc);stroke-width:2.5"/><text x="130" y="250" class="t-xs">采样端与训练端逐位一致（KL 恒为 0，贴着横轴）</text>
+    <line x1="420" y1="250" x2="444" y2="250" style="stroke:var(--c-act);stroke-width:2.5"/><text x="450" y="250" class="t-xs">加重要性权重</text>
+    <line x1="560" y1="250" x2="584" y2="250" style="stroke:var(--c-loss);stroke-width:2.5"/><text x="590" y="250" class="t-xs">不修正</text>
+  </svg>
+  <div class="dia-note">本站按博客 RL 图所用的公开数据（每步一个点）重画：横轴取原图显示的第 1–320 步，每 10 步取一个点（最后几步加密），每个点是该步及前两步的平均。三条奖励曲线在前 300 步几乎重合；不修正的那次在第 318 步原始奖励约 0.10，KL 在第 319 步升到约 0.005。逐位一致的那条 KL 线在所有步都正好为 0。</div>
+</div>
+<p>把上图读一遍：前 300 步里，三条奖励曲线几乎重合在一起，看不出差别；“不修正”那一次在第 310 步之后 KL 开始抬头，到第 318 步前后奖励骤降，同时 KL 冲到原来的十几倍（推算：从约 0.0004 到约 0.005）。作者指出，这次运行在第 318 步附近有明显的损失尖峰，KL 也同时出现尖峰。另外两次运行一直平稳。逐位一致那一次，KL 每一步都是精确的 0。</p>
+
+<h4 id="n-7-4">7.4 结果的份量</h4>
+<p>这篇文章的论证主体是对机制的解释（第 2–5 节），实验是用来佐证的，样本量很小。逐条说说每个数字是在什么条件下得到的、对照了什么、没有对照什么。</p>
+<ul>
+  <li><b>“80 种回答 → 1 种”只来自一个模型、一个提示、温度 0。</b>它证明了现象存在、修法有效，但不衡量“平均有多少比例的提示会分叉”。博客没有写 GPU 型号与数量、并行方式（235B 的模型显然不是单卡）、vLLM 的版本，也没有说 1000 个请求是怎样并发发送的；而并发方式决定了批大小怎么变，也就决定了不确定性有多严重。仓库说明里的另一个数（Qwen3-8B、1000 条、每条 100 个 token：18 种 → 1 种）同样是单一设置。</li>
+  <li><b>Qwen3-235B 是 MoE 模型，而博客没有讨论 MoE 的内核。</b>专家路由的 top-k 选择、分组矩阵乘、专家结果的合并都是归约或离散选择，同样可能依赖批大小。博客只讲了 RMSNorm、矩阵乘和注意力三类，MoE 部分在这次实验里是怎样做到批不变的，没有说明。</li>
+  <li><b>26 → 42 秒是一个很窄的工作负载。</b>单卡 Qwen3-8B，输出只有 90–110 个 token，输入长度没写，GPU 型号没写，对照的是“vLLM 默认配置”（版本不详）。度量是 1000 条请求的总完成时间，相当于离线吞吐，不是首 token 延迟或每 token 延迟。而且确定性配置换成了 FlexAttention 后端，作者自己说大部分减速来自这个集成没优化好，所以这个数字混合了“批不变本身的代价”和“换了一个较慢的注意力后端的代价”，两者没有拆开。</li>
+  <li><b>减速在低并发时可能更大。</b>第 5.2 节的数据显示，批不变矩阵乘在批大小 64 以下只有 cuBLAS 的约三分之一，而低并发的在线服务、长输出的解码阶段，恰恰经常处在小批状态。博客的性能测试一次性压上 1000 条请求，批通常不小，所以没有覆盖这种情形。</li>
+  <li><b>“慢约 20%”是单个矩阵乘在一组未公开的 \(N,K\) 上、跨批大小 8–8184 的平均。</b>它不是端到端数字，也不能直接推到别的形状和 GPU 上。</li>
+  <li><b>RL 实验每种配置只有一次运行。</b>只有一个模型、一个数据集、最长 4096 个 token，图里只画到约第 320 步；从图的数据文件看，逐位一致那次运行也只有 321 步。没有报告下游准确率，没有报告让训练端逐位一致花了多少额外时间，也没有说训练框架和 RL 算法的细节，以及“加重要性权重”用的是哪种具体形式（截断与否、阈值多少）。</li>
+  <li><b>RL 实验说明的是“逐位一致和加修正一样好”，不是“比加修正更好”。</b>在画出来的范围内，加重要性权重的那次同样平稳，奖励曲线和逐位一致那次几乎重合。逐位一致的优势在于它在原理上消除了偏差，而不是在这张图上跑出了更高的奖励。</li>
+  <li><b>图外的数据。</b>博客正文没有提到，但图所用的数据文件里，“不修正”和“加修正”两次运行都跑到了约 1140 步：“不修正”那次在第 318 步的崩溃之后一度恢复，之后在第 700 步前后彻底崩溃，奖励停在约 −0.1、KL 升到几十；“加修正”那次一直保持在 0.45 上下（本站读自数据文件）。这说明不修正时的崩溃不是偶然的一次抖动。另外，博客文字说加修正时 KL 在 0.001 上下；按数据文件，前 319 步的均值约 0.0004、最大约 0.0008（推算），量级一致但略低，可能是文字取了整数量级。</li>
+  <li><b>一处疑似笔误。</b>原文写的初始模型是 “Qwen 2.5-VL instruct 8B”，但 Qwen2.5-VL 公开发布的尺寸是 3B、7B、32B 和 72B，没有 8B，可能是 7B 或别的模型之误。</li>
+</ul>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>批不变推理解决的是“推理和推理之间”的一致；“训练和推理之间”的一致还要求训练端也用同样的内核、同样的精度、同样的归约顺序。博客说他们“修改了训练栈”做到了逐位一致，但没有给出具体做法。后来 Yao 等人的分析发现，只在推理端打开确定性模式、不对齐训练端时，训推之间的差距几乎没有缩小（见“后来怎么样了”）。</div>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#experiments" target="_blank" rel="noopener">英文原文 · Experiments ↗</a> · <a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#true-on-policy-rl" target="_blank" rel="noopener">True on-policy RL ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 结论：拒绝“差不多就行”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者想让读者带走的态度是什么？</div>
+<p>结论很短，主要是一个态度。现代软件系统有很多层抽象，碰到不确定性和细微的数值差异时，人们很容易选择糊过去：模型本来就是“概率性”的，多一点不确定又何妨？单元测试过不了，把容差调大一点就行；训练器和采样器的 logprob 对不上，大概也不是真正的 bug。作者明确拒绝这种“失败主义”：只要花一点功夫，就能找到不确定性的根本原因，甚至彻底解决它。他希望这篇文章能让社区真正理解推理系统里的不确定性从何而来，也鼓励大家对自己的系统做到完全理解。</p>
+<p>回头看全文的论证链条：浮点加法的结果依赖顺序（第 2 节）；单个内核的顺序是固定的，所以逐次运行确定（第 3 节）；但顺序会随批大小改变，而批大小随服务器负载改变，所以用户看到的结果不确定（第 4 节）；只要让 RMSNorm、矩阵乘、注意力这三类归约的切分方式与批大小无关，就能消除这种不确定性（第 5 节），代价是放弃一些针对小批和特定形状的优化（第 7 节）。</p>
+<p class="note-links"><a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/#conclusion" target="_blank" rel="noopener">英文原文 · Conclusion ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>这篇博客是 Thinking Machines Lab 的研究博客 Connectionism 的第一篇文章（2025-09-10）。它发布之后，“批不变性”很快从一个概念变成了主流推理引擎里的一个开关，并和强化学习里的“训推不一致”问题合流。下面先讲这条线索的另一半，也就是博客引用的 Yao 等人关于训推不一致和截断重要性采样（TIS）的工作，再讲推理引擎和 RL 框架的跟进，以及截至 2026-10 的其他路线。</p>
+
+<h4 id="n-impact-1">配套工作：训推不一致与截断重要性采样（TIS）</h4>
+<p>Feng Yao、Liyuan Liu（两人为共同一作）、Dinghuai Zhang、Chengyu Dong、Jingbo Shang、Jianfeng Gao 在 2025-08-05 发布了 Notion 博客《Your Efficient RL Framework Secretly Brings You Off-Policy RL Training》（之后多次更新，最近一次是 2025-10-13）。它的论文版本题为《On the Rollout-Training Mismatch in Modern RL Systems》，是 <b>NeurIPS 2025 的研讨会论文</b>（同时出现在 OPT 2025 研讨会和第一届 Efficient Reasoning 研讨会的接收列表中），不是主会论文。本节按博客内容整理；研讨会论文的 PDF 在 OpenReview 上，本站未能下载核对。</p>
+<div class="note-pre"><b>先补一点背景：重要性采样与截断。</b>
+<p>想估计某个量在分布 \(p\) 下的期望，但手里的样本来自另一个分布 \(q\)，可以给每个样本乘上一个权重 \(p(y)/q(y)\) 来纠正：</p>
+<div class="formula">$$\mathbb{E}_{y\sim p}\big[f(y)\big]=\mathbb{E}_{y\sim q}\Big[\frac{p(y)}{q(y)}\,f(y)\Big]$$</div>
+<p>这叫<b>重要性采样</b>，权重叫重要性比。它在期望上是精确的（无偏），但代价是方差：如果某个样本在 \(q\) 下概率很小、在 \(p\) 下概率较大，它的权重就很大，这一个样本就能主导整个估计。作者在博客里给了一个数：某个 token 的比值达到 16 时，它对梯度噪声的放大是比值的平方，即 256 倍。</p>
+<p><b>截断重要性采样</b>的做法是给权重设一个上限 \(C\)：权重超过 \(C\) 就按 \(C\) 算。这样方差有界，代价是引入了一点偏差。同样比值为 16 的例子，\(C=2\) 时放大 4 倍，\(C=8\) 时放大 64 倍。</p>
+</div>
+<p><b>问题。</b>作者以 REINFORCE 为例：理想的更新应该用 \(\pi_\theta\) 采样、用 \(\pi_\theta\) 求梯度；实际的混合式框架用 vLLM 采样、用 FSDP 求梯度，两边是同一份参数在两套代码里的实例。他们在 Qwen2.5-32B 上按 DAPO 的配方训练（4 个节点、每节点 8 张 H100），观察到两边对同一个 token 的概率可以差得很大，极端情况下 vLLM 给出的概率是 1、FSDP 给出的是 0。</p>
+<p><b>先试着从系统上修。</b>作者先怀疑是 vLLM 的问题，打了两个补丁：一是让 vLLM 返回真正用于采样的概率（vLLM v1 引擎原本不返回经过调整的采样概率，这个补丁已合并进上游）；二是提供选项把 vLLM 的 LM head（最后把隐藏状态映射到词表的那一层）提升到 FP32，这一点 MiniMax-M1 技术报告也提到过。但两个补丁都打上之后，不一致仍然存在。</p>
+<p><b>再从算法上修：TIS。</b>既然没法在系统层面消除差异，就让更新“知道”这个差异。把梯度改成</p>
+<div class="formula">$$\mathbb{E}_{y\sim\pi_{\text{samp}}}\Big[\min\Big(\frac{\pi_{\text{train}}(y)}{\pi_{\text{samp}}(y)},\,C\Big)\cdot A(y)\cdot\nabla_\theta\log\pi_{\text{train}}(y)\Big]$$</div>
+<p>其中 \(C\) 是超参数。对 PPO，作者的做法是把这个截断后的比值（用旧参数下的 \(\pi_{\text{train}}\) 和 \(\pi_{\text{samp}}\) 计算）乘在原来的 PPO 裁剪目标前面，而 PPO 自己的裁剪比值仍然只在训练端内部计算，两种比值分开处理。</p>
+<div class="dia">
+  <div class="dia-title">示意图：TIS 在一次 RL 迭代里加在哪里</div>
+  <div class="dia-flow"><span class="dia-box act">推理引擎（vLLM / SGLang）<small>按 \(\pi_{\text{samp}}\) 生成回答 \(y\)，同时记下每个 token 的 \(\log\pi_{\text{samp}}\)</small></span><span class="dia-arrow">→</span><span class="dia-box enc">训练框架（FSDP / Megatron）<small>用同一份参数重算 \(\log\pi_{\text{train}}\)，算优势 \(A\)</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box reg">比值 \(r=\pi_{\text{train}}/\pi_{\text{samp}}\)<small>逐 token 计算，不回传梯度</small></span><span class="dia-arrow">→</span><span class="dia-box pred">截断 \(w=\min(r,C)\)<small>大比值被压到 \(C\)，小于 1 的比值原样保留</small></span><span class="dia-arrow">→</span><span class="dia-box loss">梯度 \(w\cdot A\cdot\nabla\log\pi_{\text{train}}\)<small>（PPO 时乘在裁剪目标前）</small></span></div>
+  <div class="dia-note">本站示意图，按 Yao 等人博客里的公式整理。批不变 / 逐位一致的做法相当于让 \(r\) 恒等于 1，这时 TIS 什么也不做。</div>
+</div>
+<p><b>实验与数字（都来自博客）。</b></p>
+<ul>
+  <li>Qwen2.5-32B + DAPO：受资源限制只跑完前 250 步，但加了 TIS 的那次表现明显更好；两次运行唯一的区别就是这个截断比值项。</li>
+  <li>受控实验，Qwen2.5-0.5B + GSM8K（一个节点、4 张 A6000）：正常 BF16 训练时，单个 token 的最大概率差约为 0.4；把 rollout 换成 INT8 量化后，最大概率差达到 1.0。INT8 rollout 下普通 PPO 明显退化，加 TIS 后基本恢复到 BF16 正常训练的水平。</li>
+  <li>DeepSeek-R1-Distill-Qwen-1.5B：两边都用 BF16、模型较小，差距本来就小，这时加 TIS 没有带来提升。作者据此说明 TIS 不是总有用，它在差距大时才显著。</li>
+  <li>与两种变体的比较：不截断的普通重要性采样（vanilla-IS）和直接把比值塞进 PPO 裁剪的做法（PPO-IS）都不稳定；在 INT8 rollout 下两者的准确率接近 0，而 TIS 稳定。后者的问题在于：即使参数还没更新，比值也因为训推差异而不等于 1，PPO 的裁剪会频繁触发，训练信号被大量浪费。</li>
+  <li>INT8 rollout 不加 TIS 时出现熵塌缩（熵降到 0.2 以下并持续下降）和回答异常变长；用采样端样本估计的 KL（k1 估计量）频繁出现负值，说明估计本身被训推差异带偏了。加 TIS 后这些现象消失。作者还提醒，训练日志里的奖励是在采样端分布下统计的，所以加了 TIS 的运行可能日志奖励更低、下游准确率（AIME）反而更高。</li>
+</ul>
+<p><b>不一致从哪里来（2025-09-24 补充的分析）。</b>作者用 DAPO-32B 和 Polaris-7B 两个模型、DAPO-Math-17k 的前 512 个题目，比较同一批回答在不同设置下的“每个回答内的最大概率差”和“平均概率差”，发现三点：</p>
+<ul>
+  <li><b>并行方式的差异放大最大差。</b>采样端 TP1、训练端 SP1 时，最大差超过 0.5 的回答只有 1 个；采样端改成 TP2，变成 2 个；训练端再改成 SP8，变成两位数。两边用相同的张量并行（TP2 对 TP2、TP4 对 TP4）时，这样的回答就很少。平均差和 KL 在这些设置之间没有显著区别。</li>
+  <li><b>回答越长，最大差越大。</b>上限 20K token 的回答比上限 4K 的最大差更大，平均差却差不多；而且 20K 回答的前 4K 里的最大差，往往已经超过独立生成的 4K 回答，说明两边的内部状态随着生成越走越远。</li>
+  <li><b>只换采样后端没用。</b>vLLM、SGLang、打开确定性内核的 SGLang 三者之间没有哪个始终更好；尤其是只在 SGLang 里打开确定性推理、不对齐训练端时，差距并没有明显缩小。作者据此认为差异主要来自并行方式、数值精度等更深的实现差异，而不是采样本身的随机性。</li>
+</ul>
+<p>这最后一点正好补上了本文的另一半：<b>批不变只让推理和自己一致，训推一致还需要两边用同样的计算。</b>Thinking Machines 的 RL 实验之所以 KL 恒为 0，是因为他们同时改了训练栈。</p>
+<p><b>采用情况。</b>按 Yao 等人博客的更新记录，verl、slime、OAT、SkyRL、OpenRLHF 都集成了 TIS，REINFORCE++ 在工具调用推理的场景里验证了它。博客还专门对比了 <a href="areal.html">AReaL</a> 的“解耦 PPO”：AReaL 也用重要性比来弥合采样策略与训练策略的差距（它的主要动机是异步训练带来的参数滞后），但在比值超过阈值时直接丢掉样本，而不是截断。博客也讨论了 MoE 模型：路由对数值很敏感，一点差异就可能选中不同的专家，推理引擎对 MoE 又有专门的优化内核，所以 MoE 的训推差异可能更大。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>TIS 不消除差异，只限制差异对更新的影响；它是有偏的，并且差异越大越难修（INT8、FP8 rollout 时最明显）。批不变 / 逐位一致则是消除差异，代价是推理变慢、而且要两套引擎共用内核实现。两条路并不互斥：异步训练里参数版本不同带来的 off-policy，逐位一致也消除不了，仍然需要重要性采样一类的修正。</div>
+
+<h4 id="n-impact-2">推理引擎的跟进：vLLM 与 SGLang 的确定性模式</h4>
+<ul>
+  <li><b>SGLang</b>（2025-09-22 发布博客）：基于 Thinking Machines 的批不变算子（mean、log-softmax、矩阵乘），自己实现了固定 split-KV 段长的注意力，支持 FlashInfer、FlashAttention-3 和 Triton 三种后端（FA3 后端干脆把段数固定为 1），用 <code>--enable-deterministic-inference</code> 开启，要求 SGLang 0.5.3 以上。它还把分块预填充的切点对齐到 split-KV 段长（例子里是 2048）的整数倍，否则切点会随同批其他序列的长度移动；并用“由种子哈希生成的 Gumbel 噪声”实现了温度大于 0 时的可复现采样。在 Qwen3-8B 上每项各重复 50 次的测试里，普通模式下大多数子测试得到 2 到 18 种不同输出，确定性模式下所有子测试都只有 1 种。H200 上三种 RL 风格负载的端到端减速在 24.4%–55.1% 之间，FlashInfer 与 FA3 两种后端平均减速 34.35%（他们拿来对比的是 Thinking Machines 的 61.5%）；当时只支持稠密模型，TP1 和 TP2 下确定。SGLang 还和 slime 合作，在 GRPO 训练中实现了两次独立运行完全相同的训练曲线（训练端用 Megatron 的确定性模式、FlashAttention-2 的确定性反向、固定 NCCL 算法等）。</li>
+  <li><b>vLLM</b>：博客发布当天的概念验证 PR 没有合并；正式支持从 2025-09-26 合并的 PR #25603 开始，之后由一个跟踪 issue（#27433）陆续加入 FlashInfer、DeepSeek-V3、Blackwell 上的 DeepGEMM、torch.compile 与 CUDA Graph 的支持。用法是设置环境变量 <code>VLLM_BATCH_INVARIANT=1</code>，文档标注为 beta。2025-10-31 版文档要求计算能力 9.0 以上（H100/H200/B100/B200），并说明张量并行时会关掉自定义 all-reduce；截至 2026-10-12 更新的文档，支持范围已扩大到计算能力 8.0 以上的 NVIDIA GPU、AMD Instinct 和 Intel XPU，张量并行下改为保留自定义 all-reduce 但固定归约顺序，验证过的模型清单也从十来个扩展到包括 DeepSeek、Qwen3、GPT-OSS、Llama 3 等几十个。</li>
+</ul>
+
+<h4 id="n-impact-3">从批不变到逐位一致的 RL</h4>
+<ul>
+  <li><b>vLLM + TorchTitan</b>（2025-11-10）：两个团队演示了一次开源的逐位一致 on-policy RL：训练端 TorchTitan 直接复用 vLLM 批不变模式的前向内核（包括融合的 SiLU MLP、带残差的 RMSNorm），自己补写反向；他们逐个核对了前向里每一次内核调用，确保两边逐位相同。在 Qwen3-1.7B + GSM8K 上，逐位一致那次 KL 恒为 0，并且比不一致的那次用更少的步数达到更高的奖励；代价是整个 RL 运行比不逐位一致时慢 2.4 倍，而且当时只是单机同步执行。</li>
+  <li><b>vLLM 社区的 DeepSeek-V4-Flash 配方</b>（2026-10-14，NVIDIA 与 Inferact 的作者）：换了一个思路，不让推理端退回通用的批不变内核，而是保留部署时的高性能内核（FP8 矩阵乘、FP8 KV 缓存、稀疏注意力的 Top-K），把它们逐个改成与批组成、预填充 / 解码阶段、并行布局都无关，再让训练前向直接调用这些推理内核、只在训练端补反向。在 GB200 上训练 100 步，训推之间每个 token 的概率差每一步都是 0，rollout 吞吐量是高性能基线的 91.3%；而不做对齐的基线，训推 KL 从 2e-3 一路涨到 29.9，奖励回落。他们也坦言基线只跑了一种配置、没有加 TIS 一类的修正，基线未必在调优后也这么容易崩。</li>
+</ul>
+
+<h4 id="n-impact-4">其他路线与相关发现</h4>
+<ul>
+  <li><b>张量并行下的不变性。</b>本文把多卡归约排除在外，而 RL 里训练端常用 FSDP（相当于 TP=1），推理端常用多卡 TP，这本身就是一种差异。Zhang 等人的 TBIK（arXiv 2511.17826，ICML 2026）把卡内和卡间的归约统一成同一棵层次化二叉树，在 Triton 里实现了与 TP 大小无关的矩阵乘和归约，接进 vLLM 和 FSDP 后做到了不同并行方式之间逐位相同。</li>
+  <li><b>换精度。</b>Qi 等人（arXiv 2510.26788）认为训推不一致的根源在 BF16 的舍入误差太大，把训练和推理统一换成 FP16（尾数多 3 位）就能大幅消除不一致，只需改几行代码。这条路线不追求逐位相同，而是让差异小到不足以伤害训练。</li>
+  <li><b>按需确定。</b>LLM-42（arXiv 2601.17768）认为批不变内核把“确定性”和内核设计绑死了，而且不管多少流量真正需要确定性，都要付固定的减速代价。它借鉴投机解码的思路：平时走不确定的快路径，再用一个固定形状的归约计划重放验证候选 token，确认一致的才提交，不一致的回滚。</li>
+  <li><b>更早的相关发现。</b>MiniMax-M1 技术报告（arXiv 2506.13585）在 RL 中发现训练与推理的 token 概率相关性只有 0.9 左右，逐层排查后定位到 LM head 的大幅值激活，把 LM head 提到 FP32 后相关性升到 0.99 左右。博客开头引用的 Yuan 等人（arXiv 2506.09501）则测到，BF16 贪心解码下 DeepSeek-R1-Distill-Qwen-7B 的准确率会因 GPU 数量、型号和评测批大小不同而相差最多 9%，回答长度相差最多 9000 个 token。</li>
+  <li><b>其他修正法。</b>“When Speed Kills Stability”（Liu、Li 等，2025-09）提出了在序列层面计算比值、超过阈值就整条丢弃的掩码重要性采样（MIS），与 TIS 的逐 token 截断形成对照。</li>
+</ul>
+<p>总的来看，截至 2026-10，这个问题形成了三类做法：<b>修正</b>（TIS、MIS 等，便宜、通用，但留有偏差）、<b>消除</b>（批不变 / 逐位一致，原理上最干净，但要付推理速度和工程对齐的代价）、<b>缩小</b>（FP16、FP32 LM head、对齐并行方式）。本文的贡献是把“消除”这条路的根本原因讲清楚，并证明它在工程上可行。想看本站对这个主题的结构拆解和配套简答题，见<a href="../legacy/tracks/ai-infra/13-batch-invariance.html">批不变性拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按博客署名。背景只列可公开查证的信息：作者主页、公司页面与论文署名。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Horace He</b>（署名作者）<div class="aff">Thinking Machines Lab（博客署名）</div>个人主页介绍他喜欢机器学习与编译器的交叉方向，此前在 Meta 的 PyTorch 团队工作，参与 torch.compile 与 GPT-Fast，写过《Making Deep Learning Go Brrrr From First Principles》等系统方向的技术文章；FlexAttention 论文（arXiv 2412.05496）的作者之一；曾代表 Cornell 参加 ICPC 世界总决赛。</div>
+  <div class="author-card senior"><b>Thinking Machines Lab</b><div class="aff">AI 研究与产品公司</div>官网自我介绍为“人工智能研究与产品公司”，团队成员参与过 ChatGPT、Character.ai、Mistral、PyTorch、OpenAI Gym、Fairseq、Segment Anything 等项目；Connectionism 是它的研究博客，本文是其中第一篇（2025-09-10），之后还有 Modular Manifolds、LoRA Without Regret 等文章；产品包括微调平台 Tinker。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>发表形式</b>：Thinking Machines Lab 研究博客 Connectionism，2025-09-10，带 DOI（10.64434/tml.20250910），未经同行评审。没有 arXiv 版本，所以本站的 Semantic Scholar 引用快照里没有它的数字。</li>
+  <li><b>开源</b>：<a href="https://github.com/thinking-machines-lab/batch_invariant_ops" target="_blank" rel="noopener">thinking-machines-lab/batch_invariant_ops</a> 1,087 个 star、87 个 fork（截至 2026-10-20），MIT 许可；仓库创建于 2025-09-10。</li>
+  <li><b>采用</b>：vLLM 的 <code>VLLM_BATCH_INVARIANT</code> 批不变模式（beta）、SGLang 的 <code>--enable-deterministic-inference</code>、slime 的可复现 RL 训练、vLLM + TorchTitan 的逐位一致 RL 演示，都把这篇博客作为出发点（见各自的博客与文档）。</li>
+  <li><b>后续研究</b>：TBIK（张量并行不变，ICML 2026）、LLM-42（验证—回滚式确定性）、FP16 训推一致等工作都把它作为直接的对照或起点。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/ai-infra/13-batch-invariance.html">批不变性与训推一致：结构拆解与简答题（旧版）</a></li>
+  <li><a href="../legacy/tracks/ai-infra/18-rl-systems.html">RL 训练系统：verl / AReaL（旧版）</a> · 精读：<a href="hybridflow.html">HybridFlow（verl）</a>、<a href="areal.html">AReaL</a></li>
+  <li>推理引擎背景：<a href="vllm.html">vLLM / PagedAttention</a>、<a href="sglang.html">SGLang</a>、<a href="sarathi-serve.html">Sarathi-Serve（分块预填充）</a>、<a href="../legacy/tracks/ai-infra/15-orca-sarathi.html">Orca 与 Sarathi（旧版）</a></li>
+  <li>注意力内核背景：<a href="flashattention.html">FlashAttention</a>、<a href="flashattention-3.html">FlashAttention-3</a>、<a href="../legacy/tracks/ai-infra/02-flashinfer.html">FlashInfer（旧版）</a>、<a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 系列（旧版）</a></li>
+  <li>数值格式背景：<a href="../legacy/tracks/ai-infra/08-fp8-formats.html">FP8 格式（旧版）</a></li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对 Thinking Machines Lab 博客文章的中文精读笔记，正文为本站撰写，并非翻译。原文版权归 Thinking Machines Lab 所有，本页没有转载原文的图片与代码；所有示意图为本站自绘，其中矩阵乘性能图与 RL 曲线图是按原文图表所用的公开数据重画的简化图。数字与结论以原文为准：<a href="https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" target="_blank" rel="noopener">Defeating Nondeterminism in LLM Inference</a>（He &amp; Thinking Machines Lab, 2025, DOI 10.64434/tml.20250910）。配套工作见 <a href="https://fengyao.notion.site/off-policy-rl" target="_blank" rel="noopener">Yao et al., Your Efficient RL Framework Secretly Brings You Off-Policy RL Training</a>。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

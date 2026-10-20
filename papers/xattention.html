@@ -1,0 +1,1237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XAttention 精读</title>
+<meta name="description" content="XAttention（ICML 2025）逐节精读：用反对角线给注意力块打分、按累计注意力阈值选块的免训练块稀疏预填充；讲清预填充的计算账、块稀疏内核、MInference / FlexPrefill 的估计方式，以及 13.5 倍、5.12 倍、“超过全注意力”这些数字的测量条件，并与 NSA、MoBA 等训练出来的稀疏注意力对比。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="xattention">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · ICML 2025</div>
+  <h1>XAttention：用反对角线给注意力块打分的块稀疏注意力</h1>
+  <p class="en-title">XAttention: Block Sparse Attention with Antidiagonal Scoring</p>
+  <div class="paper-authors">Ruyi Xu<sup>1,*</sup>, Guangxuan Xiao<sup>2,*</sup>, Haofeng Huang<sup>1</sup>, Junxian Guo<sup>3</sup>, Song Han<sup>2,4</sup></div>
+  <div class="paper-affil"><sup>1</sup>Tsinghua University　<sup>2</sup>Massachusetts Institute of Technology　<sup>3</sup>SJTU　<sup>4</sup>NVIDIA　<sup>*</sup>共同一作（equal contribution）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2503.16428" target="_blank" rel="noopener">arXiv 2503.16428 ↗</a>
+    <a class="pill" href="https://proceedings.mlr.press/v267/xu25ag.html" target="_blank" rel="noopener">ICML 2025（PMLR 267）↗</a>
+    <a class="pill" href="https://github.com/mit-han-lab/x-attention" target="_blank" rel="noopener">Code: mit-han-lab/x-attention ↗</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>286</b><span>GitHub star（mit-han-lab/x-attention，截至 2026-10-20）</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文的 arXiv 版以 CC BY 4.0 许可发布，所以原图直接放在讲到它的地方，并说明这张图怎么看；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据、官方代码或公开的模型配置算出来的，不是论文原话。本页以 arXiv v1（2025-03-20，也是 arXiv 上唯一的版本）为主线；ICML 正式版（PMLR 267）在实验部分有增改：表 1 的 SeerAttention 一行换了数字，新增了端到端加速表和精度–稀疏度权衡图，附录加了 Wan2.1 视频生成和另外三个语言模型的 RULER 结果，后面的图表编号因此顺延一位。正式版独有的内容只以文字和数字转述，在对应位置单独标出。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>大模型读一段长输入时，第一步叫<b>预填充</b>：把整段输入一次性送进模型，算出每个位置的 key、value 和第一个输出 token。注意力要让每个位置和它前面的所有位置两两打分，所以计算量随输入长度的平方增长：输入从 8K 变成 128K，长度变成 16 倍，注意力的计算量变成 256 倍。到了十几万 token，预填充的大部分时间都花在注意力上，用户要等很久才看到第一个字。视频模型更甚：HunyuanVideo 生成一段 720p、129 帧的视频，每一步去噪都要在约 12 万个 token 上做注意力（推算，见 §5.4）。</p>
+<p>一个自然的省法是<b>块稀疏注意力</b>：把注意力矩阵切成 128×128 的块，只算重要的块，其余整块跳过。GPU 内核早就支持这种算法，真正的难点在于：要跳过哪些块，必须在算注意力之前就知道；而判断“哪些块重要”本身也要花时间。前人的估计办法要么不准（把一块 token 平均成一个向量再打分，会把细线状的重要位置抹平），要么太慢（在 8K 输入上，估计加计算的总时间比直接算全注意力还长好几倍）。</p>
+<p>XAttention 的办法很简单：把注意力矩阵按步长 \(S\) 切成小格，每个小格只取一条<b>反对角线</b>（从左下到右上）上的分数，平均之后当作这个小格的分数，再汇总成块的分数。反对角线和注意力图里两种最常见的结构——竖线（所有 query 都看同一个 key）和斜线（每个 query 都看往前固定距离的 key）——都会相交，所以能以很小的代价把它们找出来。打完分之后，每一行块按分数从高到低累加，加到总量的 \(\tau\)（比如 90%）为止，选中的块交给块稀疏内核去算。整个方法不需要训练，可以直接套在已有的模型上。</p>
+<p>论文报告的主要结果：在 Llama-3.1-8B-Instruct 上，RULER 平均 88.47（全注意力 87.52），LongBench 平均 40.60（全注意力 40.34）；Qwen2-VL-7B 在 Video-MME 上和全注意力相差不到 0.5 分；HunyuanVideo 生成的视频和全注意力版本相比 PSNR 最高 23.5；注意力这一个算子在 256K 输入上最快 13.5 倍。ICML 正式版补充了端到端的预填充加速：256K 时 5.12 倍。后面会看到，这些数字各有各的测量条件，不能放在一起直接比。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>预填充为什么在长输入时被注意力主导？这和解码阶段有什么不同？</li>
+  <li>块稀疏注意力为什么能真正变快，前提是什么？</li>
+  <li>为什么“反对角线上的和”能代表一整块的重要性？它比池化好在哪里，又有什么盲点？</li>
+  <li>按阈值选块和固定选 k 块有什么区别？\(\tau\) 控制的到底是什么？</li>
+  <li>13.5 倍、5.12 倍、“超过全注意力”这些数字分别是在什么条件下测出来的，可信到什么程度？</li>
+  <li>它和 NSA、MoBA 这些“训练时就稀疏”的方法是什么关系？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2503.16428" target="_blank" rel="noopener">英文原文 ↗</a> · <a href="https://proceedings.mlr.press/v267/xu25ag.html" target="_blank" rel="noopener">ICML 正式版 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：长输入的预填充为什么慢，块稀疏为什么一直没兑现</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>长上下文 Transformer（论文称 LCTM）越来越多地用在长文档问答、长视频理解和视频生成上，它们处理长序列时，时间花在哪里？块稀疏注意力早就被提出，为什么一直没有在实践中兑现它的好处？论文的回答是：瓶颈在预填充阶段的注意力；而块稀疏迟迟没有用起来，是因为缺少一种既便宜又准确的办法，在算注意力之前判断哪些块重要。</div>
+
+<p>论文的引言先描绘了需求：大模型正在从纯文本走向多模态，长视频理解要把一小时的画面变成 token 序列，视频生成要一次产出成百上千帧，作者设想的是能连续交互一整天的多模态助手和能生成数小时连贯视频的“世界模拟器”。这些场景的共同点是 token 数量巨大，而注意力的代价随序列长度平方增长，在预填充阶段形成严重的瓶颈。下面先把这笔账算清楚。</p>
+
+<h4 id="n-1-1">1.1 预填充的账：注意力什么时候成为大头</h4>
+<div class="note-pre"><b>先补一点背景：预填充与解码。</b>
+<p>大模型处理一个请求分两个阶段。<b>预填充</b>（prefill）把用户输入的全部 \(N\) 个 token 一次性送进模型，每一层都对这 \(N\) 个位置同时计算，产出它们的 key、value（存进 KV 缓存）和第一个输出 token。<b>解码</b>（decode）在这之后每一步只处理一个新 token。预填充是“很多 token 同时算”，矩阵乘法的规模很大，GPU 的算力能用满，所以它的耗时基本由<b>计算量</b>决定；解码每一步只算一个 token，耗时主要由读显存的速度决定。两个阶段的详细对比见本站 <a href="vllm.html#n-2-2">vLLM 精读 §2.2</a>。用户感受到的“首字延迟”（TTFT），主要就是预填充的时间。</p>
+<p>预填充的计算量分两部分。一部分是线性层（QKV 投影、输出投影、前馈网络）：每个 token 都要和全部参数乘一遍，大约是 \(2P\) 次浮点运算（\(P\) 是参数量），总量和 \(N\) 成正比。另一部分是注意力：每个位置要和它之前的所有位置算点积（\(QK^\top\)），再按权重把 value 加起来（乘 \(V\)），总量和 \(N^2\) 成正比。</p>
+<div class="formula">$$\text{FLOPs}_{\text{线性}}\approx 2PN,\qquad \text{FLOPs}_{\text{注意力}}\approx 2\,n_{\text{layer}}\,d_{\text{model}}\,N^{2}\quad(\text{因果掩码，只算下三角})$$</div>
+</div>
+<p>以论文主要用的 Llama-3.1-8B 为例：它有 32 层，隐藏维度 4096，除去词表之外约 70 亿参数。代入上式，注意力的系数是 \(2\times32\times4096=262{,}144\)，线性部分的系数约为 \(1.4\times10^{10}\)，两者在 \(N\approx5.3\) 万时相等（推算）。输入再长，注意力就成了大头。下图是按这个公式算出的注意力占比。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Llama-3.1-8B 预填充时，注意力占多少计算量（推算）</div>
+  <svg class="dg" viewBox="0 0 640 250" role="img" aria-label="Llama-3.1-8B 预填充中注意力所占计算量随长度变化（推算）" style="--dg-min:560px">
+  <line x1="70" y1="200" x2="610" y2="200" class="axis"/>
+  <line x1="70" y1="200" x2="70" y2="24" class="axis"/>
+  <line x1="70" y1="157.5" x2="610" y2="157.5" class="grid-ln"/>
+  <text x="64" y="157.5" class="t-r t-xs">25%</text>
+  <line x1="70" y1="115.0" x2="610" y2="115.0" class="grid-ln"/>
+  <text x="64" y="115.0" class="t-r t-xs">50%</text>
+  <line x1="70" y1="72.5" x2="610" y2="72.5" class="grid-ln"/>
+  <text x="64" y="72.5" class="t-r t-xs">75%</text>
+  <line x1="70" y1="30.0" x2="610" y2="30.0" class="grid-ln"/>
+  <text x="64" y="30.0" class="t-r t-xs">100%</text>
+  <text x="64" y="200" class="t-r t-xs">0%</text>
+  <rect x="90" y="187.9" width="40" height="12.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="110" y="178.9" class="t-c t-sm t-b">7%</text>
+  <text x="110" y="216" class="t-c t-sm">4K</text>
+  <rect x="168" y="177.3" width="40" height="22.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="188" y="168.3" class="t-c t-sm t-b">13%</text>
+  <text x="188" y="216" class="t-c t-sm">8K</text>
+  <rect x="246" y="160.0" width="40" height="40.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="266" y="151.0" class="t-c t-sm t-b">24%</text>
+  <text x="266" y="216" class="t-c t-sm">16K</text>
+  <rect x="324" y="135.2" width="40" height="64.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="344" y="126.2" class="t-c t-sm t-b">38%</text>
+  <text x="344" y="216" class="t-c t-sm">32K</text>
+  <rect x="402" y="106.2" width="40" height="93.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="422" y="97.2" class="t-c t-sm t-b">55%</text>
+  <text x="422" y="216" class="t-c t-sm">64K</text>
+  <rect x="480" y="79.1" width="40" height="120.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="500" y="70.1" class="t-c t-sm t-b">71%</text>
+  <text x="500" y="216" class="t-c t-sm">128K</text>
+  <rect x="558" y="58.7" width="40" height="141.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.5"/>
+  <text x="578" y="49.7" class="t-c t-sm t-b">83%</text>
+  <text x="578" y="216" class="t-c t-sm">256K</text>
+  <line x1="70" y1="115.0" x2="610" y2="115.0" style="stroke:var(--c-pred);stroke-dasharray:5 4;stroke-width:1.2"/>
+  <text x="78" y="106.0" class="t-xs" style="fill:var(--c-pred)">约 5.3 万 token 时，注意力与其余计算各占一半</text>
+  <text x="340" y="238" class="t-c t-sm">输入长度（token）</text>
+  <text x="18" y="112" class="t-c t-sm" transform="rotate(-90 18 112)">注意力占预填充计算量</text>
+  </svg>
+  <div class="dia-note">推算：只数矩阵乘法的浮点运算，忽略 softmax、归一化等以访存为主的操作；线性部分取除词表外约 69.8 亿参数（输出层只对最后一个位置计算）。真实的时间占比还取决于内核效率：注意力内核通常比大矩阵乘法跑得慢一些，所以注意力在时间上的占比往往比这里更高。</div>
+</div>
+<p>这张图说明了两件事。第一，只加速注意力，在短输入上收益很小：8K 时注意力只占约 13% 的计算，就算把它变成零，整体也只快约 15%（推算）。第二，到了 128K、256K，注意力占七八成，这时候省注意力才真正值得。XAttention 的全部改动都在预填充的注意力上，线性层和解码阶段完全不动。</p>
+
+<h4 id="n-1-2">1.2 块稀疏注意力：要么整块算，要么整块跳过</h4>
+<div class="note-pre"><b>先补一点背景：注意力为什么是稀疏的，块稀疏内核又是怎么省时间的。</b>
+<p>softmax 之后，一个 query 对所有 key 的注意力权重加起来等于 1。在长输入里，这些权重通常高度集中：大部分权重落在少数位置上，比如开头几个 token（StreamingLLM 称之为“注意力汇聚点”，attention sink）、最近的几十个 token，以及和当前内容相关的几段文字；其余成千上万个位置的权重几乎为零。把这些近乎为零的位置跳过不算，结果几乎不变，这就是稀疏注意力的出发点。</p>
+<p>但“跳过”在 GPU 上要按块来做才省时间。FlashAttention 把 \(Q\)、\(K\)、\(V\) 切成固定大小的块（比如 128 个 token 一块），每次把一块 query 和一块 key / value 搬进片上存储，用 Tensor Core 做一次规整的小矩阵乘法。如果要跳过的位置东一个西一个，每块里还是得照算；只有当一整块（128×128 个 query–key 对）都可以跳过时，内核才能直接不读这块 K/V、不做这次乘法。这种“给每个块一个开关”的做法叫<b>块稀疏注意力</b>，FlashAttention 原论文就给出了块稀疏的版本（见本站 <a href="flashattention.html#n-6">FlashAttention 精读 §6</a>）。它的耗时大致和“被算的块数”成正比，所以论文用<b>密度</b>（density，算了的块占因果下三角全部块的比例）来衡量省了多少：密度 10%，注意力的计算量就约为原来的十分之一。</p>
+</div>
+<p>XAttention 用的稀疏内核是 MIT HAN Lab 自己的 Block-Sparse-Attention 库（论文引用为 Guo et al., 2024）。这个库在 FlashAttention 2.4.2 的基础上修改而来，块大小固定为 128，允许每个注意力头用不同的块掩码。所以 XAttention 本身不写新的注意力内核，它要做的只是：为每个头、每一行块，决定哪些块打开。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个注意力头的因果块稀疏掩码（8×8 个块）</div>
+  <svg class="dg" viewBox="0 0 640 290" role="img" aria-label="因果块稀疏掩码示意" style="--dg-min:520px">
+  <text x="144.0" y="18" class="t-c t-sm">key 块 →</text>
+  <text x="26" y="138.0" class="t-c t-sm" transform="rotate(-90 26 138.0)">query 块 →</text>
+  <rect class="tk tgt" x="41" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="67" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="93" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="119" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="145" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="171" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="35" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="35" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="61" width="24" height="24"/>
+  <rect class="tk tgt" x="67" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="93" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="119" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="145" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="171" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="61" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="61" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="87" width="24" height="24"/>
+  <rect class="tk off" x="67" y="87" width="24" height="24"/>
+  <rect class="tk tgt" x="93" y="87" width="24" height="24"/>
+  <rect class="tk mask" x="119" y="87" width="24" height="24"/>
+  <rect class="tk mask" x="145" y="87" width="24" height="24"/>
+  <rect class="tk mask" x="171" y="87" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="87" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="87" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="113" width="24" height="24"/>
+  <rect class="tk enc" x="67" y="113" width="24" height="24"/>
+  <rect class="tk off" x="93" y="113" width="24" height="24"/>
+  <rect class="tk tgt" x="119" y="113" width="24" height="24"/>
+  <rect class="tk mask" x="145" y="113" width="24" height="24"/>
+  <rect class="tk mask" x="171" y="113" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="113" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="113" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="139" width="24" height="24"/>
+  <rect class="tk off" x="67" y="139" width="24" height="24"/>
+  <rect class="tk enc" x="93" y="139" width="24" height="24"/>
+  <rect class="tk off" x="119" y="139" width="24" height="24"/>
+  <rect class="tk tgt" x="145" y="139" width="24" height="24"/>
+  <rect class="tk mask" x="171" y="139" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="139" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="139" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="165" width="24" height="24"/>
+  <rect class="tk off" x="67" y="165" width="24" height="24"/>
+  <rect class="tk enc" x="93" y="165" width="24" height="24"/>
+  <rect class="tk enc" x="119" y="165" width="24" height="24"/>
+  <rect class="tk off" x="145" y="165" width="24" height="24"/>
+  <rect class="tk tgt" x="171" y="165" width="24" height="24"/>
+  <rect class="tk mask" x="197" y="165" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="165" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="191" width="24" height="24"/>
+  <rect class="tk off" x="67" y="191" width="24" height="24"/>
+  <rect class="tk off" x="93" y="191" width="24" height="24"/>
+  <rect class="tk off" x="119" y="191" width="24" height="24"/>
+  <rect class="tk enc" x="145" y="191" width="24" height="24"/>
+  <rect class="tk off" x="171" y="191" width="24" height="24"/>
+  <rect class="tk tgt" x="197" y="191" width="24" height="24"/>
+  <rect class="tk mask" x="223" y="191" width="24" height="24"/>
+  <rect class="tk tgt" x="41" y="217" width="24" height="24"/>
+  <rect class="tk off" x="67" y="217" width="24" height="24"/>
+  <rect class="tk enc" x="93" y="217" width="24" height="24"/>
+  <rect class="tk off" x="119" y="217" width="24" height="24"/>
+  <rect class="tk off" x="145" y="217" width="24" height="24"/>
+  <rect class="tk enc" x="171" y="217" width="24" height="24"/>
+  <rect class="tk off" x="197" y="217" width="24" height="24"/>
+  <rect class="tk tgt" x="223" y="217" width="24" height="24"/>
+  <rect class="tk tgt" x="290" y="51" width="18" height="18"/>
+  <text x="318" y="60" class="t-sm">强制保留：第一个块（汇聚点）和对角块</text>
+  <rect class="tk enc" x="290" y="85" width="18" height="18"/>
+  <text x="318" y="94" class="t-sm">按阈值选中的块：整块精确计算</text>
+  <rect class="tk off" x="290" y="119" width="18" height="18"/>
+  <text x="318" y="128" class="t-sm">被跳过的块：不读 K/V、不做乘法</text>
+  <rect class="tk mask" x="290" y="153" width="18" height="18"/>
+  <text x="318" y="162" class="t-sm">因果掩码：本来就不需要算</text>
+  <text x="290" y="210" class="t-sm">下三角共 36 个块，这里算了 22 个，</text>
+  <text x="290" y="230" class="t-sm">密度 = 22/36 ≈ 61%（示意值）。</text>
+  <text x="290" y="254" class="t-xs">真实设置：每块 128×128 个 token 对，</text>
+  <text x="290" y="270" class="t-xs">128K 输入时每个头有 1024×1024 个块。</text>
+  </svg>
+  <div class="dia-note">本站示意图。每一行是一个 query 块，每一列是一个 key 块。“第一个块和对角块总是保留”是官方代码的做法（§3 会讲），论文正文没有明说。</div>
+</div>
+
+<h4 id="n-1-3">1.3 难点在“先知道哪些块重要”</h4>
+<p>块稀疏的难处在于先后顺序：要跳过一个块，就得在算它之前知道它不重要；而“一个块重要不重要”，严格说要把这块的注意力分数算出来才知道。所以所有动态块稀疏方法都分三步：先用某种便宜的办法<b>估计</b>每块的重要性，再按估计结果<b>选块</b>，最后只<b>计算</b>选中的块。</p>
+<p>这带来一个两头的约束。估计如果太粗，会漏掉真正重要的块，模型就会答错；估计如果太细，估计本身就要花接近全注意力的时间，省下的计算又被吃掉了。论文的判断是，已有的方法在这两头都没做好，于是它在引言里提出的问题是：能不能做一种块稀疏注意力，既大幅加速长上下文 Transformer，又不损失精度？</p>
+<div class="dia">
+  <div class="dia-title">示意图：三种免训练方法的“先估计、再选块、后计算”</div>
+  <div class="dia-flow"><b style="width:92px">MInference</b><span class="dia-box">估计<small>取最后 64 个 query，与全部 key 算真实分数</small></span><span class="dia-arrow">→</span><span class="dia-box">选择<small>沿列找竖线、沿对角线找斜线，各取前若干条</small></span><span class="dia-arrow">→</span><span class="dia-box enc">计算<small>竖线–斜线稀疏内核</small></span></div>
+  <div class="dia-flow"><b style="width:92px">FlexPrefill</b><span class="dia-box">估计<small>用最后一段 query 判断该头适合哪种形状（JS 散度）</small></span><span class="dia-arrow">→</span><span class="dia-box">选择<small>累计注意力达到 γ 为止</small></span><span class="dia-arrow">→</span><span class="dia-box enc">计算<small>稀疏内核</small></span></div>
+  <div class="dia-flow"><b style="width:92px">XAttention</b><span class="dia-box act">估计<small>所有 query 都参与；每个 S×S 小格取一条反对角线，一次矩阵乘法算完</small></span><span class="dia-arrow">→</span><span class="dia-box act">选择<small>每行块累计估计质量达到 τ 为止</small></span><span class="dia-arrow">→</span><span class="dia-box enc">计算<small>128×128 块稀疏 FlashAttention</small></span></div>
+  <div class="dia-note">本站示意图，对应原文 §2.1 的文字描述。MInference 的“最后 64 个 query”取自 XAttention 仓库里复现 MInference 的代码；FlexPrefill 的细节见其论文（ICLR 2025）。</div>
+</div>
+<figure class="paper-fig"><div class="imgs one"><img src="xattention/fig/scheme.svg" alt="原文图 1：反对角线打分、选块、块稀疏注意力三步" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>这是一个 24×24 的注意力矩阵（序列长度 24），切成 3×3 个 8×8 的块。左图：每个 8×8 块再按步长 \(S=4\) 分成 2×2 个 4×4 小格，每个小格只取一条反对角线上的 4 个分数（彩色格子）；红色表示这几条线上的分数加起来较大，蓝色表示较小。中图：把每块里的反对角线分数汇总成 3×3 的块分数，挑出高分块（红色）。右图：只对选中的 3 个块做注意力计算，其余 6 个块跳过。这张图为了简单画成了不带因果掩码的完整矩阵；语言模型的因果注意力只需要算下三角（视频生成用的 DiT 才是完整矩阵）。</figcaption></figure>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S1.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 方法（一）：用反对角线给块打分</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>XAttention 由三部分组成：估计每个块的重要性、按阈值选块、给每个注意力头找一个尽量小的阈值。这一节讲第一部分。为什么前人的估计办法不够好？反对角线打分具体怎么算？凭什么一条线上的几个分数能代表一整块？它又在哪里会看漏？</div>
+
+<h4 id="n-2-1">2.1 前人怎么估计：池化与竖线–斜线搜索</h4>
+<div class="note-pre"><b>先补一点背景：注意力图里的“竖线”和“斜线”。</b>
+<p>把一个注意力头在长输入上的注意力矩阵画成图（行是 query、列是 key，越亮表示权重越大），常能看到两种结构。<b>竖线</b>（vertical）是某一列从上到下都很亮：后面所有 query 都在看同一个 key，比如开头的汇聚点、分隔符，或者全文的关键句。<b>斜线</b>（slash）是平行于主对角线的一条亮线：每个 query 都在看“自己往前固定距离”的那个 key，最典型的是主对角线附近（看最近的几个 token），也可能出现在更远的固定距离上。MInference（NeurIPS 2024）把很多注意力头的形状归纳为“竖线 + 斜线”（vertical-slash），另外还有 A 形和块状两种。</p>
+<p>这两种结构的共同点是<b>细</b>：在一个 128×128 的块里，一条竖线只占 1 列，一条斜线最多占 128 个格子，都不到全块 16,384 个格子的 1%。可它们承载的权重可能很大。所以一个好的估计方法，必须能“看见”这些细线。</p>
+</div>
+<p>论文指出了两类前人做法的不足。</p>
+<ul>
+  <li><b>池化</b>。把一块 query 取平均、一块 key 取平均，两个平均向量做一次点积，作为这一块的分数。这非常便宜，但平均会把细线稀释掉：一条竖线在 128 个 key 里只占 1 个，平均之后它的贡献只剩约 1/128。论文说它的消融实验表明，只靠平均池化或求和池化预测不准，尤其当块里只有少数几条重要的竖线或斜线时。不过论文给出的消融表里并没有池化这一组，只有随机、对角线和反对角线三种采样的比较（§5.6）。</li>
+  <li><b>竖线–斜线搜索</b>。MInference 和 FlexPrefill 取输入<b>最后一段</b> query，用它们和全部 key 算出真实的注意力分数，再沿列求和找竖线、沿对角线求和找斜线，选出分数最高的若干条。FlexPrefill（ICLR 2025）还会先用 JS 散度判断一个头适合“按 query 动态估计”还是“套用竖线–斜线这种预设形状”，选多少位置则按累计注意力达到阈值 \(\gamma\) 来定。论文指出这类做法有两个问题：重要的模式不一定在最后一段 query 里出现（比如文档中间的一段只被中间的 query 关注）；而且搜索本身很慢，§5.5 的耗时拆分会看到它可能比注意力本身还慢。</li>
+</ul>
+
+<h4 id="n-2-2">2.2 反对角线打分：具体怎么算</h4>
+<p>XAttention 的做法是：把注意力矩阵按步长 \(S\) 切成 \(S\times S\) 的小格（每个 128×128 的块里有 \((128/S)^2\) 个小格）；在每个小格里只取<b>一条反对角线</b>上的 \(S\) 个分数，也就是从小格左下角到右上角那一条，把它们平均。写成公式，第 \(I\) 行、第 \(J\) 列小格的分数是</p>
+<div class="formula">$$s_{IJ}=\frac{1}{S\sqrt{d}}\sum_{t=0}^{S-1} q_{IS+S-1-t}^{\top}\,k_{JS+t}$$</div>
+<p>这里 \(q_i\)、\(k_j\) 是第 \(i\) 个 query、第 \(j\) 个 key，\(d\) 是每个头的维度，\(1/\sqrt{d}\) 是注意力本来就有的缩放。下标 \(IS+S-1-t\) 随 \(t\) 增大而减小，\(JS+t\) 随 \(t\) 增大而增大：行往上走、列往右走，正好是从左下到右上的一条线。再除以 \(S\)，意味着 \(s_{IJ}\) 是这条线上 \(S\) 个原始注意力分数（softmax 之前的 logit）的<b>平均</b>。下一节会看到，这些平均分数再做一次 softmax，就得到一张缩小了 \(S\times S\) 倍的“近似注意力图”，一个块的重要性由块内所有小格汇总而来。这个式子是本站按论文算法 1 和官方代码整理的，论文正文只用文字和原文图 1 描述。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="xattention/fig/detect_vs.svg" alt="原文图 2：反对角线与竖线、斜线相交" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>左图是一张示意的因果注意力图（黄色背景），粉色条带是竖线和斜线；红框 (a) 和蓝框 (b) 是其中两个块。中图放大块 (a)：块里有一条竖线（粉色竖条），橙色斜条是 XAttention 采样用的反对角线，二者交于深色处。右图放大块 (b)：块里有一条斜线（从左上到右下的粉色条），从左下到右上的反对角线同样和它相交。作者要说明的是：不管竖线或斜线从块的哪个位置穿过，反对角线都会碰到它。</figcaption></figure>
+
+<h4 id="n-2-3">2.3 为什么反对角线管用：论文的两个理由和本站的补充</h4>
+<p>论文给出两个理由。</p>
+<ol>
+  <li><b>信息不丢。</b>在每个 \(S\times S\) 小格里，反对角线恰好经过每一行一次、每一列一次。所以每个 query 和每个 key 都参与了打分，不会有哪一行、哪一列被完全忽略。</li>
+  <li><b>模式能被检测到。</b>反对角线和块内任何一条竖线、任何一条斜线都相交（原文图 2）。竖线是纵向的，斜线是从左上到右下的，而反对角线是从左下到右上的，方向和两者都不同，所以一定会碰上。</li>
+</ol>
+<p>本站再补一个更定量的角度，解释它为什么比池化好（这是本站的解释，论文没有这样写）。设想一个块里有一条很强的竖线：某一个 key 和所有 query 的点积都比其他 key 高出很多。</p>
+<ul>
+  <li>块平均池化，相当于把块内 \(B\times B\) 个分数平均成一个数（\(\bar q^\top\bar k\) 恰好等于块内所有 \(q_i^\top k_j\) 的平均）。竖线只占其中 \(B\) 个格子，贡献被稀释为 \(1/B\)；\(B=128\) 时只剩 1/128。</li>
+  <li>反对角线在每个小格里取 \(S\) 个分数平均，竖线经过的小格里恰好有一个被采到，贡献只被稀释为 \(1/S\)。\(S=8\) 或 16 时只稀释 8 倍或 16 倍，比池化轻了 8 到 16 倍。而且块内每一行小格都会采到这条竖线一次，后面把小格分数加成块分数时，这些信号会一起累积。</li>
+</ul>
+<p>举个数字例子（本站构造）。设一个 128×128 的块里有一条竖线，这一列的 logit 比块内其他位置高出 \(\Delta=8\)（已经过 \(1/\sqrt d\) 缩放）。池化看到的平均分只比一个“完全平淡”的块高 \(8/128\approx0.06\)，取指数之后只是 1.06 倍，几乎分辨不出来。反对角线（\(S=16\)）在竖线经过的小格里看到的平均分高出 \(8/16=0.5\)，取指数后是 1.65 倍；这个块的 8 行小格每一行都会得到这个加成，块分数里这一部分就被放大了。真实注意力里，这一列的权重是其他位置的 \(e^{8}\approx2981\) 倍，两种估计都远远低估了它，但反对角线至少保留了“这里有东西”的信号，排序时能把这个块排到前面。</p>
+<p>同样的道理也说明 \(S\) 不能太大：\(S=64\) 时每条线被稀释 64 倍，一个 128×128 的块里也只剩 2×2 个小格，打分越来越接近池化。§5.6 的消融里，\(S=64\) 的精度明显下降。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个块里，三种估计方式各“看见”了什么</div>
+  <svg class="dg" viewBox="0 0 880 330" role="img" aria-label="一个注意力块内三种估计方式各采到哪些位置" style="--dg-min:780px">
+  <text x="128.0" y="22" class="t-c t-b">(a) 反对角线采样（S = 4）</text>
+  <rect x="40" y="52" width="176" height="176" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.2"/>
+  <rect x="74.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="118.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="162.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="206.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="63.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="107.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="151.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="195.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="52.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="96.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="140.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="184.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="41.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="85.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="129.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="173.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="74.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="118.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="162.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="206.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="63.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="107.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="151.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="195.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="52.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="96.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="140.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="184.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="41.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="85.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="129.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="173.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="74.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="118.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="162.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="206.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="63.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="107.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="151.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="195.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="52.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="96.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="140.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="184.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="41.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="85.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="129.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="173.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="74.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="118.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="162.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="206.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="63.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="107.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="151.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="195.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="52.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="96.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="140.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="184.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="41.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="85.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="129.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="173.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <line x1="40" y1="52" x2="40" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="40" y1="52" x2="216" y2="52" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="51" y1="52" x2="51" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="63" x2="216" y2="63" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="62" y1="52" x2="62" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="74" x2="216" y2="74" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="73" y1="52" x2="73" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="85" x2="216" y2="85" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="84" y1="52" x2="84" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="40" y1="96" x2="216" y2="96" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="95" y1="52" x2="95" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="107" x2="216" y2="107" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="106" y1="52" x2="106" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="118" x2="216" y2="118" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="117" y1="52" x2="117" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="129" x2="216" y2="129" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="128" y1="52" x2="128" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="40" y1="140" x2="216" y2="140" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="139" y1="52" x2="139" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="151" x2="216" y2="151" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="150" y1="52" x2="150" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="162" x2="216" y2="162" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="161" y1="52" x2="161" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="173" x2="216" y2="173" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="172" y1="52" x2="172" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="40" y1="184" x2="216" y2="184" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="183" y1="52" x2="183" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="195" x2="216" y2="195" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="194" y1="52" x2="194" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="206" x2="216" y2="206" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="205" y1="52" x2="205" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="40" y1="217" x2="216" y2="217" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="216" y1="52" x2="216" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="40" y1="228" x2="216" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <rect x="95" y="52" width="11" height="176" style="fill:var(--c-loss);opacity:.30"/>
+  <line x1="45.5" y1="134.5" x2="133.5" y2="222.5" style="stroke:var(--c-act);stroke-width:7;opacity:.45;stroke-linecap:round"/>
+  <line x1="45.5" y1="167.5" x2="100.5" y2="222.5" style="stroke:var(--c-act);stroke-width:2;stroke-dasharray:4 3"/>
+  <rect x="95" y="74" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="95" y="118" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="95" y="162" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="95" y="206" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="62" y="151" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="128" y="217" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="84" y="173" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="40" y="129" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="106" y="195" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <text x="128.0" y="250" class="t-c t-sm">每个 4×4 小格取 4 个数</text>
+  <text x="128.0" y="268" class="t-c t-sm">竖线采到 4 次，实线斜线 5 次</text>
+  <text x="128.0" y="286" class="t-c t-xs">虚线斜线（偶数偏移）0 次</text>
+  <text x="428.0" y="22" class="t-c t-b">(b) 对角线采样</text>
+  <rect x="340" y="52" width="176" height="176" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.2"/>
+  <rect x="341.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="385.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="429.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="473.5" y="53.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="352.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="396.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="440.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="484.5" y="64.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="363.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="407.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="451.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="495.5" y="75.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="374.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="418.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="462.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="506.5" y="86.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="341.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="385.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="429.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="473.5" y="97.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="352.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="396.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="440.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="484.5" y="108.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="363.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="407.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="451.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="495.5" y="119.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="374.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="418.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="462.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="506.5" y="130.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="341.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="385.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="429.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="473.5" y="141.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="352.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="396.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="440.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="484.5" y="152.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="363.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="407.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="451.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="495.5" y="163.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="374.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="418.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="462.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="506.5" y="174.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="341.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="385.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="429.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="473.5" y="185.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="352.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="396.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="440.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="484.5" y="196.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="363.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="407.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="451.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="495.5" y="207.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="374.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="418.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="462.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <rect x="506.5" y="218.5" width="8" height="8" style="fill:var(--c-enc)"/>
+  <line x1="340" y1="52" x2="340" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="340" y1="52" x2="516" y2="52" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="351" y1="52" x2="351" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="63" x2="516" y2="63" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="362" y1="52" x2="362" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="74" x2="516" y2="74" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="373" y1="52" x2="373" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="85" x2="516" y2="85" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="384" y1="52" x2="384" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="340" y1="96" x2="516" y2="96" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="395" y1="52" x2="395" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="107" x2="516" y2="107" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="406" y1="52" x2="406" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="118" x2="516" y2="118" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="417" y1="52" x2="417" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="129" x2="516" y2="129" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="428" y1="52" x2="428" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="340" y1="140" x2="516" y2="140" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="439" y1="52" x2="439" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="151" x2="516" y2="151" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="450" y1="52" x2="450" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="162" x2="516" y2="162" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="461" y1="52" x2="461" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="173" x2="516" y2="173" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="472" y1="52" x2="472" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="340" y1="184" x2="516" y2="184" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="483" y1="52" x2="483" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="195" x2="516" y2="195" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="494" y1="52" x2="494" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="206" x2="516" y2="206" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="505" y1="52" x2="505" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="340" y1="217" x2="516" y2="217" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="516" y1="52" x2="516" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="340" y1="228" x2="516" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <rect x="395" y="52" width="11" height="176" style="fill:var(--c-loss);opacity:.30"/>
+  <line x1="345.5" y1="134.5" x2="433.5" y2="222.5" style="stroke:var(--c-act);stroke-width:7;opacity:.45;stroke-linecap:round"/>
+  <rect x="395" y="151" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="395" y="195" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="395" y="63" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <rect x="395" y="107" width="11" height="11" style="fill:none;stroke:var(--text);stroke-width:1.8"/>
+  <text x="428.0" y="250" class="t-c t-sm">采样线与斜线平行</text>
+  <text x="428.0" y="268" class="t-c t-sm">竖线采到 4 次，实线斜线 0 次</text>
+  <text x="428.0" y="286" class="t-c t-xs">斜线要么整条采到，要么全错过</text>
+  <text x="728.0" y="22" class="t-c t-b">(c) 整块平均池化</text>
+  <rect x="640" y="52" width="176" height="176" style="fill:var(--surface-2);stroke:var(--border-strong);stroke-width:1.2"/>
+  <rect x="640" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="52" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="63" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="74" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="85" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="96" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="107" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="118" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="129" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="140" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="151" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="162" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="173" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="184" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="195" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="206" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="640" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="651" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="662" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="673" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="684" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="695" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="706" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="717" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="728" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="739" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="750" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="761" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="772" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="783" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="794" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <rect x="805" y="217" width="11" height="11" style="fill:var(--c-enc-bg)"/>
+  <line x1="640" y1="52" x2="640" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="640" y1="52" x2="816" y2="52" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="651" y1="52" x2="651" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="63" x2="816" y2="63" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="662" y1="52" x2="662" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="74" x2="816" y2="74" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="673" y1="52" x2="673" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="85" x2="816" y2="85" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="684" y1="52" x2="684" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="96" x2="816" y2="96" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="695" y1="52" x2="695" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="107" x2="816" y2="107" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="706" y1="52" x2="706" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="118" x2="816" y2="118" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="717" y1="52" x2="717" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="129" x2="816" y2="129" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="728" y1="52" x2="728" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="140" x2="816" y2="140" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="739" y1="52" x2="739" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="151" x2="816" y2="151" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="750" y1="52" x2="750" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="162" x2="816" y2="162" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="761" y1="52" x2="761" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="173" x2="816" y2="173" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="772" y1="52" x2="772" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="184" x2="816" y2="184" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="783" y1="52" x2="783" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="195" x2="816" y2="195" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="794" y1="52" x2="794" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="206" x2="816" y2="206" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="805" y1="52" x2="805" y2="228" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="640" y1="217" x2="816" y2="217" style="stroke:var(--border);stroke-width:0.4"/>
+  <line x1="816" y1="52" x2="816" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <line x1="640" y1="228" x2="816" y2="228" style="stroke:var(--border-strong);stroke-width:1.4"/>
+  <rect x="695" y="52" width="11" height="176" style="fill:var(--c-loss);opacity:.30"/>
+  <line x1="645.5" y1="134.5" x2="733.5" y2="222.5" style="stroke:var(--c-act);stroke-width:7;opacity:.45;stroke-linecap:round"/>
+  <text x="728.0" y="250" class="t-c t-sm">256 个分数平均成一个数</text>
+  <text x="728.0" y="268" class="t-c t-sm">竖线只占 16/256，斜线 9/256</text>
+  <text x="728.0" y="286" class="t-c t-xs">真实块 128×128，占比更小</text>
+  </svg>
+  <div class="dia-note">本站示意图。块缩小成 16×16、步长取 4，以便画清楚。蓝色格子是参与打分的位置（(c) 中全部格子都参与平均）；粉色竖条是一条竖线（第 5 列）；绿色粗线是一条偏移为 7 的斜线（query 位置减 key 位置等于 7），绿色虚线是一条偏移为 10 的斜线；黑框标出采样位置恰好落在竖线或实线斜线上的格子。</div>
+</div>
+<div class="note-warn"><b>读的时候要注意的两点：</b>
+<ul>
+  <li><b>“一定相交”是连续几何里的说法，在格点上并不严格成立。</b>本站推导：反对角线采到的格子 \((i,j)\) 都满足 \(i+j=(I+J)S+S-1\)；当 \(S\) 是偶数（论文用的 4、8、16、64 都是偶数），\(i-j=(i+j)-2j\) 一定是奇数。也就是说，一条只有一格宽、偏移为偶数的斜线（上图虚线），反对角线一次也采不到。实际影响有限：对角块总是被强制保留（§3），而真实注意力图里的斜线通常有好几格宽，相邻的奇数偏移会被采到。但论文“不会漏掉任何斜线”的说法，在格点层面只对一半的偏移成立。</li>
+  <li><b>对角线采样是个反面例子。</b>它和斜线平行：一条斜线要么整条落在采样线上（分数很高），要么完全错过（分数为零），估计的波动很大。§5.6 的消融里，对角线采样的 RULER 平均分是 81.06，反对角线是 88.47（\(S=8\)）。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S2.SS1" target="_blank" rel="noopener">§2.1 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S2.F2" target="_blank" rel="noopener">原文图 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 方法（二）：按阈值选块，以及它在代码里怎么一次算完</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>有了每个小格的反对角线分数，怎么决定一个块要不要算？论文的规则是：先把分数变成概率分布，再在每一行块里按分数从高到低累加，加到总量的 \(\tau\) 为止。这个规则为什么比“固定选 k 块”好？\(\tau\) 控制的是什么？所有小格的反对角线和，又是怎么用一次矩阵乘法算出来的、要花多少计算？</div>
+
+<h4 id="n-3-1">3.1 从反对角线分数到“近似注意力图”</h4>
+<p>论文的算法 1 对每一行小格（对应 \(S\) 个连续的 query），在这一行所有小格上做 softmax：</p>
+<div class="formula">$$\hat a_{IJ}=\frac{\exp(s_{IJ})}{\sum_{J'}\exp(s_{IJ'})}$$</div>
+<p>这就是一张缩小版的注意力图：原来每个 query 对每个 key 有一个权重，现在每 \(S\) 个 query 对每 \(S\) 个 key 有一个权重，而且每行加起来等于 1。把一个 \(B\times B\) 块里的 \((B/S)^2\) 个 \(\hat a_{IJ}\) 加起来，就是这一块的<b>估计注意力质量</b> \(\hat A_{bc}\)（\(b\) 是 query 块号，\(c\) 是 key 块号）。同一个 query 块对所有 key 块的估计质量加起来等于 \(B/S\)。</p>
+<p>注意这里的先后顺序：先把 \(S\) 个 logit 平均，再做 softmax。真实的块注意力质量是“先对每个 logit 做 softmax，再求和”。两者在数值上并不相等，前者只是一个用来排序的代理分数。论文也没有声称两者相等，它需要的只是“重要的块分数高”。</p>
+
+<h4 id="n-3-2">3.2 阈值选块：累计到 τ 为止</h4>
+<p>选块规则是：对每一行块，把各块的估计质量从大到小排序，依次加入，直到已加入的块的质量之和达到这一行总质量的 \(\tau\)。论文把它写成：</p>
+<div class="formula">$$\texttt{find\_blocks}(A,\tau)=\arg\min_{\mathcal{B}}\Big\{\,|\mathcal{B}|\ \Big|\ \sum_{b\in\mathcal{B}}\sum_{(i,j)\in b}A_{ij}\ \ge\ \tau\Big\}$$</div>
+<p>意思是：在所有“质量之和不少于 \(\tau\)”的块集合里，找块数最少的那个。因为是按分数从大到小贪心加入，得到的恰好就是这个最小集合。</p>
+<div class="note-pre"><b>先补一点背景：按阈值取和按个数取（top-p 与 top-k）。</b>
+<p>如果你熟悉语言模型的采样，这和 top-p（核采样）是同一个思路：top-k 每次固定取概率最高的 k 个候选，top-p 取“概率加起来达到 p 为止”的最少候选。分布集中时 top-p 取得少，分布分散时取得多。放到注意力上，有的头只盯着少数几个位置，有的头看得很散；同一个头在 4K 输入和 128K 输入上，需要的块数也完全不同。固定块数（top-k）或固定比例（top-ratio）都没法同时照顾这些情况，阈值则能自动适应。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：同样是 τ = 0.9，三种头各算几块（每行 8 个 key 块）</div>
+  <div class="dia-row"><span class="lbl">注意力分散的头</span><div class="dia-track"><span class="dia-seg w" style="flex:12.5">首块</span><span class="dia-seg w" style="flex:12.5">对角</span><span class="dia-seg kv" style="flex:12.5">.125</span><span class="dia-seg kv" style="flex:12.5">.125</span><span class="dia-seg kv" style="flex:12.5">.125</span><span class="dia-seg kv" style="flex:12.5">.125</span><span class="dia-seg kv" style="flex:12.5">.125</span><span class="dia-seg kv" style="flex:12.5">.125</span></div></div>
+  <div class="dia-out">每块都约 0.125：强制保留的两块只有 0.25，要把其余 6 块全加上才过 0.9。8 块全算。</div>
+  <div class="dia-row"><span class="lbl">一般的头</span><div class="dia-track"><span class="dia-seg w" style="flex:30">首块 .30</span><span class="dia-seg w" style="flex:25">对角 .25</span><span class="dia-seg kv" style="flex:18">.18</span><span class="dia-seg kv" style="flex:12">.12</span><span class="dia-seg kv" style="flex:6">.06</span><span class="dia-seg oth" style="flex:4"></span><span class="dia-seg oth" style="flex:3"></span><span class="dia-seg oth" style="flex:2"></span></div></div>
+  <div class="dia-out">强制的两块已有 0.55；再按大小加入 0.18、0.12、0.06，累计 0.91 ≥ 0.9，停下。8 块算 5 块，跳过的 3 块共 0.09。</div>
+  <div class="dia-row"><span class="lbl">注意力集中的头</span><div class="dia-track"><span class="dia-seg w" style="flex:62">首块 .62</span><span class="dia-seg w" style="flex:31">对角 .31</span><span class="dia-seg oth" style="flex:2"></span><span class="dia-seg oth" style="flex:2"></span><span class="dia-seg oth" style="flex:1"></span><span class="dia-seg oth" style="flex:1"></span><span class="dia-seg oth" style="flex:0.5"></span><span class="dia-seg oth" style="flex:0.5"></span></div></div>
+  <div class="dia-out">强制的两块已有 0.93，不再加入。8 块只算 2 块。</div>
+  <div class="dia-note">本站示意图，数值为示意值。紫色 = 强制保留（第一个块和对角块），蓝色 = 按阈值选中，灰色 = 跳过；每行的估计质量已归一化为 1。如果改成每行固定取 4 块（top-k）：集中的头白白多算 2 块，分散的头少算 4 块、丢掉约一半的注意力。</div>
+</div>
+<p>阈值还有一个好处：它直接控制被丢掉的那部分注意力。设真实注意力里被跳过的权重总和是 \(\varepsilon\)。块稀疏内核只在选中的位置集合 \(\mathcal S\) 上做 softmax，相当于把剩下的权重重新归一化：\(\hat o=\sum_{j\in\mathcal S}a_jv_j/(1-\varepsilon)\)，而真实输出是 \(o=\sum_j a_jv_j\)。两者之差等于 \(\sum_{j\notin\mathcal S}a_jv_j-\frac{\varepsilon}{1-\varepsilon}\sum_{j\in\mathcal S}a_jv_j\)，两项的长度各不超过 \(\varepsilon\max_j\|v_j\|\)，所以（本站推导）</p>
+<div class="formula">$$\|o-\hat o\|\ \le\ 2\varepsilon\,\max_j\|v_j\|$$</div>
+<p>也就是说，只要跳过的权重少，输出就偏不远。\(\tau=0.9\) 的直觉含义是“只允许丢大约一成的注意力”。但要记住，\(\tau\) 是设在<b>估计</b>质量上的，真实丢掉的比例取决于估计准不准；而且这个界是对一个 query 而言的，误差还会逐层传递。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码</span>
+<ul>
+  <li>块大小 \(B\) 在代码里固定为 128（有断言检查），批大小只支持 1。</li>
+  <li>选块时，第一个 key 块和每一行的对角块<b>总是保留</b>，其余块按估计质量排序累加；阈值是相对于这一行总估计质量的比例。论文的算法 1 没有写这两个强制块。</li>
+  <li>估计和选块对每个 query 头单独做：GQA 模型的 key / value 头先被复制到和 query 头一样多（Llama-3.1-8B 是 8 个 KV 头复制成 32 个），所以同一组里的头可以选不同的块。预填充受算力限制，这样做问题不大；这和 NSA 为解码强调的“组内共享选择”是两回事（见 §6）。</li>
+  <li>只有 GPU 名称里带“100”（如 A100、H100）时才走 Triton 实现，否则退回 PyTorch 实现。</li>
+  <li>解码阶段直接调用 FlashInfer 的全注意力，不做任何稀疏。</li>
+</ul></div>
+
+<h4 id="n-3-3">3.3 一次矩阵乘法算出所有反对角线和（算法 1）</h4>
+<p>如果逐个小格去取反对角线上的元素再相加，在 GPU 上会很慢。算法 1 用了一个重排技巧，把所有小格的反对角线和变成<b>一次</b>矩阵乘法：</p>
+<ol>
+  <li>把 key 按步长分组：第 \(J\) 组是 \(k_{JS},k_{JS+1},\dots,k_{JS+S-1}\)，按顺序首尾拼成一个长度为 \(S\cdot d\) 的长向量 \(\tilde k_J\)。</li>
+  <li>把 query 也按步长分组，但组内<b>倒序</b>拼接：\(\tilde q_I=[\,q_{IS+S-1},\,q_{IS+S-2},\dots,\,q_{IS}\,]\)。</li>
+  <li>两个长向量的点积 \(\tilde q_I^\top\tilde k_J=\sum_t q_{IS+S-1-t}^\top k_{JS+t}\)，正好是小格 \((I,J)\) 的反对角线和。把所有组一起算，就是一个 \((N/S)\times(Sd)\) 的矩阵乘一个 \((Sd)\times(N/S)\) 的矩阵。</li>
+</ol>
+<div class="dia">
+  <div class="dia-title">示意图：把一个小格的反对角线和写成一次点积（S = 4）</div>
+  <div class="dia-flow"><span class="dia-box enc">第 I 组 query，组内倒序拼接<small>[ q₃ | q₂ | q₁ | q₀ ]，长度 4d</small></span><span class="dia-arrow">点积</span><span class="dia-box act">第 J 组 key，组内顺序拼接<small>[ k₀ | k₁ | k₂ | k₃ ]，长度 4d</small></span><span class="dia-arrow">=</span><span class="dia-box reg">q₃·k₀ + q₂·k₁ + q₁·k₂ + q₀·k₃<small>4×4 小格反对角线上的 4 个分数之和</small></span></div>
+  <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">小格（行 q₀…q₃，列 k₀…k₃）：</span><div class="cells" style="width:129px"><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell a">④</span><span class="cell"></span><span class="cell"></span><span class="cell a">③</span><span class="cell"></span><span class="cell"></span><span class="cell a">②</span><span class="cell"></span><span class="cell"></span><span class="cell a">①</span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-note">本站示意图，对应原文算法 1 第 3–12 行。①–④ 依次是 q₃·k₀、q₂·k₁、q₁·k₂、q₀·k₃，从左下走到右上。官方的 Triton 内核不真的拼接向量，而是在内核里按这个顺序循环 \(S\) 次、每次做一个 \(d\) 维的小矩阵乘法并累加，效果相同。</div>
+</div>
+
+<h4 id="n-3-4">3.4 估计本身要花多少（推算）</h4>
+<p>这个乘法的计算量是 \((N/S)^2\cdot Sd=N^2d/S\) 次乘加，是完整 \(QK^\top\) 的 \(1/S\)。完整注意力除了 \(QK^\top\) 还有乘 \(V\) 的一半，所以估计用的矩阵乘法约占全注意力矩阵乘法的 \(1/(2S)\)：\(S=8\) 时约 6.3%，\(S=16\) 时约 3.1%（推算）。此外还要对 \((N/S)^2\) 个分数做 softmax 并按块求和，这部分以访存为主。官方实现把乘法写成一个 Triton 内核（因果时跳过上三角的小格），把 softmax 和块内求和融合成另一个内核，并把 query 分段（chunk）处理以控制显存。</p>
+<p>和 §5.5 的耗时拆分对照：在论文测的那个长度上，全注意力 73.8 ms；XAttention 的估计（论文称“模式搜索”）在 \(S=8\) 时 9.3 ms、\(S=16\) 时 3.6 ms，分别约为全注意力的 12.6% 和 4.9%（推算）。这比纯矩阵乘法的比例高，多出来的就是 softmax 和读写分数矩阵的开销。</p>
+<div class="note-warn"><b>容易忽略的一点：</b>估计的成本只和 \(N^2/S\) 有关，和最后选中多少块无关。在短输入上，块本来就选得多（4K 时密度约 52%，见 §5.5），省下的计算有限，估计这笔固定开销就显得重，这是短输入上加速比低的原因之一。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S2.SS2" target="_blank" rel="noopener">英文原文 §2.2（含算法 1）↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 方法（三）：给每个头找一个尽量小的阈值</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>\(\tau\) 设成 0.9，对所有头都合适吗？不同的头稀疏程度差别很大，有的头即使只保留很少几块也不影响结果。论文的第三个组件是给每个头单独找一个尽量小的阈值。它是怎么找的？找出来的阈值长什么样？这一步在实验结论里有多大分量？</div>
+<p>论文把它写成一个动态规划。模型共有 \(H\) 个注意力头（指全部层的头），定义 \(D[h][m]\) 为“在前 \(h\) 个头上总共做了恰好 \(m\) 次阈值调整之后，能达到的最好性能”，递推式为</p>
+<div class="formula">$$D[h][m]=\max\big(D[h-1][m],\ P(h,m)\big)$$</div>
+<p>其中 \(P(h,m)\) 是在 \(D[h-1][m-1]\) 对应的状态上，把第 \(h\) 个头的阈值再降一档之后的模型性能。每降一档就把阈值乘以 0.9：</p>
+<div class="formula">$$t_h(m)=t_h(m-1)\times 0.9$$</div>
+<p>按这个规则，一个头的阈值只能取 0.9、0.81、0.729、0.656……这些值：每调整一次，就少保留约一成的估计质量。实验里从 \(\tau=0.9\) 出发，允许 \(M=1000\) 次调整，最后得到的阈值平均约 0.8。论文强调这一步不是必需的，它只是能在精度不变的前提下进一步提高稀疏度。</p>
+<p>这段描述有几处没有交代：“性能” \(P\) 是在什么数据上、用什么指标测的；每次评估都要跑一遍模型，1,000 次调整乘上全部头数要跑多少遍；递推式本身也更像一个“按头依次决定降不降”的贪心过程，而不是严格意义上的动态规划。官方仓库没有发布这个搜索的代码，只发布了搜索结果：Llama-3.1-8B 每层每头一个阈值的三张表，分别对应 \(S=4、8、16\)。仓库在 2025 年 6 月另外补了一个“阈值标定”脚本，做法和论文描述的不同：用一批长文档问答提示跑全注意力（本站抽看了第一段，用的是 LongBench 多文档问答的提示模板），对每个头找出“覆盖真实注意力 90% 的那些块”在估计分数上对应的比例，再在所有样本上取最大值。</p>
+<div class="dia">
+  <div class="dia-title">示意图：官方仓库发布的逐头阈值（S = 8 那张表），按层取平均</div>
+  <svg class="dg" viewBox="0 0 700 250" role="img" aria-label="官方仓库发布的逐头阈值（stride 8）按层平均" style="--dg-min:620px">
+  <line x1="60" y1="200" x2="674" y2="200" class="axis"/>
+  <line x1="60" y1="200" x2="60" y2="30" class="axis"/>
+  <line x1="60" y1="160.0" x2="674" y2="160.0" class="grid-ln"/>
+  <text x="54" y="160.0" class="t-r t-xs">0.25</text>
+  <line x1="60" y1="120.0" x2="674" y2="120.0" class="grid-ln"/>
+  <text x="54" y="120.0" class="t-r t-xs">0.5</text>
+  <line x1="60" y1="80.0" x2="674" y2="80.0" class="grid-ln"/>
+  <text x="54" y="80.0" class="t-r t-xs">0.75</text>
+  <line x1="60" y1="40.0" x2="674" y2="40.0" class="grid-ln"/>
+  <text x="54" y="40.0" class="t-r t-xs">1</text>
+  <text x="54" y="200" class="t-r t-xs">0</text>
+  <rect x="66" y="137.3" width="14" height="62.7" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.2"/>
+  <text x="73" y="214" class="t-c t-xs">0</text>
+  <rect x="85" y="120.8" width="14" height="79.2" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.2"/>
+  <rect x="104" y="113.7" width="14" height="86.3" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.2"/>
+  <rect x="123" y="125.7" width="14" height="74.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="142" y="87.8" width="14" height="112.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="149" y="214" class="t-c t-xs">4</text>
+  <rect x="161" y="75.8" width="14" height="124.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="180" y="88.0" width="14" height="112.0" style="fill:var(--c-pred-bg);stroke:var(--c-pred);stroke-width:1.2"/>
+  <rect x="199" y="56.0" width="14" height="144.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="218" y="63.1" width="14" height="136.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="225" y="214" class="t-c t-xs">8</text>
+  <rect x="237" y="54.7" width="14" height="145.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="256" y="60.8" width="14" height="139.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="275" y="56.0" width="14" height="144.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="294" y="70.0" width="14" height="130.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="301" y="214" class="t-c t-xs">12</text>
+  <rect x="313" y="48.4" width="14" height="151.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="332" y="55.9" width="14" height="144.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="351" y="58.3" width="14" height="141.7" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="370" y="55.8" width="14" height="144.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="377" y="214" class="t-c t-xs">16</text>
+  <rect x="389" y="58.9" width="14" height="141.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="408" y="78.5" width="14" height="121.5" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="427" y="89.5" width="14" height="110.5" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="446" y="75.7" width="14" height="124.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="453" y="214" class="t-c t-xs">20</text>
+  <rect x="465" y="73.9" width="14" height="126.1" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="484" y="74.8" width="14" height="125.2" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="503" y="92.7" width="14" height="107.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="522" y="101.6" width="14" height="98.4" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="529" y="214" class="t-c t-xs">24</text>
+  <rect x="541" y="85.1" width="14" height="114.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="560" y="72.7" width="14" height="127.3" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="579" y="80.4" width="14" height="119.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="598" y="64.4" width="14" height="135.6" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="605" y="214" class="t-c t-xs">28</text>
+  <rect x="617" y="94.2" width="14" height="105.8" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="636" y="55.0" width="14" height="145.0" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <rect x="655" y="76.1" width="14" height="123.9" style="fill:var(--c-enc-bg);stroke:var(--c-enc);stroke-width:1.2"/>
+  <text x="662" y="214" class="t-c t-xs">31</text>
+  <line x1="60" y1="56.0" x2="674" y2="56.0" style="stroke:var(--c-act);stroke-dasharray:5 4;stroke-width:1.2"/>
+  <line x1="60" y1="78.2" x2="674" y2="78.2" style="stroke:var(--text-2);stroke-dasharray:2 3;stroke-width:1.2"/>
+  <text x="364.0" y="232" class="t-c t-sm">层号（Llama-3.1-8B 共 32 层，每层 32 个头）</text>
+  <text x="16" y="115" class="t-c t-sm" transform="rotate(-90 16 115)">该层各头 τ 的平均</text>
+  <rect x="64" y="8" width="12" height="12" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+  <text x="82" y="14" class="t-xs">该层有 τ = 0 的头（只算首块和对角块）</text>
+  <line x1="320" y1="14" x2="350" y2="14" style="stroke:var(--c-act);stroke-dasharray:5 4;stroke-width:1.2"/>
+  <text x="356" y="14" class="t-xs">搜索起点 τ = 0.9</text>
+  <line x1="470" y1="14" x2="500" y2="14" style="stroke:var(--text-2);stroke-dasharray:2 3;stroke-width:1.2"/>
+  <text x="506" y="14" class="t-xs">1,024 个头的平均 ≈ 0.76</text>
+  </svg>
+  <div class="dia-note">数据来自官方仓库 <code>xattn/threshold/llama_threshold.py</code> 里的 <code>llama_fuse_8</code>，按层平均由本站计算。三张表的总体平均：\(S=4\) 约 0.79，\(S=8\) 约 0.76，与论文说的“平均约 0.8”相符；\(S=16\) 约 0.91（推算）。表里有不少大于 0.9 的值（最大 0.96），所以这些表并不完全是“从 0.9 出发、每次乘 0.9”得到的；本站无法确认论文的表格用的就是这几张表。</div>
+</div>
+<p>这张图有两个值得注意的地方。第一，阈值随层数变化很大：最浅的几层平均只有 0.4–0.5，中间层接近 0.9，说明浅层的很多头可以非常稀疏。第二，\(S=4\) 和 \(S=8\) 的表里各有 28 个头的阈值是 0（都在第 0、1、2、6 层）。按官方代码，阈值为 0 的头只算第一个块和对角块，相当于块粒度的“只看开头和最近”。这和同一作者此前的 DuoAttention 把一部分头改成“只看开头和最近”的流式头，是同一个观察：有相当一部分头根本不需要看全文。</p>
+<div class="note-warn"><b>这一步在实验结论里分量很重：</b>消融实验（arXiv 表 9，正式版表 10）显示，把逐头阈值换回统一的 \(\tau=0.9\)，\(S=8\) 时 RULER 平均从 88.47 掉到 84.96，\(S=16\) 时从 88.08 掉到 85.83，都低于全注意力的 87.52。也就是说，§5.2 里“XAttention 超过全注意力”的结论，依赖这个调参步骤；而论文没有说调参用的是什么数据。如果用的就是 RULER 本身，那么 RULER 上的分数就包含了在测试集上调参的成分。还有一个反直觉的现象：阈值降低（算得更少，密度从 26.13% 降到 20.97%），分数反而从 84.96 升到 88.47，这也提示搜索可能拟合了评测集上的波动。视频理解和视频生成的实验用的是统一阈值（0.9 / 0.95），不受这一点影响。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S2.SS3" target="_blank" rel="noopener">英文原文 §2.3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实验：精度丢了多少，速度快了多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在文本、视频理解、视频生成三类长序列任务上，XAttention 和全注意力比丢了多少精度？和其他免训练的稀疏方法比谁更好？到底快了多少？读数字之前，先要弄清楚每个实验比的是什么、在什么条件下比的，否则很容易把“只测注意力算子”的倍数当成整次推理的倍数，或者把“和全注意力视频有多像”当成视频质量。</div>
+
+<h4 id="n-5-1">5.1 实验设置</h4>
+<p><b>模型。</b>文本用 Llama-3.1-8B-Instruct（原生上下文 128K）；视频理解用 Qwen2-VL-7B-Instruct；视频生成用 HunyuanVideo（130 亿参数以上的扩散 Transformer）。正式版附录另外报告了 Mistral Nemo 12B、Phi-3.5 Mini 3.8B、Qwen2.5 7B 的 RULER 结果，以及 Wan2.1 的视频生成结果。</p>
+<p><b>对照方法。</b>全注意力基线是 FlashInfer 框架里实现的 FlashAttention（论文没写版本）。稀疏对照有三个，论文说都严格按公开实现运行：MInference 用官方配置，所有头都用竖线–斜线模式；FlexPrefill 取 \(\gamma=0.95\)、\(\tau=0.1\)，这是其原论文里精度最高的一组参数；SeerAttention 先训练了它的门控参数。</p>
+<div class="note-pre"><b>先补一点背景：SeerAttention 和几个评测基准。</b>
+<p><b>SeerAttention</b>（2024）是“半训练”的块稀疏：模型本身冻结，另加一个小门控，把一块 query 和一块 key 池化后经过可学习的线性层，再相乘得到块分数；门控用自蒸馏的方式学习全注意力的块级分布。它介于完全免训练（XAttention、MInference、FlexPrefill）和从头训练（NSA、MoBA）之间。</p>
+<p><b>RULER</b> 是合成的长上下文基准：在可调长度的填充文本里埋“针”，考察检索、多跳追踪、聚合等能力，长度可以从 4K 设到 128K。合成任务的好处是长度可控，缺点是和真实使用有距离。<b>LongBench</b> 是真实任务集合（单文档问答、多文档问答、摘要、少样本、代码等），英文样本平均约 6,711 个词，大多比 RULER 的长档短得多；论文用了其中 16 个任务。<b>Video-MME</b> 有 900 段视频、共 254 小时，时长从 11 秒到 1 小时，分短、中、长三档，共 2,700 道选择题，可以带字幕或不带字幕作答。视频生成用 <b>VBench</b> 的 946 条经 GPT 扩写的提示词。</p>
+<p>视频生成的三个指标衡量的都是“稀疏版生成的视频”和“同一随机种子、同一提示词下全注意力生成的视频”有多像：<b>PSNR</b> 是逐像素误差的对数尺度（单位 dB，越高越像）；<b>SSIM</b> 比较局部的亮度、对比度和结构（0 到 1，越高越像）；<b>LPIPS</b> 用神经网络特征计算感知距离（越低越像）。它们都不是视频本身的质量分。</p>
+</div>
+
+<h4 id="n-5-2">5.2 文本：RULER 与 LongBench</h4>
+<div class="table-wrap"><table>
+<tr><th>方法（Llama-3.1-8B-Instruct，RULER）</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th><th class="num">64K</th><th class="num">128K</th><th class="num">平均</th></tr>
+<tr><td>全注意力</td><td class="num">96.74</td><td class="num">94.03</td><td class="num">92.02</td><td class="num">84.17</td><td class="num">81.32</td><td class="num">76.89</td><td class="num">87.52</td></tr>
+<tr><td>FlexPrefill</td><td class="num">95.99</td><td class="num">93.67</td><td class="num">92.73</td><td class="num">88.14</td><td class="num">81.14</td><td class="num">74.67</td><td class="num">87.72</td></tr>
+<tr><td>MInference</td><td class="num">96.54</td><td class="num">94.06</td><td class="num">91.37</td><td class="num">85.79</td><td class="num">83.03</td><td class="num">54.12</td><td class="num">84.15</td></tr>
+<tr><td>SeerAttention（arXiv v1）</td><td class="num">84.43</td><td class="num">79.55</td><td class="num">79.80</td><td class="num">72.95</td><td class="num">64.79</td><td class="num">51.61</td><td class="num">72.18</td></tr>
+<tr><td>SeerAttention（ICML 正式版）</td><td class="num">95.32</td><td class="num">92.14</td><td class="num">92.20</td><td class="num">88.05</td><td class="num">83.30</td><td class="num">72.37</td><td class="num">87.23</td></tr>
+<tr class="hl"><td>XAttention \(S=8\)</td><td class="num">96.83</td><td class="num">94.07</td><td class="num">93.17</td><td class="num">90.75</td><td class="num">84.08</td><td class="num">72.31</td><td class="num">88.47</td></tr>
+<tr class="hl"><td>XAttention \(S=16\)</td><td class="num">96.11</td><td class="num">93.95</td><td class="num">93.56</td><td class="num">90.64</td><td class="num">83.12</td><td class="num">71.11</td><td class="num">88.08</td></tr>
+</table></div>
+<p>数字来自原文表 1，XAttention 用的是 §4 的逐头阈值。读这张表要分几层看。</p>
+<ul>
+  <li><b>短到中等长度（4K–64K）</b>：XAttention 和全注意力持平或更高，在 32K 上高出 6.6 分。</li>
+  <li><b>最长的 128K</b>：XAttention 是 72.31 / 71.11，比全注意力低 4.6–5.8 分，也低于 FlexPrefill 的 74.67。可 128K 恰恰是稀疏注意力最该派上用场的长度。</li>
+  <li><b>MInference</b> 在 128K 上崩到 54.12；<b>SeerAttention</b> 在 arXiv 版里全面落后（平均 72.18），正式版换成新数字后平均 87.23，和其他方法差不多，论文没有解释为什么改。</li>
+  <li><b>全注意力这一行本身</b>：32K 的 84.17 和 64K 的 81.32 偏低。连 FlexPrefill 的平均（87.72）都高于全注意力，就是因为它在 32K 上也高出 4 分。两篇后来的独立论文在同一模型上测得的全注意力，32K 分别是 90.68（FlashPrefill，2026）和 92.33（BLASST，2025），比这里高 6.5–8.2 分。RULER 的任务子集和样本数可以不同，所以这不能直接说明谁错了；但“稀疏版超过全注意力 6 分以上”在机制上很难解释（稀疏只会丢信息，偶尔去掉噪声能略微加分，但幅度不会这么大），更可能是基线本身的波动。</li>
+</ul>
+<div class="table-wrap"><table>
+<tr><th>方法（LongBench）</th><th class="num">NarrativeQA</th><th class="num">Qasper</th><th class="num">HotpotQA</th><th class="num">GovReport</th><th class="num">TREC</th><th class="num">TriviaQA</th><th class="num">LSHT</th><th class="num">RepoBench-P</th><th class="num">16 项平均</th></tr>
+<tr><td>全注意力</td><td class="num">31.44</td><td class="num">25.07</td><td class="num">16.89</td><td class="num">34.22</td><td class="num">72.50</td><td class="num">91.65</td><td class="num">46.00</td><td class="num">49.14</td><td class="num">40.34</td></tr>
+<tr><td>MInference</td><td class="num">31.59</td><td class="num">24.82</td><td class="num">17.03</td><td class="num">34.19</td><td class="num">72.50</td><td class="num">91.18</td><td class="num">46.00</td><td class="num">49.93</td><td class="num">40.30</td></tr>
+<tr><td>FlexPrefill</td><td class="num">27.30</td><td class="num">28.56</td><td class="num">17.20</td><td class="num">32.76</td><td class="num">64.00</td><td class="num">88.18</td><td class="num">31.00</td><td class="num">47.54</td><td class="num">36.83</td></tr>
+<tr class="hl"><td>XAttention \(S=8\)</td><td class="num">28.99</td><td class="num">26.14</td><td class="num">17.40</td><td class="num">34.41</td><td class="num">72.00</td><td class="num">91.65</td><td class="num">47.00</td><td class="num">50.84</td><td class="num">40.60</td></tr>
+</table></div>
+<p>这里只摘了原文表 2 中 16 项任务里的 8 项，平均是 16 项的平均。XAttention 的平均分最高（40.60），和全注意力（40.34）、MInference（40.30）基本持平，FlexPrefill 落后 3.5 分，主要掉在 TREC 和 LSHT 这类少样本分类上。XAttention 单项掉得最多的是 NarrativeQA（31.44 → 28.99），而它正是 LongBench 里最长的英文任务（平均 18,409 个词，LongBench 论文的统计）。LongBench 的大多数样本只有几千到一万多个 token，在这个长度上块本来就选得多，所以它主要说明“中等长度上稀疏不伤精度”，对超长输入的说服力有限。正式版附录 B 在另外三个模型上跑了 RULER（4K–128K 平均）：Mistral Nemo 12B 全注意力 67.97，XAttention \(S=4\) / \(S=16\) 为 67.92 / 67.47；Phi-3.5 Mini 为 84.68 对 84.86 / 83.82；Qwen2.5 7B 为 77.84 对 77.75 / 77.21；MInference 和 FlexPrefill 在这三个模型上都低 1.9–3.8 分。附录没有说明这些模型用的阈值是怎么定的。</p>
+
+<h4 id="n-5-3">5.3 视频理解：Video-MME</h4>
+<div class="table-wrap"><table>
+<tr><th>方法（Qwen2-VL-7B）</th><th class="num">短 无字幕</th><th class="num">短 有字幕</th><th class="num">中 无字幕</th><th class="num">中 有字幕</th><th class="num">长 无字幕</th><th class="num">长 有字幕</th><th class="num">总 无字幕</th><th class="num">总 有字幕</th></tr>
+<tr><td>全注意力</td><td class="num">72.1</td><td class="num">78.1</td><td class="num">63.9</td><td class="num">69.4</td><td class="num">55.1</td><td class="num">60.2</td><td class="num">63.7</td><td class="num">69.2</td></tr>
+<tr><td>MInference</td><td class="num">71.7</td><td class="num">77.6</td><td class="num">62.3</td><td class="num">67.9</td><td class="num">55.2</td><td class="num">59.8</td><td class="num">63.1</td><td class="num">68.4</td></tr>
+<tr><td>FlexPrefill</td><td class="num">71.4</td><td class="num">77.4</td><td class="num">62.6</td><td class="num">68.3</td><td class="num">53.8</td><td class="num">57.3</td><td class="num">62.6</td><td class="num">67.7</td></tr>
+<tr class="hl"><td>XAttention</td><td class="num">71.9</td><td class="num">78.8</td><td class="num">62.6</td><td class="num">68.5</td><td class="num">55.7</td><td class="num">60.3</td><td class="num">63.3</td><td class="num">69.1</td></tr>
+</table></div>
+<p>XAttention 在这里用的是统一参数 \(S=16\)、\(\tau=0.9\)，没有逐头调阈值。总分和全注意力相差 0.4 分（无字幕）和 0.1 分（有字幕），在三个稀疏方法里最好；FlexPrefill 在长视频上掉得最多（有字幕时 60.2 → 57.3）。论文强调 XAttention 在长视频上“超过了全注意力”（55.7 对 55.1），但每一档时长只有 300 段视频、900 道题，0.6 分大约相当于多答对 5 道题（推算），在正常的波动范围之内；中等时长上它反而低 1.3 分（无字幕）。合理的读法是：在视频理解上，免训练的块稀疏几乎不掉分。论文没有报告视频理解的速度。另外，仓库的评测脚本里“有字幕”那一组用的是每秒 0.5 帧，不是论文正文说的每秒 1 帧。</p>
+
+<h4 id="n-5-4">5.4 视频生成：HunyuanVideo</h4>
+<div class="note-pre"><b>先补一点背景：视频扩散模型里的注意力有多长。</b>
+<p>HunyuanVideo 是扩散 Transformer（DiT）：先用 3D VAE 把视频压缩到隐空间，再切成小块变成 token，在 50 步去噪的每一步、每一层都对全部 token 做注意力。和语言模型不同，这里的注意力是<b>非因果</b>的：每个 token 能看到所有 token，整张注意力矩阵都要算。按 HunyuanVideo 技术报告的配置（时间方向压缩 4 倍、空间方向压缩 8 倍，再按 2×2 切块），720×1280、129 帧的视频对应 \(33\times45\times80=118{,}800\) 个视频 token（推算）。在这个长度上，注意力几乎就是全部的计算量。</p>
+</div>
+<p><b>设置。</b>\(S=8\)，\(\tau=0.9\) 或 0.95；把 DiT 主干里的注意力全部换成 XAttention（按官方代码，视频 token 和有效的文本 token 一起走 XAttention，只有文本补齐用的填充位置单独用全注意力）；生成 720×1280、129 帧的视频，50 步去噪；和同一随机种子、同一提示词下的全注意力视频逐一比较，在 946 条提示上取平均。因为 MInference、FlexPrefill 都没有实现非因果注意力，这里只和全注意力比。</p>
+<p><b>热身。</b>作者发现，从第一步去噪就开始稀疏，生成的视频虽然质量不错，但构图（物体的位置和布局）会和全注意力版本有些偏移，相似度指标随之下降。扩散模型的研究表明，前几步去噪决定了画面的整体布局，于是作者让前 5 步（共 50 步）仍用全注意力，之后再切换到 XAttention。</p>
+<div class="table-wrap"><table>
+<tr><th>设置（5 步热身）</th><th class="num">PSNR ↑</th><th class="num">SSIM ↑</th><th class="num">LPIPS ↓</th><th class="num">密度 ↓</th></tr>
+<tr><td>HunyuanVideo，\(\tau=0.90\)</td><td class="num">21.5</td><td class="num">0.767</td><td class="num">0.215</td><td class="num">34.4%</td></tr>
+<tr><td>HunyuanVideo，\(\tau=0.95\)</td><td class="num">23.5</td><td class="num">0.822</td><td class="num">0.155</td><td class="num">45.5%</td></tr>
+<tr><td>Wan2.1，\(\tau=0.90\)（正式版附录 A）</td><td class="num">21.2</td><td class="num">0.745</td><td class="num">0.231</td><td class="num">39.2%</td></tr>
+<tr><td>Wan2.1，\(\tau=0.95\)（正式版附录 A）</td><td class="num">22.7</td><td class="num">0.819</td><td class="num">0.129</td><td class="num">33.6%</td></tr>
+</table></div>
+<figure class="paper-fig"><div class="imgs one"><img src="xattention/fig/videogen.jpg" alt="原文图 3：HunyuanVideo 全注意力与 XAttention 生成结果对比" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b>四行是同一提示词（篝火旁弹吉他的熊猫，背景是暮色中的雪山）生成的同一段视频的 8 帧。第一行是全注意力；第二行是 XAttention 不热身、\(\tau=0.95\)：熊猫和篝火的位置、大小都和第一行明显不同，画面本身仍然清晰；第三、四行是 5 步热身、\(\tau=0.9\) 和 0.95：构图和第一行几乎一致，细节（吉他、火光、背景山形）也基本对得上。这张图说明热身解决的是“构图偏移”而不是“画质下降”。</figcaption></figure>
+<p>怎么理解这些数字？第一，PSNR 21.5–23.5 dB 比较的是两段<b>各自生成</b>的视频，任何细小的位置偏移都会让逐像素误差变大，所以不能拿图像压缩里“30 dB 以上肉眼难辨”的经验来套；论文说这种相似度“人眼难以分辨”，主要靠原文图 3 支撑，单看数字证明不了。第二，\(\tau\) 越高越像，密度也越高（34.4% → 45.5%），这是预期中的取舍。但正式版附录 A 的 Wan2.1 一组反过来：\(\tau=0.95\) 的密度（33.6%）反而低于 \(\tau=0.9\)（39.2%），和表注“τ 越高密度越高”的说法矛盾，论文没有解释，可能是两行的密度写反了。第三，论文没有报告视频生成的任何速度数字。按密度粗算：前 5 步全注意力，后 45 步约 34% 的块加上约 6% 的估计开销，注意力的计算量约为原来的 47%，也就是注意力部分最多快约 2 倍（推算，忽略内核效率差异），端到端还会更少。</p>
+
+<h4 id="n-5-5">5.5 效率：注意力加速、耗时拆分与端到端</h4>
+<figure class="paper-fig"><div class="imgs one"><img src="xattention/fig/speedup.svg" alt="原文图 4：不同长度下各稀疏方法的注意力加速倍数" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>横轴是输入长度（8K 到 256K），纵轴是预填充时注意力部分相对 FlashInfer 全注意力的加速倍数（1 表示一样快，小于 1 表示更慢）。每组五根柱子依次是 MInference（灰）、SeerAttention（黄）、FlexPrefill（蓝紫）、XAttention \(S=8\)（浅红）、XAttention \(S=16\)（深红），柱顶数字是倍数，\(\tau=0.9\)。8K 时三个对照方法只有 0.1–0.2 倍，也就是比全注意力慢 5–10 倍，XAttention 是 1.7 / 1.5 倍；128K 时 XAttention 是 7.1 / 11.7 倍；256K 时 \(S=16\) 达到 13.5 倍，FlexPrefill 7.6 倍，MInference 4.2 倍。</figcaption></figure>
+<p>短输入上对照方法比全注意力还慢，原因正是 §1.3 说的：它们的模式搜索有一笔和长度关系不大的固定开销，短输入时密度又高，省下的计算不够抵消搜索。XAttention 的估计便宜，所以在 8K 上也略快于全注意力。\(S=16\) 的密度比 \(S=8\) 略高，却更快，因为它的估计便宜一半。论文说 256K 时的 13.5 倍和 9.8 倍分别对应密度 7.32% 和 6.89%，并指向表 5；但表 5 只列到 128K，这两个密度其实是 128K 那一格的数字，256K 的密度论文没有给出。</p>
+<div class="table-wrap"><table>
+<tr><th>密度（arXiv 表 5）</th><th class="num">4K</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th><th class="num">64K</th><th class="num">128K</th></tr>
+<tr><td>\(S=4\)</td><td class="num">51.73%</td><td class="num">40.96%</td><td class="num">27.43%</td><td class="num">21.09%</td><td class="num">9.43%</td><td class="num">6.20%</td></tr>
+<tr><td>\(S=8\)</td><td class="num">52.16%</td><td class="num">43.77%</td><td class="num">27.49%</td><td class="num">20.97%</td><td class="num">10.98%</td><td class="num">6.89%</td></tr>
+<tr><td>\(S=16\)</td><td class="num">55.38%</td><td class="num">43.55%</td><td class="num">28.91%</td><td class="num">27.93%</td><td class="num">11.32%</td><td class="num">7.32%</td></tr>
+</table></div>
+<p>密度随长度下降得很快：4K 时要算一半的块，128K 时只算 6%–7%。这符合直觉：输入越长，每个 query 真正需要看的位置占全部位置的比例越小。步长越大，密度通常越高，本站的理解是：步长大时每个分数平均了更多 logit，近似注意力图更“平”，要累计到同样的 \(\tau\) 就得加入更多块。（表注写的是“\(S=8\) 的稀疏度更低”，从数字看应是“密度更低”。）</p>
+<figure class="paper-fig"><div class="imgs one"><img src="xattention/fig/breakdown.svg" alt="原文图 5：预填充注意力耗时拆分为模式搜索与注意力计算" loading="lazy"></div>
+<figcaption><b>原文图 5（正式版图 6）。怎么看：</b>每根柱子是一次预填充注意力的总耗时（毫秒），灰色是“模式搜索”（估计加选块），深红是稀疏注意力本身。全注意力 73.8 ms；MInference 搜索 89.6 ms、注意力 18.8 ms，总和比全注意力还慢；FlexPrefill 是 20.8 + 15.8；XAttention \(S=8\) 是 9.3 + 13.9，\(S=16\) 是 3.6 + 14.3。图上的 24.9× 和 5.9× 是 XAttention \(S=16\) 的搜索时间相对 MInference、FlexPrefill 的倍数（按柱上标的数字算，后者是 5.8 倍，差别应来自四舍五入）。论文没有写这张图对应的输入长度。</figcaption></figure>
+<p>这张图把“为什么快”拆成了两个来源：一是搜索快（3.6 ms 对 20.8 ms、89.6 ms）；二是选得准，所以算的块更少，稀疏注意力本身也最快（14.3 ms 对 15.8 ms、18.8 ms）。前者是反对角线 + 一次矩阵乘法的功劳，后者是估计质量的功劳。</p>
+<p><b>端到端（正式版新增）。</b>正式版增加了一张表（正式版表 6），在 RULER 上测 Llama-3.1-8B 整次预填充的加速：</p>
+<div class="table-wrap"><table>
+<tr><th>端到端预填充加速（正式版表 6）</th><th class="num">8K</th><th class="num">16K</th><th class="num">32K</th><th class="num">64K</th><th class="num">128K</th><th class="num">256K</th></tr>
+<tr><td>XAttention \(S=8\)</td><td class="num">2.59×</td><td class="num">3.04×</td><td class="num">3.96×</td><td class="num">4.38×</td><td class="num">4.67×</td><td class="num">4.93×</td></tr>
+<tr><td>XAttention \(S=16\)</td><td class="num">2.89×</td><td class="num">3.60×</td><td class="num">4.40×</td><td class="num">4.82×</td><td class="num">4.94×</td><td class="num">5.12×</td></tr>
+</table></div>
+<div class="note-pre"><b>先补一点背景：阿姆达尔定律。</b>
+<p>如果一项工作里有比例 \(f\) 的部分被加速了 \(s\) 倍，其余部分不变，那么整体只能加速 \(1/\big((1-f)+f/s\big)\) 倍。没被加速的部分是天花板：就算 \(s\) 无穷大，整体也最多 \(1/(1-f)\) 倍。由此可以推出一个硬约束：只加速注意力的方法，端到端的倍数<b>不可能超过</b>注意力本身的倍数。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：只看注意力的加速、正式版报告的端到端加速，和按计算量占比推算的上限（Llama-3.1-8B，S = 16）</div>
+  <svg class="dg" viewBox="0 0 700 270" role="img" aria-label="只看注意力的加速、正式版报告的端到端加速、按计算量占比推算的端到端加速" style="--dg-min:620px">
+  <line x1="70" y1="210" x2="640" y2="210" class="axis"/>
+  <line x1="70" y1="210" x2="70" y2="22" class="axis"/>
+  <line x1="70" y1="184.3" x2="640" y2="184.3" class="grid-ln"/>
+  <text x="64" y="184.3" class="t-r t-xs">2×</text>
+  <line x1="70" y1="158.6" x2="640" y2="158.6" class="grid-ln"/>
+  <text x="64" y="158.6" class="t-r t-xs">4×</text>
+  <line x1="70" y1="132.9" x2="640" y2="132.9" class="grid-ln"/>
+  <text x="64" y="132.9" class="t-r t-xs">6×</text>
+  <line x1="70" y1="107.1" x2="640" y2="107.1" class="grid-ln"/>
+  <text x="64" y="107.1" class="t-r t-xs">8×</text>
+  <line x1="70" y1="81.4" x2="640" y2="81.4" class="grid-ln"/>
+  <text x="64" y="81.4" class="t-r t-xs">10×</text>
+  <line x1="70" y1="55.7" x2="640" y2="55.7" class="grid-ln"/>
+  <text x="64" y="55.7" class="t-r t-xs">12×</text>
+  <line x1="70" y1="30.0" x2="640" y2="30.0" class="grid-ln"/>
+  <text x="64" y="30.0" class="t-r t-xs">14×</text>
+  <line x1="70" y1="197.1" x2="640" y2="197.1" style="stroke:var(--text-3);stroke-width:1"/>
+  <text x="64" y="197.1" class="t-r t-xs">1×</text>
+  <polyline points="130,190.7 218,177.9 306,144.4 394,102.0 482,59.6 570,36.4" style="fill:none;stroke:var(--c-pred);stroke-width:2.2;"/>
+  <circle cx="130" cy="190.7" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="218" cy="177.9" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="306" cy="144.4" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="394" cy="102.0" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="482" cy="59.6" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="570" cy="36.4" r="3.2" style="fill:var(--c-pred)"/>
+  <polyline points="130,172.8 218,163.7 306,153.4 394,148.0 482,146.5 570,144.2" style="fill:none;stroke:var(--c-enc);stroke-width:2.2;"/>
+  <circle cx="130" cy="172.8" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="218" cy="163.7" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="306" cy="153.4" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="394" cy="148.0" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="482" cy="146.5" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="570" cy="144.2" r="3.2" style="fill:var(--c-enc)"/>
+  <polyline points="130,196.5 218,195.0 306,191.5 394,185.0 482,173.2 570,154.2" style="fill:none;stroke:var(--text-2);stroke-width:2.2;stroke-dasharray:5 4;"/>
+  <circle cx="130" cy="196.5" r="3.2" style="fill:var(--text-2)"/>
+  <circle cx="218" cy="195.0" r="3.2" style="fill:var(--text-2)"/>
+  <circle cx="306" cy="191.5" r="3.2" style="fill:var(--text-2)"/>
+  <circle cx="394" cy="185.0" r="3.2" style="fill:var(--text-2)"/>
+  <circle cx="482" cy="173.2" r="3.2" style="fill:var(--text-2)"/>
+  <circle cx="570" cy="154.2" r="3.2" style="fill:var(--text-2)"/>
+  <text x="578" y="36.4" class="t-xs" style="fill:var(--c-pred)">13.5×</text>
+  <text x="578" y="138.2" class="t-xs" style="fill:var(--c-enc)">5.12×</text>
+  <text x="578" y="164.2" class="t-xs">4.3×</text>
+  <text x="122" y="164.8" class="t-r t-xs" style="fill:var(--c-enc)">2.89×</text>
+  <text x="122" y="188.7" class="t-r t-xs" style="fill:var(--c-pred)">1.5×</text>
+  <text x="82" y="36" class="t-xs" style="fill:var(--c-loss)">8K：端到端 2.89× 反而高于只看注意力的 1.5×，</text>
+  <text x="82" y="50" class="t-xs" style="fill:var(--c-loss)">说明两组测量用的基线不是同一个</text>
+  <text x="130" y="226" class="t-c t-sm">8K</text>
+  <text x="218" y="226" class="t-c t-sm">16K</text>
+  <text x="306" y="226" class="t-c t-sm">32K</text>
+  <text x="394" y="226" class="t-c t-sm">64K</text>
+  <text x="482" y="226" class="t-c t-sm">128K</text>
+  <text x="570" y="226" class="t-c t-sm">256K</text>
+  <line x1="80" y1="246" x2="106" y2="246" style="stroke:var(--c-pred);stroke-width:2.2;"/>
+  <text x="112" y="246" class="t-xs">只看注意力（原文图 4）</text>
+  <line x1="285" y1="246" x2="311" y2="246" style="stroke:var(--c-enc);stroke-width:2.2;"/>
+  <text x="317" y="246" class="t-xs">端到端预填充（正式版表 6）</text>
+  <line x1="490" y1="246" x2="516" y2="246" style="stroke:var(--text-2);stroke-width:2.2;stroke-dasharray:5 4;"/>
+  <text x="522" y="246" class="t-xs">按计算量占比推算的端到端上限</text>
+  </svg>
+  <div class="dia-note">橙线来自原文图 4，蓝线来自正式版表 6，灰色虚线是本站推算：用 §1.1 的计算量占比 \(f\) 和橙线的倍数 \(s\) 代入阿姆达尔定律。推算只数矩阵乘法，真实的注意力时间占比通常更高，所以灰线偏保守。</div>
+</div>
+<p>把两组数字放在一起，就会发现对不上。在 256K 上，端到端 5.12 倍、注意力 13.5 倍，倒推出注意力约占整次预填充时间的 87%（推算），和 §1.1 按计算量估的 83% 是同一个量级，说得通。可在 8K 上，注意力只快 1.5 倍，端到端却快了 2.89 倍，违反了上面的硬约束。唯一的解释是两组测量用的基线不一样：端到端测量里的“全注意力”很可能是一个比 FlashInfer 慢得多的实现（比如 Hugging Face Transformers 的默认注意力），或者端到端还包含了别的改动。论文没有交代端到端用的基线，所以表 6 的倍数，尤其是短输入那几格，不能当成“比一个优化过的推理引擎快多少”。另外，Llama-3.1-8B 的原生上下文是 128K，表里的 256K 只能说明速度，不代表这个长度上的精度。</p>
+
+<h4 id="n-5-6">5.6 消融实验：每个设计各贡献了多少</h4>
+<p>四组消融都在 Llama-3.1-8B 的 RULER 上做，“平均”是 4K–128K 的平均，密度越低越省。</p>
+<div class="table-wrap"><table>
+<tr><th>采样方式（arXiv 表 6）</th><th class="num">\(S=8\)：32K</th><th class="num">\(S=8\)：平均</th><th class="num">\(S=8\)：密度</th><th class="num">\(S=16\)：32K</th><th class="num">\(S=16\)：平均</th><th class="num">\(S=16\)：密度</th></tr>
+<tr><td>随机（每行每列各取一个）</td><td class="num">82.53</td><td class="num">82.48</td><td class="num">27.57%</td><td class="num">82.35</td><td class="num">80.94</td><td class="num">31.36%</td></tr>
+<tr><td>对角线</td><td class="num">76.47</td><td class="num">81.06</td><td class="num">24.47%</td><td class="num">58.26</td><td class="num">79.63</td><td class="num">25.31%</td></tr>
+<tr class="hl"><td>反对角线</td><td class="num">90.75</td><td class="num">88.47</td><td class="num">20.97%</td><td class="num">90.64</td><td class="num">88.08</td><td class="num">27.93%</td></tr>
+</table></div>
+<p><b>采样方式。</b>随机采样和反对角线一样保证每行、每列各取一次，只是位置随机，平均分低了 6–7 分；对角线采样更差，\(S=16\) 时 32K 只有 58.26。这组对比把功劳精确地归到了“方向”上：同样的采样数量、同样的行列覆盖，只有和竖线、斜线都相交的反对角线最好，而且它的密度也最低，说明它的估计更“敢”排除不重要的块。</p>
+<div class="table-wrap"><table>
+<tr><th>步长（arXiv 表 7）</th><th class="num">\(S=4\)</th><th class="num">\(S=8\)</th><th class="num">\(S=16\)</th><th class="num">\(S=64\)</th></tr>
+<tr><td>RULER 平均</td><td class="num">88.89</td><td class="num">88.47</td><td class="num">88.08</td><td class="num">81.21</td></tr>
+<tr><td>密度</td><td class="num">21.09%</td><td class="num">20.97%</td><td class="num">27.93%</td><td class="num">39.88%</td></tr>
+</table></div>
+<p><b>步长。</b>\(S\) 从 4 到 16，精度只掉 0.8 分，估计成本却降到四分之一；到 \(S=64\) 精度掉了 7 分、密度还上升到近 40%。作者的解释是步长太大的反对角线太稀，分辨不出从块的不同位置进入的斜线。这和 §2.3 的“稀释”角度一致。实际使用中 \(S=8\) 和 \(S=16\) 是两个常用档：前者更准，后者更快。</p>
+<div class="table-wrap"><table>
+<tr><th>选块规则（arXiv 表 8 / 表 9）</th><th class="num">\(S=4\)：平均</th><th class="num">\(S=4\)：密度</th><th class="num">\(S=8\)：平均</th><th class="num">\(S=8\)：密度</th><th class="num">\(S=16\)：平均</th><th class="num">\(S=16\)：密度</th></tr>
+<tr><td>Top-K</td><td class="num">84.96</td><td class="num">17.40%</td><td class="num">84.13</td><td class="num">19.92%</td><td class="num">83.11</td><td class="num">30.15%</td></tr>
+<tr><td>Top-Ratio</td><td class="num">85.96</td><td class="num">21.00%</td><td class="num">85.42</td><td class="num">21.00%</td><td class="num">84.24</td><td class="num">27.00%</td></tr>
+<tr><td>统一阈值 \(\tau=0.9\)（表 9）</td><td class="num">87.51</td><td class="num">23.06%</td><td class="num">84.96</td><td class="num">26.13%</td><td class="num">85.83</td><td class="num">28.36%</td></tr>
+<tr class="hl"><td>逐头最小阈值（表 8 的“Threshold”）</td><td class="num">88.89</td><td class="num">21.09%</td><td class="num">88.47</td><td class="num">20.97%</td><td class="num">88.08</td><td class="num">27.93%</td></tr>
+</table></div>
+<p><b>选块规则与逐头阈值。</b>论文把 Top-K（\(S=8\) 时 \(K=8192\)，\(S=16\) 时 16384）、Top-Ratio（27% / 31%）的参数调到和阈值法计算量相近，结论是阈值法在相近的密度下高约 3–5 分。但要注意，表 8 里的“Threshold”一行用的是逐头调过的阈值，而 Top-K 和 Top-Ratio 没有逐头调参，这组比较把“阈值规则”和“逐头调参”两个因素混在了一起。本站把表 9 的统一阈值一行放进来对照：\(S=4\) 和 \(S=16\) 时，统一阈值在相近密度下仍比 Top-K / Top-Ratio 高 1.5–2.7 分，阈值规则本身确实有用；但 \(S=8\) 时统一阈值（84.96，密度 26.13%）并不比 Top-Ratio（85.42，密度 21%）好。所以“阈值选块”的优势是真实的，但幅度没有表 8 显示的那么大，表 8 里的 3–5 分有相当一部分来自逐头调参。</p>
+
+<h4 id="n-5-7">5.7 结果的份量</h4>
+<p>把上面的数字放回它们各自的测量条件里，可以这样看。</p>
+<ul>
+  <li><b>基线系统和硬件交代得不全。</b>全注意力基线是 FlashInfer 里的 FlashAttention，版本没写；GPU 型号论文没写，只在致谢里提到 NVIDIA 捐赠了 DGX 服务器，仓库的演示说明单张 A100 即可运行。XAttention 用的稀疏内核基于 FlashAttention 2.4.2 修改；如果测速在 H100 上进行，FlashInfer 的全注意力未必是同一代的内核实现，两边的内核效率不一定对等。三个稀疏对照是作者按公开实现封装后跑的，仓库里有 MInference 和 FlexPrefill 的封装代码。</li>
+  <li><b>13.5 倍只是一个算子的倍数。</b>原文图 4 测的是单层注意力：仓库的测速脚本取 Llama-3.1-8B 第 12 层在一段生成的长文本上的 Q、K，V 用随机数，循环计时。整次预填充的加速见正式版表 6，256K 时 5.12 倍，而且这组数字和图 4 的基线不一致（§5.5）。解码阶段完全不变，KV 缓存一个也没少存，所以对“输入短、输出长”的任务（比如长思维链推理）几乎没有收益。</li>
+  <li><b>有损，而且在最长处损失最大。</b>\(\tau\) 控制的是估计出来的质量，不是真实丢掉的注意力。RULER 上“持平或超过全注意力”依赖逐头调过的阈值，统一 \(\tau=0.9\) 时 \(S=8\) 的平均是 84.96，比全注意力低 2.6 分；即使用了逐头阈值，128K 上也比全注意力低 4.6–5.8 分。全注意力基线本身在 32K、64K 上偏低（§5.2），也让“超过全注意力”的说法打了折扣。</li>
+  <li><b>批大小和服务场景没有覆盖。</b>官方实现要求批大小为 1（代码里有断言），所有测速都是单个请求、单张 GPU。真实的推理服务会把多个请求拼成一批，还常用分块预填充（chunked prefill，见本站 <a href="sarathi-serve.html">Sarathi-Serve 精读</a>）把长输入切成几段、与解码交替执行；XAttention 的估计需要当前这段 query 和此前全部的 key，这些场景下的开销和收益，论文都没有测。仓库在 2025 年 6 月合并过一个修复“分块预填充时（非 Triton 路径）表现不佳”的社区补丁，说明有人在这样用，但没有公开的测量。</li>
+  <li><b>视频实验的指标各有局限。</b>视频理解只报精度、不报速度；视频生成只报和全注意力视频的相似度，不报速度，也没有报 VBench 自己的质量分。</li>
+  <li><b>独立复测给出了更保守的数字。</b>FlashPrefill（2026）在 H20 GPU 上、以 FlashAttention 2.8.3 为基线，用 \(S=16\)、\(\tau=0.9\) 复测：XAttention 在 Llama-3.1-8B 上的算子加速是 4K 0.77 倍、8K 1.27 倍、32K 2.34 倍、128K 3.48 倍，RULER 平均 87.67，全注意力 89.12。硬件、基线和阈值都和原论文不同，倍数远低于原文图 4 在 128K 上的 11.7 倍，但“精度损失约 1.5 分”这个量级可以作为参照。更多复测见“后来怎么样了”。</li>
+</ul>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码：测速脚本里的全注意力基线</span>
+<p>官方仓库当前版本的测速脚本（<code>eval/efficiency/attention_speedup.py</code>）里，作为分母的 FlashInfer 全注意力在计时的那一次传的是 <code>causal=False</code>，即不带因果掩码、算完整的 \(N\times N\)；而且只计时一次，XAttention 则计 50 次取平均。2025 年 6 月的一次提交只把预热那一处改成了因果版本，计时处没有改。非因果的全注意力要算的乘法大约是因果版本的两倍。如果论文图 4 也是这样测的，那么加速倍数被放大了，最多接近 2 倍。论文没有说明基线是不是因果的；当前脚本测的长度是 4K–128K，和图 4 的 8K–256K 也不一样，所以本站无法确认图 4 用的是哪一版脚本，这里只如实记录代码现状。</p>
+</div>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S3.T1" target="_blank" rel="noopener">表 1 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S3.F4" target="_blank" rel="noopener">原文图 4 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S3.F5" target="_blank" rel="noopener">原文图 5 ↗</a> · <a href="https://arxiv.org/html/2503.16428#S3.SS4" target="_blank" rel="noopener">消融 §3.4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 相关工作：免训练的稀疏与训练出来的稀疏</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>XAttention 在稀疏注意力的谱系里处于什么位置？论文的相关工作分了四类，这里先概括它们；然后把 XAttention 和本站读过的 NSA、同期的 MoBA 放在一起比较，看“推理时才稀疏、不需要训练”和“训练时就稀疏”这两条路各自付出什么代价。</div>
+<p><b>论文的四类相关工作。</b>第一类是长上下文本身：用长文本继续预训练或微调，或者借助外部记忆和检索。第二类是稀疏注意力：Sparse Transformer、Longformer、BigBird 这类固定模式要重新训练；H2O、TOVA 按注意力分数丢弃 token；StreamingLLM 只保留开头和最近的 token；基于“检索头”的方法（如 DuoAttention）只让少数头看全文来加速解码；针对预填充的有 MInference、FlexPrefill（选择开销是瓶颈）和 SeerAttention（要训练门控，论文认为它在下游任务上表现有限）。正式版在这里还加了按页挑选 KV 来加速解码的 Quest。第三类是推理加速的系统工作：FlashAttention、RingAttention、FlashDecoding、PagedAttention，以及 SmoothQuant、AWQ、QServe 等量化方法。第四类是同期工作：视频生成的 Sparse VideoGen 和 Sliding Tile Attention，以及 NSA、MoBA。</p>
+<div class="table-wrap"><table>
+<tr><th></th><th>XAttention</th><th>SeerAttention</th><th>MoBA</th><th>NSA</th></tr>
+<tr><td>要不要训练</td><td>不需要，直接用于已有模型</td><td>只训练一个小门控，模型冻结</td><td>需要（继续训练或从头训练）</td><td>需要，从预训练开始就稀疏</td></tr>
+<tr><td>块分数怎么来</td><td>反对角线上 logit 的平均，再做 softmax</td><td>池化后的 Q、K 经可学习线性层相乘</td><td>query 与块内 key 的平均值做内积，无可学习参数</td><td>复用压缩分支的注意力分数</td></tr>
+<tr><td>选多少块</td><td>累计估计质量达到 τ（可逐头设定）</td><td>按门控分数选</td><td>固定 top-k 块，当前块必选</td><td>固定 top-n 块，组内共享</td></tr>
+<tr><td>加速哪个阶段</td><td>只有预填充</td><td>预填充</td><td>主要是预填充</td><td>训练、预填充、解码</td></tr>
+<tr><td>主要代价</td><td>估计有固定开销；稀疏度受限；最长输入上仍有损失</td><td>要额外训练门控</td><td>只对按它训练的模型有效</td><td>要从头训练，只对新模型有效</td></tr>
+</table></div>
+<p>这张对比表是本站整理的，NSA 的细节见本站 <a href="native-sparse-attention.html#n-3-4">NSA 精读 §3.4</a>，MoBA 的打分与选块见 <a href="moba.html#n-3-1">MoBA 精读 §2.2.1</a>。几点值得展开：</p>
+<ul>
+  <li><b>同样是块均值打分，训练与否天差地别。</b>MoBA 用 query 和块内 key 的平均值做内积来选块，这正是 XAttention 批评的“池化”。在 MoBA 里它能用，是因为模型在训练中学会了让重要的信息在块均值里显得突出；把它直接套在没训练过的模型上就不行。FlashPrefill（2026）的复测里，把 MoBA 式的选块（FlashMoBA，块大小 128，取 8 块）直接用在 Llama-3.1-8B 上，RULER 平均只有 69.86，XAttention 是 87.67，全注意力 89.12。这从侧面印证了 XAttention 的出发点：免训练时，估计方法必须足够细。</li>
+  <li><b>NSA 对“推理时才稀疏”的批评，XAttention 回答了一半。</b>NSA 认为，全注意力训练出的模型在推理时突然被稀疏，会偏离它训练时的状态，检索类的头尤其容易受损（见 <a href="native-sparse-attention.html#n-2-2">NSA 精读 §2.2</a>）。XAttention 的结果说明，只要估计足够准、阈值足够保守，预填充阶段的事后稀疏在多数基准上可以几乎不掉分；但 128K 上的 4–6 分损失，以及 4K 时仍要算一半的块，也说明免训练的稀疏度有天花板。</li>
+  <li><b>GQA 的问题在预填充里不突出。</b>NSA 强调同一 GQA 组的头必须共享选择，否则解码时要读的 KV 是各头选择的并集，访存省不下来。XAttention 只做预填充，预填充受算力而不是显存带宽限制，每个头各选各的块并不会让读取量失控，所以它可以对每个头单独选块、单独设阈值。</li>
+  <li><b>适用面不同。</b>免训练方法的最大优势是任何已有的稠密模型都能直接用，包括视频理解模型和视频生成的 DiT；训练出来的稀疏只对按它训练的新模型有效，但能做到更高的稀疏度，并且能同时加速解码。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 结论</h3>
+<p>论文的结论是：反对角线上的和是块重要性的一个可靠代理，XAttention 据此高效地识别并剪掉不重要的块，在 RULER、LongBench、Video-MME、VBench 上保持与全注意力相当的表现，注意力计算最多快 13.5 倍；它让块稀疏注意力在长上下文模型的实际部署中变得可用。</p>
+<p>本站的总结是：XAttention 的核心贡献是一个很便宜的块重要性估计（反对角线采样，加上把它变成一次矩阵乘法的重排技巧），配上按累计质量选块的规则。它的价值在于免训练、跨模态：同一套方法在文本、视频理解、视频生成三种模型上都能直接用。它的局限也很清楚：只加速预填充；RULER 上的好成绩依赖逐头调阈值，而调参数据没有交代；最长输入上仍有可见的损失；测速的基线、硬件和端到端设置交代不全，算子倍数和端到端倍数之间还对不上。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2503.16428#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>截至 2026-10-20，XAttention 在 Semantic Scholar 上被引 160 次。它很快成了免训练稀疏注意力论文的标准对照方法之一，下面按“独立复测”“同一团队的后续”“这条路线后来的走向”三部分整理。</p>
+
+<h4 id="n-impact-1">独立复测：精度损失小，速度倍数明显更低</h4>
+<ul>
+  <li><b>FlashPrefill（2026-03）</b>：在 H20 上以 FlashAttention 2.8.3 为基线，把 XAttention（\(S=16\)、\(\tau=0.9\)）和 MInference、FlexPrefill 一起复测。Llama-3.1-8B 的 RULER 平均：全注意力 89.12、XAttention 87.67、FlexPrefill 88.30；算子加速在 128K 时是 3.48 倍（FlexPrefill 5.18 倍）。在 Qwen3-30B-A3B 上，XAttention 的密度从 4K 的 57.4% 降到 256K 的 18.5%，比原论文在 Llama 上报告的密度高得多，说明密度很依赖具体模型。</li>
+  <li><b>BLASST（2025-12）</b>：在 Llama-3.1-8B 的 RULER 4K–64K 上，XAttention 平均 92.44，稠密注意力 93.21；在 Qwen3-8B 上把 XAttention（负责预填充）和 BLASST（负责解码）组合，RULER-16K 只比稠密低 0.33 分，说明两者可以叠加。它也报告，在 70%–90% 的高稀疏度下，XAttention 的精度下降比直接利用 softmax 统计量的 BLASST 更陡。</li>
+  <li><b>Sparse VideoGen2（2025-05）</b>：在 H100 上、30% 去噪步数热身的设置下，测得 XAttention 用于 HunyuanVideo 720p 时 PSNR 28.9、密度 39.3%、端到端加速 1.56 倍；它同时说明 XAttention 当时还不支持 Wan2.1。这是本站找到的唯一一个视频生成上的独立速度数字，量级和 §5.4 的推算（注意力最多快约 2 倍）一致。</li>
+</ul>
+
+<h4 id="n-impact-2">同一团队的后续</h4>
+<ul>
+  <li><b>Radial Attention（NeurIPS 2025）</b>：同一实验室针对长视频生成的工作，观察到视频扩散模型的注意力随时空距离衰减，改用一个静态的、计算密度随时间距离指数下降的掩码，复杂度 \(O(n\log n)\)，报告在 Wan2.1-14B、HunyuanVideo、Mochi 1 上最多快 1.9 倍。它不再在线估计，而是把“哪里重要”的先验直接写进掩码。</li>
+  <li><b>FlashMoBA（2025-11）</b>：Guangxuan Xiao 和 Junxian Guo 共同一作，转向“训练出来的”块稀疏。它分析了 MoBA 的选块准确率由什么决定，建议用更小的块和对 key 的短卷积，并写了专门的内核，报告小块时比 FlashAttention-2 最多快 14.7 倍。从 XAttention 的“免训练估计”到 FlashMoBA 的“训练中选块”，可以看作同一批作者对这个问题的两种回答。</li>
+  <li><b>StreamingVLM（ICLR 2026）</b>：Ruyi Xu 和 Guangxuan Xiao 再次共同一作，把长视频理解做成实时流式处理，关注的是无限长视频流上的 KV 管理，而不是预填充稀疏。</li>
+</ul>
+
+<h4 id="n-impact-3">这条路线后来的走向</h4>
+<p>免训练的预填充稀疏还在继续发展：MInference 团队的 MMInference（2025-04）把思路推广到视觉语言模型，先按模态把 token 重新排列，再做稀疏；FlashPrefill 把模式发现和阈值判断做得更快，BLASST 不做单独的估计，而是利用注意力计算过程中实际的 softmax 统计量按阈值跳块，同时覆盖预填充和解码。但在新训练的大模型上，主流做法已经转向“训练时就稀疏”：DeepSeek 在 V3.2 里用 DeepSeek Sparse Attention 逐 token 选择（见 <a href="deepseek-v3-2.html">DeepSeek-V3.2 精读</a>），Kimi 用 MoBA，MiniCPM4 用 InfLLM-V2。XAttention 留下的比较持久的东西，一是“用很便宜的结构化采样代替池化”这个估计思路，二是把“按累计质量而不是按个数选块”（FlexPrefill 已经用过类似的累计阈值）和这种便宜的估计结合起来，让免训练的块稀疏在 8K 这样的中等长度上也不至于变慢。本站没有找到它被并入 vLLM 或 SGLang 主线的公开记录；官方仓库最后一次更新是 2025-07-06。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面、论文署名。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Ruyi Xu</b>（共同一作）<div class="aff">清华大学（论文署名）</div>后来与 Guangxuan Xiao 共同一作 StreamingVLM（ICLR 2026）。</div>
+  <div class="author-card"><b>Guangxuan Xiao</b>（共同一作，通讯作者）<div class="aff">MIT EECS 博士生（导师 Song Han，论文发表时）</div>SmoothQuant、StreamingLLM、DuoAttention 的主要作者；后来与 Junxian Guo 共同一作 FlashMoBA。据其个人主页，已获 MIT 博士学位，2025 年起在 Thinking Machines Lab 任技术人员。</div>
+  <div class="author-card"><b>Haofeng Huang</b><div class="aff">清华大学（论文署名）</div>免训练稀疏注意力 SpargeAttn（ICML 2025）的作者之一。</div>
+  <div class="author-card"><b>Junxian Guo</b><div class="aff">上海交通大学（论文署名 SJTU）</div>XAttention 所用 Block-Sparse-Attention 内核库的第一作者（论文引用为 Guo et al., 2024）；LServe（MLSys 2025）作者之一；FlashMoBA 共同一作。</div>
+  <div class="author-card senior"><b>Song Han</b>（通讯作者）<div class="aff">MIT EECS 副教授（终身教职），HAN Lab 负责人；论文同时署名 NVIDIA</div>Deep Compression、EIE、AWQ、SmoothQuant、StreamingLLM 等模型压缩与高效推理工作的作者。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。本站 2026-10-20 查询时为被引 160 次，其中高影响力引用 22 次。</li>
+  <li><b>发表</b>：ICML 2025（PMLR 第 267 卷，第 69819–69831 页），以海报形式报告。arXiv 上只有 2025-03-20 的 v1；正式版在实验和附录上有增改（见本页开头的说明）。</li>
+  <li><b>开源</b>：<a href="https://github.com/mit-han-lab/x-attention" target="_blank" rel="noopener">mit-han-lab/x-attention</a> 有 286 个 star、24 个 fork（截至 2026-10-20），仓库创建于 2025-02-24，最后一次推送是 2025-07-06；仓库没有声明开源许可证。它依赖的 <a href="https://github.com/mit-han-lab/Block-Sparse-Attention" target="_blank" rel="noopener">mit-han-lab/Block-Sparse-Attention</a> 内核库有 563 个 star（同日），2025-12 起支持 Hopper 和 Blackwell GPU。</li>
+  <li><b>作为对照方法</b>：Sparse VideoGen2、BLASST、FlashPrefill 等后续论文都把 XAttention 作为免训练稀疏注意力的对照。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li class="xlink">相关精读：<a href="moba.html">MoBA</a>、<a href="native-sparse-attention.html">NSA 原生稀疏注意力</a>、<a href="flashattention.html">FlashAttention</a></li>
+  <li><a href="../legacy/tracks/ai-infra/01-flash-attention.html">FlashAttention 结构拆解</a>：分块、在线 softmax 与 IO 复杂度，块稀疏内核的基础。</li>
+  <li><a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DeepSeek Sparse Attention 结构拆解</a>：训练时稀疏的代表，可与本页的免训练路线对照。</li>
+  <li><a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>：预填充与解码、KV 缓存的计算量与访存。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">原文：Ruyi Xu, Guangxuan Xiao, Haofeng Huang, Junxian Guo, Song Han.
+<em>XAttention: Block Sparse Attention with Antidiagonal Scoring.</em> ICML 2025.
+<a href="https://arxiv.org/abs/2503.16428" target="_blank" rel="noopener">arXiv:2503.16428</a>，以
+<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布。
+本页标注“原文图”的图片取自 arXiv HTML 版（v1）原文并依 CC BY 4.0 使用、署名；其中原文图 3 由 PNG 转存为 JPEG 以减小体积，内容未做修改，其余图片未做修改；图注为本站撰写。ICML 正式版独有的表格和附录内容只以文字和数字转述。其余文字、表格与示意图为本站撰写的精读笔记，并非翻译。数字与结论以原文为准。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读 · 原文以 CC BY 4.0 许可发布</footer>
+</body>
+</html>

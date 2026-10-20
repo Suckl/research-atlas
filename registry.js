@@ -892,14 +892,15 @@ window.ATLAS_REGISTRY = {
       "authors": ["Zihao Ye", "Lequn Chen", "Ruihang Lai", "Wuwei Lin", "Yineng Zhang", "…", "Luis Ceze"],
       "org": "University of Washington / CMU / NVIDIA 等",
       "date": "2025-01",
-      "venue": "MLSys 2025（最佳论文）",
+      "venue": "MLSys 2025（杰出论文奖）",
       "arxiv": "2501.01005",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2501.01005" },
         { "label": "Code", "url": "https://github.com/flashinfer-ai/flashinfer" }
       ],
       "page": "legacy/tracks/ai-infra/02-flashinfer.html",
-      "tldr": "面向“服务”的注意力引擎：把分页 / 基数树 / 树状等各种 KV 布局统一成块稀疏矩阵，用 JIT 模板生成注意力变体，用 plan/run 两阶段做负载均衡调度并兼容 CUDAGraph。相对 FlashAttention 的区别不在数学，而在批处理、布局与调度。",
+      "reading": "papers/flashinfer.html",
+      "tldr": "FlashInfer 把分页、基数树、树状掩码等各种 KV 存放方式统一成块稀疏矩阵，用即时编译为各种注意力变体生成内核，并在每一步先在 CPU 上做负载均衡规划、再让可被 CUDA Graph 录制的内核按计划执行。接入 SGLang 后，相对其 Triton 后端 token 间延迟降低 29%–69%；如今它是 vLLM 和 SGLang 在 Blackwell 上默认的注意力内核来源。",
       "tags": ["内核", "块稀疏 KV", "JIT", "调度"],
       "facts": {
         "problem": "推理服务中 KV 布局多样、序列长度参差、小 batch 解码难以打满 GPU",
@@ -1065,16 +1066,17 @@ window.ATLAS_REGISTRY = {
       "lane": "training",
       "title": "FP8 格式",
       "full_title": "FP8 Formats for Deep Learning",
-      "authors": ["Paulius Micikevicius", "Dusan Stosic", "Neil Burgess", "Marius Cornea", "Pradeep Dubey", "…"],
+      "authors": ["Paulius Micikevicius", "Dusan Stosic", "Neil Burgess", "Marius Cornea", "Pradeep Dubey", "Richard Grisenthwaite", "Sangwon Ha", "Alexander Heinecke", "Patrick Judd", "John Kamalu", "Naveen Mellempudi", "Stuart Oberman", "Mohammad Shoeybi", "Michael Siu", "Hao Wu"],
       "org": "NVIDIA / Arm / Intel",
       "date": "2022-09",
-      "venue": "arXiv 2209.05433",
+      "venue": "arXiv 预印本",
       "arxiv": "2209.05433",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2209.05433" }
       ],
       "page": "legacy/tracks/ai-infra/08-fp8-formats.html",
-      "tldr": "两种 8 位浮点：E4M3（精度高，最大 448，没有 inf，只保留一个 NaN 编码）和 E5M2（范围大，最大 57344，IEEE 风格）。推荐前向的权重 / 激活用 E4M3、梯度用 E5M2，配合逐张量缩放因子；GPT-3 175B 的 FP8 训练困惑度与 bf16 相差 0.03。",
+      "reading": "papers/fp8-formats.html",
+      "tldr": "NVIDIA、Arm、Intel 联合定义了两种 8 位浮点编码：精度较高、最大值 448 的 E4M3 和范围较宽、最大值 57,344 的 E5M2，建议前向的权重和激活用 E4M3、反向的梯度用 E5M2，并给每个张量配一个缩放因子。在 16 位硬件上模拟的实验里，从 CNN 到 175B 的 GPT 不改超参数就训到了与 16 位相当的精度，16 位训好的语言模型直接量化成 E4M3 也明显好于 int8；这两种编码后来原样成了 Hopper GPU 和 OCP 标准里的 FP8。",
       "tags": ["数值", "E4M3", "E5M2", "缩放因子"],
       "facts": {
         "problem": "int8 对 LLM 激活中的离群值不鲁棒；16 位算力 / 带宽不够用",
@@ -1160,7 +1162,8 @@ window.ATLAS_REGISTRY = {
         { "label": "Qwen3.5 docs", "url": "https://huggingface.co/docs/transformers/en/model_doc/qwen3_5" }
       ],
       "page": "legacy/tracks/ai-infra/11-gated-deltanet.html",
-      "tldr": "线性注意力的状态是一个 d×d 矩阵：Mamba2 式的门控 α 负责“整体遗忘”，DeltaNet 的 delta 规则 β 负责“定点改写”，二者相加得到 Gated DeltaNet；分块并行算法让训练接近 Mamba2 速度。Qwen3-Next / Qwen3.5 以 3 层 GDN : 1 层门控全注意力混合，线性层不用 RoPE。",
+      "reading": "papers/gated-deltanet.html",
+      "tldr": "Gated DeltaNet 把 Mamba2 的门控（整体淡忘旧记忆）和 DeltaNet 的 delta 规则（先读出旧值、只写入差值的定点改写）合成一条更新规则，并把基于 WY 表示的分块并行训练算法推广到带门控的情形；在 1.3B 参数、100B token 的统一对比中它全面优于 Mamba2 和 DeltaNet，后来成为 Qwen3-Next、Qwen3.5 等“3 层 GDN 配 1 层全注意力”混合模型里的线性注意力层。",
       "tags": ["线性注意力", "delta 规则", "混合架构", "位置编码"],
       "facts": {
         "problem": "线性注意力 / SSM 要么记不住（无定点改写），要么忘不掉（无门控）；全注意力 KV 随长度线性增长",
@@ -1168,7 +1171,7 @@ window.ATLAS_REGISTRY = {
         "mechanism": "S_t = S_{t−1}(α_t(I − β_t k_t k_tᵀ)) + β_t v_t k_tᵀ；chunkwise WY 并行；短因果卷积提供局部位置信息",
         "tradeoff": "固定大小状态在精细检索上仍逊于全注意力 → 需要混合；比 Mamba2 慢 2–3K tok/s",
         "key_number": "S-NIAH-2@8K：GDN 29.6 vs Mamba2 17.0 vs DeltaNet 14.4；Qwen3.5：3:1 混合，conv 核 4，K/V 头 16/32×128",
-        "systems": "Qwen3-Next、Qwen3.5 / 3.6、NVIDIA Nemotron-H 类混合模型；FLA 内核库"
+        "systems": "Qwen3-Next、Qwen3.5 / 3.6、Olmo Hybrid；Kimi Linear 的 KDA 是其变体；FLA 内核库"
       }
     },
     {
@@ -1180,8 +1183,8 @@ window.ATLAS_REGISTRY = {
       "full_title": "DeepSeek-V3.2: DeepSeek Sparse Attention（及 NSA、DeepSeek-V4 的 CSA / HCA）",
       "authors": ["DeepSeek-AI"],
       "org": "DeepSeek",
-      "date": "2025-09",
-      "venue": "V3.2-Exp 2025-09；V3.2 arXiv 2512.02556；V4 arXiv 2606.19348",
+      "date": "2025-12",
+      "venue": "arXiv 技术报告（预印本）；V3.2-Exp 2025-09 发布",
       "arxiv": "2512.02556",
       "links": [
         { "label": "V3.2", "url": "https://arxiv.org/abs/2512.02556" },
@@ -1189,7 +1192,8 @@ window.ATLAS_REGISTRY = {
         { "label": "V4", "url": "https://arxiv.org/abs/2606.19348" }
       ],
       "page": "legacy/tracks/ai-infra/12-deepseek-sparse-attention.html",
-      "tldr": "用一个极轻的“闪电索引器”（少头、ReLU、FP8）给每个 query 对所有历史 token 打分，只对 top-k = 2048 个 MLA 潜向量做注意力，核心注意力从 O(L²) 降到 O(Lk)；先用 KL 把索引器对齐到稠密注意力再稀疏训练。V4 进一步在压缩后的 KV 上做 DSA（CSA）并与重压缩的稠密分支（HCA）交错。",
+      "reading": "papers/deepseek-v3-2.html",
+      "tldr": "DeepSeek-V3.2 在 V3.1-Terminus 上继续训练，加入稀疏注意力 DSA：一个用 FP8 计算的轻量“闪电索引器”给前面每个 token 打分，每个 query 只对分数最高的 2048 个 MLA 条目做注意力，128K 位置上的解码成本约降到原来的 1/8，效果与 V3.1-Terminus 持平。报告后半部分讲规模化的 GRPO 强化学习、在工具调用中保留思考，以及大规模合成的智能体任务。",
       "tags": ["稀疏注意力", "索引器", "长上下文", "MLA"],
       "facts": {
         "problem": "长上下文下注意力与 KV 读取随 L² / L 增长",
@@ -1210,13 +1214,14 @@ window.ATLAS_REGISTRY = {
       "authors": ["Horace He", "Thinking Machines Lab"],
       "org": "Thinking Machines Lab；Yao et al.（UCSD / Microsoft）",
       "date": "2025-09",
-      "venue": "Thinking Machines 博客 2025-09；TIS NeurIPS 2025",
+      "venue": "Thinking Machines 博客 2025-09；TIS 为 NeurIPS 2025 研讨会论文",
       "links": [
         { "label": "Blog", "url": "https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/" },
         { "label": "TIS", "url": "https://fengyao.notion.site/off-policy-rl" }
       ],
       "page": "legacy/tracks/ai-infra/13-batch-invariance.html",
-      "tldr": "温度 0 也不确定，根源不是“并发 + 浮点”而是内核缺乏批不变性：归约顺序随 batch 大小变化，于是你的结果取决于同批里还有谁。把 RMSNorm / matmul / attention 改成固定归约策略后 1000 次采样完全一致；由此可做“逐位一致”的 on-policy RL，否则需用截断重要性采样修正训推偏差。",
+      "reading": "papers/batch-invariance.html",
+      "tldr": "温度为 0 时推理结果仍会变，主要原因不是并发线程谁先算完，而是 RMSNorm、矩阵乘和注意力会随批大小换一种切分方式、从而改变浮点加法的顺序，而批大小又随服务器负载变化。把这三类内核改成与批大小无关的固定归约顺序后，Qwen3-235B 温度 0 采样 1000 次从 80 种回答变成 1 种（总耗时多约六成），也让 RL 的采样端和训练端可以逐位一致，不必再靠截断重要性采样去修正训推差异。",
       "tags": ["数值", "确定性", "RL", "重要性采样"],
       "facts": {
         "problem": "同一请求的输出随同批请求数变化；RL 中采样器与训练器概率不一致导致训练崩溃",
@@ -1224,7 +1229,7 @@ window.ATLAS_REGISTRY = {
         "mechanism": "批不变内核：固定 split 策略与 tile 配置、注意力用固定 split-size；RL 侧用 TIS 把隐式 off-policy 校正回来",
         "tradeoff": "确定性内核更慢（26 s → 42–55 s / 1000 序列）；TIS 引入有界偏差",
         "key_number": "Qwen3-235B 温度 0：1000 次采样 80 种不同输出 → 1 种；逐位一致训练 KL 恒为 0",
-        "systems": "vLLM 的 batch-invariant 模式、Thinking Machines Tinker；VeRL / slime / OAT 集成 TIS"
+        "systems": "vLLM、SGLang 的确定性 / batch-invariant 模式；VeRL / slime / OAT 集成 TIS"
       }
     },
     {
@@ -1534,19 +1539,19 @@ window.ATLAS_REGISTRY = {
       "track": "ai-infra",
       "kind": "paper",
       "lane": "serving",
-      "title": "Orca / Sarathi-Serve",
-      "full_title": "Orca: A Distributed Serving System for Transformer-Based Generative Models；Sarathi-Serve: Taming Throughput-Latency Tradeoff in LLM Inference",
+      "title": "Orca",
+      "full_title": "Orca: A Distributed Serving System for Transformer-Based Generative Models",
       "authors": ["Gyeong-In Yu", "Joo Seong Jeong", "Geon-Woo Kim", "Soojeong Kim", "Byung-Gon Chun"],
-      "org": "首尔大学 / FriendliAI；Sarathi-Serve：Microsoft Research India 等",
+      "org": "首尔大学 / FriendliAI",
       "date": "2022-07",
-      "venue": "OSDI 2022；Sarathi-Serve OSDI 2024",
+      "venue": "OSDI 2022",
       "links": [
-        { "label": "Orca (OSDI ’22)", "url": "https://www.usenix.org/conference/osdi22/presentation/yu" },
-        { "label": "Sarathi arXiv", "url": "https://arxiv.org/abs/2403.02310" },
-        { "label": "Code", "url": "https://github.com/microsoft/sarathi-serve" }
+        { "label": "USENIX OSDI ’22", "url": "https://www.usenix.org/conference/osdi22/presentation/yu" },
+        { "label": "PDF", "url": "https://www.usenix.org/system/files/osdi22-yu.pdf" }
       ],
       "page": "legacy/tracks/ai-infra/15-orca-sarathi.html",
-      "tldr": "Orca 把调度粒度从“请求”降到“一次前向迭代”（迭代级调度，即连续批处理），并用 selective batching 只对与序列长度无关的算子拼批：GPT-3 175B 上同延迟吞吐 36.9×。Sarathi-Serve 再把长 prompt 切成等大的块与 decode 拼进同一批（chunked prefill + 无停顿调度），消除 prefill 对 decode 的阻塞：服务容量比 vLLM 高 2.6–3.7×（Falcon-180B 流水并行下的 5.6× 是相对 Orca）。",
+      "reading": "papers/orca.html",
+      "tldr": "Orca 把推理服务的调度粒度从“整个请求”缩小到“模型的一次迭代”：每生成一个 token 就重新组批，先生成完的请求立刻返回，新请求下一步就能加入，这就是今天所说的连续批处理。为了让进度不同的请求能放进同一批，它只对线性层等逐 token 的算子拼批、注意力按请求分开算；在 GPT-3 175B 上，相同延迟下吞吐量是 FasterTransformer 的 36.9 倍。",
       "tags": ["调度", "连续批处理", "chunked prefill"],
       "facts": {
         "problem": "请求级批处理：短请求等长请求、新请求等整批；prefill 插入会卡住正在 decode 的请求",
@@ -1765,6 +1770,246 @@ window.ATLAS_REGISTRY = {
       "tldr": "Kimi 的推理服务平台：把 prefill 和 decode 拆到不同机器，并把 GPU 服务器闲置的 CPU 内存、SSD 和网卡汇成跨机器的 KV 缓存池，调度器同时按“缓存在哪”和“谁更闲”分派请求，过载时按预测的负载提前拒绝。用替身 70B 模型回放真实请求时，满足延迟要求的请求比 vLLM 多约 75%。"
     },
     {
+      "id": "muon",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "Muon 规模化",
+      "full_title": "Muon is Scalable for LLM Training",
+      "authors": ["Jingyuan Liu", "Jianlin Su", "Xingcheng Yao", "Zhejun Jiang", "Guokun Lai", "Yulun Du", "Yidao Qin", "Weixin Xu", "Enzhe Lu", "Junjie Yan", "Yanru Chen", "Huabin Zheng", "Yibo Liu", "Shaowei Liu", "Bohong Yin", "Weiran He", "Han Zhu", "Yuzhi Wang", "Jianzhou Wang", "Mengnan Dong", "Zheng Zhang", "Yongsheng Kang", "Hao Zhang", "Xinran Xu", "Yutao Zhang", "Yuxin Wu", "Xinyu Zhou", "Zhilin Yang"],
+      "date": "2025-02",
+      "venue": "arXiv 技术报告（预印本）",
+      "org": "Moonshot AI / UCLA",
+      "arxiv": "2502.16982",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2502.16982" },
+        { "label": "Code", "url": "https://github.com/MoonshotAI/Moonlight" },
+        { "label": "Weights (Moonlight-16B-A3B)", "url": "https://huggingface.co/moonshotai/Moonlight-16B-A3B" },
+        { "label": "Megatron-LM PR #1428 (Distributed Muon, closed unmerged)", "url": "https://github.com/NVIDIA/Megatron-LM/pull/1428" },
+        { "label": "Muon (Keller Jordan blog)", "url": "https://kellerjordan.github.io/posts/muon/" }
+      ],
+      "page": "papers/muon.html",
+      "reading": "papers/muon.html",
+      "tldr": "月之暗面的技术报告：给 Muon（把梯度动量矩阵正交化后再更新的优化器）加上权重衰减，并按矩阵形状把更新 RMS 对齐到 AdamW 的约 0.2，使它能直接沿用 AdamW 的学习率和权重衰减，还在 ZeRO-1 上实现了分布式版本。在 0.4B–1.5B 稠密模型的 scaling law 上，Muon 达到同样损失只需 AdamW 约 52% 的训练算力，作者据此用 5.7T token 训练了 16B 总参数、3B 激活的 MoE 模型 Moonlight。"
+    },
+    {
+      "id": "moba",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "MoBA",
+      "full_title": "MoBA: Mixture of Block Attention for Long-Context LLMs",
+      "authors": ["Enzhe Lu", "Zhejun Jiang", "Jingyuan Liu", "Yulun Du", "Tao Jiang", "Chao Hong", "Shaowei Liu", "Weiran He", "Enming Yuan", "Yuzhi Wang", "Zhiqi Huang", "Huan Yuan", "Suting Xu", "Xinran Xu", "Guokun Lai", "Yanru Chen", "Huabin Zheng", "Junjie Yan", "Jianlin Su", "Yuxin Wu", "Neo Y. Zhang", "Zhilin Yang", "Xinyu Zhou", "Mingxing Zhang", "Jiezhong Qiu"],
+      "date": "2025-02",
+      "org": "Moonshot AI / 清华大学 / 之江实验室 / 浙江大学",
+      "venue": "NeurIPS 2025",
+      "arxiv": "2502.13189",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2502.13189" },
+        { "label": "NeurIPS 2025", "url": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/19eae75beed66321d62272e794a9c2ac-Abstract-Conference.html" },
+        { "label": "Code", "url": "https://github.com/MoonshotAI/MoBA" }
+      ],
+      "page": "papers/moba.html",
+      "reading": "papers/moba.html",
+      "tldr": "月之暗面的块稀疏注意力：把上下文切成大块，每个 query 用自己与每块平均 key 的内积挑出几块（自己所在的块必选、块内保持因果），只在这些 token 上做一次 softmax；它不加任何参数，可以与全注意力分层或分阶段混用，并直接复用 FlashAttention 的变长内核。从 Llama-3.1-8B 续训到 100 万 token 后多数基准与全注意力接近，100 万 token 预填充时注意力层快 6.5 倍、整个模型快 3.34 倍，但最能考验稀疏的 RULER@128K 在正式版里落后 3.6 个百分点。"
+    },
+    {
+      "id": "xattention",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "kernels",
+      "title": "XAttention",
+      "full_title": "XAttention: Block Sparse Attention with Antidiagonal Scoring",
+      "authors": ["Ruyi Xu", "Guangxuan Xiao", "Haofeng Huang", "Junxian Guo", "Song Han"],
+      "date": "2025-03",
+      "org": "Tsinghua University / MIT / SJTU / NVIDIA",
+      "venue": "ICML 2025",
+      "arxiv": "2503.16428",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2503.16428" },
+        { "label": "ICML 2025 (PMLR 267)", "url": "https://proceedings.mlr.press/v267/xu25ag.html" },
+        { "label": "Code", "url": "https://github.com/mit-han-lab/x-attention" },
+        { "label": "Project page", "url": "https://hanlab.mit.edu/projects/xattention" }
+      ],
+      "page": "papers/xattention.html",
+      "reading": "papers/xattention.html",
+      "tldr": "XAttention 在注意力矩阵的每个小格里只取一条反对角线上的分数，用一次很便宜的矩阵乘法估出哪些 128×128 的块重要，再按累计注意力达到阈值来选块、只算这些块；它不需要训练，可直接用于长文本、视频理解和视频生成模型的预填充。论文报告注意力算子最多快 13.5 倍、精度与全注意力相当，但端到端预填充约 5 倍，最长输入上仍有几分的损失。"
+    },
+    {
+      "id": "dsv3-insights",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "basics",
+      "title": "DeepSeek-V3 硬件反思",
+      "full_title": "Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures",
+      "authors": ["Chenggang Zhao", "Chengqi Deng", "Chong Ruan", "Damai Dai", "Huazuo Gao", "Jiashi Li", "Liyue Zhang", "Panpan Huang", "Shangyan Zhou", "Shirong Ma", "Wenfeng Liang", "Ying He", "Yuqing Wang", "Yuxuan Liu", "Y.X. Wei"],
+      "date": "2025-05",
+      "org": "DeepSeek-AI",
+      "venue": "ISCA 2025 (Industry Track)",
+      "arxiv": "2505.09343",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2505.09343" },
+        { "label": "ACM DOI", "url": "https://doi.org/10.1145/3695053.3731412" },
+        { "label": "DeepEP", "url": "https://github.com/deepseek-ai/DeepEP" },
+        { "label": "DeepGEMM", "url": "https://github.com/deepseek-ai/DeepGEMM" }
+      ],
+      "page": "papers/deepseek-v3-hardware.html",
+      "reading": "papers/deepseek-v3-hardware.html",
+      "tldr": "DeepSeek 团队回顾在 2,048 张 H800 上训练和部署 V3 时，模型结构（MLA、MoE、FP8、节点受限路由）和集群网络（多平面两层胖树）是怎样迁就硬件短板的，并据此向芯片、网卡和交换机厂商提出一份愿望清单。论文大部分是设计回顾和纸上推算，真正的实测集中在网络：在 2,048 卡上训练 V3 时，多平面网络与单平面多轨网络的吞吐和 MFU 几乎相同。"
+    },
+    {
+      "id": "gated-attention",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "门控注意力",
+      "full_title": "Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free",
+      "authors": ["Zihan Qiu", "Zekun Wang", "Bo Zheng", "Zeyu Huang", "Kaiyue Wen", "Songlin Yang", "Rui Men", "Le Yu", "Fei Huang", "Suozhi Huang", "Dayiheng Liu", "Jingren Zhou", "Junyang Lin"],
+      "date": "2025-05",
+      "org": "Qwen Team / Alibaba Group / University of Edinburgh / Stanford University / MIT / Tsinghua University",
+      "venue": "NeurIPS 2025（Oral，最佳论文奖）",
+      "arxiv": "2505.06708",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2505.06708" },
+        { "label": "NeurIPS 2025", "url": "https://proceedings.neurips.cc/paper_files/paper/2025/hash/904e89bb4e632e75fb47f093b620b257-Abstract-Conference.html" },
+        { "label": "Code", "url": "https://github.com/qiuzh20/gated_attention" },
+        { "label": "Models (HF)", "url": "https://huggingface.co/QwQZh/gated_attention" },
+        { "label": "NeurIPS 2025 best paper announcement", "url": "https://blog.neurips.cc/2025/11/26/announcing-the-neurips-2025-best-paper-awards/" }
+      ],
+      "page": "papers/gated-attention.html",
+      "reading": "papers/gated-attention.html",
+      "tldr": "在每个注意力头的 SDPA 输出上乘一个由当前 token 算出的 sigmoid 门，15B MoE 和 1.7B 稠密模型的效果都更好，训练更稳，能承受更大的学习率。这道门的分数大多接近 0 且随 query 变化，消除了注意力汇和超大激活，用 YaRN 外推到 128K 时 RULER 明显更高；Qwen3-Next 和 Qwen3.5 的全注意力层采用了它。"
+    },
+    {
+      "id": "kvzip",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "KVzip",
+      "full_title": "KVzip: Query-Agnostic KV Cache Compression with Context Reconstruction",
+      "authors": ["Jang-Hyun Kim", "Jinuk Kim", "Sangwoo Kwon", "Jae W. Lee", "Sangdoo Yun", "Hyun Oh Song"],
+      "date": "2025-05",
+      "org": "Seoul National University / Neural Processing Research Center / NAVER AI Lab",
+      "venue": "NeurIPS 2025 (Oral)",
+      "arxiv": "2505.23416",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2505.23416" },
+        { "label": "NeurIPS 2025", "url": "https://papers.nips.cc/paper_files/paper/2025/hash/f4eaa4b8f2d08edb3f0af990d56134ea-Abstract-Conference.html" },
+        { "label": "Oral", "url": "https://neurips.cc/virtual/2025/oral/118742" },
+        { "label": "Code", "url": "https://github.com/snu-mllab/KVzip" }
+      ],
+      "page": "papers/kvzip.html",
+      "reading": "papers/kvzip.html",
+      "tldr": "KVzip 让模型把原文“复述”一遍，按每个 KV 在复述时收到的最大注意力打分、扔掉低分者，所以压缩一次就能服务之后的任意问题。论文报告 KV 缓存缩小 3–4 倍、解码注意力延迟约减半，代价是每份上下文要多花约 2 次预填充的计算来打分。"
+    },
+    {
+      "id": "areal",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "training",
+      "title": "AReaL",
+      "full_title": "AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning",
+      "authors": ["Wei Fu", "Jiaxuan Gao", "Xujie Shen", "Chen Zhu", "Zhiyu Mei", "Chuyi He", "Shusheng Xu", "Guo Wei", "Jun Mei", "Jiashu Wang", "Tongkai Yang", "Binhang Yuan", "Yi Wu"],
+      "date": "2025-05",
+      "org": "清华大学交叉信息研究院 / 蚂蚁集团 / 香港科技大学",
+      "venue": "NeurIPS 2025",
+      "arxiv": "2505.24298",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2505.24298" },
+        { "label": "NeurIPS 2025", "url": "https://proceedings.nips.cc/paper_files/paper/2025/hash/33c00862bfa29ac72ecf630a41e19352-Abstract-Conference.html" },
+        { "label": "Code", "url": "https://github.com/areal-project/AReaL" }
+      ],
+      "page": "papers/areal.html",
+      "reading": "papers/areal.html",
+      "tldr": "同步 RL 要等一批里最长的回答写完才能训练，推理模型长短悬殊的输出让大量 GPU 空等。AReaL 把生成和训练拆到不同的 GPU 上各自不停地跑，用最大陈旧度限制样本落后的版本数、用解耦 PPO 目标修正旧样本，在 1.5B–32B 推理模型上同卡同步数下训练时间比自家同步版缩短 1.6–2.8 倍（比 verl 的估计值缩短 1.5–2.3 倍），精度基本持平。"
+    },
+    {
+      "id": "engram",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "条件记忆（可扩展查表）",
+      "full_title": "Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models",
+      "authors": ["Xin Cheng", "Rui Tian", "Wangding Zeng", "Damai Dai", "Qinyu Chen", "Bingxuan Wang", "Zhenda Xie", "Kezhao Huang", "Xingkai Yu", "Chengqi Deng", "Shangyan Zhou", "Chenggang Zhao", "Zhewen Hao", "Yukun Li", "Han Zhang", "Zhengyan Zhang", "Yixuan Wei", "M.Y Xu", "Huishuai Zhang", "Dongyan Zhao", "Wenfeng Liang"],
+      "date": "2026-01",
+      "venue": "ACL 2026",
+      "org": "DeepSeek-AI / 北京大学",
+      "arxiv": "2601.07372",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2601.07372" },
+        { "label": "ACL Anthology", "url": "https://aclanthology.org/2026.acl-long.226/" },
+        { "label": "Code", "url": "https://github.com/deepseek-ai/Engram" }
+      ],
+      "page": "papers/conditional-memory.html",
+      "reading": "papers/conditional-memory.html",
+      "tldr": "DeepSeek 与北京大学提出 Engram：用当前位置最近两三个 token 的哈希 N-gram 直接从一张巨大的表里查出向量，作为与 MoE 条件计算并列的“条件记忆”。在总参数和计算量都相同时，把约四分之一的专家参数换成查表，27B 模型在知识、推理、代码数学和长上下文检索上都更好，而且因为查表地址只取决于输入 token，100B 参数的表可以放在 CPU 内存里预取，推理吞吐只降不到 3%。"
+    },
+    {
+      "id": "minimax-sa",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "MiniMax 稀疏注意力",
+      "full_title": "MiniMax Sparse Attention",
+      "authors": ["Xunhao Lai", "Weiqi Xu", "Yufeng Yang", "Qiaorui Chen", "Yang Xu", "Lunbin Zeng", "Xiaolong Li", "Haohai Sun", "Haichao Zhu", "Vito Zhang", "Jinkai Hu", "Jiayao Li", "Rui Gao", "Zekun Li", "Songquan Zhu", "Jingkai Zhou", "Pengyu Zhao"],
+      "date": "2026-06",
+      "venue": "arXiv 预印本（技术报告）",
+      "org": "MiniMax / 北京大学 / NVIDIA / 浙江大学 / 华中科技大学 / 南京大学 / 杭州电子科技大学",
+      "arxiv": "2606.13392",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2606.13392" },
+        { "label": "Code（推理内核，SM100）", "url": "https://github.com/MiniMax-AI/MSA" },
+        { "label": "MiniMax-M3（采用 MSA 的模型）", "url": "https://huggingface.co/MiniMaxAI/MiniMax-M3" }
+      ],
+      "page": "papers/minimax-sparse-attention.html",
+      "reading": "papers/minimax-sparse-attention.html",
+      "tldr": "MiniMax 在 GQA 上加一个很轻的索引分支：每个 GQA 组给 128 个 token 一块的 KV 打分（取块内最大值），各自挑出 16 块（当前块必选），主分支只在这 2,048 个 token 上做精确的 softmax 注意力；索引分支靠对主分支的 KL 对齐、截断输入梯度和全注意力预热来训练。在 109B 多模态 MoE 上训练 3T token，效果与全注意力相当，1M 上下文时注意力算子在 H800 上预填充快 14.2 倍、解码快 7.6 倍，这套机制后来用于 MiniMax-M3。"
+    },
+    {
+      "id": "dspark",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "serving",
+      "title": "DSpark",
+      "full_title": "DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation",
+      "authors": ["Xin Cheng", "Xingkai Yu", "Chenze Shao", "Jiashi Li", "Yunfan Xiong", "Yi Qian", "Jiaqi Zhu", "Shirong Ma", "Xiaokang Zhang", "Jiasheng Ye", "Qinyu Chen", "Chengqi Deng", "Jiping Yu", "Damai Dai", "Zhengyan Zhang", "Yixuan Wei", "Yixuan Tan", "Wenkai Yang", "Runxin Xu", "Yu Wu", "Zhean Xu", "Xuanyu Wang", "Muyang Chen", "Rui Tian", "Xiao Bi", "Zhewen Hao", "Shaoyuan Chen", "Huanqi Cao", "Wentao Zhang", "Anyi Xu", "Huishuai Zhang", "Dongyan Zhao", "Wenfeng Liang"],
+      "date": "2026-07",
+      "venue": "arXiv 预印本",
+      "org": "DeepSeek-AI / Peking University",
+      "arxiv": "2607.05147",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2607.05147" },
+        { "label": "Code", "url": "https://github.com/deepseek-ai/DeepSpec" },
+        { "label": "Weights", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-DSpark" },
+        { "label": "Weights (Pro)", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-DSpark" }
+      ],
+      "page": "papers/dspark.html",
+      "reading": "papers/dspark.html",
+      "tldr": "DeepSeek 的投机解码框架：草稿器用并行主干一次算完整块，再加一个只看前一个 token 的轻量 Markov 头，缓解并行起草越往后越不准的问题；置信度头估计每个草稿 token 的存活概率，调度器结合引擎实测的吞吐曲线按负载为每个请求挑选验证长度，并保持无损。在 DeepSeek-V4 的线上流量中，相同吞吐下每用户生成速度比原先的 MTP-1 快 60%–85%（V4-Flash）。"
+    },
+    {
+      "id": "dsv41-flash",
+      "track": "ai-infra",
+      "kind": "paper",
+      "lane": "arch",
+      "title": "DeepSeek-V4.1-Flash",
+      "full_title": "DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression",
+      "authors": ["DeepSeek-AI"],
+      "date": "2026-09",
+      "venue": "arXiv 技术报告",
+      "org": "DeepSeek",
+      "arxiv": "2609.19969",
+      "links": [
+        { "label": "arXiv", "url": "https://arxiv.org/abs/2609.19969" },
+        { "label": "Hugging Face", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash" },
+        { "label": "Code（推理参考实现）", "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/main/inference" },
+        { "label": "FlashMLA", "url": "https://github.com/deepseek-ai/FlashMLA" }
+      ],
+      "page": "papers/deepseek-v4-1-flash.html",
+      "reading": "papers/deepseek-v4-1-flash.html",
+      "tldr": "DeepSeek 2026 年 9 月的 552B 多模态 MoE 模型，主题是把 KV 缓存压到极限：新注意力 CSA2 让 40 层里只有 4 层自己存全局 KV，并把它存成 FP4，每个 token 只要 890 字节（约为 V4-Flash 的 1/4），部署时再用近似的“SWA 有界重放”代替长期保存滑动窗口 KV，持久缓存降到约 1/8。前 20 层兼作“因果编码器”让预填充只算一半的层，但每一步压缩的精度代价，报告只给了定性说法、没有给消融数字。"
+    },
+    {
       "id": "eagle",
       "track": "ai-infra",
       "kind": "paper",
@@ -1821,7 +2066,7 @@ window.ATLAS_REGISTRY = {
         "level": "训练系统（RL 数据流编排）",
         "mechanism": "单控制器 + 多控制器混合编程；actor 权重在训练 / 生成布局间重分片；异步 rollout + 中途换权重 + 陈旧度控制 + 解耦 PPO",
         "tradeoff": "异步带来 off-policy（需解耦目标或重要性修正）；共置时显存紧，分离时设备利用不均",
-        "key_number": "HybridFlow 吞吐 1.53–20.57×、切换开销最多降 89.1%；AReaL 训练 41.0 h → 14.8 h（2.77×），线性扩展到 512 卡",
+        "key_number": "HybridFlow 吞吐 1.53–20.57×、切换开销最多降 89.1%；AReaL 训练 41.0 h → 14.8 h（2.77×，对照是作者自己的同步版 AReaL；相对 verl 约 1.5–2.3×），线性扩展到 512 卡",
         "systems": "verl、AReaL、OpenRLHF、slime；推理端为 vLLM / SGLang"
       }
     },
@@ -1832,16 +2077,17 @@ window.ATLAS_REGISTRY = {
       "lane": "training",
       "title": "FP4 训练：NVFP4 / MXFP4",
       "full_title": "Pretraining Large Language Models with NVFP4（及 OCP MX 微缩放格式）",
-      "authors": ["NVIDIA", "Felix Abecassis", "Anjulie Agrusa", "Dong Ahn"],
+      "authors": ["NVIDIA"],
       "org": "NVIDIA",
       "date": "2025-09",
-      "venue": "arXiv 2509.25149",
+      "venue": "arXiv 技术报告（预印本）",
       "arxiv": "2509.25149",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2509.25149" }
       ],
       "page": "legacy/tracks/ai-infra/19-fp4-training.html",
-      "tldr": "Blackwell 的 FP4 张量核数学吞吐是 FP8 的 2–3×。MXFP4 = E2M1 元素 + 每 32 个共享一个 2 的幂缩放（E8M0）；NVFP4 把块缩到 16、块缩放改用 E4M3、再加一级 FP32 张量缩放。NVIDIA 用 NVFP4 把 12B 混合 Mamba-Transformer 训练到 10T token：约 15% 的层留高精度、Wgrad 输入做 16×16 随机 Hadamard 变换、权重二维缩放、梯度随机舍入；MMLU-Pro 62.58 对 FP8 的 62.62。MXFP4 要多 36% 的 token 才追上。",
+      "reading": "papers/nvfp4.html",
+      "tldr": "NVIDIA 用 NVFP4（每 16 个 4 位数共用一个 FP8 缩放、外加张量级 FP32 缩放）把一个 12B 混合 Mamba-Transformer 训练了 10T token，配方是少数末端层留 BF16、Wgrad 输入做随机 Hadamard 变换、权重二维缩放、梯度随机舍入，损失与 FP8 基线相差 1–1.5%，下游任务大体持平。同样的配方下，开放标准 MXFP4 要多用 36% 的 token 才能追上 NVFP4。",
       "tags": ["数值", "FP4", "微缩放", "Blackwell"],
       "facts": {
         "problem": "把 GEMM 精度从 8 bit 再减半：E2M1 只有 15 个可表示值，离群值与梯度偏差会毁掉训练",
@@ -1862,7 +2108,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Kimi Team", "Yu Zhang", "Zongyu Lin", "Xingcheng Yao"],
       "org": "Moonshot AI",
       "date": "2025-10",
-      "venue": "arXiv 2510.26692；Kimi K3 arXiv 2607.24653",
+      "venue": "arXiv 技术报告（预印本）；Kimi K3 技术报告 arXiv 2607.24653",
       "arxiv": "2510.26692",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2510.26692" },
@@ -1870,7 +2116,8 @@ window.ATLAS_REGISTRY = {
         { "label": "HF", "url": "https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct" }
       ],
       "page": "legacy/tracks/ai-infra/20-kimi-linear.html",
-      "tldr": "KDA（Kimi Delta Attention）把 Gated DeltaNet 的标量遗忘门换成逐通道的对角门 Diag(α_t)，并把分块算法特化为受约束的 DPLR，比通用 DPLR 内核快约 2×。3 层 KDA : 1 层 MLA 混合，MLA 层不用位置编码。48B-A3B 在同配方下全面超过全 MLA：1M 上下文 KV 少 75%、解码吞吐最高 6×。2026-07 的 Kimi K3（2.8T-A104B）沿用 3:1 KDA + 门控 MLA，并加入 Attention Residuals。",
+      "reading": "papers/kimi-linear.html",
+      "tldr": "Kimi Linear 把 Gated DeltaNet 里“整个状态一起遗忘”的标量门改成“每个通道各自遗忘”的逐通道门（KDA），并为它设计了比通用 DPLR 快约一倍的分块内核；再按 3 层 KDA 配 1 层不加位置编码的 MLA 搭成 48B-A3B 模型。在同样 1.4T token 的训练下，它在多数短文本、长文本基准和数学强化学习上超过全 MLA 基线，1M 上下文时 KV 缓存少约 75%，单请求解码快约 2.2 倍、大批量下每 token 时间约为 1/6；2026 年的 Kimi K3 沿用了这套设计。",
       "tags": ["线性注意力", "混合架构", "NoPE", "KDA"],
       "facts": {
         "problem": "线性注意力的有限状态记忆不够精细；纯线性模型检索弱；全注意力 KV 随长度线性增长",
@@ -1891,7 +2138,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Yuhan Liu", "Yihua Cheng", "Jiayi Yao", "Yuwei An", "Xiaokun Chen", "Shaoting Feng", "Yuyang Huang", "Samuel Shen", "Rui Zhang", "Kuntai Du", "Junchen Jiang"],
       "org": "UChicago / TensorMesh 等（LMCache）；Stanford / NVIDIA 等（Strata）",
       "date": "2025-10",
-      "venue": "LMCache arXiv 2510.09665；Strata OSDI 2026",
+      "venue": "arXiv 预印本（LMCache）；Strata OSDI 2026",
       "arxiv": "2510.09665",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2510.09665" },
@@ -1899,7 +2146,8 @@ window.ATLAS_REGISTRY = {
         { "label": "LMCache", "url": "https://github.com/LMCache/LMCache" }
       ],
       "page": "legacy/tracks/ai-infra/21-kv-cache-tiering.html",
-      "tldr": "长上下文与多轮 / 智能体负载让可复用的 KV 远超显存，于是 KV 变成要分层管理的数据：GPU → CPU DRAM → 本地 SSD → 远端存储。LMCache 把 KV 按 256 token 分块、跨层打包、逐层流水加载，作为 vLLM / SGLang 的连接器同时服务前缀复用与 PD 分离：吞吐最高 15×。Strata（OSDI 2026）指出分页布局导致碎片化 I/O、调度器不感知加载延迟，用 GPU 辅助 I/O 与缓存感知调度，长上下文上比 vLLM + LMCache 最高快 5×、比 TensorRT-LLM 快 3.75×。",
+      "reading": "papers/lmcache.html",
+      "tldr": "长上下文、多轮对话和智能体负载让值得复用的 KV 缓存远超显存，LMCache 把它们从 vLLM / SGLang 里取出，存到 CPU 内存、磁盘和远端存储并在引擎之间传送，靠把小页拼成 256 token 的大块传输、让加载与逐层计算重叠，在作者的实验里同等首 token 延迟下吞吐最高提高十几倍。同期的 Strata（OSDI 2026）改用 GPU 线程直接搬运小页、让调度器把加载时间算进去，在长上下文上比当时的 vLLM + LMCache 吞吐最高再高 5 倍。",
       "tags": ["KV cache", "存储层级", "前缀复用", "调度"],
       "facts": {
         "problem": "命中的前缀 KV 放不下 GPU；重算长 prompt 昂贵；分页 KV 搬运时 I/O 碎片化、调度不感知加载延迟",
@@ -1920,14 +2168,15 @@ window.ATLAS_REGISTRY = {
       "authors": ["Ted Zadouri", "Markus Hoehnerbach", "Jay Shah", "Timmy Liu", "Vijay Thakkar", "Tri Dao"],
       "org": "Princeton / Meta / Colfax / NVIDIA / Together AI",
       "date": "2026-03",
-      "venue": "MLSys 2026",
+      "venue": "MLSys 2026（Oral）",
       "arxiv": "2603.05451",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2603.05451" },
         { "label": "Code", "url": "https://github.com/Dao-AILab/flash-attention" }
       ],
       "page": "legacy/tracks/ai-infra/22-flash-attention-4.html",
-      "tldr": "Blackwell（B200）把张量核吞吐翻倍到 8192 op/clk/SM，但共享内存带宽（128 B/clk/SM）和 exp 单元（16 op/clk/SM）原地不动，注意力的瓶颈从矩阵乘移到了 softmax 与数据搬运。FA4 用全异步 MMA + 张量内存（TMEM）重排流水线、两个 Q tile 乒乓；用多项式软件模拟 10–25% 的 exp2；只在行最大值涨幅超过 log₂256 时才重缩放；反向用 2-CTA MMA 减半 dQ 原子加。B200 BF16 前向最高 1613 TFLOPS（71%）。",
+      "reading": "papers/flashattention-4.html",
+      "tldr": "Blackwell（B200）把张量核吞吐翻了一倍，指数单元和共享内存带宽却没变，注意力的瓶颈因此从矩阵乘移到了 softmax 和数据搬运。FlashAttention-4 用张量内存重排前反向流水线，用 FMA 单元上的多项式分担一部分指数，只在行最大值涨幅超过 2^8 倍时才重缩放，并在反向用 2-CTA 矩阵乘减少共享内存流量；B200 上 BF16 前向最高 1613 TFLOPs/s（约 71% 峰值），这些技巧后来也被 cuDNN 吸收。",
       "tags": ["内核", "Blackwell", "TMEM", "CuTe-DSL"],
       "facts": {
         "problem": "硬件非对称扩展：MMA 翻倍而 SMEM 带宽与 exp 单元不变，softmax 与访存成为瓶颈",
@@ -1948,14 +2197,15 @@ window.ATLAS_REGISTRY = {
       "authors": ["DeepSeek-AI"],
       "org": "DeepSeek",
       "date": "2026-04",
-      "venue": "arXiv 2606.19348（2026-04-26 提交）；mHC arXiv 2512.24880",
+      "venue": "arXiv 技术报告（预印本）；mHC arXiv 2512.24880",
       "arxiv": "2606.19348",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2606.19348" },
         { "label": "mHC", "url": "https://arxiv.org/abs/2512.24880" }
       ],
       "page": "legacy/tracks/ai-infra/23-deepseek-v4.html",
-      "tldr": "V4-Pro（1.6T-A49B，61 层）与 V4-Flash（284B-A13B，43 层），原生 1M 上下文。架构上三件事：CSA（每 4 个 token 压成 1 条 KV 再用 DSA 取 top-k）与 HCA（每 128 个 token 压 1 条、稠密注意）交错；mHC 把残差流扩成 4 路、混合矩阵约束为双随机矩阵（Sinkhorn 20 次），解决超连接在 27B 上信号放大约 3000× 的不稳定；大部分参数改用 Muon。系统上有 MegaMoE 融合 EP 内核、TileLang、批不变的确定性内核、专家权重 FP4 QAT 与磁盘 KV 缓存。1M 上下文单 token FLOPs 为 V3.2 的 27%、KV 为 10%。",
+      "reading": "papers/deepseek-v4.html",
+      "tldr": "V4 让 KV 序列本身变短：CSA 把每 4 个 token 压成 1 条 KV 再用索引器挑 top-k，HCA 把每 128 个 token 压成 1 条后全看，两者交替并配 128 token 滑动窗口，报告估算 1M 上下文时 V4-Pro 的单 token 计算只有 V3.2 的 27%、KV 只有 10%。此外用双随机约束的 mHC 加宽残差流、用 Muon 训练，并配套 MegaMoE 融合内核、批不变内核、磁盘 KV 缓存和 FP4 量化感知训练。",
       "tags": ["MoE", "压缩注意力", "超连接", "Muon", "1M 上下文"],
       "facts": {
         "problem": "1M 上下文下的注意力 FLOPs 与 KV 存储；更宽残差流（HC）训练不稳定；万亿参数训练与部署效率",
@@ -3703,7 +3953,7 @@ window.ATLAS_REGISTRY = {
       "authors": ["Chanhyuk Lee", "Jaehoon Yoo", "Manan Agarwal", "Sheel Shah", "Jerry Huang", "Aditi Raghunathan", "Seunghoon Hong", "Nicholas M. Boffi", "Jinwoo Kim"],
       "date": "2026-02",
       "venue": "NeurIPS 2026（官方仓库标注）",
-      "org": "KAIST; Carnegie Mellon University",
+      "org": "KAIST / Carnegie Mellon University",
       "arxiv": "2602.16813",
       "links": [
         { "label": "arXiv", "url": "https://arxiv.org/abs/2602.16813" },
@@ -3774,7 +4024,7 @@ window.ATLAS_REGISTRY = {
       "full_title": "DreamOn: Diffusion Language Models For Code Infilling Beyond Fixed-size Canvas",
       "authors": ["Zirui Wu", "Lin Zheng", "Zhihui Xie", "Jiacheng Ye", "Jiahui Gao", "Shansan Gong", "Yansong Feng", "Zhenguo Li", "Wei Bi", "Guorui Zhou", "Lingpeng Kong"],
       "date": "2026-02",
-      "org": "The University of Hong Kong; Kuaishou Technology; Huawei Noah's Ark Lab; Peking University",
+      "org": "The University of Hong Kong / Kuaishou Technology / Huawei Noah's Ark Lab / Peking University",
       "venue": "ICLR 2026",
       "arxiv": "2602.01326",
       "links": [
@@ -5518,6 +5768,18 @@ window.ATLAS_REGISTRY = {
     { "from": "nsa", "to": "deepseek-sparse-attention", "label": "块级稀疏 → token 级稀疏" },
     { "from": "megatron", "to": "megascale", "label": "3D 并行 → 万卡生产训练" },
     { "from": "pd-disaggregation", "to": "mooncake", "label": "PD 分离 → 以 KVCache 为中心" },
+    { "from": "rl-systems", "to": "areal", "label": "同步 RL → 全异步 RL" },
+    { "from": "zero-fsdp", "to": "muon", "label": "ZeRO-1 切分 → 分布式 Muon" },
+    { "from": "muon", "to": "deepseek-v4", "label": "Muon 优化器被 V4 采用" },
+    { "from": "flash-attention", "to": "moba", "label": "分块注意力 → 按块路由" },
+    { "from": "flash-attention", "to": "xattention", "label": "IO 感知分块 → 块稀疏预填充" },
+    { "from": "deepseek-v3", "to": "dsv3-insights", "label": "V3 训练实践 → 硬件反思" },
+    { "from": "snapkv", "to": "kvzip", "label": "按问题压缩 → 与问题无关的压缩" },
+    { "from": "deepseek-v3", "to": "engram", "label": "MoE 条件计算 → 条件记忆" },
+    { "from": "nsa", "to": "minimax-sa", "label": "可训练稀疏注意力 → MiniMax 方案" },
+    { "from": "deepseek-sparse-attention", "to": "minimax-sa", "label": "索引器 + KL 对齐训练" },
+    { "from": "eagle", "to": "dspark", "label": "特征层草稿 → 半自回归草稿" },
+    { "from": "deepseek-v4", "to": "dsv41-flash", "label": "V4 → 极限 KV 压缩" },
     { "from": "flash-attention", "to": "flashinfer", "label": "从单算子到服务引擎" },
     { "from": "vllm", "to": "sglang", "label": "块级前缀共享 → 基数树" },
     { "from": "vllm", "to": "pd-disaggregation", "label": "单引擎 → 分池集群" },

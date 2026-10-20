@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kimi Linear / KDA 精读</title>
+<meta name="description" content="Kimi Linear 技术报告（Moonshot AI，2025-10）的逐节精读：从线性注意力、delta 规则和 Gated DeltaNet 讲起，解释逐通道门控的 KDA、受约束 DPLR 的分块算法、3:1 的 KDA–MLA 混合和 MLA 层不用位置编码；再看 1.4T token 同配方对照、1M 上下文的 KV 缓存与解码速度分别是在什么条件下测的；最后是 Kimi K3 如何把这套设计放大到 2.8T。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="kimi-linear">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · 技术报告（arXiv，2025-10）</div>
+  <h1>Kimi Linear：一种表达力强、效率又高的注意力架构</h1>
+  <p class="en-title">Kimi Linear: An Expressive, Efficient Attention Architecture</p>
+  <div class="paper-authors">Kimi Team：Yu Zhang<sup>1</sup>, Zongyu Lin<sup>*</sup>, Xingcheng Yao, Jiaxi Hu<sup>2</sup>, Fanqing Meng, Chengyin Liu, Xin Men, Songlin Yang<sup>#3</sup>, Zhiyuan Li, Wentao Li, Enzhe Lu, Weizhou Liu, Yanru Chen, Weixin Xu, Longhui Yu, Yejie Wang, Yu Fan, Longguang Zhong, Enming Yuan, Dehao Zhang, Yizhi Zhang, T.Y. Liu, Haiming Wang, Shengjun Fang, Weiran He, Shaowei Liu, Yiwei Li, Jianlin Su, Jiezhong Qiu<sup>4</sup>, Bo Pang, Junjie Yan, Zhejun Jiang, Weixiao Huang, Bohong Yin, Jiacheng You, Chu Wei, Zhengtao Wang, Chao Hong, Yutian Chen, Guanduo Chen, Yucheng Wang, Huabin Zheng, Feng Wang, Yibo Liu, Mengnan Dong, Zheng Zhang, Siyuan Pan, Wenhao Wu, Yuhao Wu, Longyu Guan, Jiawen Tao, Guohong Fu<sup>#1</sup>, Xinran Xu, Yuzhi Wang, Guokun Lai, Yuxin Wu, Xinyu Zhou, Zhilin Yang, Yulun Du</div>
+  <div class="paper-affil">项目在 Moonshot AI（月之暗面）完成　<sup>1</sup>Soochow University（苏州大学）　<sup>2</sup>The Hong Kong University of Science and Technology (Guangzhou)（香港科技大学（广州））　<sup>3</sup>Massachusetts Institute of Technology　<sup>4</sup>Hangzhou Institute of Medicine, CAS（中国科学院杭州医学研究所）　<sup>#</sup>外部合作者　<sup>*</sup>已不在团队　（首页只署名 Kimi Team；上面的名单抄自原文附录 A，按贡献大小排序，承担项目负责工作的成员排在最后）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2510.26692" target="_blank" rel="noopener">arXiv 2510.26692 ↗</a>
+    <a class="pill" href="https://arxiv.org/html/2510.26692v2" target="_blank" rel="noopener">技术报告 HTML（v2）↗</a>
+    <a class="pill" href="https://github.com/MoonshotAI/Kimi-Linear" target="_blank" rel="noopener">Code: MoonshotAI/Kimi-Linear ↗</a>
+    <a class="pill" href="https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda" target="_blank" rel="noopener">KDA 内核：fla/ops/kda ↗</a>
+    <a class="pill" href="https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct" target="_blank" rel="noopener">权重：Kimi-Linear-48B-A3B ↗</a>
+    <a class="pill" href="https://arxiv.org/abs/2607.24653" target="_blank" rel="noopener">后续：Kimi K3（arXiv 2607.24653）↗</a>
+    <a class="pill" href="../legacy/tracks/ai-infra/20-kimi-linear.html">结构拆解：架构图与简答题</a>
+  </div>
+  <div class="paper-stats" data-stats>
+    <div><b>1,618</b><span>GitHub star（MoonshotAI/Kimi-Linear，截至 2026-10-20）</span></div>
+    <div><b>5,953</b><span>GitHub star（fla-org/flash-linear-attention，KDA 内核所在库，截至 2026-10-20）</span></div>
+  </div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">GitHub star 为 2026-10-20 的快照。阅读状态、进度与收藏只保存在你的浏览器里。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按技术报告的章节顺序，用本站自己的话把整篇报告从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。原文采用 CC BY-NC-ND 许可，不允许转载改编原图，所以本页的图全部是本站自己画的示意图，或者是把原文报告的数字重新画成的简图，每张图都附有原图链接。标“推算”的数字是本站根据论文或公开配置算出来的；标“读自原图”的数字是从原文矢量图的坐标读出的近似值，不是论文正文给出的数字。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇报告解决什么问题</h3>
+<p>大模型正在从“回答一个问题”变成“完成一件任务”：读一个代码仓库、连续调用几百次工具、在强化学习里生成几万 token 的推理过程。这类工作的共同点是上下文很长，而且输出也很长。标准的 softmax 注意力在这里要付两笔账。第一笔是计算：处理一段长度为 \(T\) 的输入，注意力要让每个 token 和它前面的所有 token 两两打分，计算量随 \(T^2\) 增长。第二笔是内存：生成阶段每个请求都要保存所有历史 token 的 key 和 value（KV 缓存），它随 \(T\) 线性增长，而且每生成一个 token 都要把它从显存里完整读一遍。上下文到了百万 token，这两笔账都会压垮推理服务。</p>
+<p>线性注意力是另一条路：它把全部历史压缩进一个大小固定的矩阵“状态”，每生成一个 token 只更新、读取这个状态，成本与上下文长度无关。代价是固定大小的状态装不下所有细节，所以纯线性注意力模型在“从长文里精确找回某句话”这类任务上一直不如 softmax 注意力。业界的折中办法是混合：大部分层用线性注意力，少数层保留全注意力。这篇报告在这条路上做了两件事。第一，提出 <b>KDA（Kimi Delta Attention）</b>：在 Gated DeltaNet 的基础上，把“整个状态一起遗忘”的标量门改成“每个通道各自遗忘”的逐通道门，并为它设计了一套专门的分块并行算法，内核速度约为通用 DPLR 写法的 2 倍。第二，用 KDA 搭出 <b>Kimi Linear</b>：每 3 层 KDA 配 1 层 MLA 全注意力，MLA 层干脆不加位置编码，模型总参数 48B、每个 token 激活 3B。</p>
+<p>报告最有分量的结果是一组“同配方”对照：Kimi Linear、全 MLA 模型和用 Gated DeltaNet 混合的模型（GDN-H）用同样的结构规模、同样的 1.4T token、同样的训练流程训练，Kimi Linear 在大多数短文本、长文本基准上都最好（例如 MMLU-Pro 51.0 对 MLA 的 47.2，128K 长度的 RULER 84.3 对 81.3），在数学强化学习中也涨得更快。效率方面，KV 缓存最多少 75%；1M 上下文时，批大小为 1 的单 token 解码时间是 MLA 的约 1/2.2，允许更大批量时折算到每个 token 的时间是 MLA 的 1/6.3。后面会看到，这几个速度数字的测量条件各不相同，报告也没有写明硬件。团队开源了 KDA 内核、vLLM 实现，以及训练了 5.7T token、支持 1M 上下文的 48B-A3B 模型。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>线性注意力为什么可以写成一个“边读边学”的 RNN？delta 规则和门控分别解决了它的什么毛病？</li>
+  <li>KDA 和 Gated DeltaNet 只差一处：标量门变成逐通道门。为什么这一处改动需要重写分块算法，又为什么能比通用 DPLR 快一倍？</li>
+  <li>为什么混合比例选 3:1、为什么混合按层而不是按头、为什么 MLA 层可以不要位置编码？</li>
+  <li>“KV 少 75%”“解码快 6 倍”分别是在什么条件下得出的，哪些条件报告没有交代？</li>
+  <li>“同配方下全面超过全注意力”这个结论有多可靠，哪些基准上并没有超过？</li>
+  <li>2026 年的 Kimi K3 把这套设计放大到 2.8T 参数时，又改了什么？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#abstract" target="_blank" rel="noopener">英文原文·摘要 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S0.F1" target="_blank" rel="noopener">原文图 1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：为什么又回到线性注意力</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>智能体和强化学习让推理时的上下文和输出都变得很长，softmax 注意力的计算和 KV 缓存成了瓶颈。线性注意力能省掉这两笔开销，却长期在质量上落后。近几年哪些改进缩小了差距？为什么最后还是要和全注意力混合？这篇报告声称自己和以前的混合模型有什么不同？</div>
+
+<div class="note-pre"><b>先补一点背景：softmax 注意力在长上下文里的两笔开销。</b>
+<p>注意力让第 \(t\) 个 token 用自己的 query \(q_t\) 去和前面每个 token 的 key \(k_i\) 比相似度，经过 softmax 变成权重，再把对应的 value \(v_i\) 加权求和。这件事在推理的两个阶段代价不同。</p>
+<ul>
+  <li><b>预填充（prefill）</b>：一次性处理用户给的整段输入。长度为 \(T\) 时，每个 token 都要和它之前的所有 token 打分，总共约 \(T^2/2\) 对，所以计算量随 \(T^2\) 增长。输入从 128K 变成 1M（约 8 倍），这部分计算变成约 64 倍。</li>
+  <li><b>解码（decode）</b>：之后每一步只生成一个 token。为了不重复计算，系统把所有历史 token 的 key、value 存下来，这就是 KV 缓存（详见 <a href="vllm.html#n-2">vLLM 精读 §2</a>）。每生成一个 token，都要把整份 KV 缓存从显存读一遍。KV 缓存的大小随上下文长度线性增长，所以上下文越长，每一步读得越多、越慢；同时一张卡上能同时放下的请求也越少。</li>
+</ul>
+<p>线性注意力的做法是去掉 softmax，把“和历史逐个比较”改成“查一张固定大小的表”。这张表就是一个 \(d_k\times d_v\) 的矩阵状态，下一节会详细推导。它的好处是：预填充的计算量随 \(T\) 线性增长，解码每一步的读取量是常数，内存也是常数。</p>
+</div>
+
+<div class="dia">
+  <div class="dia-title">示意图：生成第 \(T+1\) 个 token 时，一层注意力要从显存里读多少东西</div>
+  <div class="dia-row"><span class="lbl">softmax，\(T\) = 4K</span><div class="dia-track"><span class="dia-seg kv" style="flex:0.4">KV</span><span class="dia-seg oth" style="flex:9.6"></span></div></div>
+  <div class="dia-row"><span class="lbl">softmax，\(T\) = 128K</span><div class="dia-track"><span class="dia-seg kv" style="flex:1.25">KV</span><span class="dia-seg oth" style="flex:8.75"></span></div></div>
+  <div class="dia-row"><span class="lbl">softmax，\(T\) = 1M</span><div class="dia-track"><span class="dia-seg kv" style="flex:10">全部历史的 KV，随 \(T\) 线性增长</span></div></div>
+  <div class="dia-row"><span class="lbl">线性注意力，任意 \(T\)</span><div class="dia-track"><span class="dia-seg cmp" style="flex:0.6">状态</span><span class="dia-seg oth" style="flex:9.4">固定大小的 \(d_k\times d_v\) 矩阵，与 \(T\) 无关</span></div></div>
+  <div class="dia-note">示意，条形长度只表达趋势（4K 和 128K 的条为了看得见被放大了，真实比例是 4K : 128K : 1M = 1 : 32 : 256）。代价在右边那一行：固定大小的状态是对全部历史的压缩，细节会丢。</div>
+</div>
+
+<p>线性注意力早在 2020 年就被提出，但很长一段时间里，即使在短文本上，它的语言建模质量也明显不如 softmax 注意力。报告认为差距是被两类改进缩小的：一类是<b>门控（或衰减）</b>，让状态能主动忘掉旧信息，代表作有 RetNet、Mamba2、GLA；另一类是 <b>delta 规则</b>，让状态在写入新信息前先擦掉同一位置的旧信息，代表作有 DeltaNet、Gated DeltaNet、RWKV-7。两者结合后，线性注意力在中等长度上已经接近 softmax 的水平。</p>
+<p>但有一个根本限制改不掉：状态大小固定，能记住的东西就有上限。需要在很长的上下文里精确找回某个细节时（比如在 100 万 token 的仓库里找某个函数的定义），纯线性模型在理论上就处于劣势。所以近两年的大模型多采用<b>混合架构</b>：大部分层用线性注意力，隔几层放一层全注意力，让全注意力负责精确检索。报告批评以往的混合模型要么规模有限，要么评测不够全面，于是给自己定了一个目标：在相同训练条件下，质量追平甚至超过全注意力，同时在速度和内存上都有实质收益。</p>
+<p>报告列出三项贡献：（1）KDA，一种改进了记忆管理和硬件效率的门控 delta 规则；（2）Kimi Linear 架构，KDA 与全注意力按 3:1 交替；（3）在 1.4T token 规模上做公平对照，覆盖短文本、长文本和强化学习三种场景，并开源内核、vLLM 集成和模型权重。报告还强调，这些组件可以直接替换现有的全注意力流水线，不需要改动缓存和调度接口。</p>
+<div class="note-warn"><b>读的时候容易误解的地方：</b>“for the first time outperforms full attention under fair comparisons”是报告自己的说法。“公平对照”在这里有具体含义：同样的模型规模、同样的数据和 token 数、同样的训练流程，基线也由同一团队训练。它并不意味着在所有基准上都领先（第 5 节会看到 MLA 在 LongBench v2、Frames 等几项上更好），也不意味着在其他规模、其他数据配方下结论一定成立。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 预备知识：线性注意力、delta 规则与 Gated DeltaNet</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KDA 是在一串前人工作上做的一处修改，不先把这串工作理清，后面的公式就看不懂。线性注意力的“矩阵状态”是怎么从普通注意力里推出来的？为什么可以把它看成一个“边读边学”的存储器？delta 规则相当于在优化什么，它比原始线性注意力好在哪？Gated DeltaNet 又加了什么？报告还在这一节交代了后面分块算法要用的记号。</div>
+
+<h4 id="n-2-1">2.1 记号：一个头的状态、分块和累积衰减</h4>
+<p>报告里所有公式都针对<b>一个注意力头</b>。第 \(t\) 个 token 的 query、key 是 \(d_k\) 维列向量 \(q_t,k_t\)，value 和输出是 \(d_v\) 维的 \(v_t,o_t\)。状态 \(\mathbf{S}_t\) 是一个 \(d_k\times d_v\) 的矩阵：<b>行对应 key 的维度，列对应 value 的维度</b>。读出用 \(o_t=\mathbf{S}_t^{\top}q_t\)。Kimi Linear 里 \(d_k=d_v=128\)，所以每个头的状态是 \(128\times128\) 个数。</p>
+<p>为了在 GPU 上并行，长度为 \(L\) 的序列会被切成 \(L/C\) 个<b>块</b>（chunk），每块 \(C\) 个 token（实现里 \(C=64\)）。报告用下标 \([t]\) 表示第 \(t\) 块：\(\mathbf{Q}_{[t]}\in\mathbb{R}^{C\times d}\) 是把块内 \(C\) 个 query 按行叠起来的矩阵，\(\square_{[t]}^{r}\) 是块内第 \(r\) 个元素，\(\mathbf{S}_{[t]}\) 是进入第 \(t\) 块时的状态（也就是上一块结束时的状态）。</p>
+<p>衰减相关的记号有三个。\(\alpha_t\) 是第 \(t\) 步的遗忘系数（KDA 里它是一个 \(d_k\) 维向量）。块内从第 \(i\) 步到第 \(j\) 步的<b>累积衰减</b>是逐步相乘：\(\gamma_{[t]}^{i\to j}=\prod_{k=i}^{j}\alpha_{[t]}^{k}\)，简写 \(\gamma_{[t]}^{r}=\gamma_{[t]}^{1\to r}\)。把块内每一步的 \(\gamma^{r}\) 按行叠起来，得到 \(C\times d_k\) 的矩阵 \(\boldsymbol{\Gamma}_{[t]}^{1\to C}\)。另外 \(\mathbf{M}\)（也写作 Tril）表示含对角线的下三角掩码，\(\mathbf{M}^{-}\)（StrictTril）表示不含对角线的下三角掩码，用来保证块内只看前面的 token。</p>
+
+<h4 id="n-2-2">2.2 线性注意力：一张边读边写的“联想记忆表”</h4>
+<div class="note-pre"><b>先补一点背景：去掉 softmax 之后发生了什么。</b>
+<p>普通注意力的输出是 \(o_t=\sum_{i\le t}\mathrm{softmax}_i(q_t^{\top}k_i)\,v_i\)。softmax 要先看到所有分数才能归一化，所以必须把每个 \(k_i\)、\(v_i\) 都留着。线性注意力把 softmax 去掉（或者换成一个特征映射），只保留打分 \(q_t^{\top}k_i\)：</p>
+<div class="formula">$$o_t=\sum_{i\le t}(q_t^{\top}k_i)\,v_i=\Big(\sum_{i\le t}k_i v_i^{\top}\Big)^{\!\top} q_t=\mathbf{S}_t^{\top}q_t,\qquad \mathbf{S}_t=\mathbf{S}_{t-1}+k_t v_t^{\top}$$</div>
+<p>关键在中间那一步：标量 \(q_t^{\top}k_i\) 可以挪到括号外面，矩阵乘法满足结合律，于是“先和每个历史 token 打分再加权”变成了“先把历史累加成一个矩阵，再用 query 读一次”。这个矩阵 \(\mathbf{S}_t\) 就是状态。它的大小只取决于 \(d_k\) 和 \(d_v\)，与已经读过多少 token 无关。每来一个新 token，只需加上一个外积 \(k_tv_t^{\top}\)。这就是“线性注意力是 RNN”的含义。</p>
+</div>
+<p>为什么说状态是一张“联想记忆表”？看一个最小的例子。设 \(d_k=d_v=2\)。第 1 个 token 的 \(k_1=(1,0)\)、\(v_1=(3,5)\)，第 2 个 token 的 \(k_2=(0,1)\)、\(v_2=(-1,2)\)。累加后</p>
+<div class="formula">$$\mathbf{S}_2=k_1v_1^{\top}+k_2v_2^{\top}=\begin{pmatrix}3&5\\-1&2\end{pmatrix}$$</div>
+<p>状态的第 1 行存的是 \(v_1\)，第 2 行存的是 \(v_2\)。用 \(q=(1,0)\) 去读，得到 \(\mathbf{S}_2^{\top}q=(3,5)=v_1\)：key 像地址，value 像内容，query 像“按地址取数”。这个比喻在快速权重（fast weight）文献里很常见：状态是每读一个 token 就改一次的“快权重”，而生成 \(q,k,v\) 的投影矩阵是训练时才更新的“慢权重”。</p>
+<p>问题出在写入上。假设第 3 个 token 又用地址 \(k_3=(1,0)\) 写入新内容 \(v_3=(7,0)\)。线性注意力只会累加，第 1 行变成 \((3,5)+(7,0)=(10,5)\)，再用 \((1,0)\) 去读，得到的是新旧内容的混合，既不是 3、5 也不是 7、0。地址总共只有 \(d_k=128\) 个相互正交的方向，序列一长，不同 token 的 key 必然重叠，写进去的东西互相干扰，而且越积越多。报告用优化的语言描述这个毛病：线性注意力的更新等价于对目标 \(\mathcal{L}_t(\mathbf{S})=-\langle \mathbf{S}^{\top}k_t,v_t\rangle\) 做一步梯度下降。这个目标只奖励“让读出值和 \(v_t\) 方向一致”，没有任何一项告诉状态应该擦掉什么，于是状态只增不减。</p>
+
+<h4 id="n-2-3">2.3 DeltaNet：写之前先擦掉旧值</h4>
+<p>DeltaNet 换了一个目标：希望用 \(k_t\) 读出来的值正好等于 \(v_t\)，也就是最小化重建误差 \(\mathcal{L}_t(\mathbf{S})=\tfrac12\|\mathbf{S}^{\top}k_t-v_t\|^2\)。对 \(\mathbf{S}\) 求梯度得 \(k_t(\mathbf{S}^{\top}k_t-v_t)^{\top}\)，以学习率 \(\beta_t\) 走一步：</p>
+<div class="formula">$$\mathbf{S}_t=\mathbf{S}_{t-1}-\beta_t k_t\big(\mathbf{S}_{t-1}^{\top}k_t-v_t\big)^{\top}=\big(\mathbf{I}-\beta_t k_tk_t^{\top}\big)\mathbf{S}_{t-1}+\beta_t k_tv_t^{\top}$$</div>
+<p>这就是经典的 <b>delta 规则</b>。它的含义可以分三步读：先用 \(k_t\) 读出当前存着的旧值 \(v^{\text{old}}=\mathbf{S}_{t-1}^{\top}k_t\)；算出旧值和新值的差 \(v^{\text{old}}-v_t\)；再沿着 \(k_t\) 这个地址把差值按比例 \(\beta_t\) 修正掉。当 \(\|k_t\|=1\) 时，修正后用 \(k_t\) 读出的值正好是 \((1-\beta_t)v^{\text{old}}+\beta_t v_t\)。\(\beta_t\in[0,1]\) 因此叫“写入强度”：\(\beta_t=1\) 时彻底覆盖，\(\beta_t=0\) 时什么都不写。</p>
+<div class="dia">
+  <div class="dia-title">示意图：delta 规则的一步更新 = 读出旧值、算差、沿同一地址改写</div>
+  <div class="dia-flow"><span class="dia-box">旧状态 \(\mathbf{S}_{t-1}\)</span><span class="dia-arrow">→</span><span class="dia-box enc">① 读出<small>\(v^{\text{old}}=\mathbf{S}_{t-1}^{\top}k_t\)</small></span><span class="dia-arrow">→</span><span class="dia-box pred">② 算差<small>\(v^{\text{old}}-v_t\)</small></span><span class="dia-arrow">→</span><span class="dia-box act">③ 沿 \(k_t\) 改写<small>\(\mathbf{S}\leftarrow\mathbf{S}-\beta_t k_t(v^{\text{old}}-v_t)^{\top}\)</small></span><span class="dia-arrow">→</span><span class="dia-box">新状态 \(\mathbf{S}_t\)</span></div>
+  <div class="dia-note">本站示意图。原始线性注意力只有第 ③ 步里的“加 \(k_tv_t^{\top}\)”，没有第 ① ② 步，所以它不会先擦掉同一地址上的旧内容。</div>
+</div>
+<div class="note-eg"><b>接着上面的例子算一遍：</b>\(\mathbf{S}_2\) 的第 1 行是 \((3,5)\)。第 3 个 token 用 \(k_3=(1,0)\) 写入 \(v_3=(7,0)\)。取 \(\beta=1\)：读出 \(v^{\text{old}}=(3,5)\)，差值 \((-4,5)\)，改写后第 1 行变成 \((3,5)-(-4,5)=(7,0)\)，第 2 行不动。再用 \((1,0)\) 读，得到的正是 \(v_3\)。取 \(\beta=0.5\)：第 1 行变成 \((5,2.5)\)，新旧各占一半。对照线性注意力的 \((10,5)\)，delta 规则做的是“覆盖”而不是“叠加”。</div>
+<p>矩阵 \(\mathbf{I}-\beta_tk_tk_t^{\top}\) 是一个秩 1 修正的单位阵，数值线性代数里叫广义 Householder 变换（\(\beta=2\) 且 \(\|k\|=1\) 时就是镜面反射）。很多个这种矩阵连乘起来，可以写成“单位阵减一个低秩矩阵”的紧凑形式（WY 表示），这是 DeltaNet 能在 GPU 上按块并行训练的数学基础，第 3 节会用到。</p>
+
+<h4 id="n-2-4">2.4 Gated DeltaNet：再加一个整体遗忘的门</h4>
+<p>delta 规则只会改写“当前地址”上的内容，没有被新 key 碰到的旧联想会一直留在状态里，哪怕它早就过时了。Gated DeltaNet（GDN）在更新前给整个状态乘一个遗忘系数 \(\alpha_t\in[0,1]\)：</p>
+<div class="formula">$$\mathbf{S}_t=\alpha_t\big(\mathbf{I}-\beta_tk_tk_t^{\top}\big)\mathbf{S}_{t-1}+\beta_tk_tv_t^{\top}$$</div>
+<p>\(\alpha_t\) 由当前输入算出，每个头每个 token 一个标量。\(\alpha_t\) 接近 1 时状态几乎原样保留；接近 0 时整张表被清空，相当于“换话题了，前面的不要了”。报告把它解释为对快权重做<b>权重衰减</b>，效果类似一个随数据变化的 L2 正则：它给每条记忆规定了寿命，减少旧内容对新内容的干扰。GDN 的完整精读见 <a href="gated-deltanet.html">Gated DeltaNet 精读</a>。</p>
+<p>报告在这里还埋了一个伏笔：如果把注意力分数写成“query 乘一串矩阵再乘 key”的形式，GDN 里那串矩阵 \(\alpha_j(\mathbf{I}-\beta_jk_jk_j^{\top})\) 就扮演了位置编码的角色。RoPE 里这串矩阵是固定的旋转矩阵，GDN 里它由数据决定、可以学习，而且不要求是正交矩阵。这个观点决定了后面 MLA 层敢不加位置编码，第 6 节会展开。</p>
+<div class="note-warn"><b>容易混淆的两点：</b>
+<ul>
+  <li>报告的状态是 \(d_k\times d_v\)、读出用 \(\mathbf{S}^{\top}q\)；有些文献（包括 GDN 原文的部分写法）把状态写成 \(d_v\times d_k\)、读出用 \(\mathbf{S}q\)。两者只差一个转置，比较公式时要先统一方向，否则会把“按 key 维衰减”看成“按 value 维衰减”。</li>
+  <li>\(\alpha_t\) 是“保留比例”，不是“遗忘比例”：\(\alpha_t=0.9\) 意味着保留 90%。代码里通常存的是它的对数 \(g_t=\log\alpha_t\le 0\)。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/11-gated-deltanet.html">Gated DeltaNet 结构拆解页</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 KDA：把“整张表一起忘”改成“每个通道各自忘”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KDA 相对 Gated DeltaNet 到底改了什么？改动只有一处，为什么值得单独提出一个新模块？这一处改动让 GPU 上的高效训练变难了，作者是怎么用分块算法、WY 表示和 UT 变换把它重新变成大块矩阵乘法的？和更一般的 DPLR 写法相比，KDA 的内核为什么能快一倍？这一节对应原文 §3、§3.1、§3.2，是整篇报告的技术核心。</div>
+
+<h4 id="n-3-0">3.0 一个公式的改动</h4>
+<p>KDA 的递推式是：</p>
+<div class="formula">$$\mathbf{S}_t=\big(\mathbf{I}-\beta_tk_tk_t^{\top}\big)\operatorname{Diag}(\alpha_t)\,\mathbf{S}_{t-1}+\beta_tk_tv_t^{\top},\qquad o_t=\mathbf{S}_t^{\top}q_t$$</div>
+<p>和 GDN 相比，唯一的区别是遗忘系数：GDN 的 \(\alpha_t\) 是一个标量，KDA 的 \(\alpha_t\) 是一个 \(d_k\) 维向量，放进对角矩阵 \(\operatorname{Diag}(\alpha_t)\)。对角矩阵左乘状态，相当于<b>把状态的第 \(i\) 行乘以 \(\alpha_{t,i}\)</b>。前面说过，状态的行对应 key 的维度，也就是“地址”的各个分量。所以 GDN 是“整张表按同一个比例褪色”，KDA 是“表的每一行按自己的比例褪色”。</p>
+<div class="dia">
+  <div class="dia-title">示意图：标量门（GDN）与逐通道门（KDA）对状态矩阵的作用</div>
+  <svg class="dg" viewBox="0 0 760 290" role="img" aria-label="GDN 用同一个系数衰减整个状态矩阵，KDA 对每一行用不同系数" style="--dg-min:600px">
+    <text x="128" y="22" class="t-c t-b">GDN：整张表乘同一个 αₜ</text>
+    <text x="518" y="22" class="t-c t-b">KDA：第 i 行乘自己的 αₜ,ᵢ</text>
+    <g>
+      <rect x="40" y="44" width="176" height="160" class="panel"/>
+      <g style="fill:var(--c-enc)">
+        <rect x="40" y="44" width="176" height="20" fill-opacity="0.45"/><rect x="40" y="64" width="176" height="20" fill-opacity="0.45"/>
+        <rect x="40" y="84" width="176" height="20" fill-opacity="0.45"/><rect x="40" y="104" width="176" height="20" fill-opacity="0.45"/>
+        <rect x="40" y="124" width="176" height="20" fill-opacity="0.45"/><rect x="40" y="144" width="176" height="20" fill-opacity="0.45"/>
+        <rect x="40" y="164" width="176" height="20" fill-opacity="0.45"/><rect x="40" y="184" width="176" height="20" fill-opacity="0.45"/>
+      </g>
+      <g style="stroke:var(--surface);stroke-width:1.5">
+        <line x1="40" y1="64" x2="216" y2="64"/><line x1="40" y1="84" x2="216" y2="84"/><line x1="40" y1="104" x2="216" y2="104"/><line x1="40" y1="124" x2="216" y2="124"/><line x1="40" y1="144" x2="216" y2="144"/><line x1="40" y1="164" x2="216" y2="164"/><line x1="40" y1="184" x2="216" y2="184"/>
+        <line x1="62" y1="44" x2="62" y2="204"/><line x1="84" y1="44" x2="84" y2="204"/><line x1="106" y1="44" x2="106" y2="204"/><line x1="128" y1="44" x2="128" y2="204"/><line x1="150" y1="44" x2="150" y2="204"/><line x1="172" y1="44" x2="172" y2="204"/><line x1="194" y1="44" x2="194" y2="204"/>
+      </g>
+      <text x="236" y="124" class="t-sm">× 0.7</text>
+      <text x="236" y="140" class="t-xs">所有行</text>
+      <text x="128" y="222" class="t-c t-sm">列 = value 维（dᵥ = 128）</text>
+      <text x="24" y="124" class="t-c t-sm" transform="rotate(-90 24 124)">行 = key 维（dₖ = 128）</text>
+      <text x="128" y="248" class="t-c t-xs">所有记忆按同一速度褪色：要么一起留，要么一起忘</text>
+    </g>
+    <g>
+      <rect x="430" y="44" width="176" height="160" class="panel"/>
+      <g style="fill:var(--c-enc)">
+        <rect x="430" y="44" width="176" height="20" fill-opacity="0.9"/><rect x="430" y="64" width="176" height="20" fill-opacity="0.8"/>
+        <rect x="430" y="84" width="176" height="20" fill-opacity="0.25"/><rect x="430" y="104" width="176" height="20" fill-opacity="0.85"/>
+        <rect x="430" y="124" width="176" height="20" fill-opacity="0.08"/><rect x="430" y="144" width="176" height="20" fill-opacity="0.6"/>
+        <rect x="430" y="164" width="176" height="20" fill-opacity="0.4"/><rect x="430" y="184" width="176" height="20" fill-opacity="0.9"/>
+      </g>
+      <g style="stroke:var(--surface);stroke-width:1.5">
+        <line x1="430" y1="64" x2="606" y2="64"/><line x1="430" y1="84" x2="606" y2="84"/><line x1="430" y1="104" x2="606" y2="104"/><line x1="430" y1="124" x2="606" y2="124"/><line x1="430" y1="144" x2="606" y2="144"/><line x1="430" y1="164" x2="606" y2="164"/><line x1="430" y1="184" x2="606" y2="184"/>
+        <line x1="452" y1="44" x2="452" y2="204"/><line x1="474" y1="44" x2="474" y2="204"/><line x1="496" y1="44" x2="496" y2="204"/><line x1="518" y1="44" x2="518" y2="204"/><line x1="540" y1="44" x2="540" y2="204"/><line x1="562" y1="44" x2="562" y2="204"/><line x1="584" y1="44" x2="584" y2="204"/>
+      </g>
+      <text x="616" y="54" class="t-xs">× 0.99 几乎不忘</text>
+      <text x="616" y="94" class="t-xs">× 0.40 很快淡出</text>
+      <text x="616" y="134" class="t-xs">× 0.05 几乎清空</text>
+      <text x="616" y="194" class="t-xs">× 0.99 长期保留</text>
+      <text x="518" y="222" class="t-c t-sm">每一行的保留比例由当前 token 决定</text>
+      <text x="518" y="248" class="t-c t-xs">有的通道存长期信息，有的通道只存最近几个 token</text>
+    </g>
+    <text x="380" y="276" class="t-c t-xs">衰减之后，两者都再做同样的 delta 更新：沿 kₜ 擦掉旧值、写入 βₜkₜvₜᵀ</text>
+  </svg>
+  <div class="dia-note">本站示意图，颜色深浅表示衰减后这一行的记忆还剩多少，数值是举例。原文没有对应的图；递推式见 <a href="https://arxiv.org/html/2510.26692v2#S3.E1" target="_blank" rel="noopener">原文式 (1) ↗</a>。</div>
+</div>
+<p>为什么要这么细？报告给了两层理由。第一层是记忆管理：一个头的 128 个 key 通道里，有的可能用来记“这段对话的主题”，需要几千个 token 都不忘；有的可能用来记“上一个括号有没有闭合”，几个 token 之后就该清掉。标量门只能在两者之间取一个折中，逐通道门可以各取所需。第二层是位置感知（第 6 节详述）：如果把衰减看成一种位置编码，RoPE 之所以好用，是因为它给每一对维度分配了不同的旋转频率，相当于同时提供从短到长各种尺度的“距离刻度”；GDN 的标量衰减只有一种刻度，KDA 的逐通道衰减则恢复了这种“每个维度一种尺度”的多样性。</p>
+<p>KDA 并不是第一个用逐通道衰减的模型。GLA（门控线性注意力）早就用 \(\operatorname{Diag}(\alpha_t)\)，但它没有 delta 规则，写入只能叠加。所以可以把 KDA 理解为 <b>GLA 的细粒度遗忘 + GDN 的 delta 改写</b>。报告附录的表 7 还给了一个统一视角：GDN 和 KDA 都相当于“先衰减得到 \(\tilde{\mathbf{S}}_{t-1}\)，再在 \(\tilde{\mathbf{S}}_{t-1}\) 上对重建误差 \(\tfrac{\beta_t}{2}\|\tilde{\mathbf{S}}_{t-1}^{\top}k_t-v_t\|^2\) 做一步随机梯度下降”，两者只差衰减是标量还是逐通道。</p>
+<p>注意公式里衰减和 delta 改写的顺序：KDA 是<b>先衰减、再改写</b>（\(\operatorname{Diag}(\alpha_t)\) 写在 \(\mathbf{I}-\beta_tk_tk_t^{\top}\) 的右边，先作用于 \(\mathbf{S}_{t-1}\)）。对 GDN 来说顺序无所谓，因为标量和任何矩阵都可交换；对 KDA 来说对角矩阵和 \(k_tk_t^{\top}\) 一般不可交换，顺序不同就是两个不同的模型。这个顺序也正是下面分块算法能简化的前提。</p>
+
+<h4 id="n-3-1">3.1 硬件友好的分块算法</h4>
+<div class="note-pre"><b>先补一点背景：同一个递推，三种算法。</b>
+<p>线性注意力类模型在数学上是 RNN，但在 GPU 上训练时有三种算法可选，它们算出的结果相同，代价不同：</p>
+<ul>
+  <li><b>逐步递推</b>：严格按 token 顺序，一步一步更新状态。每一步只有矩阵乘向量这样的小运算，而且后一步必须等前一步，序列有多长就要串行多少步。GPU 上负责矩阵乘法的 Tensor Core 吃不饱，训练很慢。但生成阶段本来就是一次一个 token，所以解码用的就是这种形式。</li>
+  <li><b>完全并行</b>：像普通注意力那样，一次算出 \(T\times T\) 的“谁影响谁”矩阵。全是大矩阵乘法，但计算量随 \(T^2\) 增长，失去了线性注意力的意义。</li>
+  <li><b>分块（chunkwise）</b>：把序列切成长度 \(C\) 的块。块内用完全并行的方式算（\(C\times C\) 的小矩阵，适合 Tensor Core）；块与块之间只传递一个状态矩阵，按块递推。串行步数从 \(T\) 降到 \(T/C\)，总计算量仍随 \(T\) 线性增长。现代线性注意力的训练和预填充几乎都用这种形式。</li>
+</ul>
+<p>对原始线性注意力，分块很容易：块内的贡献就是一个带因果掩码的 \(\mathbf{Q}\mathbf{K}^{\top}\)。对 delta 规则，难点在于每一步的转移矩阵 \(\mathbf{I}-\beta k k^{\top}\) 都不同，块内要把 64 个这样的 \(d_k\times d_k\) 矩阵乘起来。直接乘既慢又占内存，需要一个数学技巧把它变成小矩阵运算。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：分块计算的三步（以 256 个 token、块长 \(C=64\) 为例）</div>
+  <svg class="dg" viewBox="0 0 760 296" role="img" aria-label="序列切成四块，块内并行计算下三角矩阵，块间串行传递状态" style="--dg-min:620px">
+    <text x="380" y="16" class="t-c t-sm">① 各块同时算（可并行）：块内 64×64 的矩阵运算，UT 变换得到 W、U</text>
+    <g class="data">
+      <rect x="40" y="34" width="150" height="36" rx="6" class="box"/><text x="115" y="52" class="t-c">块 0：token 1–64</text>
+      <rect x="220" y="34" width="150" height="36" rx="6" class="box"/><text x="295" y="52" class="t-c">块 1：65–128</text>
+      <rect x="400" y="34" width="150" height="36" rx="6" class="box"/><text x="475" y="52" class="t-c">块 2：129–192</text>
+      <rect x="580" y="34" width="150" height="36" rx="6" class="box"/><text x="655" y="52" class="t-c">块 3：193–256</text>
+    </g>
+    <path class="edge no-head" d="M115,70 L115,88"/><path class="edge no-head" d="M295,70 L295,88"/><path class="edge no-head" d="M475,70 L475,88"/><path class="edge no-head" d="M655,70 L655,88"/>
+    <g class="enc">
+      <path d="M85,90 L85,150 L145,150 Z" class="box"/><path d="M265,90 L265,150 L325,150 Z" class="box"/>
+      <path d="M445,90 L445,150 L505,150 Z" class="box"/><path d="M625,90 L625,150 L685,150 Z" class="box"/>
+    </g>
+    <text x="115" y="166" class="t-c t-xs">64×64 下三角</text><text x="295" y="166" class="t-c t-xs">64×64 下三角</text><text x="475" y="166" class="t-c t-xs">64×64 下三角</text><text x="655" y="166" class="t-c t-xs">64×64 下三角</text>
+    <g class="pred">
+      <rect x="10" y="196" width="52" height="30" rx="6" class="box"/><text x="36" y="211" class="t-c t-sm">S[0]</text>
+      <rect x="190" y="196" width="52" height="30" rx="6" class="box"/><text x="216" y="211" class="t-c t-sm">S[1]</text>
+      <rect x="370" y="196" width="52" height="30" rx="6" class="box"/><text x="396" y="211" class="t-c t-sm">S[2]</text>
+      <rect x="550" y="196" width="52" height="30" rx="6" class="box"/><text x="576" y="211" class="t-c t-sm">S[3]</text>
+      <rect x="700" y="196" width="52" height="30" rx="6" class="box"/><text x="726" y="211" class="t-c t-sm">S[4]</text>
+    </g>
+    <path class="edge pred" d="M62,211 L188,211"/><path class="edge pred" d="M242,211 L368,211"/><path class="edge pred" d="M422,211 L548,211"/><path class="edge pred" d="M602,211 L698,211"/>
+    <path class="edge idx" d="M115,172 L125,208"/><path class="edge idx" d="M295,172 L305,208"/><path class="edge idx" d="M475,172 L485,208"/><path class="edge idx" d="M655,172 L650,208"/>
+    <text x="380" y="252" class="t-c t-sm">② 块间递推：只串行 4 步（而不是 256 步），每步是 128×128 的矩阵运算</text>
+    <text x="380" y="278" class="t-c t-sm">③ 输出 = 来自上一块状态的部分（块间） + 本块内部的部分（块内下三角矩阵）</text>
+  </svg>
+  <div class="dia-note">本站示意图。蓝色三角表示块内的 \(C\times C\) 下三角矩阵运算，可以在所有块上同时进行；橙色方框是在块与块之间传递的 \(d_k\times d_v\) 状态，必须按顺序算。对应 <a href="https://arxiv.org/html/2510.26692v2#S3.SS1" target="_blank" rel="noopener">原文 §3.1 ↗</a> 的式 (2)–(9)。</div>
+</div>
+<p><b>第一步：把块内的递推展开。</b>设进入某一块时的状态是 \(\mathbf{S}^0\)，块内第 \(r\) 步之后的状态可以写成两部分之和（原文式 2）：</p>
+<div class="formula">$$\mathbf{S}^{r}=\underbrace{\prod_{i=1}^{r}\big(\mathbf{I}-\beta^{i}k^{i}k^{i\top}\big)\operatorname{Diag}(\alpha^{i})}_{\mathbf{P}^{r}:\ \text{旧状态经过 }r\text{ 次转移}}\ \mathbf{S}^{0}\;+\;\underbrace{\sum_{i=1}^{r}\Big(\prod_{j=i+1}^{r}\big(\mathbf{I}-\beta^{j}k^{j}k^{j\top}\big)\operatorname{Diag}(\alpha^{j})\Big)\beta^{i}k^{i}v^{i\top}}_{\mathbf{H}^{r}:\ \text{块内 }r\text{ 次写入各自再经过后续转移}}$$</div>
+<p>（这里省略了块编号下标 \([t]\)。）\(\mathbf{P}^r\) 是 \(r\) 个 \(d_k\times d_k\) 矩阵的连乘，直接算代价很大。</p>
+<p><b>第二步：WY 表示，把连乘压缩成“对角阵减若干个秩 1 项”。</b>原文式 (3)–(5) 证明了（附录 B 用归纳法）：</p>
+<div class="formula">$$\mathbf{P}^{r}=\operatorname{Diag}(\gamma^{r})-\sum_{i=1}^{r}\operatorname{Diag}(\gamma^{i\to r})\,k^{i}w^{i\top},\qquad \mathbf{H}^{r}=\sum_{i=1}^{r}\operatorname{Diag}(\gamma^{i\to r})\,k^{i}u^{i\top}$$</div>
+<p>意思是：\(r\) 次“衰减 + 秩 1 擦除”连乘起来，等于“纯衰减”减去 \(r\) 个秩 1 修正项，每个修正项由一个 key \(k^i\) 和一个辅助向量 \(w^i\) 决定。于是不需要存 \(r\) 个大矩阵，只需要 \(r\) 个 \(d_k\) 维向量 \(w^i\) 和 \(r\) 个 \(d_v\) 维向量 \(u^i\)。它们满足一个递推：\(w^r\) 等于 \(\beta^r\) 乘以“衰减过的 \(k^r\) 减去前面各个 \(w^i\) 的加权和”，权重是 \(k^{i\top}\operatorname{Diag}(\gamma^{i\to r})k^{r}\)；\(u^r\) 的形式相同，只是把 \(k^r\) 换成 \(v^r\)。这里的权重都是标量，块内总共只有 \(C\times C\) 个。报告说这里沿用了 Comba 的写法，可以省掉后续一次额外的矩阵求逆。</p>
+<p><b>第三步：UT 变换，把向量递推变成一次三角矩阵求逆。</b>上面的递推仍然是一个一个算的。UT 变换把它整体写成矩阵形式（原文式 6–7）：</p>
+<div class="formula">$$\mathbf{M}=\Big(\mathbf{I}+\operatorname{StrictTril}\big(\operatorname{Diag}(\beta)\,(\boldsymbol{\Gamma}\odot\mathbf{K})\,(\mathbf{K}/\boldsymbol{\Gamma})^{\top}\big)\Big)^{-1}\operatorname{Diag}(\beta),\qquad \mathbf{W}=\mathbf{M}(\boldsymbol{\Gamma}\odot\mathbf{K}),\quad \mathbf{U}=\mathbf{M}\mathbf{V}$$</div>
+<p>括号里是一个 \(C\times C\) 的单位下三角矩阵，它的逆可以用高斯消元里的前代法逐行求出，代价是 \(C^2\) 量级的小运算；求出 \(\mathbf{M}\) 之后，\(\mathbf{W}\)、\(\mathbf{U}\) 都只是一次矩阵乘法。报告强调这一步的目的是减少“非矩阵乘法”的运算，因为 GPU 上非矩阵乘法的吞吐比 Tensor Core 低一个数量级以上。</p>
+<p><b>第四步：块间更新状态，块内算输出。</b>有了 \(\mathbf{W}\)、\(\mathbf{U}\)，状态按块递推（原文式 8），输出分两部分（原文式 9）：</p>
+<div class="formula">$$\mathbf{S}_{[t+1]}=\operatorname{Diag}(\gamma^{C})\,\mathbf{S}_{[t]}+(\boldsymbol{\Gamma}^{i\to C}\odot\mathbf{K})^{\top}\big(\mathbf{U}-\mathbf{W}\mathbf{S}_{[t]}\big)$$</div>
+<div class="formula">$$\mathbf{O}_{[t]}=\underbrace{(\boldsymbol{\Gamma}\odot\mathbf{Q})\,\mathbf{S}_{[t]}}_{\text{块间：读上一块留下的状态}}+\underbrace{\operatorname{Tril}\big((\boldsymbol{\Gamma}\odot\mathbf{Q})(\mathbf{K}/\boldsymbol{\Gamma})^{\top}\big)}_{\text{块内：带衰减的因果注意力矩阵}}\underbrace{\big(\mathbf{U}-\mathbf{W}\mathbf{S}_{[t]}\big)}_{\text{“伪 value”}}$$</div>
+<p>最值得理解的是“伪 value” \(\mathbf{U}-\mathbf{W}\mathbf{S}_{[t]}\)。delta 规则写入的不是 \(v\) 本身，而是“\(v\) 减去这个地址上已经存着的东西”，而“已经存着的东西”取决于进入这一块时的状态 \(\mathbf{S}_{[t]}\)。\(\mathbf{U}-\mathbf{W}\mathbf{S}_{[t]}\) 恰好把每个 token 的 value 修正成了“考虑到旧状态之后真正要写进去的量”。一旦换成伪 value，块内的计算就和普通的门控线性注意力（GLA）完全一样：一个带衰减的下三角注意力矩阵乘以 value。这就是 delta 规则能分块并行的根本原因。</p>
+<p><b>剩下的麻烦：除以累积衰减。</b>式 (9) 里的 \(\mathbf{K}/\boldsymbol{\Gamma}\) 要除以从块首到当前位置的累积衰减。累积衰减是很多个小于 1 的数相乘，块内 64 步下来可能非常小：假如某个通道每步保留 0.5，64 步后是 \(0.5^{64}\approx5.4\times10^{-20}\)（推算），它的倒数约 \(1.8\times10^{19}\)，远超 FP16 的上限 65504，BF16 虽然表示范围够，但有效数字只有 8 位左右，乘回去时误差会被放大。标量衰减（GDN）可以把这个因子留在 \(C\times C\) 的分数矩阵里统一处理；逐通道衰减的因子挂在 \(d_k\) 个通道上，躲不开。GLA 的办法是在对数域里算相对衰减，并在块内再切一层小块（二级分块）、用全精度计算。Kimi K3 的报告补充说明了 Kimi Linear 的具体做法：每个 64 token 的块再分成 16 token 的小块，非对角的小块可以直接用 Tensor Core 做矩阵乘法，对角线上的小块则需要逐个位置对显式计算，这部分是块内的主要瓶颈（K3 对此的改进见文末）。</p>
+<div class="note-warn"><b>容易误解的地方：</b>分块算法是<b>精确</b>的代数变形，不是近似，它和逐步递推算出的结果在数学上相同（只有浮点误差的区别）。所以“训练用分块、解码用逐步递推”不会造成训练与推理不一致。块长 \(C\) 是一个工程折中：块越长，块内矩阵越大、越适合 Tensor Core，但块内 \(C^2\) 的开销和累积衰减的数值范围也随之变大。</div>
+
+<h4 id="n-3-2">3.2 效率分析：KDA 是一种受约束的 DPLR</h4>
+<div class="note-pre"><b>先补一点背景：DPLR 转移矩阵。</b>
+<p>把各种线性注意力写成 \(\mathbf{S}_t=\mathbf{A}_t\mathbf{S}_{t-1}+(\text{写入项})\) 的形式，差别都在转移矩阵 \(\mathbf{A}_t\)。一类表达力很强、又还算好算的选择是“对角加低秩”（Diagonal-Plus-Low-Rank，DPLR）：\(\mathbf{A}_t=\mathbf{D}_t-a_tb_t^{\top}\)，即一个对角矩阵（逐通道衰减）减去一个秩 1 矩阵（某种擦除）。早期的状态空间模型 S4 用的是固定的 DPLR 矩阵，RWKV-7 用的是随输入变化的一般 DPLR，其中 \(a_t\)、\(b_t\) 是两个独立生成的向量。</p>
+</div>
+<p>把 KDA 的转移矩阵展开：\((\mathbf{I}-\beta_tk_tk_t^{\top})\operatorname{Diag}(\alpha_t)=\operatorname{Diag}(\alpha_t)-\beta_tk_t\,(k_t\odot\alpha_t)^{\top}\)。它正好是 DPLR 的形式，对应关系是</p>
+<div class="formula">$$\mathbf{D}=\operatorname{Diag}(\alpha_t),\qquad a_t=\beta_tk_t,\qquad b_t=k_t\odot\alpha_t$$</div>
+<p>也就是说，KDA 是一个<b>受约束的 DPLR</b>：两个低秩向量不再独立，都由同一个 key 决定，而且 \(b_t\) 里的衰减和对角部分共用同一个 \(\alpha_t\)。这个约束有两个后果。一是表达力上它和经典 delta 规则保持一致（“擦除的方向”就是“写入的方向”）；二是计算上它省了很多事。在一般 DPLR 的分块算法里，\(a\)、\(b\) 两个向量都要和逐通道衰减交互，块内需要用二级分块精确计算四个 \(C\times C\) 矩阵；把 \(a\)、\(b\) 都绑到 \(k\) 上之后，只剩两个，而且在块间更新和输出阶段还能再省掉大约三次矩阵乘法（逐行对照见第 6 节）。报告的结论是 KDA 的算子效率比一般 DPLR 提高约 100%。</p>
+<div class="dia">
+  <div class="dia-title">简图：KDA 与通用 DPLR 分块内核的耗时（批大小 1，16 个头）</div>
+  <svg class="dg" viewBox="0 0 640 310" role="img" aria-label="输入长度从 2K 到 64K，DPLR 内核耗时约为 KDA 的两倍" style="--dg-min:520px">
+    <line x1="80" y1="250" x2="560" y2="250" class="axis"/><line x1="80" y1="250" x2="80" y2="40" class="axis"/>
+    <line x1="80" y1="200" x2="560" y2="200" class="grid-ln"/><line x1="80" y1="150" x2="560" y2="150" class="grid-ln"/><line x1="80" y1="100" x2="560" y2="100" class="grid-ln"/><line x1="80" y1="50" x2="560" y2="50" class="grid-ln"/>
+    <text x="70" y="250" class="t-r t-xs">0</text><text x="70" y="200" class="t-r t-xs">16</text><text x="70" y="150" class="t-r t-xs">32</text><text x="70" y="100" class="t-r t-xs">48</text><text x="70" y="50" class="t-r t-xs">64</text>
+    <text x="100" y="268" class="t-c t-xs">2K</text><text x="180" y="268" class="t-c t-xs">4K</text><text x="260" y="268" class="t-c t-xs">8K</text><text x="340" y="268" class="t-c t-xs">16K</text><text x="420" y="268" class="t-c t-xs">32K</text><text x="500" y="268" class="t-c t-xs">64K</text>
+    <text x="320" y="294" class="t-c t-sm">输入长度（横轴按 2 倍间隔）</text>
+    <text x="26" y="150" class="t-c t-sm" transform="rotate(-90 26 150)">内核耗时（ms）</text>
+    <polyline points="100,243.7 180,237.8 260,226.4 340,203.4 420,157.4 500,64.9" style="fill:none;stroke:var(--c-pred);stroke-width:2.4"/>
+    <polyline points="100,244.7 180,243.7 260,237.9 340,226.3 420,203.7 500,156.8" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+    <g style="fill:var(--c-pred)"><circle cx="100" cy="243.7" r="3.5"/><circle cx="180" cy="237.8" r="3.5"/><circle cx="260" cy="226.4" r="3.5"/><circle cx="340" cy="203.4" r="3.5"/><circle cx="420" cy="157.4" r="3.5"/><circle cx="500" cy="64.9" r="3.5"/></g>
+    <g style="fill:var(--c-enc)"><circle cx="100" cy="244.7" r="3.5"/><circle cx="180" cy="243.7" r="3.5"/><circle cx="260" cy="237.9" r="3.5"/><circle cx="340" cy="226.3" r="3.5"/><circle cx="420" cy="203.7" r="3.5"/><circle cx="500" cy="156.8" r="3.5"/></g>
+    <text x="510" y="62" class="t-sm" style="fill:var(--c-pred)">通用 DPLR ≈ 59 ms</text>
+    <text x="510" y="156" class="t-sm" style="fill:var(--c-enc)">KDA ≈ 30 ms</text>
+    <text x="512" y="110" class="t-xs">64K 时相差约 2.0×</text>
+  </svg>
+  <div class="dia-note">数值读自 <a href="https://arxiv.org/html/2510.26692v2#S3.F2" target="_blank" rel="noopener">原文图 2 ↗</a> 的矢量坐标（约值）：DPLR 2.0 / 3.9 / 7.6 / 14.9 / 29.6 / 59.2 ms，KDA 1.7 / 2.0 / 3.9 / 7.6 / 14.8 / 29.8 ms。两条线都随长度线性增长（横轴是对数刻度，所以看起来是上翘的）；除 2K 外，比值都在 1.9–2.0 倍。</div>
+</div>
+<p><b>怎么看这张图：</b>横轴是输入长度，纵轴是一次内核调用的耗时。橙线是通用 DPLR 的分块内核，蓝线是 KDA。两条线的形状相同，只是 KDA 整体低一半，说明省下来的是每个块的固定工作量，而不是改变了复杂度。最短的 2K 处差距只有约 1.2 倍，因为块少的时候内核启动等固定开销占比大。报告据此总结：在 64K 以内，KDA 内核速度接近 DPLR 的 2 倍。</p>
+<div class="note-warn"><b>这张图没有交代的条件：</b>GPU 型号、头维度（推测为 128）、是只测前向还是前向加反向、DPLR 基线用的是哪个实现（可能是 fla 库里的通用 DPLR 内核，报告没有写明），这些都没有说明。它是<b>单个算子</b>的对比，不是端到端训练速度。另外，报告说 KDA 在表达力上“与一般 DPLR 一致”，严格说并不准确：KDA 把 \(a\)、\(b\) 绑定到同一个 key 上，是 DPLR 的一个子集；它换来的是速度和与 delta 规则的一致性，而不是更强的表达力。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S3.SS1" target="_blank" rel="noopener">§3.1 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S3.SS2" target="_blank" rel="noopener">§3.2 ↗</a> · 相关：<a href="flashattention.html">FlashAttention 精读</a>（为什么 GPU 上要尽量把计算变成大块矩阵乘法）</p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 模型架构：KDA 层长什么样，怎么和 MLA 混在一起</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>一个完整的 KDA 层除了上一节的递推，还有哪些部件（短卷积、归一化、门）？KDA 层和全注意力层按什么比例、以什么方式混合？全注意力层为什么选 MLA，又为什么可以不要位置编码？最后用公开的模型配置算一算，1M 上下文时 KV 缓存到底能省多少。</div>
+<div class="note-pre"><b>先补一点背景：MoE 骨干和 Moonlight。</b>
+<p>Kimi Linear 是一个混合专家（MoE）模型：每层的前馈网络被拆成很多个“专家”小网络，一个路由器为每个 token 只挑其中几个来算。这样总参数可以很大（存知识），每个 token 实际用到的参数却很少（省计算）。MoE 和 MLA 的细节见 <a href="deepseek-v3.html#n-2">DeepSeek-V3 精读 §2.1</a>。报告说骨干结构沿用 Moonlight，那是 Moonshot 用 Muon 优化器训练的 16B 总参、3B 激活的 MoE 模型（见 <a href="muon.html">Muon 精读</a>）。Kimi Linear 主要的不同是把 MoE 的稀疏度提高到 32：256 个专家里每个 token 激活 8 个，总参数 48B，激活参数仍约 3B；第一层用普通的稠密前馈网络，以求训练稳定。</p>
+</div>
+
+<h4 id="n-4-1">4.1 一个 KDA 层的完整计算</h4>
+<p>对第 \(h\) 个头，输入向量 \(x_t\) 经过下面几路投影（原文 §4 的公式）：</p>
+<div class="formula">$$q_t^h,\;k_t^h=\operatorname{L2Norm}\big(\operatorname{Swish}(\operatorname{ShortConv}(\mathbf{W}_{q/k}^h x_t))\big),\qquad v_t^h=\operatorname{Swish}\big(\operatorname{ShortConv}(\mathbf{W}_v^h x_t)\big)$$</div>
+<div class="formula">$$\alpha_t^h=f\big(\mathbf{W}_{\alpha}^{\uparrow}\mathbf{W}_{\alpha}^{\downarrow}x_t\big)\in[0,1]^{d_k},\qquad \beta_t^h=\operatorname{Sigmoid}(\mathbf{W}_{\beta}^h x_t)\in[0,1]$$</div>
+<p>逐项解释，每一项都有它的理由：</p>
+<ul>
+  <li><b>短卷积（ShortConv）</b>：沿序列方向的逐通道因果卷积，核长很小（公开配置里是 4），也就是让每个通道和前面 3 个 token 的同一通道做一次加权混合。它几乎不花算力，却给 q、k、v 注入了“紧挨着的几个 token 是什么”这种局部顺序信息。第 5 节的消融显示去掉它验证困惑度变差。</li>
+  <li><b>L2 归一化 q、k</b>：把 key 的长度固定为 1。这样 \(\mathbf{I}-\beta_tk_tk_t^{\top}\) 的特征值是 1（\(d_k-1\) 重）和 \(1-\beta_t\)，都落在 \([0,1]\) 里，状态在多次连乘后不会爆炸。如果不归一化，\(\beta_t\|k_t\|^2\gt 2\) 时会出现绝对值大于 1 的负特征值，状态会越乘越大。报告称这一步是为了“特征值稳定”。</li>
+  <li><b>逐通道衰减 \(\alpha_t\)</b>：先用低秩投影把 \(x_t\) 压到 128 维（等于头维度），再投影回每个头的 \(d_k\) 维，然后经过一个和 GDN、Mamba 类似的函数 \(f\) 映射到 \([0,1]\)。公开代码（以及 Kimi K3 报告的复述）给出了 \(f\) 的具体形式：先算对数衰减 \(g_t=-e^{A_h}\operatorname{Softplus}(z_t)\le0\)，再取 \(\alpha_t=e^{g_t}\)，其中 \(z_t\) 是投影结果加一个偏置，\(A_h\) 是每个头一个可学习的尺度。在对数域里参数化，保证了 \(\alpha\) 永远落在 \((0,1)\) 里。</li>
+  <li><b>写入强度 \(\beta_t\)</b>：每个头一个标量，Sigmoid 激活。它不需要逐通道，因为它控制的是“这一次写入多用力”，而不是“哪个通道留多久”。</li>
+</ul>
+<p>KDA 递推的输出在送出之前还要经过两步（原文式 10）：</p>
+<div class="formula">$$o_t=\mathbf{W}_o\Big(\operatorname{Sigmoid}\big(\mathbf{W}_g^{\uparrow}\mathbf{W}_g^{\downarrow}x_t\big)\odot\operatorname{RMSNorm}\big(\operatorname{KDA}(q_t,k_t,v_t,\alpha_t,\beta_t)\big)\Big)$$</div>
+<p>先对每个头的输出单独做 RMSNorm，再乘一个由 \(x_t\) 算出的 Sigmoid <b>输出门</b>，最后过输出投影 \(\mathbf{W}_o\)。输出门让模型可以按 token、按通道决定“这一层这次读出来的东西用多少”。报告说这个门借鉴了 Gated Attention 的做法（见 <a href="gated-attention.html">Gated Attention 精读</a>），能缓解注意力汇聚点（attention sink）现象；门同样用低秩参数化，是为了和基线保持参数量相当，性能和满秩门相近。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：Kimi Linear 的层堆叠（左）与一个 KDA 层的内部（右）</div>
+  <svg class="dg" viewBox="0 0 760 372" role="img" aria-label="左侧为三层 KDA 加一层 MLA 的重复组，右侧为 KDA 层的投影、递推与输出门" style="--dg-min:640px">
+    <text x="110" y="18" class="t-c t-b">层堆叠</text>
+    <rect x="30" y="30" width="160" height="28" rx="6" class="box"/><text x="110" y="44" class="t-c t-sm">输出 / 下一组</text>
+    <path class="edge" d="M110,88 L110,60"/>
+    <rect x="18" y="84" width="184" height="216" rx="8" class="frame"/>
+    <g class="pred"><rect x="30" y="94" width="160" height="42" rx="6" class="box"/><text x="110" y="109" class="t-c t-sm">MLA（不加位置编码）</text><text x="110" y="126" class="t-c t-xs">+ MoE 前馈</text></g>
+    <g class="enc"><rect x="30" y="146" width="160" height="42" rx="6" class="box"/><text x="110" y="161" class="t-c t-sm">KDA</text><text x="110" y="178" class="t-c t-xs">+ MoE 前馈</text></g>
+    <g class="enc"><rect x="30" y="196" width="160" height="42" rx="6" class="box"/><text x="110" y="211" class="t-c t-sm">KDA</text><text x="110" y="228" class="t-c t-xs">+ MoE 前馈</text></g>
+    <g class="enc"><rect x="30" y="246" width="160" height="42" rx="6" class="box"/><text x="110" y="261" class="t-c t-sm">KDA</text><text x="110" y="278" class="t-c t-xs">+ MoE 前馈</text></g>
+    <g class="data"><rect x="30" y="318" width="160" height="28" rx="6" class="box"/><text x="110" y="332" class="t-c t-sm">输入（上一组的输出）</text></g>
+    <path class="edge" d="M110,316 L110,290"/>
+    <text x="110" y="364" class="t-c t-xs">虚线框为一组，按 3:1 重复</text>
+
+    <text x="500" y="18" class="t-c t-b">一个 KDA 层（以一个头为例）</text>
+    <g class="data"><rect x="236" y="150" width="56" height="30" rx="6" class="box"/><text x="264" y="165" class="t-c">xₜ</text></g>
+    <path class="edge no-head" d="M292,165 L312,165"/>
+    <path class="edge no-head" d="M312,54 L312,252"/>
+    <path class="edge" d="M312,54 L328,54"/><path class="edge" d="M312,96 L328,96"/><path class="edge" d="M312,138 L328,138"/><path class="edge" d="M312,210 L328,210"/><path class="edge" d="M312,252 L328,252"/>
+    <g class="enc">
+      <rect x="330" y="40" width="236" height="28" rx="6" class="box"/><text x="448" y="54" class="t-c t-xs">q：线性 → 短卷积 → Swish → L2 归一化</text>
+      <rect x="330" y="82" width="236" height="28" rx="6" class="box"/><text x="448" y="96" class="t-c t-xs">k：线性 → 短卷积 → Swish → L2 归一化</text>
+      <rect x="330" y="124" width="236" height="28" rx="6" class="box"/><text x="448" y="138" class="t-c t-xs">v：线性 → 短卷积 → Swish</text>
+    </g>
+    <g class="reg">
+      <rect x="330" y="196" width="236" height="28" rx="6" class="box"/><text x="448" y="210" class="t-c t-xs">α：低秩投影 → f → (0,1) 的 128 维向量</text>
+      <rect x="330" y="238" width="236" height="28" rx="6" class="box"/><text x="448" y="252" class="t-c t-xs">β：线性 → Sigmoid → 标量</text>
+    </g>
+    <path class="edge" d="M566,54 L590,112"/><path class="edge" d="M566,96 L590,128"/><path class="edge" d="M566,138 L590,144"/><path class="edge reg" d="M566,210 L590,162"/><path class="edge reg" d="M566,252 L590,172"/>
+    <g class="pred"><rect x="592" y="100" width="150" height="80" rx="8" class="box"/><text x="667" y="122" class="t-c t-b">KDA 递推</text><text x="667" y="142" class="t-c t-xs">状态 Sₜ：128×128</text><text x="667" y="160" class="t-c t-xs">先逐通道衰减，再 delta 改写</text></g>
+    <path class="edge" d="M667,180 L667,198"/>
+    <rect x="592" y="200" width="150" height="26" rx="6" class="box"/><text x="667" y="213" class="t-c t-xs">逐头 RMSNorm</text>
+    <path class="edge" d="M667,226 L667,244"/>
+    <g class="act"><rect x="592" y="246" width="150" height="26" rx="6" class="box"/><text x="667" y="259" class="t-c t-xs">⊙ Sigmoid 输出门（低秩）</text></g>
+    <path class="edge" d="M667,272 L667,290"/>
+    <rect x="592" y="292" width="150" height="26" rx="6" class="box"/><text x="667" y="305" class="t-c t-xs">输出投影 Wₒ</text>
+    <path class="edge" d="M667,318 L667,340"/><text x="667" y="352" class="t-c t-xs">层输出</text>
+    <path class="edge idx" d="M264,180 L264,300 L576,300 L576,259 L590,259"/>
+    <text x="420" y="292" class="t-c t-xs">门也由 xₜ 经低秩投影算出</text>
+  </svg>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2510.26692v2#S3.F3" target="_blank" rel="noopener">原文图 3 ↗</a> 和 §4 的公式。公开的 48B 模型共 27 层：第 4、8、12、16、20、24、27 层是 MLA，其余 20 层是 KDA，所以最后一组是“2 层 KDA + 1 层 MLA”（读自 Hugging Face 上的 config.json）。每层 KDA 有 32 个头，\(d_k=d_v=128\)。</div>
+</div>
+
+<h4 id="n-4-2">4.2 为什么按层混合，为什么是 3:1</h4>
+<p>纯线性注意力的主要短板是长上下文检索，所以要掺一些全注意力层。混合有两种方式：<b>层内混合</b>（同一层里一部分头用线性注意力、一部分头用 softmax，或者对远处和近处的 token 用不同机制）和<b>层间混合</b>（整层整层地交替）。报告选了层间混合，理由是基础设施简单、训练稳定：同一层里只有一种计算路径，张量并行、流水并行、KV 缓存管理都不用为“半层线性、半层 softmax”做特殊处理。比例上，报告用消融实验（第 5 节表 1）比较了 0:1、1:1、3:1、7:1、15:1，认为 3:1 在质量和吞吐之间最平衡。全注意力层选 MLA，是因为 Moonshot 之前的 Moonlight、Kimi K2 都用 MLA，它本身就是一种压缩 KV 缓存的注意力。</p>
+
+<h4 id="n-4-3">4.3 MLA 层不要位置编码（NoPE）</h4>
+<div class="note-pre"><b>先补一点背景：RoPE 为什么会妨碍 MLA 的“矩阵吸收”。</b>
+<p>RoPE 把位置信息编码为对 query 和 key 的旋转：位置 \(i\) 的 key 被旋转角度 \(i\theta\)，位置 \(t\) 的 query 被旋转 \(t\theta\)，二者点积只依赖相对距离 \(t-i\)（详见 <a href="roformer.html">RoFormer 精读</a>）。MLA 的 KV 缓存只存每个 token 的一个 512 维“潜向量”，推理时把“从潜向量还原 key 的矩阵”吸收进 query 一侧，直接拿 query 和潜向量做点积，所有头共用同一份潜向量，计算上等价于只有一个 KV 头的多查询注意力（MQA）。问题是，如果 key 先还原再旋转，旋转矩阵夹在 query 和潜向量之间，并且随位置变化，就没法预先吸收。DeepSeek 的解决办法是另开一个 64 维、所有头共用的“带 RoPE 的 key 分量”，这部分单独缓存、单独计算（详见 <a href="deepseek-v3.html#n-2">DeepSeek-V3 精读 §2.1</a>）。</p>
+</div>
+<p>Kimi Linear 的所有 MLA 层都不加任何位置编码（NoPE），位置信息和“近处更重要”的倾向全部交给 KDA 层负责。报告的依据是：KDA 按顺序处理 token，逐通道衰减随距离累积，隐藏状态里已经带有相对位置信息；从这个意义上说，KDA 承担了类似短卷积或滑动窗口注意力（SWA）的“位置感知”角色，甚至更强。报告引用了几项先前工作的结论：给全局 NoPE 注意力配上一个专门感知位置的机制，长上下文表现可以很有竞争力。</p>
+<p>NoPE 带来两个工程上的好处。第一，MLA 在推理时可以完全变成纯 MQA：没有旋转挡在中间，整个 key 都能被吸收。第二，长上下文训练变简单：RoPE 模型把上下文从 4K 扩到 128K、1M 时，通常要调大旋转频率的底数，或者用 YaRN 之类的方法插值；NoPE 模型没有这些参数可调，也就不需要调。</p>
+<div class="note-warn"><b>和代码对照时的一个细节：</b>公开的 Hugging Face 实现里，MLA 层仍然保留了那个 64 维的“位置分量”投影（配置里 <code>qk_rope_head_dim</code> 仍是 64），只是不再对它做旋转（配置项 <code>mla_use_nope</code> 为 true，代码中没有任何旋转操作）。所以它实际上变成了 64 维额外的、所有头共用的内容分量，KV 缓存每个 token 每层仍是 512 + 64 个数。“不加位置编码”指的是不旋转，并不是把这部分维度删掉了。</div>
+
+<h4 id="n-4-4">4.4 算一笔账：1M 上下文时 KV 缓存省多少</h4>
+<p>报告只给了“最多省 75%”这个结论。下面用公开配置推算一下这个数是怎么来的，以及它在什么长度下才成立。假设 KV 缓存用 BF16（每个数 2 字节），MLA 每层每个 token 缓存 512 + 64 = 576 个数，即 1,152 字节；全 MLA 基线和 Kimi Linear 一样是 27 层（报告说效率对比中三个模型“层数和头数相同”）。</p>
+<div class="dia">
+  <div class="dia-title">推算：每个请求的缓存大小（BF16；全 MLA = 27 层 MLA，Kimi Linear = 7 层 MLA + 20 层 KDA）</div>
+  <div class="dia-row"><span class="lbl">1M，全 MLA</span><div class="dia-track"><span class="dia-seg kv" style="flex:32.6">KV 缓存 32.6 GB</span></div></div>
+  <div class="dia-row"><span class="lbl">1M，Kimi Linear</span><div class="dia-track"><span class="dia-seg kv" style="flex:8.46">MLA KV 8.5 GB</span><span class="dia-seg cmp" style="flex:0.4">状态</span><span class="dia-seg oth" style="flex:23.74">省下约 74%</span></div></div>
+  <div class="dia-row"><span class="lbl">128K，全 MLA</span><div class="dia-track"><span class="dia-seg kv" style="flex:4.08">4.08 GB</span><span class="dia-seg oth" style="flex:28.52"></span></div></div>
+  <div class="dia-row"><span class="lbl">128K，Kimi Linear</span><div class="dia-track"><span class="dia-seg kv" style="flex:1.06">1.06</span><span class="dia-seg cmp" style="flex:0.3"></span><span class="dia-seg oth" style="flex:31.24">共约 1.10 GB，省约 73%</span></div></div>
+  <div class="dia-out">KDA 状态：20 层 × 32 头 × 128 × 128 个数，FP32 存储约 42 MB，BF16 约 21 MB；短卷积缓存约 2 MB。与上下文长度无关。</div>
+  <div class="dia-note">推算公式：全 MLA 每 token 27 × 1,152 B = 31,104 B；Kimi Linear 每 token 7 × 1,152 B = 8,064 B，外加每个请求固定约 44 MB 的 KDA 状态（按 FP32 计）。条形里的“状态”被放大了才看得见。KDA 状态实际用 FP32 还是 BF16 存，取决于推理引擎，报告没有说明。若 KV 缓存用 FP8，两边的 KV 都减半。</div>
+</div>
+<p>从这笔账能读出三点。第一，长上下文时节省比例趋近于 \(1-7/27\approx74\%\)（推算），这就是“最多 75%”的来源：严格 3:1 时上限是 75%，公开模型因为最后一组只有 2 层 KDA，略低一点。第二，节省比例随长度变化：4K 上下文时全 MLA 约 127 MB，Kimi Linear 是 33 MB 的 KV 加约 44 MB 的固定状态，只省约 40%（推算，按 FP32 状态计）；固定大小的状态在短上下文里并不便宜。第三，省下的显存可以换成更大的批：同样的显存，1M 上下文时能多放约 3.8 倍的请求（推算，32.6 / 8.5），这正是第 5 节“解码快 6 倍”的主要来源。</p>
+<div class="note-warn"><b>容易误解的地方：</b>“KV 缓存少 75%”比较的是同样深度的全 MLA 模型，而 MLA 本身已经比普通多头注意力的 KV 小得多。如果拿普通 GQA 模型作参照，绝对节省会更大，但那就不是这篇报告的对照了。另外，节省的只是注意力的缓存；48B 模型的权重（BF16 约 96 GB，推算）不受影响，单卡能否放下整个模型是另一回事。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct/blob/main/config.json" target="_blank" rel="noopener">公开模型配置 config.json ↗</a> · 相关：<a href="../legacy/tracks/ai-infra/10-rope.html">RoPE 结构拆解页</a>（部分旋转与 NoPE 的讨论）</p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 实验（上）：合成任务、消融与缩放律</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在真正花大价钱训练 48B 模型之前，作者先用小实验回答了三个问题：逐通道衰减在“记忆管理”类的合成任务上是否真的比标量衰减好？混合比例、输出门、短卷积这些设计选择各自有多大作用？把规模放大时，Kimi Linear 相对全注意力的优势是保持、扩大还是缩小？这一节对应原文 §5.1–5.3。</div>
+
+<h4 id="n-5-1">5.1 合成任务：回文、多查询联想回忆、栈</h4>
+<div class="note-pre"><b>先补一点背景：为什么用这三种合成任务。</b>
+<p>固定大小的状态有一个已知的弱点：它很难把一长串输入原封不动地记住再吐出来，也很难在大量键值对里精确找到某一个。合成任务把这些能力单独拎出来测，噪声小、结论清楚。<b>回文</b>（倒序复制）要求模型把一串随机 token 倒着输出一遍，考的是“完整、精确地记住全部历史”，已有研究表明这类复制任务对线性注意力很难。<b>多查询联想回忆（MQAR）</b>先给一串“键 值”对，再给若干个键，要求输出对应的值，考的是联想检索；已有研究发现它和语言建模质量高度相关。<b>栈</b>同时维护 64 个独立的栈，输入是一串“压入某栈某元素”“弹出某栈”的操作，要求在弹出时报出正确元素，考的是状态追踪。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：三种合成任务的输入和期望输出（本站自拟的例子）</div>
+  <div class="dia-flow"><b style="width:56px">回文</b><span class="dia-box">输入：A 7 Q 2 ⟨分隔⟩</span><span class="dia-arrow">→</span><span class="dia-box enc">输出：2 Q 7 A<small>倒序复制整段历史</small></span></div>
+  <div class="dia-flow"><b style="width:56px">MQAR</b><span class="dia-box">输入：K 4 D 9 P 1 ⟨分隔⟩ D P</span><span class="dia-arrow">→</span><span class="dia-box enc">输出：9 1<small>按键查值，键可以出现在任意位置</small></span></div>
+  <div class="dia-flow"><b style="width:56px">栈</b><span class="dia-box">压入 栈3 X · 压入 栈1 Y · 压入 栈3 Z · 弹出 栈3 · 弹出 栈3</span><span class="dia-arrow">→</span><span class="dia-box enc">输出：Z，然后 X<small>后进先出，64 个栈各自独立</small></span></div>
+  <div class="dia-note">本站示意图，例子是自拟的；原文的例子和结果曲线见 <a href="https://arxiv.org/html/2510.26692v2#S5.F4" target="_blank" rel="noopener">原文图 4 ↗</a>。只在 ⟨分隔⟩ 之后的位置计算准确率。</div>
+</div>
+<p><b>实验设置。</b>所有模型都是 2 层、每层 2 个头、头维 128 的小模型，每个任务最多训练 2 万步，学习率在 \(\{5\times10^{-5},10^{-4},5\times10^{-4},10^{-3}\}\) 里网格搜索，报告最好的一组训练准确率曲线。比较两个维度：序列长度从 256 增加到 2048 时的峰值准确率；固定长度 1024 时 KDA、GDN、Mamba2 的收敛速度。</p>
+<div class="table-wrap"><table>
+  <tr><th>任务</th><th class="num">长度</th><th class="num">KDA</th><th class="num">GDN</th><th class="num">Mamba2</th></tr>
+  <tr><td>回文</td><td class="num">1024</td><td class="num">100</td><td class="num">97</td><td class="num">0</td></tr>
+  <tr><td>回文</td><td class="num">2048</td><td class="num">42</td><td class="num">37</td><td class="num">0</td></tr>
+  <tr><td>MQAR</td><td class="num">1024</td><td class="num">100</td><td class="num">79</td><td class="num">0</td></tr>
+  <tr><td>MQAR</td><td class="num">2048</td><td class="num">48</td><td class="num">29</td><td class="num">0</td></tr>
+  <tr><td>栈</td><td class="num">1024</td><td class="num">100</td><td class="num">100</td><td class="num">0</td></tr>
+  <tr><td>栈</td><td class="num">2048</td><td class="num">100</td><td class="num">100</td><td class="num">0</td></tr>
+</table></div>
+<p class="w-note">峰值准确率（%），读自原文图 4 左半的矢量坐标，取整。256 长度时三者都接近 100；512 长度时 KDA、GDN 都是 100，Mamba2 在回文和 MQAR 上已降到 0、在栈上仍是 100。</p>
+<p><b>怎么读这些结果。</b>第一，随着长度增加，KDA 始终不低于 GDN，差距在 MQAR 上最明显（1024 长度时 100 对 79）。第二，收敛速度差别更大：长度 1024 时，KDA 在回文上大约 4 千步就到 94%、6 千步到 99%，GDN 要到 1.8 万步左右才到 99%；MQAR 上 KDA 2 千步就有 93%，GDN 训满 2 万步还停在 79%；栈上两者都能做对，KDA 约快一倍（数字读自原文图 4 右半）。报告把这归因于逐通道衰减：模型可以选择性地忘掉无关信息、更精确地保留关键记忆。第三，没有 delta 规则、只有标量衰减的 Mamba2 在这套设置下几乎全军覆没。</p>
+<div class="note-warn"><b>读这组结果时要注意：</b>
+<ul>
+  <li>报告正文说 Mamba2 “在所有任务上都失败”，但从原图看，它在 256 长度时三个任务都接近 100%，栈任务到 512 也还是 100%，失败的是更长的设置。</li>
+  <li>2048 长度的回文和 MQAR 上，KDA 也只有 42% 和 48%，并没有“解决”这些任务；它比 GDN 好，但两者都在掉。这本来就是固定状态的上限问题，也是后面仍要混入全注意力的原因。</li>
+  <li>报告的是“学习率网格里最好的那条训练准确率曲线”，每个配置看来只跑了一次；2 层 2 头的小模型和 48B 混合模型之间隔着很远，这组实验说明的是机制上的倾向，不能直接推到大模型。</li>
+</ul></div>
+
+<h4 id="n-5-2">5.2 关键组件的消融</h4>
+<p>消融实验都在缩放律实验的第一档模型上做（16 个头、16 层，激活参数约 653M），所有变体用相同的计算量预算和超参数，比较训练困惑度和验证困惑度（越低越好）。验证集是一份高质量数据，分布和预训练语料差别很大，所以验证困惑度（5.6 左右）比训练困惑度（9.2 左右）低得多；报告选它是为了考察分布偏移下的泛化。</p>
+<div class="dia">
+  <div class="dia-title">简图：各变体的验证困惑度（原文表 1，越短越好；注意横轴从 5.60 开始）</div>
+  <svg class="dg" viewBox="0 0 640 300" role="img" aria-label="八个变体的验证困惑度横向条形图，3:1 最低" style="--dg-min:520px">
+    <line x1="200" y1="30" x2="200" y2="272" class="axis"/>
+    <line x1="268" y1="30" x2="268" y2="272" class="grid-ln" style="stroke-dasharray:3 3"/>
+    <text x="200" y="288" class="t-c t-xs">5.60</text><text x="268" y="288" class="t-c t-xs">5.65</text><text x="336" y="288" class="t-c t-xs">5.70</text><text x="404" y="288" class="t-c t-xs">5.75</text><text x="472" y="288" class="t-c t-xs">5.80</text><text x="540" y="288" class="t-c t-xs">5.85</text>
+    <g class="t-sm">
+      <text x="190" y="45" class="t-r">3:1（采用）</text><text x="190" y="75" class="t-r">0:1（纯 MLA）</text><text x="190" y="105" class="t-r">1:1</text><text x="190" y="135" class="t-r">7:1</text><text x="190" y="165" class="t-r">15:1</text>
+      <text x="190" y="195" class="t-r">去掉输出门</text><text x="190" y="225" class="t-r">Swish 输出门</text><text x="190" y="255" class="t-r">去掉短卷积</text>
+    </g>
+    <rect x="200" y="36" width="68" height="18" style="fill:var(--c-enc)"/>
+    <rect x="200" y="66" width="231.2" height="18" style="fill:var(--c-pred)"/>
+    <rect x="200" y="96" width="81.6" height="18" style="fill:var(--c-tgt)"/>
+    <rect x="200" y="126" width="136" height="18" style="fill:var(--c-tgt)"/>
+    <rect x="200" y="156" width="299.2" height="18" style="fill:var(--c-tgt)"/>
+    <rect x="200" y="186" width="95.2" height="18" style="fill:var(--c-act)"/>
+    <rect x="200" y="216" width="285.6" height="18" style="fill:var(--c-act)"/>
+    <rect x="200" y="246" width="136" height="18" style="fill:var(--c-act)"/>
+    <g class="t-xs">
+      <text x="274" y="45">5.65（训练 9.23）</text><text x="437" y="75">5.77（训练 9.45）</text><text x="288" y="105">5.66（训练 9.29）</text><text x="342" y="135">5.70（训练 9.23）</text>
+      <text x="505" y="165">5.82（训练 9.34）</text><text x="301" y="195">5.67（训练 9.25）</text><text x="492" y="225">5.81（训练 9.43）</text><text x="342" y="255">5.70（训练 9.29）</text>
+    </g>
+  </svg>
+  <div class="dia-note">数字来自 <a href="https://arxiv.org/html/2510.26692v2#S5.T1" target="_blank" rel="noopener">原文表 1 ↗</a>，括号里是训练困惑度。蓝色是最终采用的配置，橙色是纯全注意力，绿色是其他混合比例，红色是组件消融（都在 3:1 基础上改动）。横轴截断，条形长度只用来比较，差距看起来比实际大。</div>
+</div>
+<ul>
+  <li><b>输出门。</b>去掉门，验证困惑度从 5.65 升到 5.67；把 Sigmoid 门换成 GDN 原文用的 Swish 门，升到 5.81，差得多。这和 Gated Attention 的结论一致，所以报告在所有模型里（包括 GDN-H 基线）都用 Sigmoid 门。</li>
+  <li><b>短卷积。</b>去掉后验证困惑度升到 5.70。核长约为 4 的逐通道卷积在很多新架构里都有，报告认为它在混合模型里仍然不可忽视。</li>
+  <li><b>混合比例。</b>3:1 的训练和验证困惑度都最低。7:1 的训练困惑度和 3:1 一样（9.23），验证困惑度却明显更差（5.70），说明全注意力太少时，泛化到分布外数据会变差；1:1 的验证困惑度和 3:1 几乎一样（5.66），但全注意力层多了一倍，推理开销更大；15:1 最差。纯全注意力（0:1）也明显不如 3:1。报告据此选 3:1。</li>
+</ul>
+<p>“纯 MLA 反而不如混合”这一点值得多想一下。直觉上全注意力是质量上限，但在 653M 激活参数、4K 训练长度的设置下，KDA 层提供的局部顺序、近期偏好等归纳偏置可能本身就有用，混合模型并不只是“省钱版的全注意力”。这个现象在 1.4T 的大规模对照里又出现了一次（第 5 节下半）。</p>
+<p>消融表里没有 NoPE 和 RoPE 的对比，报告把它放在 1.4T 规模的长上下文结果里讲（见下一节的表 5）：在 MLA 层加 RoPE 的 Kimi Linear (RoPE) 短文本成绩相近，长文本平均分却从 54.5 降到 51.8。报告的解释是，加了 RoPE 后，全注意力层带着很强的显式相对位置信号，而线性层只提供较弱的隐式位置偏置，模型会过分依赖全注意力层里的短程顺序，这对短文本有利，但在训练中途扩展到长上下文时不够灵活；NoPE 让位置偏置在各层之间分布得更均衡。</p>
+<div class="note-warn"><b>这张表的分量：</b>每个变体一次运行，没有方差；差距最小的只有 0.01（3:1 对 1:1），很可能落在随机种子带来的波动里。规模是 653M 激活参数，上下文 4K，只看困惑度，没有下游任务和长上下文评测。所以“3:1 最好”更准确的说法是：在这个小规模上，3:1 和 1:1 并列最好，3:1 更省，7:1 以上开始变差。</div>
+
+<h4 id="n-5-3">5.3 缩放律：放大之后优势还在吗</h4>
+<div class="note-pre"><b>先补一点背景：计算最优的缩放律。</b>
+<p>训练损失大致随训练算力 \(C\) 按幂律下降：\(L=A\cdot C^{-b}\)。Chinchilla 的做法是对每个算力预算选出最合适的模型大小和训练 token 数（计算最优），再用几组这样的点拟合出 \(A\) 和 \(b\)。两个架构的拟合曲线放在一起，就能回答“达到同样的损失，谁需要的算力更少”。“1.16 倍计算效率”的意思是：要达到 Kimi Linear 在某个算力下的损失，MLA 需要多花约 16% 的算力。算力单位 PFLOP/s-days 指“每秒 \(10^{15}\) 次浮点运算持续一天”，约 \(8.64\times10^{19}\) 次运算。</p>
+</div>
+<p><b>实验设置（原文表 2）。</b>5 档 MoE 模型，激活参数（不含嵌入）从 653M 到 1.7B，头数和层数从 16 增加到 24，训练 token 从 38.8B 到 128B；都按 Moonlight 的结构，64 个专家激活 8 个，用 Muon 优化器，上下文 4096。MLA 的每一档都用网格搜索仔细调过超参数；Kimi Linear 固定 3:1 的比例，<b>直接照搬 MLA 的训练配置，没有再调</b>。按 \(6ND\) 粗估，这 5 档的训练算力大约在 1.8 到 15 PFLOP/s-days 之间（推算）。</p>
+<p>拟合结果是：MLA 为 \(L=2.3092\times C^{-0.0536}\)，Kimi Linear 为 \(L=2.2879\times C^{-0.0527}\)。报告的结论是在计算最优训练下，Kimi Linear 的计算效率约为 MLA 的 1.16 倍，并认为如果给 KDA 也单独调超参数，曲线还会更好。</p>
+<div class="dia">
+  <div class="dia-title">简图：两条拟合曲线（按原文给出的公式画出）</div>
+  <svg class="dg" viewBox="0 0 640 300" role="img" aria-label="MLA 与 Kimi Linear 的拟合损失曲线，Kimi Linear 略低" style="--dg-min:520px">
+    <rect x="170.6" y="40" width="344.4" height="210" style="fill:var(--surface-2)"/>
+    <line x1="80" y1="250" x2="560" y2="250" class="axis"/><line x1="80" y1="250" x2="80" y2="40" class="axis"/>
+    <line x1="80" y1="216.8" x2="560" y2="216.8" class="grid-ln"/><line x1="80" y1="161.6" x2="560" y2="161.6" class="grid-ln"/><line x1="80" y1="106.3" x2="560" y2="106.3" class="grid-ln"/><line x1="80" y1="51.1" x2="560" y2="51.1" class="grid-ln"/>
+    <text x="70" y="216.8" class="t-r t-xs">2.0</text><text x="70" y="161.6" class="t-r t-xs">2.1</text><text x="70" y="106.3" class="t-r t-xs">2.2</text><text x="70" y="51.1" class="t-r t-xs">2.3</text>
+    <text x="80" y="266" class="t-c t-xs">1</text><text x="191.1" y="266" class="t-c t-xs">2</text><text x="337.9" y="266" class="t-c t-xs">5</text><text x="448.9" y="266" class="t-c t-xs">10</text><text x="560" y="266" class="t-c t-xs">20</text>
+    <text x="320" y="288" class="t-c t-sm">训练算力（PFLOP/s-days，对数刻度）</text>
+    <text x="26" y="145" class="t-c t-sm" transform="rotate(-90 26 145)">损失</text>
+    <polyline points="80.0,46.0 145.0,73.4 191.1,92.5 256.0,118.9 302.1,137.4 367.1,162.8 413.2,180.6 478.2,205.1 524.2,222.2 560.0,235.3" style="fill:none;stroke:var(--c-pred);stroke-width:2.4"/>
+    <polyline points="80.0,57.7 145.0,84.5 191.1,103.1 256.0,128.9 302.1,146.8 367.1,171.7 413.2,189.0 478.2,212.9 524.2,229.6 560.0,242.4" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+    <path d="M302.1,146.8 L326.1,146.8" style="stroke:var(--text-2);stroke-width:1.4;marker-end:url(#ah)"/>
+    <text x="336" y="124" class="t-xs">同样的损失，MLA 要多约 16% 算力</text>
+    <text x="150" y="60" class="t-sm" style="fill:var(--c-pred)">MLA</text>
+    <text x="96" y="112" class="t-sm" style="fill:var(--c-enc)">Kimi Linear</text>
+    <text x="342" y="58" class="t-c t-xs">灰底：实验覆盖的算力范围（约 1.8–15，推算）</text>
+  </svg>
+  <div class="dia-note">本站按原文 <a href="https://arxiv.org/html/2510.26692v2#S5.F5" target="_blank" rel="noopener">图 5 ↗</a> 中给出的两个拟合式重新画的曲线，没有画原图的数据点。两条线在对数坐标下几乎平行，Kimi Linear 低一点。</div>
+</div>
+<p><b>怎么读这张图，以及“1.16 倍”是不是常数。</b>两个拟合式的指数不同（0.0536 对 0.0527），所以两条线并不严格平行，效率比也就随算力变化。按拟合式推算，算力为 1 PFLOP/s-day 时约为 1.19 倍，4 时约 1.16 倍，15 时约 1.14 倍；如果一直外推下去，差距会继续缩小，到 1.4T 主实验的算力（约 290 PFLOP/s-days）时约为 1.08 倍，两条线会在约 \(3\times10^{4}\) PFLOP/s-days 处相交（以上均为推算）。但这种外推不可靠：两个指数只差 0.0009，报告没有给出拟合的置信区间，这么小的差别完全可能是拟合噪声。能确定的结论只有两条：在实验覆盖的小算力范围里，Kimi Linear 一致地略好；“1.16 倍”是这个范围中段的数字，不能当成任意规模下的固定倍数。</p>
+<div class="note-warn"><b>容易被忽略的偏向：</b>这组对比在超参数上是偏向 MLA 的（MLA 调过，Kimi Linear 照搬），这一点对报告的结论有利，说明优势不是靠调参调出来的。反过来，缩放律只看预训练损失，和下游任务、长上下文能力之间没有一一对应，也就不能用它去预测 1M 上下文的检索表现。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S5.SS1" target="_blank" rel="noopener">英文原文 §5.1 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.SS2" target="_blank" rel="noopener">§5.2 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.SS3" target="_blank" rel="noopener">§5.3 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.T2" target="_blank" rel="noopener">表 2 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5x">5 实验（下）：1.4T token 同配方对照、强化学习与效率</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>报告标题级的结论“在公平对照下超过全注意力”就来自这里。三个 48B-A3B 模型（全 MLA、GDN 混合、Kimi Linear）是怎么做到“同配方”的？短文本、长文本、指令微调、强化学习各自的结果如何，哪些基准上 Kimi Linear 并没有赢？预填充和解码速度的几个倍数分别在什么条件下测得？最后用“结果的份量”把这些数字放回它们的测量条件里。这一节对应原文 §5.4–5.6。</div>
+
+<h4 id="n-5-4">5.4 实验设置：怎样才算“同配方”</h4>
+<p><b>参与对照的模型。</b>MLA 是全注意力基线；GDN-H 是用 Gated DeltaNet 替换 KDA 的混合基线；Kimi Linear 是本文模型。三者的结构、参数量和训练设置都相同，GDN-H 也用了 Sigmoid 输出门。为了单独检验 NoPE，报告还训练了一个 MLA 层加 RoPE 的 Kimi Linear (RoPE)。四个模型都是 48B 总参、3B 激活：报告写的是“256 个专家激活 8 个（含 1 个共享专家）”，公开配置里则是 256 个路由专家选 8 个、另加 1 个共享专家；第一层是稠密层。</p>
+<p><b>预训练。</b>四个模型都用 4,096 token 的上下文窗口、MuonClip 优化器和 WSD 学习率调度（先预热、再长时间保持、最后衰减），从 Kimi K2 的预训练语料里采样共 1.4T token，学习率 \(1.1\times10^{-3}\)，全局批大小 3,200 万 token，并沿用 K2 的退火阶段和“长上下文激活”阶段（报告没有展开这一阶段的长度和数据）。最终发布的模型用同样的流程训练了 5.7T token（与 Moonlight 对齐），支持 1M 上下文。</p>
+<p><b>后训练。</b>指令微调（SFT）数据在 K2 的 SFT 数据基础上加入了更多推理任务，分多个阶段：先在广泛的指令数据上训练通用能力，再有计划地加练推理数据。强化学习的提示集主要来自数学、代码和 STEM，先筛掉对起点模型过难或过易的题。为了防止强化学习损伤通用能力，训练中同时加了 PTX 损失（在高质量的通用数据上继续做监督学习）。算法沿用 Kimi K1.5，并加了几项稳定性措施：用截断重要性采样（TIS）修正推理引擎和训练引擎之间因数值精度不同而产生的策略偏差（这个问题的来龙去脉见 <a href="batch-invariance.html">批不变性精读</a>），动态调整 KL 惩罚和每轮更新次数，避免熵塌缩。</p>
+<div class="note-pre"><b>先补一点背景：几种评测方式。</b>
+<ul>
+  <li><b>基于困惑度的评测</b>：对于选择题，不让模型生成答案，而是比较模型给每个选项打的概率，取最高的。基座模型的 MMLU、MMLU-Redux、GPQA-Diamond、C-Eval 用的是这种方式，其他基准让模型生成答案再判分。两种方式算出的分数不能直接比较。</li>
+  <li><b>Avg@k</b>：同一道题采样 \(k\) 次取平均正确率，用来降低温度 1.0 采样带来的方差。比如 AIME 2025 用 Avg@64，GPQA-Diamond 取 8 次独立运行的平均。</li>
+  <li><b>长上下文基准</b>（都在 128K 长度上测）：RULER 是可控长度的合成检索与多跳追踪；MRCR 要求在很长的多轮对话里找出某一类请求的第几次出现并复述对应回答；HELMET-ICL 是长上下文里的大量示例学习；LongBench v2 和 Frames 是贴近真实的长文档推理与多跳事实检索；RepoQA 要按描述在代码仓库里找到对应函数；Long Code Arena 的 Lib 和 Commit 两项分别是基于库的代码生成和提交信息生成。</li>
+</ul>
+<p>所有模型都在内部的、基于 LM-Harness 改造的评测框架下、用同一套设置评测，温度一律 1.0。</p>
+</div>
+
+<h4 id="n-5-5">5.5 主要结果</h4>
+<p><b>基座模型（预训练后，短上下文）。</b></p>
+<div class="table-wrap"><table>
+  <tr><th>类别</th><th>基准</th><th class="num">MLA</th><th class="num">GDN-H</th><th class="num">Kimi Linear</th></tr>
+  <tr><td rowspan="7">通用</td><td>HellaSwag</td><td class="num">81.7</td><td class="num">82.2</td><td class="num"><b>82.9</b></td></tr>
+  <tr><td>ARC-Challenge</td><td class="num">64.6</td><td class="num">66.5</td><td class="num"><b>67.3</b></td></tr>
+  <tr><td>Winogrande</td><td class="num">78.1</td><td class="num">77.9</td><td class="num"><b>78.6</b></td></tr>
+  <tr><td>BBH</td><td class="num">71.6</td><td class="num">70.6</td><td class="num"><b>72.9</b></td></tr>
+  <tr><td>MMLU</td><td class="num">71.6</td><td class="num">72.2</td><td class="num"><b>73.8</b></td></tr>
+  <tr><td>MMLU-Pro</td><td class="num">47.2</td><td class="num">47.9</td><td class="num"><b>51.0</b></td></tr>
+  <tr><td>TriviaQA</td><td class="num">68.9</td><td class="num">70.1</td><td class="num"><b>71.7</b></td></tr>
+  <tr><td rowspan="5">数学与代码</td><td>GSM8K</td><td class="num">83.7</td><td class="num">81.7</td><td class="num"><b>83.9</b></td></tr>
+  <tr><td>MATH</td><td class="num"><b>54.7</b></td><td class="num">54.1</td><td class="num"><b>54.7</b></td></tr>
+  <tr><td>EvalPlus</td><td class="num">59.5</td><td class="num"><b>63.1</b></td><td class="num">60.2</td></tr>
+  <tr><td>CRUXEval-I-cot</td><td class="num">51.6</td><td class="num">56.0</td><td class="num"><b>56.6</b></td></tr>
+  <tr><td>CRUXEval-O-cot</td><td class="num">61.5</td><td class="num">58.1</td><td class="num"><b>62.0</b></td></tr>
+  <tr><td rowspan="2">中文</td><td>C-Eval</td><td class="num">79.3</td><td class="num">79.1</td><td class="num"><b>79.5</b></td></tr>
+  <tr><td>CMMLU</td><td class="num">79.5</td><td class="num">80.7</td><td class="num"><b>80.8</b></td></tr>
+</table></div>
+<p class="w-note">数字来自 <a href="https://arxiv.org/html/2510.26692v2#S5.T3" target="_blank" rel="noopener">原文表 3 ↗</a>，三个模型都训练 1.4T token，加粗为每行最高。</p>
+<p>Kimi Linear 在 14 项里有 13 项最高或并列最高，唯一明显落后的是 EvalPlus（60.2，GDN-H 为 63.1）。差距最大的是 MMLU-Pro（+3.8）、ARC-Challenge（+2.7）和 MMLU（+2.2），而 Winogrande、GSM8K、MATH、C-Eval 上的差距不到 1 分甚至为 0。一个值得注意的细节：GDN-H 在多数短文本基准上也高于 MLA，说明“混合模型在短文本上不输甚至略好于全注意力”这一现象并不是 KDA 独有的。</p>
+<p><b>指令微调后（同样的 SFT 配方）。</b></p>
+<div class="table-wrap"><table>
+  <tr><th>类别</th><th>基准</th><th class="num">MLA</th><th class="num">GDN-H</th><th class="num">Kimi Linear</th></tr>
+  <tr><td rowspan="6">通用</td><td>BBH</td><td class="num">68.2</td><td class="num">68.5</td><td class="num"><b>69.4</b></td></tr>
+  <tr><td>MMLU</td><td class="num">75.7</td><td class="num">75.6</td><td class="num"><b>77.0</b></td></tr>
+  <tr><td>MMLU-Pro</td><td class="num">65.7</td><td class="num">64.8</td><td class="num"><b>67.4</b></td></tr>
+  <tr><td>MMLU-Redux</td><td class="num">79.2</td><td class="num">78.7</td><td class="num"><b>80.3</b></td></tr>
+  <tr><td>GPQA-Diamond（Avg@8）</td><td class="num">57.1</td><td class="num">58.6</td><td class="num"><b>62.1</b></td></tr>
+  <tr><td>LiveBench（Pass@1）</td><td class="num">45.7</td><td class="num"><b>46.4</b></td><td class="num">45.2</td></tr>
+  <tr><td rowspan="6">数学与代码</td><td>AIME 2025（Avg@64）</td><td class="num">20.6</td><td class="num">21.1</td><td class="num"><b>21.3</b></td></tr>
+  <tr><td>MATH500</td><td class="num">80.8</td><td class="num"><b>83.0</b></td><td class="num">81.2</td></tr>
+  <tr><td>HMMT 2025（Avg@32）</td><td class="num">11.3</td><td class="num">11.3</td><td class="num"><b>12.5</b></td></tr>
+  <tr><td>PolyMath-en（Avg@4）</td><td class="num">41.3</td><td class="num">41.5</td><td class="num"><b>43.6</b></td></tr>
+  <tr><td>LiveCodeBench v6（Pass@1）</td><td class="num">25.1</td><td class="num">25.4</td><td class="num"><b>26.0</b></td></tr>
+  <tr><td>EvalPlus</td><td class="num"><b>62.6</b></td><td class="num">62.5</td><td class="num">61.0</td></tr>
+</table></div>
+<p class="w-note">数字来自 <a href="https://arxiv.org/html/2510.26692v2#S5.T4" target="_blank" rel="noopener">原文表 4 ↗</a>。</p>
+<p>SFT 之后 Kimi Linear 在 12 项里赢了 9 项，GPQA-Diamond 的差距最大（62.1 对 57.1）。报告正文点名的例外是 MATH500 和 EvalPlus；表里还能看到第三个例外：LiveBench 上 Kimi Linear（45.2）其实是三者中最低的。数学竞赛题上的分数整体很低（AIME 约 21、HMMT 约 12），1 分左右的差距相当于少数几道题。</p>
+<p><b>长上下文（128K，三个基线 + RoPE 变体）。</b></p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th class="num">RULER</th><th class="num">MRCR</th><th class="num">HELMET-ICL</th><th class="num">LongBench v2</th><th class="num">Frames</th><th class="num">RepoQA</th><th class="num">LCA Lib</th><th class="num">LCA Commit</th><th class="num">平均</th></tr>
+  <tr><td>MLA</td><td class="num">81.3</td><td class="num">22.6</td><td class="num">88.0</td><td class="num"><b>36.1</b></td><td class="num"><b>60.5</b></td><td class="num">63.0</td><td class="num">32.8</td><td class="num"><b>33.2</b></td><td class="num">52.2</td></tr>
+  <tr><td>GDN-H</td><td class="num">80.5</td><td class="num">23.9</td><td class="num">85.5</td><td class="num">32.6</td><td class="num">58.7</td><td class="num">63.0</td><td class="num">34.7</td><td class="num">30.5</td><td class="num">51.2</td></tr>
+  <tr><td>Kimi Linear (RoPE)</td><td class="num">78.8</td><td class="num">22.0</td><td class="num">88.0</td><td class="num">35.4</td><td class="num">59.9</td><td class="num">66.5</td><td class="num">31.3</td><td class="num">32.5</td><td class="num">51.8</td></tr>
+  <tr class="hl"><td>Kimi Linear</td><td class="num"><b>84.3</b></td><td class="num"><b>29.6</b></td><td class="num"><b>90.0</b></td><td class="num">35.0</td><td class="num">58.8</td><td class="num"><b>68.5</b></td><td class="num"><b>37.1</b></td><td class="num">32.7</td><td class="num"><b>54.5</b></td></tr>
+</table></div>
+<p class="w-note">数字来自 <a href="https://arxiv.org/html/2510.26692v2#S5.T5" target="_blank" rel="noopener">原文表 5 ↗</a>，LCA = Long Code Arena。四个模型都训练 1.4T token。</p>
+<p>长上下文是混合模型最该担心的地方，这张表因此最有信息量。Kimi Linear 的平均分最高（54.5），RULER（+3.0）、MRCR（+7.0）、RepoQA（+5.5）、LCA Lib（+4.3）领先明显；但在 LongBench v2、Frames、LCA Commit 三项上，全注意力 MLA 仍然更好。另外两个对照很说明问题。第一，GDN-H 的平均分（51.2）<b>低于</b> MLA，也就是说同样是 3:1 混合，用标量门的 GDN 在长上下文上会输给全注意力，用逐通道门的 KDA 才赢。第二，Kimi Linear (RoPE) 的平均分只有 51.8，RULER 甚至降到 78.8，说明在这个配方下，MLA 层不加位置编码对长上下文是有实际帮助的。</p>
+<p><b>强化学习。</b>为了比较两种架构在强化学习中的“可塑性”，报告在 K2 的内部数学训练集上对 MLA 和 Kimi Linear（都是 1.4T 版本）做可验证奖励的强化学习（RLVR），算法和全部超参数相同。原文图 6 画了训练集准确率、MATH500 和 AIME 2025 的曲线。从原图读出（约值）：两个模型的起点几乎一样（训练准确率都约 22%），训练结束时 Kimi Linear 的训练准确率约 59%，MLA 约 52%，差距随训练逐渐拉大；MATH500 上分别约 86 和 85（Kimi Linear 的峰值约 88），AIME 2025 上分别约 22.5 和 19（AIME 只有 30 道题，曲线抖动很大）。报告的结论是，在需要长篇推理输出的强化学习中，Kimi Linear 明显好于 MLA。</p>
+<p>报告最后把三个阶段的排序总结为：预训练和 SFT 阶段 Kimi Linear &gt; GDN-H &gt; MLA；长上下文评测中 Kimi Linear &gt; MLA &gt; GDN-H；强化学习阶段 Kimi Linear &gt; MLA。</p>
+
+<h4 id="n-5-6">5.6 效率：预填充和解码各快多少</h4>
+<div class="note-pre"><b>先补一点背景：速度指标和批大小。</b>
+<p><b>预填充耗时</b>是处理完整段输入所需的时间，决定了首个 token 要等多久。<b>TPOT</b>（time per output token）是解码阶段平均每生成一个 token 的时间。批大小为 1 时，TPOT 就是单个用户感受到的生成速度；批大小为 \(B\) 时，一步同时为 \(B\) 个请求各生成一个 token，如果把一步的耗时除以 \(B\)，得到的是“摊到每个 token 上的时间”，它的倒数是吞吐量。解码阶段受显存带宽限制，批越大越划算（见 <a href="vllm.html#n-1">vLLM 精读 §1</a>），而批能开多大取决于显存里放得下多少请求的缓存。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">简图：MLA 与 Kimi Linear 的预填充耗时和解码时间（48B 设置，横轴为上下文长度 4K → 1M）</div>
+  <svg class="dg" viewBox="0 0 820 290" role="img" aria-label="三个小图：预填充耗时、批大小为 1 的 TPOT、大批量摊薄后的 TPOT，长上下文时 Kimi Linear 都明显更快" style="--dg-min:700px">
+    <text x="156" y="22" class="t-c t-sm t-b">(a) 预填充耗时（s）</text>
+    <text x="416" y="22" class="t-c t-sm t-b">(b) 解码 TPOT，批大小 1（ms）</text>
+    <text x="676" y="22" class="t-c t-sm t-b">(c) 解码 TPOT，大批量摊薄（ms）</text>
+    <g>
+      <line x1="60" y1="220" x2="252" y2="220" class="axis"/><line x1="60" y1="220" x2="60" y2="45" class="axis"/>
+      <line x1="60" y1="135" x2="252" y2="135" class="grid-ln"/><line x1="60" y1="50" x2="252" y2="50" class="grid-ln"/>
+      <text x="52" y="220" class="t-r t-xs">0</text><text x="52" y="135" class="t-r t-xs">35</text><text x="52" y="50" class="t-r t-xs">70</text>
+      <text x="60" y="236" class="t-c t-xs">4K</text><text x="180" y="236" class="t-c t-xs">128K</text><text x="252" y="236" class="t-c t-xs">1M</text>
+      <polyline points="60.0,219.8 84.0,219.8 108.0,219.6 132.0,219.1 156.0,218.1 180.0,215.1 204.0,206.0 228.0,174.8 252.0,61.0" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+      <polyline points="60.0,219.8 84.0,219.7 108.0,219.5 132.0,219.2 156.0,218.4 180.0,216.6 204.0,212.2 228.0,200.4 252.0,164.8" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+      <circle cx="252" cy="61" r="3" style="fill:var(--c-pred)"/><circle cx="252" cy="164.8" r="3" style="fill:var(--c-enc)"/>
+      <text x="258" y="66" class="t-xs">65 s</text><text x="258" y="166" class="t-xs">23 s</text><text x="258" y="116" class="t-sm t-b">2.9×</text>
+    </g>
+    <g>
+      <line x1="320" y1="220" x2="512" y2="220" class="axis"/><line x1="320" y1="220" x2="320" y2="45" class="axis"/>
+      <line x1="320" y1="135" x2="512" y2="135" class="grid-ln"/><line x1="320" y1="50" x2="512" y2="50" class="grid-ln"/>
+      <text x="312" y="220" class="t-r t-xs">0</text><text x="312" y="135" class="t-r t-xs">10</text><text x="312" y="50" class="t-r t-xs">20</text>
+      <text x="320" y="236" class="t-c t-xs">4K</text><text x="440" y="236" class="t-c t-xs">128K</text><text x="512" y="236" class="t-c t-xs">1M</text>
+      <polyline points="320.0,174.8 344.0,174.4 368.0,167.3 392.0,164.6 416.0,161.5 440.0,154.8 464.0,142.7 488.0,118.3 512.0,69.0" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+      <polyline points="320.0,176.7 344.0,176.5 368.0,174.4 392.0,174.0 416.0,173.0 440.0,171.2 464.0,169.0 488.0,163.4 512.0,152.1" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+      <circle cx="512" cy="69" r="3" style="fill:var(--c-pred)"/><circle cx="512" cy="152.1" r="3" style="fill:var(--c-enc)"/>
+      <text x="518" y="72" class="t-xs">17.8</text><text x="518" y="156" class="t-xs">8.0</text><text x="518" y="112" class="t-sm t-b">2.2×</text>
+    </g>
+    <g>
+      <line x1="580" y1="220" x2="772" y2="220" class="axis"/><line x1="580" y1="220" x2="580" y2="45" class="axis"/>
+      <line x1="580" y1="135" x2="772" y2="135" class="grid-ln"/><line x1="580" y1="50" x2="772" y2="50" class="grid-ln"/>
+      <text x="572" y="220" class="t-r t-xs">0</text><text x="572" y="135" class="t-r t-xs">6</text><text x="572" y="50" class="t-r t-xs">12</text>
+      <text x="580" y="236" class="t-c t-xs">4K</text><text x="700" y="236" class="t-c t-xs">128K</text><text x="772" y="236" class="t-c t-xs">1M</text>
+      <polyline points="580.0,218.7 604.0,218.1 628.0,217.0 652.0,214.3 676.0,208.9 700.0,194.1 724.0,176.1 748.0,136.7 772.0,57.4" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+      <polyline points="580.0,218.6 604.0,218.7 628.0,218.7 652.0,218.6 676.0,217.9 700.0,213.5 724.0,210.8 748.0,205.1 772.0,193.9" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+      <circle cx="772" cy="57.4" r="3" style="fill:var(--c-pred)"/><circle cx="772" cy="193.9" r="3" style="fill:var(--c-enc)"/>
+      <text x="778" y="60" class="t-xs">11.5</text><text x="778" y="196" class="t-xs">1.8</text><text x="778" y="128" class="t-sm t-b">6.3×</text>
+    </g>
+    <line x1="260" y1="266" x2="290" y2="266" style="stroke:var(--c-pred);stroke-width:2.4"/><text x="296" y="266" class="t-sm">MLA（全注意力）</text>
+    <line x1="430" y1="266" x2="460" y2="266" style="stroke:var(--c-enc);stroke-width:2.4"/><text x="466" y="266" class="t-sm">Kimi Linear（GDN-H 与它几乎重合，未画）</text>
+  </svg>
+  <div class="dia-note">数值读自原文矢量图的坐标（约值）：(a) 来自 <a href="https://arxiv.org/html/2510.26692v2#S5.F7" target="_blank" rel="noopener">原文图 7(a) ↗</a>，(b) 来自图 7(b)（报告注明批大小为 1），(c) 来自 <a href="https://arxiv.org/html/2510.26692v2#S0.F1" target="_blank" rel="noopener">原文图 1(b) ↗</a>（报告说“允许更大的批”，但没有写批大小）。粗体倍数是原图上标注的数字；端点数字是本站读出的值，其中 (c) 的 11.48 ms 与 1.84 ms 也写在原文图注里。横轴各点依次为 4K、8K、16K、32K、64K、128K、256K、512K、1M。</div>
+</div>
+<p><b>预填充（图 a）。</b>报告指出，所有模型都按 Kimi Linear 48B 的设置构建，层数和头数相同。4K 到 16K 时三者差不多，因为短输入下大头是投影和 MoE，注意力本身占比小；从 128K 起 Kimi Linear 明显更快，512K 时快 2.3 倍，1M 时快 2.9 倍。Kimi Linear 和 GDN-H 的曲线几乎重合，说明逐通道衰减带来的额外计算在端到端预填充里看不出来，这和第 3 节内核比 DPLR 快一倍的设计目标一致。</p>
+<p><b>解码，批大小为 1（图 b）。</b>512K 时 Kimi Linear 快 1.8 倍，1M 时快 2.2 倍。可以用 KV 读取量来理解这个数：把 4K 时的耗时（约 5 ms）看作与上下文无关的固定部分（读权重、MoE、调度等），1M 时 MLA 多出约 12.4 ms，Kimi Linear 多出约 2.9 ms，二者之比约 4.3；第 4 节推算的 KV 读取量之比是 27/7 ≈ 3.9，同一量级（推算，数值读自原图）。固定部分摊薄不了，所以单个请求的加速比停在 2 倍出头。</p>
+<p><b>解码，大批量（图 c）。</b>这是摘要里“最多 6 倍解码吞吐”的出处：1M 上下文时 TPOT 为 1.84 ms 对 11.48 ms，报告标为 6.3 倍（两个数直接相除约为 6.2，推算）；256K、512K 时分别标为 4.8 倍和 5.7 倍，128K 时为 3.98 倍（原文图 1a）。这里的 TPOT 显然是按批摊薄后的值：4K 时只有约 0.1 ms，而图 b 中单个请求约 5 ms，二者相差约 50 倍。报告的解释是 Kimi Linear 省下 KV 缓存后可以开更大的批，第 6.3 节也把 6.3 倍称为“理论上的”解码加速。</p>
+<div class="note-warn"><b>这三张图之间容易混淆的地方：</b>“快 2.2 倍”和“快 6.3 倍”不是同一个东西。前者是单个用户在 1M 上下文下感受到的生成速度；后者是服务方在显存允许的最大批量下的每 token 成本，它同时包含了“每步读得少”和“同样的显存能放更多请求”两个效应。报告在不同地方给了略有出入的数字：§6.3 正文说图 7(b) 显示 1M 时快 2.3 倍，图上标的是 2.2 倍；§7 的讨论里又写“超过 2 倍”；摘要写“最多 6 倍”，图注写 6.3 倍。</div>
+
+<h4 id="n-5-7">5.7 结果的份量</h4>
+<p>这组对照在设计上比多数架构论文更有说服力：三个模型规模相同、数据和 token 数相同、训练流程相同，而且基线 MLA 正是 Moonshot 自己在 Kimi K2 里用的注意力，不是一个弱基线。但下面这些条件会影响这些数字的分量。</p>
+<ul>
+  <li><b>每个结果只有一次训练。</b>三个 48B 模型各训练一次，没有不同随机种子的对照，评测也只对部分基准做了多次采样平均。表 3 里 Winogrande、GSM8K、MATH、C-Eval 等不到 1 分的差距，落在一般评测噪声的范围里；真正拉开差距的是 MMLU-Pro、GPQA-Diamond、RULER、MRCR、RepoQA 这几项。</li>
+  <li><b>并非全面领先。</b>“outperforms full MLA with a sizeable margin across all evaluated tasks”这句摘要说得过满：表 4 的 LiveBench、EvalPlus 和表 5 的 LongBench v2、Frames、LCA Commit 上，MLA 都比 Kimi Linear 高。偏真实场景的长文档推理（LongBench v2、Frames）恰好是 MLA 仍占优的地方，而 Kimi Linear 赢得最多的 RULER、MRCR、RepoQA 偏合成或偏检索。</li>
+  <li><b>规模与训练长度有限。</b>对照规模是 48B 总参、3B 激活、1.4T token，预训练上下文只有 4K，长上下文能力来自 K2 式的“长上下文激活”阶段，而这一阶段的长度、数据量报告都没有交代。128K 的长上下文评测结论能否推到 1M，这组对照本身回答不了（发布模型在 1M 的 RULER 上得 94.8，但那是 5.7T 版本，没有 MLA 对照）。</li>
+  <li><b>评测框架是内部的。</b>所有分数来自基于 LM-Harness 改造的内部框架，温度 1.0，部分基准用困惑度方式。三个模型之间可比，但和其他报告里的同名基准分数不能直接比较。</li>
+  <li><b>强化学习只做了数学。</b>只有一组数学 RLVR 的曲线，算法和超参数对两个模型完全相同，每个模型一次运行。超参数相同是公平的，但也可能恰好更适合其中一种架构；报告没有给出代码、智能体任务的强化学习对照。</li>
+  <li><b>效率数字缺少硬件和引擎信息。</b>报告没有写 GPU 型号和数量、推理引擎及版本、MLA 用的是哪个注意力内核、预填充测的是单个请求还是一批；大批量 TPOT 没有给出批大小，也不是在某个延迟约束（SLO）下测的吞吐。这些数字说明的是趋势和数量级：长上下文下解码时间主要由 KV 读取决定，Kimi Linear 读得少。具体倍数在别的硬件、别的引擎上会变。</li>
+  <li><b>没有“精度换速度”的旋钮。</b>Kimi Linear 不是对某个全注意力模型的近似或压缩，而是从头训练的另一种架构，所以它的速度收益没有对应的“掉点”可以单独衡量；质量代价全部体现在上面各张表的对比里。也正因为如此，这些结论只对“从头预训练”成立，不能用来说明把现有全注意力模型改造成 KDA 混合会怎样。</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S5.SS4" target="_blank" rel="noopener">英文原文 §5.4 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.SS5" target="_blank" rel="noopener">§5.5 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.F6" target="_blank" rel="noopener">图 6 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S5.SS6" target="_blank" rel="noopener">§5.6 ↗</a> · 相关：<a href="distserve.html">DistServe 精读</a>（TTFT、TPOT 与 SLO）</p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 讨论：KDA 为什么能当位置编码，和 DPLR 差在哪，计算量有多大</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>前面几处结论都依赖一个观点：KDA 本身就带着位置信息，所以 MLA 层可以不要位置编码。这个观点从哪来？它和 RoPE 是什么关系？第 3 节说 KDA 比通用 DPLR 少算很多，具体少在哪几步？KDA 和全注意力的计算量各随长度怎样增长，推理时又是怎么切换算法的？这一节对应原文 §6。</div>
+
+<h4 id="n-6-1">6.1 KDA 是一种可学习的位置编码</h4>
+<div class="note-pre"><b>先补一点背景：把 RoPE 写成“矩阵连乘”。</b>
+<p>不加位置编码的注意力对输入顺序是不敏感的：把句子里的词换个顺序，每个词得到的输出不变（因果掩码只提供了“谁在前面”这一点点信息）。RoPE 的做法是把 query、key 的每两个维度看成一个平面上的向量，位置 \(j\) 的 token 在第 \(k\) 个平面上旋转 \(j\theta_k\)。报告把它写成一个统一的形式（原文式 11）：</p>
+<div class="formula">$$s_{t,i}=q_t^{\top}\Big(\prod_{j=i+1}^{t}\mathbf{R}_j\Big)k_i$$</div>
+<p>即 query 和 key 之间夹着一串“每走一步乘一次”的矩阵。对 RoPE，每一步都是同一个旋转，连乘的结果只取决于走了多少步 \(t-i\)，所以它编码的是相对位置；又因为旋转矩阵是正交的（\(\mathbf{R}_{t-i}=\mathbf{R}_t^{\top}\mathbf{R}_i\)），可以把旋转分别加在 query 和 key 上，不必真的去做连乘。</p>
+</div>
+<p>把 KDA 的递推展开（原文式 12，省略 \(\beta\)），第 \(t\) 个输出对第 \(i\) 个 value 的权重是：</p>
+<div class="formula">$$o_t=\sum_{i\le t}\Big(q_t^{\top}\prod_{j=i+1}^{t}\operatorname{Diag}(\alpha_j)\big(\mathbf{I}-\beta_jk_jk_j^{\top}\big)\,k_i\Big)\,v_i$$</div>
+<p>形式和 RoPE 一模一样：query 和 key 之间夹着一串逐步相乘的矩阵。区别有两点。第一，RoPE 每一步的矩阵是固定的，KDA 每一步的矩阵由当时的输入决定，是学出来的；第二，RoPE 的矩阵是正交的（只转不缩），KDA 的矩阵会收缩（衰减和擦除都让向量变短），距离越远，夹在中间的收缩越多，权重越小。所以 KDA 天然带有“越近越重要”的倾向，而且这种倾向的强弱可以按内容调节。报告由此把 GDN 类模型看成一种“乘法式的相对位置编码”，它放松了 RoPE 的正交约束，可能更强。</p>
+<div class="table-wrap"><table>
+  <tr><th>模型</th><th>query 和第 \(i\) 个 key 之间夹着什么</th><th>性质</th></tr>
+  <tr><td>softmax 注意力</td><td>什么都没有（打分为 \(\exp(q_t^{\top}k_i)\)）</td><td>对位置无感，需要外加位置编码</td></tr>
+  <tr><td>softmax + RoPE</td><td>\(\prod \mathbf{R}_s\)，固定旋转</td><td>正交，只依赖相对距离</td></tr>
+  <tr><td>线性注意力</td><td>什么都没有</td><td>无位置信息，也不会遗忘</td></tr>
+  <tr><td>Mamba2</td><td>\(\prod \alpha_s\)，标量衰减</td><td>所有通道同一种距离刻度</td></tr>
+  <tr><td>GLA</td><td>\(\prod \operatorname{Diag}(\alpha_s)\)</td><td>每个通道一种刻度，没有擦除</td></tr>
+  <tr><td>DeltaNet</td><td>\(\prod(\mathbf{I}-k_sk_s^{\top})\)</td><td>按内容擦除，没有衰减</td></tr>
+  <tr><td>Gated DeltaNet</td><td>\(\prod \alpha_s(\mathbf{I}-k_sk_s^{\top})\)</td><td>擦除 + 单一刻度的衰减</td></tr>
+  <tr class="hl"><td>KDA</td><td>\(\prod \operatorname{Diag}(\alpha_s)(\mathbf{I}-k_sk_s^{\top})\)</td><td>擦除 + 每个通道一种刻度的衰减</td></tr>
+</table></div>
+<p class="w-note">本站根据 <a href="https://arxiv.org/html/2510.26692v2#S6.T6" target="_blank" rel="noopener">原文表 6 ↗</a> 的递推形式整理，省略了 \(\beta\) 和归一化；原表还列了 FoX、DeltaFormer、PaTH-FoX、Comba、RWKV-7 等，以及每种方法的并行形式。</p>
+<p>为什么要逐通道？报告指出，RoPE 的一个关键优点是给每一对维度分配不同的旋转频率，相当于沿特征维度做了一次非均匀的傅里叶变换：高频的维度对相邻几个 token 的差别敏感，低频的维度能分辨很远的距离。GDN 的标量衰减只有一种“距离刻度”，缺少这种多样性；KDA 的逐通道衰减让每个通道各有一种刻度，下图画的就是这件事。</p>
+<div class="dia">
+  <div class="dia-title">示意图：不同保留系数 \(\alpha\) 对应不同的“记忆距离”</div>
+  <svg class="dg" viewBox="0 0 640 290" role="img" aria-label="四条衰减曲线，保留系数越接近 1，记忆衰减得越慢" style="--dg-min:520px">
+    <line x1="70" y1="240" x2="580" y2="240" class="axis"/><line x1="70" y1="240" x2="70" y2="36" class="axis"/>
+    <line x1="70" y1="140" x2="580" y2="140" class="grid-ln"/><line x1="70" y1="40" x2="580" y2="40" class="grid-ln"/>
+    <text x="62" y="240" class="t-r t-xs">0</text><text x="62" y="140" class="t-r t-xs">0.5</text><text x="62" y="40" class="t-r t-xs">1</text>
+    <text x="70" y="256" class="t-c t-xs">0</text><text x="195" y="256" class="t-c t-xs">50</text><text x="320" y="256" class="t-c t-xs">100</text><text x="445" y="256" class="t-c t-xs">150</text><text x="570" y="256" class="t-c t-xs">200</text>
+    <text x="320" y="280" class="t-c t-sm">与当前 token 的距离 n（token 数）</text>
+    <text x="24" y="140" class="t-c t-sm" transform="rotate(-90 24 140)">剩余权重 αⁿ</text>
+    <polyline points="70.0,40.0 72.5,140.0 75.0,190.0 77.5,215.0 80.0,227.5 85.0,236.9 90.0,239.2 95.0,239.8 107.5,240.0 570.0,240.0" style="fill:none;stroke:var(--c-loss);stroke-width:2.2"/>
+    <polyline points="70.0,40.0 72.5,60.0 75.0,78.0 77.5,94.2 80.0,108.8 85.0,133.7 90.0,153.9 95.0,170.3 107.5,198.8 120.0,215.7 145.0,231.5 170.0,237.0 220.0,239.6 270.0,240.0 570.0,240.0" style="fill:none;stroke:var(--c-pred);stroke-width:2.2"/>
+    <polyline points="70.0,40.0 72.5,44.0 75.0,47.9 77.5,51.8 80.0,55.5 85.0,62.8 90.0,69.8 95.0,76.6 107.5,92.3 120.0,106.5 145.0,130.9 170.0,150.9 220.0,180.5 270.0,200.3 320.0,213.5 395.0,225.5 470.0,232.1 570.0,236.5" style="fill:none;stroke:var(--c-tgt);stroke-width:2.2"/>
+    <polyline points="70.0,40.0 72.5,41.0 75.0,42.0 77.5,43.0 80.0,44.0 85.0,45.9 90.0,47.9 95.0,49.8 107.5,54.5 120.0,59.1 145.0,67.9 170.0,76.3 220.0,91.9 270.0,106.1 320.0,118.8 395.0,135.8 470.0,150.3 570.0,166.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.2"/>
+    <line x1="350" y1="52" x2="374" y2="52" style="stroke:var(--c-loss);stroke-width:2.4"/><text x="380" y="52" class="t-xs">α = 0.5：只记得前一两个 token</text>
+    <line x1="350" y1="70" x2="374" y2="70" style="stroke:var(--c-pred);stroke-width:2.4"/><text x="380" y="70" class="t-xs">α = 0.9：半衰期约 7 个 token</text>
+    <line x1="350" y1="88" x2="374" y2="88" style="stroke:var(--c-tgt);stroke-width:2.4"/><text x="380" y="88" class="t-xs">α = 0.98：半衰期约 34 个 token</text>
+    <line x1="350" y1="106" x2="374" y2="106" style="stroke:var(--c-enc);stroke-width:2.4"/><text x="380" y="106" class="t-xs">α = 0.995：半衰期约 138 个 token</text>
+  </svg>
+  <div class="dia-note">本站示意图，半衰期为推算值（\(\ln 0.5/\ln\alpha\)）。真实的 KDA 里 \(\alpha\) 每一步都随输入变化，delta 擦除也会改变权重，这里只画了“\(\alpha\) 固定、没有擦除”时的纯衰减。一个头里 128 个通道可以各取一条这样的曲线，作用类似 RoPE 里从高到低排列的各种旋转频率。</div>
+</div>
+<p>这个视角也解释了报告对 RoPE 外推问题的看法：RoPE 的频率是固定的，模型容易过拟合训练时见过的长度，超出这个长度后，高频以外的那些维度会转到训练中从未出现过的角度；业界的补救办法有部分旋转（只对一部分维度加 RoPE）、调大频率底数，甚至干脆不用位置编码。既然 KDA 层已经扮演了 RoPE 的角色，Kimi Linear 就让全局的 MLA 层用 NoPE，让位置信息由 KDA 动态地捕捉。</p>
+<div class="note-warn"><b>这是一个解释，不是证明：</b>“KDA 可以替代位置编码”的直接证据只有表 5 的一组对照（NoPE 比 RoPE 的长上下文平均分高 2.7）和发布模型在 1M 上的 RULER 成绩。报告没有分析 KDA 学到的衰减系数实际分布成什么样，也没有测试“只用 MLA、全部 NoPE”时会怎样。</div>
+
+<h4 id="n-6-2">6.2 和 DPLR 的关系：少算的到底是哪几步</h4>
+<p>DPLR 结构在 S4 里就出现过，不过 S4 用的是固定的 DPLR 矩阵，计算时通常把它在复数域里对角化，表达力实际上被限制成了对角变换。随输入变化的一般 DPLR 表达力更强，但计算量大、不好并行。KDA 的转移矩阵可以改写为 \(\operatorname{Diag}(\alpha_t)-\beta_tk_tk_t^{\top}\operatorname{Diag}(\alpha_t)\)，正好是 \(a_t=\beta_tk_t\)、\(b_t=k_t\odot\alpha_t\) 的 DPLR；而因为对角部分和 \(b_t\) 共用 \(\alpha_t\)，衰减可以整体提到前面去，先像 GLA 那样做逐通道衰减，再像 DeltaNet 那样做 Householder 式的擦除。</p>
+<p>报告并排给出了两种分块算法的 PyTorch 风格伪代码（原文 Listing 8），差别集中在两处：</p>
+<div class="dia">
+  <div class="dia-title">示意图：通用 DPLR 与 KDA 分块算法的工作量对比</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box pred">通用 DPLR<small>\(a_t\)、\(b_t\) 是两个独立向量</small></span></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">块内需要逐位置计算的 \(C\times C\) 矩阵：</span><div class="cells"><span class="cell c">qk</span><span class="cell c">qb</span><span class="cell c">ab</span><span class="cell c">ak</span></div></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">输出由 3 项相加；状态更新有 2 项</span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box enc">KDA<small>\(a=\beta k\)，\(b=k\odot\alpha\)，都绑在同一个 key 上</small></span></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">块内需要逐位置计算的 \(C\times C\) 矩阵：</span><div class="cells"><span class="cell a">qk</span><span class="cell a">kk</span></div></div>
+      <div class="dia-flow"><span class="lbl" style="font-size:.8rem;color:var(--text-2)">输出由 2 项相加；状态更新只有 1 项（用伪 value）</span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站根据 <a href="https://arxiv.org/html/2510.26692v2#S6.SS1.fig1" target="_blank" rel="noopener">原文 Listing 8 ↗</a> 的两段伪代码整理。每个方格代表一个需要带着累积衰减逐位置计算（因此要做二级分块）的块内矩阵，下标表示它由哪两种向量做内积得到。</div>
+</div>
+<ul>
+  <li><b>块内矩阵从 4 个减到 2 个。</b>块内计算要除以累积衰减 \(1/\Gamma\)，数值不稳定，只能用二级分块来解决，而二级分块会带来额外的计算和读写。通用 DPLR 里 \(q\)、\(k\)、\(a\)、\(b\) 四种向量两两组合，要算 \(A_{qk},A_{qb},A_{ab},A_{ak}\) 四个矩阵；KDA 里 \(a\)、\(b\) 都由 \(k\) 决定，只剩 \(A_{qk}\) 和 \(A_{kk}\) 两个。</li>
+  <li><b>块间与输出再省约 3 次矩阵乘法。</b>通用 DPLR 的输出要把“\(A_{qk}\) 乘 value”“\(A_{qb}\) 乘修正项”“query 乘上一块状态”三项相加，状态更新也要分 key 和 \(b\) 两路；KDA 的输出只有“query 乘状态”加“\(A_{qk}\) 乘伪 value”两项，状态更新只有一路。</li>
+</ul>
+<p>两处合起来，就是第 3 节图里那接近 2 倍的内核速度差。</p>
+
+<h4 id="n-6-3">6.3 复杂度：训练算多少，推理怎么算</h4>
+<p><b>训练计算量。</b>Kimi Linear 和全 MLA 的参数量相近，各种线性投影的计算量相同，差别只在注意力核心本身。对一个头、头维 \(d_h\)、块长 \(C=64\)、长度 \(T\) 的序列，报告给出（原文式 13–14）：</p>
+<div class="formula">$$\mathrm{FLOPs}_{\text{KDA}}=6Td_h^2+3TCd_h+TC^2,\qquad \mathrm{FLOPs}_{\text{Attn}}=2T^2d_h$$</div>
+<p>代入 \(d_h=128\)、\(C=64\)：KDA 每个 token 约 \(6\times128^2+3\times64\times128+64^2\approx1.27\times10^5\) 次运算，是一个常数；全注意力每个 token 约 \(2Td_h=256T\) 次，随长度线性增长。两者之比在 \(T=4\)K 时约 8 倍，128K 时约 264 倍，1M 时约 2,100 倍（推算，只比较一个头的注意力核心）。但在 4K 这样的短上下文里，注意力核心只是全部计算的一小部分，大头是所有层都有的投影和 MoE 前馈，所以第 5 节图 7(a) 里 4K–16K 时三个模型的预填充时间几乎一样。</p>
+<p><b>推理策略。</b>预填充用第 3 节的分块内核（矩阵乘法密集），逐个生成时切换到逐步递推的内核（读写量小）。公开的 Hugging Face 实现正是这样切换的：一次输入的 token 数不超过 64 时走逐步递推，否则走分块。每个 KDA 头的状态固定为 \(128\times128\)，与序列长度无关。报告认为，随着序列变长，受显存带宽限制的解码时间会逼近混合比例决定的上限，并引用图 7(b) 中 1M 时“2.3 倍”的加速（图上标的是 2.2 倍）；再加上省下的显存可以支持更大的批，长上下文下的理论解码加速可达 6.3 倍。按第 4 节的推算，只有 7/27 的层读随长度增长的 KV，这个上限应在 27/7 ≈ 3.9 倍附近，而不是报告字面上写的“3:1”（推算）；实测单请求停在 2.2 倍，是因为读权重等固定开销摊不掉。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S6.SS1" target="_blank" rel="noopener">§6.1 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S6.SS2" target="_blank" rel="noopener">§6.2 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#S6.SS3" target="_blank" rel="noopener">§6.3 ↗</a> · 相关：<a href="roformer.html">RoFormer 精读</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 相关工作与结论：线性注意力、稀疏注意力与混合模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>KDA 在线性注意力家族里处于什么位置？同样是为长上下文省钱，稀疏注意力（NSA、MoBA、DSA）走的是另一条路，两条路各有什么长短？混合模型有哪几种做法，Kimi Linear 为什么选“按层交替 + NoPE”？</div>
+<p><b>线性注意力的演化。</b>线性注意力用核函数代替 softmax，借助矩阵乘法的结合律避免显式构造 \(T\times T\) 的注意力矩阵，从而做到线性复杂度。之后的改进主要沿两条线展开：衰减从与数据无关（RetNet）变成与数据相关（Mamba2 等），粒度从每个头一个标量变成逐通道（GLA）；更新规则从单纯叠加变成带纠错的 delta 规则。报告的表 7 用“测试时训练”（TTT）的框架把这些方法统一起来：每种方法都可以看成在每个 token 上对状态做一步梯度下降，区别只在优化的目标函数。</p>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th>每一步在优化什么</th><th>更新规则</th></tr>
+  <tr><td>线性注意力</td><td>让读出值和 \(v_t\) 方向一致（无上限）</td><td>\(\mathbf{S}_t=\mathbf{S}_{t-1}+k_tv_t^{\top}\)</td></tr>
+  <tr><td>RetNet / Mamba2</td><td>同上，再加一个把状态拉向 0 的正则项</td><td>\(\mathbf{S}_t=\alpha_t\mathbf{S}_{t-1}+\beta_tk_tv_t^{\top}\)（RetNet 的 \(\alpha\) 固定）</td></tr>
+  <tr><td>GLA</td><td>同上，正则项逐通道</td><td>\(\mathbf{S}_t=\operatorname{Diag}(\alpha_t)\mathbf{S}_{t-1}+k_tv_t^{\top}\)</td></tr>
+  <tr><td>Gated DeltaNet</td><td>在衰减后的状态上最小化重建误差</td><td>\(\mathbf{S}_t=(\mathbf{I}-\beta_tk_tk_t^{\top})\alpha_t\mathbf{S}_{t-1}+\beta_tk_tv_t^{\top}\)</td></tr>
+  <tr class="hl"><td>KDA</td><td>在逐通道衰减后的状态上最小化重建误差</td><td>\(\mathbf{S}_t=(\mathbf{I}-\beta_tk_tk_t^{\top})\operatorname{Diag}(\alpha_t)\mathbf{S}_{t-1}+\beta_tk_tv_t^{\top}\)</td></tr>
+</table></div>
+<p class="w-note">本站从 <a href="https://arxiv.org/html/2510.26692v2#S7.T7" target="_blank" rel="noopener">原文表 7 ↗</a> 中选取部分行改写；原表还包括 HGRN2、Longhorn、Comba、RWKV-7。</p>
+<p>报告也承认，即使有了这些改进，线性注意力在精确复制和极长上下文里的细粒度检索上仍然落后于全注意力，这正是要做混合、要用更有结构的更新规则（如 delta 规则的秩 1 纠错）的原因。</p>
+<p><b>稀疏注意力：另一条路。</b>稀疏注意力不压缩历史，而是每次只挑一部分历史 token 来算注意力。早期方法用固定模式（滑动窗口、空洞窗口、固定跳跃），结构僵硬、容易掉点；后来的方法按内容动态挑选（聚类、轻量路由），但挑选本身有开销，没有专门的内核就拿不到理论加速。近期的做法强调软硬件协同：<a href="native-sparse-attention.html">NSA</a> 和 <a href="moba.html">MoBA</a> 都从挑 token 改成挑块，NSA 用一个小网络给块打分、依赖分组查询注意力里足够多的头来凑满矩阵乘法，MoBA 用 FlashAttention 内核顺便算出的 log-sum-exp 分数选前 \(k\) 个块；DeepSeek-V3.2-Exp 的 DSA 又回到按 token 选，靠一个低精度（FP8）、小头维的“索引器”全注意力来保持效率（见 <a href="deepseek-v3-2.html">DeepSeek-V3.2 精读</a>）。</p>
+<p><b>两条路怎么比。</b>报告的看法是：稀疏注意力更擅长取回细粒度的历史信息，但它必须保存全部 KV 缓存才能从中挑选，所以内存上不如状态固定的线性注意力；而且稀疏只是在全注意力里做选择，表达能力的上限就是全注意力。线性注意力奉行“压缩即智能”，用固定大小的状态做泛化，配上 delta 规则后理论表达力还可能更强；它的检索短板可以用扩大状态等办法缓解，真正的障碍是硬件实现和推理基础设施不成熟，这正是 Kimi Linear 开源内核、接入 vLLM 想解决的。报告最后提出，两条路并不互斥，未来可以把线性注意力的压缩能力和稀疏注意力的细粒度检索结合起来。</p>
+<p><b>混合模型的两种做法。</b>层内混合在同一层里融合不同机制，比如把 softmax 头和状态空间模型的头并排放在一层（如 Hymba），或者对较早的历史用线性注意力、对最近的 token 用滑动窗口注意力。它的缺点是系统复杂：异构的计算路径让分布式并行等优化变得麻烦。层间混合按固定比例整层交替，Jamba、MiniMax-01、混元 TurboS 等大模型都采用了这种方式，Kimi Linear 也是，只是线性部分用 KDA 而不是常见的 Mamba2，因为作者发现 KDA 整体更好，尤其是检索和复制能力。</p>
+<p><b>位置编码的趋势。</b>近期研究发现混合模型对 RoPE 频率底数的调整很敏感，给上下文扩展带来麻烦。于是不少模型向 NoPE 靠拢：Falcon-H1 用了极大的 RoPE 底数（约 \(10^{11}\)），让位置编码几乎等于没有；SWAN-GPT 让带 RoPE 的层和 NoPE 的全注意力层交替。Kimi Linear 的“KDA + NoPE 全注意力”属于同一方向，报告认为它让上下文扩展变得直接。</p>
+<p><b>结论。</b>报告的总结是：Kimi Linear 以逐通道门控的 KDA 为核心，与全注意力按 3:1 交替，内存占用最多降低 75%，解码吞吐最多提高 6.3 倍，并在相同条件下超过全注意力基线；内核和预训练权重都已开源。</p>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#Sx1" target="_blank" rel="noopener">结论 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 附录：推导、参考代码与 5.7T 模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>附录里有四部分：作者贡献名单、第 3 节 WY 表示的归纳证明、一段完整的分块 KDA 参考代码、以及训练 5.7T token 的发布模型和 Moonlight 的对比。证明为什么成立得这么干净？参考代码的每一段对应哪个公式？发布模型的成绩能说明什么，不能说明什么？</div>
+<p><b>附录 A：贡献名单。</b>名单按贡献大小排序，承担项目负责工作的成员排在最后；项目在 Moonshot AI 完成，外部合作者标 #，已离开团队的成员标 *。页首的作者行就是按这份名单抄录的。</p>
+<p><b>附录 B：WY 表示的归纳证明。</b>要证明的是第 3 节的 \(\mathbf{P}^r=\operatorname{Diag}(\gamma^r)-\sum_{i\le r}\operatorname{Diag}(\gamma^{i\to r})k^iw^{i\top}\)。假设它对 \(r-1\) 成立，在左边乘上第 \(r\) 步的转移矩阵 \((\mathbf{I}-\beta^rk^rk^{r\top})\operatorname{Diag}(\alpha^r)\)。证明能顺利进行的关键在于“先衰减”：\(\operatorname{Diag}(\alpha^r)\) 直接乘在 \(\mathbf{P}^{r-1}\) 上，正好把每一项里的 \(\gamma^{\cdot\to r-1}\) 变成 \(\gamma^{\cdot\to r}\)，旧的秩 1 项形式不变；然后展开 \(\mathbf{I}-\beta^rk^rk^{r\top}\)，多出来的所有项都以 \(k^r\) 开头，可以合并成一个新的秩 1 项 \(k^rw^{r\top}\)，合并出来的 \(w^r\) 恰好就是第 3 节的递推式。\(\mathbf{H}^r\) 的证明完全相同，只是把 \(w\) 换成 \(u\)。如果衰减放在擦除之后，\(\operatorname{Diag}(\alpha^r)\) 会夹在 \(k^r\) 和旧项之间，就不能这样整齐地吸收，这也是 KDA 选择“先衰减再改写”的计算动机。</p>
+<p><b>附录 C：参考代码。</b>原文给了一段约 50 行的 PyTorch 风格函数 <code>chunk_kda</code>，全部用 FP32 计算，块长默认 64。按顺序读，它和第 3 节的公式一一对应：</p>
+<ol>
+  <li>把 query 乘上 \(d_k^{-1/2}\)；对数衰减 \(g\) 沿块内累加，得到对数形式的累积衰减。</li>
+  <li>逐列构造块内矩阵：第 \(i\) 列是“衰减调整过的各个 key”与第 \(i\) 个 key 的内积，乘以 \(\beta\)，取严格下三角并取负。</li>
+  <li>用一个从第 1 行到第 \(C-1\) 行的循环做前代消元，求出单位下三角矩阵的逆，再加上单位阵、乘以 \(\beta\)：这就是 UT 变换里的 \(\mathbf{M}\)。随后 <code>w = A @ (g.exp() * k)</code>、<code>u = A @ v</code>。</li>
+  <li>逐块循环：先构造块内的 query–key 矩阵（注释写明“为数值稳定做二级分块”，参考代码里逐个位置计算相对衰减）并加因果掩码；算伪 value <code>v_i = u_i - w_i @ S</code>；输出 <code>o = (q_i * g_i.exp()) @ S + A @ v_i</code>；最后把状态按整块的衰减缩放，再加上衰减调整过的 key 与伪 value 的乘积。</li>
+</ol>
+<p>这段代码是讲解用的参考实现，真正训练用的是 fla 库里的 Triton 内核（后来还有 CUTLASS 实现的 FlashKDA，见文末）。</p>
+<p><b>附录 D：训练 5.7T token 的发布模型。</b>按 Moonlight 的 token 数（5.7T）训练的 Kimi Linear，与 Moonlight 在几乎所有基准上相比都更好。部分数字如下：</p>
+<div class="table-wrap"><table>
+  <tr><th>版本</th><th>基准</th><th class="num">Kimi Linear（48B 总参 / 3B 激活）</th><th class="num">Moonlight（16B 总参 / 3B 激活）</th></tr>
+  <tr><td rowspan="5">基座</td><td>MMLU-Pro（5-shot）</td><td class="num">54.8</td><td class="num">42.4</td></tr>
+  <tr><td>TriviaQA（5-shot）</td><td class="num">75.2</td><td class="num">66.2</td></tr>
+  <tr><td>MATH（4-shot）</td><td class="num">58.5</td><td class="num">45.3</td></tr>
+  <tr><td>CRUXEval-O-cot</td><td class="num">67.0</td><td class="num">46.6</td></tr>
+  <tr><td>C-Eval（5-shot）</td><td class="num">83.3</td><td class="num">77.6</td></tr>
+  <tr><td rowspan="6">指令</td><td>RULER@128K</td><td class="num">95.4</td><td class="num">—</td></tr>
+  <tr><td>RULER@1M</td><td class="num">94.8</td><td class="num">—</td></tr>
+  <tr><td>GPQA-Diamond（Avg@8）</td><td class="num">71.7</td><td class="num">24.7</td></tr>
+  <tr><td>AIME 2025（Avg@64）</td><td class="num">58.6</td><td class="num">—</td></tr>
+  <tr><td>MATH500</td><td class="num">94.6</td><td class="num">58.0</td></tr>
+  <tr><td>LiveCodeBench v6（Pass@1）</td><td class="num">45.7</td><td class="num">11.9</td></tr>
+</table></div>
+<p class="w-note">数字来自 <a href="https://arxiv.org/html/2510.26692v2#A4.T8" target="_blank" rel="noopener">原文表 8 ↗</a> 和 <a href="https://arxiv.org/html/2510.26692v2#A4.T9" target="_blank" rel="noopener">表 9 ↗</a>。“—”表示未评测：Moonlight-Instruct 的上下文上限是 8K，超出的任务没有测。</p>
+<div class="note-warn"><b>这组对比不是架构对照：</b>两个模型 token 数相同、激活参数相同，但 Kimi Linear 的总参数是 Moonlight 的 3 倍，两者的数据、MoE 稀疏度和后训练流程也不同（Kimi Linear 的后训练用的是 K2 时代的推理数据和强化学习）。指令版的巨大差距（例如 GPQA-Diamond 71.7 对 24.7）主要反映后训练的代差，不能归功于 KDA。它能说明的是：这套架构可以训练成一个在 1M 上下文上 RULER 达到 94.8 的可用模型。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2510.26692v2#A1" target="_blank" rel="noopener">英文原文附录 A ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#A2" target="_blank" rel="noopener">附录 B ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#A3" target="_blank" rel="noopener">附录 C ↗</a> · <a href="https://arxiv.org/html/2510.26692v2#A4" target="_blank" rel="noopener">附录 D ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>Kimi Linear 发布于 2025 年 10 月底。到 2026 年 10 月，它最重要的后续是 Moonshot 自己的旗舰模型 Kimi K3 全面采用了 KDA 混合架构；同时 KDA 内核和模型实现进入了主流开源库。下面分三部分讲。</p>
+
+<h4 id="n-impact-1">开源与采用（截至 2026-10-20）</h4>
+<ul>
+  <li><b>内核。</b>KDA 的 Triton 内核在 flash-linear-attention（fla）库的 <code>fla/ops/kda</code> 目录下，包括训练和预填充用的分块内核、解码用的逐步递推内核和衰减门函数；该目录下的 <code>backends</code> 还有 <code>flash_kda</code>、<code>tilelang</code>、<code>triton_ascend</code> 三个后端。fla 库当时有 5,953 个 GitHub star。Moonshot 另有一个用 CUTLASS 写的开源内核仓库（2026-04 创建） <a href="https://github.com/MoonshotAI/FlashKDA" target="_blank" rel="noopener">FlashKDA</a>（1,282 个 star），Kimi K3 报告说它会作为 fla 的后端被自动调用。</li>
+  <li><b>推理引擎。</b>vLLM 主干的模型注册表里有 <code>KimiLinearForCausalLM</code>，目前它和 Kimi K3 的实现放在同一个模块（<code>vllm.models.kimi_k3</code>）里。</li>
+  <li><b>权重。</b>Hugging Face 上的 Kimi-Linear-48B-A3B-Instruct 有 609 个点赞，近 30 天下载约 16.9 万次；Base 版有 84 个点赞。代码仓库 <a href="https://github.com/MoonshotAI/Kimi-Linear" target="_blank" rel="noopener">MoonshotAI/Kimi-Linear</a> 有 1,618 个 star，MIT 许可。</li>
+</ul>
+
+<h4 id="n-impact-k3">Kimi K3：把 KDA 放大到 2.8T 参数</h4>
+<div class="note-pre"><b>先补一点背景：Kimi K3 是什么。</b>
+<p>Kimi K3（arXiv 2607.24653，2026-07）是 Moonshot 的旗舰模型：2.8T 总参数、104B 激活参数的 MoE，原生支持图像和视频，上下文 1M token。它的架构有四项新东西：KDA 混合注意力（沿序列方向）、Attention Residuals（沿深度方向：每一层不再把前面各层的输出等权累加，而是用一个可学习的“伪 query”对前面各层的输出做注意力，自己挑要什么）、Stable LatentMoE（沿宽度方向：896 个路由专家激活 16 个，在压缩的潜空间里计算）和逐头的 Muon 优化器。这里只讲与本文直接相关的 KDA 部分。</p>
+</div>
+<p><b>层的排布没有变。</b>K3 仍是“3 层 KDA + 1 层 MLA”为一组反复堆叠，最后再加 1 层 MLA，保证最后一层一定是全局注意力，一共 93 层：69 层 KDA、24 层 MLA（Kimi K2 是 61 层全 MLA）。所有 MLA 层继续不用位置编码，并且加了一个由输入决定的、满秩的 Sigmoid 输出门（报告称为门控 MLA）。为了修正 FlashAttention 中有偏的舍入误差，K3 在训练时把注意力输出保留为 FP32。</p>
+<p><b>KDA 本身改了两处。</b>第一处是给衰减加了下界。第 3 节讲过，Kimi Linear 把 64 token 的块再切成 16 token 的小块，非对角小块用 Tensor Core 做矩阵乘法，对角线上的小块却必须逐个位置对计算，因为块内累积衰减的倒数可能大到溢出。K3 把对数衰减的映射从 \(g=-e^{A}\operatorname{Softplus}(z)\)（可以趋于负无穷）改成</p>
+<div class="formula">$$g=g_{\min}\cdot\operatorname{Sigmoid}(e^{A}z)\in(g_{\min},0),\qquad g_{\min}=-5$$</div>
+<p>于是每一步的保留系数都大于 \(e^{-5}\approx6.7\times10^{-3}\)，16 个 token 的累积对数衰减落在 \((-80,0)\) 之间，倒数小于 \(e^{80}\)（约 \(5.5\times10^{34}\)，推算），在 BF16 的表示范围之内。数值范围有了保证，对角小块也可以直接用 Tensor Core 的稠密矩阵乘法，块内的主要瓶颈就去掉了。代价是模型不能再在一步之内把某个通道“清零”（最多只能衰减到约 0.7%）。第二处是把 KDA 的输出门从低秩改成满秩，和门控 MLA 一致。</p>
+<div class="dia">
+  <div class="dia-title">示意图：一个 64 token 块内的 4×4 个 16 token 小块，各用什么方式计算</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><b>Kimi Linear</b></div>
+      <div class="cells" style="max-width:140px"><span class="cell c">逐</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell a">TC</span><span class="cell c">逐</span><span class="cell"></span><span class="cell"></span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell c">逐</span><span class="cell"></span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell c">逐</span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><b>Kimi K3（衰减有下界）</b></div>
+      <div class="cells" style="max-width:140px"><span class="cell a">TC</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell"></span><span class="cell"></span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell"></span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell a">TC</span><span class="cell a">TC</span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图，对应 <a href="https://arxiv.org/html/2607.24653#S2.F3" target="_blank" rel="noopener">Kimi K3 报告图 3 ↗</a>。每格是块内注意力矩阵的一个 16×16 小块，右上角的空格因果掩码为 0、不用算。“TC”表示用 Tensor Core 的稠密矩阵乘法，“逐”表示需要逐个位置对显式计算的对角小块。</div>
+</div>
+<p><b>上下文扩展更省事。</b>K3 预训练时上下文从 8K 扩到 64K，在最后的退火阶段再从 256K 扩到 1M。报告说，因为没有位置编码，模型“可以直接外推到 1M，不需要任何位置编码上的修改”。要注意的是 K3 实际上训练到了 1M，所以这句话说明的是“扩展时不用调 RoPE 参数”，而不是“没训练过的长度也能用”。</p>
+<p><b>KDA 的系统支持是 K3 报告着墨最多的部分。</b></p>
+<ul>
+  <li><b>FlashKDA 内核。</b>朴素实现里，块内并行计算和块间串行传递状态是交替进行的，传递状态时大部分计算单元闲着。FlashKDA 把两者重叠起来，并把工作拆成按 token 并行的阶段和按头并行的递推阶段，各自调优，报告称明显快于 Triton 参考实现（没有给出倍数）。</li>
+  <li><b>单卡内的上下文并行。</b>纯张量并行时，每张卡只分到几个头，超长序列预填充时递推仍然很长，大量计算单元空闲。K3 利用“每一段的状态转移可以先独立算出来、事后再精确拼接”这一性质，在一张卡内把序列切给不同的计算单元并行处理。</li>
+  <li><b>跨卡的 KDA 上下文并行（KCP）。</b>原始线性注意力做上下文并行很简单：各卡从零状态算出本段的状态，前面各段相加即可。delta 规则不行，因为每个 token 的转移矩阵会作用在“进入这一段时的状态”上，本段的结果依赖前面的状态。KCP 让每张卡先算两样只依赖本地 token 的东西：本段的累积转移矩阵（\(d_k\times d_k\)）和从零状态出发的本地状态；一次固定大小的 all-gather 之后，每张卡按顺序把前面各段的这两样东西套用一遍，就能还原出自己的入口状态。通信量与序列长度无关，实现在 fla 的 PR #691 中。</li>
+  <li><b>前缀缓存。</b>混合模型的前缀缓存比全注意力难：MLA 的 KV 按 token 存，任何前缀都能截出来复用；KDA 的状态只是某个位置上的一个快照，只有事先存了快照的位置才能复用，而快照很大，只能稀疏地存。K3 把 KDA 状态和 MLA 的 KV 放进同一个分页池（统一页大小），物理块是 6144 token，但在块内按 512 token 做前缀哈希；KDA 快照只在少数哈希边界上保存，通常是对话轮次的边界。命中时取“MLA 哈希匹配且 KDA 有快照”的最长边界，把快照复制成请求私有的状态，从那里继续预填充。见下图。</li>
+  <li><b>投机解码。</b>KDA 的状态在解码时原地更新，如果多 token 预测（MTP）草稿里有一部分被拒绝，状态已经走过头、没法简单回退；为每个草稿位置存快照又会成倍增加读写量。K3 的做法是只缓存草稿 token 的投影输入（远小于状态本身），验证后在片上重放被接受的那几步，再写回状态。报告说这与 Dao AI Lab 同期提出的 ReplaySSM 思路相同。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：K3 在一个 6144 token 的物理块内做细粒度前缀复用</div>
+  <svg class="dg" viewBox="0 0 760 236" role="img" aria-label="一个物理块分成十二个 512 token 的哈希块，KDA 快照只存在少数边界，新请求在 2560 处命中" style="--dg-min:640px">
+    <text x="388" y="18" class="t-c t-sm">一个物理块 = 6144 token = 12 个 512 token 的哈希块（下面的数字是块末尾的 token 位置）</text>
+    <g class="enc">
+      <rect x="40" y="34" width="56" height="34" class="box"/><rect x="98" y="34" width="56" height="34" class="box"/><rect x="156" y="34" width="56" height="34" class="box"/><rect x="214" y="34" width="56" height="34" class="box"/><rect x="272" y="34" width="56" height="34" class="box"/><rect x="330" y="34" width="56" height="34" class="box"/><rect x="388" y="34" width="56" height="34" class="box"/>
+    </g>
+    <rect x="446" y="34" width="56" height="34" class="panel"/><rect x="504" y="34" width="56" height="34" class="panel"/><rect x="562" y="34" width="56" height="34" class="panel"/><rect x="620" y="34" width="56" height="34" class="panel"/><rect x="678" y="34" width="56" height="34" class="panel"/>
+    <text x="68" y="51" class="t-c t-xs">512</text><text x="126" y="51" class="t-c t-xs">1024</text><text x="184" y="51" class="t-c t-xs">1536</text><text x="242" y="51" class="t-c t-xs">2048</text><text x="300" y="51" class="t-c t-xs">2560</text><text x="358" y="51" class="t-c t-xs">3072</text><text x="416" y="51" class="t-c t-xs">3584</text>
+    <text x="590" y="51" class="t-c t-xs">尚未写入</text>
+    <g style="fill:none;stroke:var(--text-3);stroke-width:1.4">
+      <circle cx="97" cy="86" r="5"/><circle cx="213" cy="86" r="5"/><circle cx="271" cy="86" r="5"/><circle cx="387" cy="86" r="5"/>
+    </g>
+    <circle cx="155" cy="86" r="5" style="fill:var(--text-3)"/><circle cx="445" cy="86" r="5" style="fill:var(--text-3)"/>
+    <circle cx="329" cy="86" r="6" style="fill:var(--c-pred)"/>
+    <text x="40" y="108" class="t-xs">○ 无 KDA 快照　● 有 KDA 快照（通常在对话轮次的边界）</text>
+    <line x1="40" y1="128" x2="357" y2="128" style="stroke:var(--c-act);stroke-width:3"/>
+    <line x1="357" y1="122" x2="357" y2="134" style="stroke:var(--c-act);stroke-width:2"/>
+    <text x="198" y="144" class="t-c t-xs" style="fill:var(--c-act)">新请求与缓存前缀一致的部分：前 2800 个 token</text>
+    <path class="edge pred" d="M329,170 L329,96"/>
+    <text x="329" y="184" class="t-c t-sm" style="fill:var(--c-pred)">命中边界 B = 2560（既有 MLA 哈希匹配，又有 KDA 快照）</text>
+    <text x="388" y="210" class="t-c t-xs">复用前 5 个哈希块的 MLA KV，把 2560 处的 KDA 快照复制成请求私有状态，从第 2560 个 token 起继续预填充</text>
+    <text x="388" y="228" class="t-c t-xs">2048 处虽然 MLA 也匹配，但没有 KDA 快照，不能作为命中点；3072 处 MLA 已不匹配</text>
+  </svg>
+  <div class="dia-note">本站示意图，例子改编自 <a href="https://arxiv.org/html/2607.24653#S5.F12" target="_blank" rel="noopener">Kimi K3 报告图 12 ↗</a>（原图同样以 2560 处命中为例），快照所在位置是本站假设的。蓝色为已缓存的 MLA KV，灰色为该物理块中尚未写入的部分。</div>
+</div>
+<p><b>怎么评价。</b>K3 报告说，KDA、Attention Residuals、Stable LatentMoE 加上改进的数据和训练配方，合起来让整体缩放效率比 Kimi K2 提高约 2.5 倍。这是几项改动的总效果，报告没有在 K3 的规模上单独消融 KDA，所以不能从中读出“KDA 在 2.8T 规模上贡献了多少”。能确定的是：Moonshot 在 1.4T 规模的对照之后，把 KDA + NoPE MLA 的 3:1 混合用到了自己最大的模型上，并为它补齐了训练（上下文并行）、推理（前缀缓存、投机解码）和强化学习（KDA 状态与 MLA 缓存一起换出到 CPU 内存）的整套系统支持。K3 的总体评测成绩是厂商自报：报告说它整体落后于 Claude Fable 5 和 GPT-5.6 Sol，领先于其评测范围内的其他模型。</p>
+
+<h4 id="n-impact-2">同一时期的其他选择，以及还不知道的事</h4>
+<ul>
+  <li><b>同样 3:1，位置编码的选择不同。</b>阿里的 Qwen3-Next 也是每 4 层中 3 层 Gated DeltaNet、1 层门控全注意力，但它的全注意力层保留了部分 RoPE（公开配置里 <code>partial_rotary_factor</code> 为 0.25，即只对 1/4 的维度旋转）。两家在“线性层选什么”“全注意力层要不要位置编码”上做了不同选择，目前没有在同一配方下直接对比的公开结果。GDN 一侧的精读见 <a href="gated-deltanet.html">Gated DeltaNet 精读</a>。</li>
+  <li><b>稀疏注意力那条路也在推进。</b>报告第 7 节说线性和稀疏是两条互补的路；DeepSeek 选的是稀疏这条，从 V3.2 的 DSA 一路发展下来（见 <a href="deepseek-v3-2.html">DeepSeek-V3.2 精读</a>）。两条路在同一规模上的直接比较，本站还没有查到。</li>
+  <li><b>还不知道的。</b>截至 2026-10，本站没有查到其他机构在同等规模上独立复现“KDA 混合在同配方下超过全注意力”的结果；KDA 相对 GDN 的优势在比 48B-A3B 大得多的规模上是否保持，K3 报告也没有给出对照。效率数字的硬件依赖同样缺少公开的第三方测量。</li>
+</ul>
+<p>想看 KDA 层的可交互架构图、线性注意力家族对照表和配套简答题，见<a href="../legacy/tracks/ai-infra/20-kimi-linear.html">结构拆解页</a>。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名。背景只列可公开查证的信息：作者主页、实验室与机构页面，以及原文参考文献里能看到的代表作。完整的 59 人名单见页首。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Yu Zhang</b>（名单第一位）<div class="aff">Soochow University（苏州大学，论文标注）</div>flash-linear-attention（FLA）库的作者之一（与 Songlin Yang 合著，原文参考文献 [113]），Gated Slot Attention 的第一作者（[124]）。</div>
+  <div class="author-card"><b>Jiaxi Hu</b><div class="aff">The Hong Kong University of Science and Technology (Guangzhou)（论文标注）</div>Comba 的第一作者（[40]）；KDA 分块算法里 \(\mathbf{P}\) 的写法沿用了 Comba。</div>
+  <div class="author-card"><b>Songlin Yang</b>（外部合作者）<div class="aff">Massachusetts Institute of Technology（论文标注）</div>个人主页：MIT 博士，导师 Yoon Kim，现为 Thinking Machines Lab 技术人员；GLA、DeltaNet 按序列并行、Gated DeltaNet、PaTH 注意力的第一作者，FLA 库作者。</div>
+  <div class="author-card"><b>Enzhe Lu</b><div class="aff">Moonshot AI</div>MoBA（混合块注意力）的第一作者（[63]），见 <a href="moba.html">MoBA 精读</a>。</div>
+  <div class="author-card"><b>Jianlin Su</b><div class="aff">Moonshot AI</div>RoFormer（RoPE）的第一作者（[88]），“科学空间”博客作者（[87]）。</div>
+  <div class="author-card"><b>Guohong Fu</b>（外部合作者）<div class="aff">Soochow University（论文标注）</div></div>
+  <div class="author-card"><b>Jiezhong Qiu</b><div class="aff">Hangzhou Institute of Medicine, CAS（论文标注）</div></div>
+  <div class="author-card senior"><b>Zhilin Yang</b><div class="aff">Moonshot AI；名单倒数第二位（附录 A：承担项目负责工作的成员排在最后）</div>个人主页：清华大学本科、卡内基梅隆大学博士（2019），代表作 XLNet、Transformer-XL。</div>
+  <div class="author-card senior"><b>Yulun Du</b><div class="aff">Moonshot AI；名单最后一位</div>本报告与 Kimi K3 报告在 arXiv 上的提交人。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：arXiv 技术报告，v1 于 2025-10-30 提交，v2 于 2025-11-01 更新；截至 2026-10-20，本站没有查到会议或期刊版本，内容未经同行评审。</li>
+  <li><b>开源</b>：<a href="https://github.com/MoonshotAI/Kimi-Linear" target="_blank" rel="noopener">MoonshotAI/Kimi-Linear</a> 1,618 个 star、90 个 fork，MIT 许可（仓库创建于 2025-10-29）；KDA 内核在 <a href="https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda" target="_blank" rel="noopener">fla</a>（5,953 个 star）；<a href="https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct" target="_blank" rel="noopener">Instruct 权重</a> 609 个点赞、近 30 天下载约 16.9 万次（以上均为 2026-10-20 查询）。</li>
+  <li><b>采用</b>：vLLM 主干支持 Kimi Linear；Moonshot 的旗舰模型 Kimi K3（2026-07）沿用 3:1 的 KDA–MLA 混合与 NoPE。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/ai-infra/20-kimi-linear.html">Kimi Linear 结构拆解页</a>：可交互架构图、线性注意力家族对照、简答题。</li>
+  <li><a href="gated-deltanet.html">Gated DeltaNet 精读</a>（KDA 的直接前身）与 <a href="../legacy/tracks/ai-infra/11-gated-deltanet.html">Gated DeltaNet 结构拆解页</a>。</li>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>（MLA、矩阵吸收、MoE）与 <a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">结构拆解页</a>。</li>
+  <li><a href="roformer.html">RoFormer 精读</a>（RoPE）与 <a href="../legacy/tracks/ai-infra/10-rope.html">RoPE 结构拆解页</a>（部分旋转与 NoPE）。</li>
+  <li>稀疏注意力的另一条路：<a href="native-sparse-attention.html">NSA 精读</a>、<a href="moba.html">MoBA 精读</a>、<a href="deepseek-v3-2.html">DeepSeek-V3.2（DSA）精读</a>、<a href="../legacy/tracks/ai-infra/12-deepseek-sparse-attention.html">DSA 结构拆解页</a>。</li>
+  <li>训练与推理背景：<a href="muon.html">Muon 精读</a>、<a href="gated-attention.html">Gated Attention 精读</a>、<a href="vllm.html">vLLM 精读</a>、<a href="flashattention.html">FlashAttention 精读</a>、<a href="../legacy/tracks/ai-infra/00-inference-basics.html">推理基础</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。原文以 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/" target="_blank" rel="noopener">CC BY-NC-ND 4.0</a> 发布，不允许演绎，所以本页没有使用任何原文图片；所有图都是本站绘制的示意图，或根据原文报告的数字、公式和矢量图坐标重新画出的简图，并在图下注明对应的原图。数字与结论以原文为准：<a href="https://arxiv.org/abs/2510.26692" target="_blank" rel="noopener">arXiv:2510.26692</a>（v2）。“后来怎么样了”中关于 Kimi K3 的内容依据 <a href="https://arxiv.org/abs/2607.24653" target="_blank" rel="noopener">arXiv:2607.24653</a>（v2，同为 CC BY-NC-ND 4.0）；模型配置与代码细节依据 Hugging Face 上公开的 config.json 与 modeling_kimi.py。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>

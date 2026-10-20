@@ -782,6 +782,81 @@ window.ATLAS_METRICS = {
    "citations": 563,
    "influential": 48,
    "s2": "23c2e21b6a5789724715f2986fdc586a517ffe57"
+  },
+  "2502.13189": {
+   "citations": 229,
+   "influential": 25,
+   "s2": "d281440cd94ed477c4a07e63d3149c377eaa0798"
+  },
+  "2502.16982": {
+   "citations": 445,
+   "influential": 66,
+   "s2": "1d239507d99278b79b85c04eab7b59fd7e3e3216"
+  },
+  "2503.16428": {
+   "citations": 160,
+   "influential": 22,
+   "s2": "b4ab74dfafb9a84b2452fe6945e063c79e005d7e"
+  },
+  "2505.06708": {
+   "citations": 352,
+   "influential": 41,
+   "s2": "a295e71055248f4145257ed88f25503a75a78406"
+  },
+  "2505.09343": {
+   "citations": 110,
+   "influential": 11,
+   "s2": "b246ae41419dfb4af8fc993378a324b9c66ef251"
+  },
+  "2505.23416": {
+   "citations": 117,
+   "influential": 27,
+   "s2": "29dc00eca32c284da982792c106dc099a8fed9e8"
+  },
+  "2505.24298": {
+   "citations": 296,
+   "influential": 70,
+   "s2": "89c3f847ded8200d1a1d09e278bb32fd721c9761"
+  },
+  "2601.07372": {
+   "citations": 89,
+   "influential": 19,
+   "s2": "c283116f911bb7457e595656a28d3b500744a495"
+  },
+  "2602.01326": {
+   "citations": 38,
+   "influential": 5,
+   "s2": "bc419a73a07e0416013fe136a283d556fb6d467e"
+  },
+  "2602.16813": {
+   "citations": 72,
+   "influential": 27,
+   "s2": "6a5521a08c8e466af3358ab81ab4ea347d227a65"
+  },
+  "2604.11748": {
+   "citations": 33,
+   "influential": 15,
+   "s2": "b4d85734e6c66d77efee448c7f03b5536e42fdd2"
+  },
+  "2605.10938": {
+   "citations": 38,
+   "influential": 23,
+   "s2": "64131f64d0077d2e846ab0a40615c137d8d44b7e"
+  },
+  "2606.13392": {
+   "citations": 37,
+   "influential": 9,
+   "s2": "f67a29537aa3f04aae5aac40f6b4e02972b4be27"
+  },
+  "2607.05147": {
+   "citations": 53,
+   "influential": 27,
+   "s2": "42c6db4a9fde6cc229f70ecd6f704529ea8c1871"
+  },
+  "2609.19969": {
+   "citations": 107,
+   "influential": 4,
+   "s2": "e79f9541258bb9fc026c129f8a0920cfac7a2063"
   }
  }
 };

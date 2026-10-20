@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engram 条件记忆 精读</title>
+<meta name="description" content="DeepSeek 与北京大学的 Engram 论文（arXiv 2601.07372，ACL 2026）逐节精读：哈希 N-gram 查表、上下文门控、MoE 与查表记忆之间的稀疏分配缩放律、27B 对照实验、长上下文、等效加深分析，以及把 100B 参数的表放到主机内存并预取的系统设计。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="reading" data-track="ai-infra" data-node="engram">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">论文精读 · AI Infra · ACL 2026</div>
+  <h1>条件记忆：用可扩展的查表给大语言模型开辟一条新的稀疏维度</h1>
+  <p class="en-title">Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models</p>
+  <div class="paper-authors">Xin Cheng<sup>1,2,*</sup>, Rui Tian<sup>2,*</sup>, Wangding Zeng<sup>2</sup>, Damai Dai<sup>2</sup>, Qinyu Chen<sup>2</sup>, Bingxuan Wang<sup>2</sup>, Zhenda Xie<sup>2</sup>, Kezhao Huang<sup>2</sup>, Xingkai Yu<sup>2</sup>, Chengqi Deng<sup>2</sup>, Shangyan Zhou<sup>2</sup>, Chenggang Zhao<sup>2</sup>, Zhewen Hao<sup>2</sup>, Yukun Li<sup>2</sup>, Han Zhang<sup>2</sup>, Zhengyan Zhang<sup>2</sup>, Yixuan Wei<sup>2</sup>, M.Y Xu<sup>2</sup>, Huishuai Zhang<sup>1</sup>, Dongyan Zhao<sup>1</sup>, Wenfeng Liang<sup>2</sup></div>
+  <div class="paper-affil"><sup>1</sup>北京大学（Peking University）　<sup>2</sup>DeepSeek-AI　<sup>*</sup>共同一作（按 arXiv v2 署名；v1 与 ACL 版为 14 位作者，没有 Rui Tian 等 7 人）</div>
+  <div class="paper-pills">
+    <a class="pill" href="https://arxiv.org/abs/2601.07372" target="_blank" rel="noopener">arXiv 2601.07372 ↗</a>
+    <a class="pill" href="https://aclanthology.org/2026.acl-long.226/" target="_blank" rel="noopener">ACL 2026 ↗</a>
+    <a class="pill" href="https://github.com/deepseek-ai/Engram" target="_blank" rel="noopener">Code: deepseek-ai/Engram ↗</a>
+  </div>
+  <div class="paper-stats" data-stats><div><b>4,766</b><span>GitHub star（deepseek-ai/Engram，截至 2026-10-20）</span></div><div><b>27B / 3.8B</b><span>主实验：总参数 / 每 token 激活参数</span></div></div>
+  <div class="read-ctl">
+    <span class="seg" role="group" aria-label="阅读状态"><button type="button" data-status="unread">未读</button><button type="button" data-status="reading">在读</button><button type="button" data-status="done">已读</button></span>
+    <button class="btn" type="button" data-fav>☆ 收藏</button>
+    <span class="read-progress" aria-hidden="true"><i></i></span><span class="read-pct"></span>
+    <button class="btn primary" type="button" data-resume hidden>回到上次读到的位置</button>
+  </div>
+  <p class="w-note" style="margin-top:6px">阅读状态、进度与收藏只保存在你的浏览器里。本页依据 arXiv v2（2026-07-12）；v2 与 v1（2026-01-12）的实验数字相同，v2 增补了作者和相关工作。</p>
+</div>
+
+<h2 id="notes">逐节精读</h2>
+<p class="notes-intro">这部分按论文的章节顺序，用本站自己的话把整篇论文从头讲一遍。读懂某个概念需要的背景知识，会在第一次用到它之前单独讲清楚（青色框）。每个结论都尽量说出“因为什么、所以什么”。论文以 CC BY 4.0 发布，原图放在讲到它的地方，并说明这张图怎么看；原图没画到的概念，用本站的示意图补上。标“推算”的数字是本站根据论文数据算出来的，不是论文原话。每节末尾有英文原文的链接。</p>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这篇论文解决什么问题</h3>
+<p>今天的大模型几乎都用<b>混合专家</b>（Mixture-of-Experts，MoE）来扩大参数量。它的思路是：模型里放很多个“专家”网络，但每个 token 只挑其中几个来算。于是总参数可以很大，每个 token 花的计算量却基本不变。这种“按输入决定用哪部分参数来计算”的做法，叫<b>条件计算</b>。</p>
+<p>这篇来自 DeepSeek 和北京大学的论文指出，语言里有一大类内容其实不需要“算”，只需要“查”：人名、地名、固定搭配、成语、代码里的惯用写法，这些东西在文本里反复以同样的样子出现，看到前两三个 token 基本就能确定是什么。而 Transformer 没有“查表”这个基本操作，只能靠前几层的注意力和前馈网络，把这些固定组合一点一点“拼”出来，相当于每次运行时都重新构造一张本来可以直接存下来的表。作者因此给模型加了一个查表模块 <b>Engram</b>：用当前 token 和它前面一两个 token 组成的短片段（N-gram）做钥匙，经过哈希直接从一张巨大的表里取出几行向量，再由一个门控决定这份记忆用多少。取一行向量几乎不需要乘法，所以这张表可以做得很大而不增加计算量。作者把这叫做<b>条件记忆</b>，并把它看作和 MoE 并列的另一条稀疏维度。</p>
+<p>论文的主要发现有四条。第一，在总参数和每 token 计算量都固定的前提下，把原本给 MoE 专家的参数挪出大约 20%–25% 给 Engram，验证损失最低；全给专家或全给查表都更差，损失随分配比例呈 U 形。第二，在 27B 总参数、3.8B 激活参数、262B 训练 token 的对照里，Engram-27B 在几乎所有基准上超过参数和计算量都相同的 MoE-27B，而且推理、代码、数学的提升（如 BBH +5.0）比知识类（如 MMLU +3.0）还大。第三，长上下文检索明显变好（多查询“大海捞针”从 84.2 到 97.0）。第四，因为查表用的地址只取决于输入 token，系统可以在模型还没算到那一层之前就把需要的行从 CPU 内存里取过来；把一张 1000 亿参数的表整张放在主机内存里，推理吞吐只下降不到 3%。</p>
+<p>读完这部分，你应该能回答这几个问题：</p>
+<ul>
+  <li>“条件计算”和“条件记忆”分别是什么，查表为什么几乎不花计算、却很占内存？</li>
+  <li>Engram 怎么把一段 token 变成表里的地址，哈希冲突怎么处理，门控起什么作用？</li>
+  <li>参数总量固定时，专家和查表各该分多少？这条 U 形曲线是在多大规模上测的？</li>
+  <li>27B 的对照实验里，哪些量是严格对齐的，哪些没有对齐？+3、+5 这样的提升有多大份量？</li>
+  <li>为什么说 Engram 让网络“等效变深”，这个说法的证据有多强？</li>
+  <li>为什么 Engram 的表能放到 CPU 内存里预取，而 MoE 的专家不行？“吞吐只降 3%”是在什么条件下测的？</li>
+  <li>DeepSeek 后来的模型有没有真的用上它？</li>
+</ul>
+<p class="note-links"><a href="https://arxiv.org/abs/2601.07372" target="_blank" rel="noopener">英文原文·摘要 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 引言：语言里既有要“算”的部分，也有只需要“查”的部分</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>MoE 已经能让模型参数很多而计算很少，为什么还要再加一种稀疏？作者的出发点是一个观察：语言建模其实混着两种性质不同的任务，一种需要深而灵活的计算（组合推理），另一种只是把固定的模式认出来（知识检索）。Transformer 只有“计算”这一种工具，于是连第二种任务也得用计算去模拟。这一节讲清楚这个观察，以及作者据此提出的方案和主要结论。</div>
+
+<div class="note-pre"><b>先补一点背景：MoE 为什么叫“条件计算”，总参数和激活参数是什么。</b>
+<p>普通的 Transformer 每一层有一个前馈网络（FFN），每个 token 都要经过它的全部参数。MoE 把这个 FFN 换成很多个小 FFN（专家），再加一个<b>路由器</b>：路由器看当前 token 在这一层的隐藏状态，给每个专家打分，只选分数最高的 \(k\) 个专家来算。DeepSeek 的做法（DeepSeekMoE）还额外有几个“共享专家”，每个 token 都会经过它们；本站的 <a href="deepseek-v3.html#n-2-2">DeepSeek-V3 精读</a>对此有详细讲解。</p>
+<p>这样一来就要区分两个数。<b>总参数</b>是模型里所有参数的数量，决定模型要占多少存储。<b>激活参数</b>是处理一个 token 时真正参与了计算的参数，决定计算量：一个 token 前向时每个激活参数大约要做一次乘加，也就是 2 次浮点运算。以本文的 MoE-27B 为例，总参数 26.7B，激活参数 3.8B，每个 token 只用到全部参数的约 14%（推算）。没被选中的专家参数“存着但没用”，它们就是稀疏性带来的“免费”容量。</p>
+<p>关键的一点是：路由器要等这一层的隐藏状态算出来之后，才知道该用哪几个专家。也就是说，MoE 用哪部分参数，是<b>在运行时由中间结果决定的</b>。这一点在第 2.5 节讲系统设计时会变得很重要。</p>
+</div>
+
+<p>作者认为，语言里很大一部分内容是<b>局部的、静态的、高度程式化的</b>：命名实体（“Alexander the Great”）、固定搭配（“By the way”）、成语和专有名词（“四大发明”“张仲景”）。这类内容只看最近几个 token 就能确定，所以经典的 N-gram 语言模型用查表就能很好地捕捉它们。可是标准 Transformer 里没有查表这个操作，模型只能用前几层的注意力和 FFN 去“合成”这些模式。</p>
+<p>论文引用了一个可解释性研究（Patchscopes，Ghandeharioun 等，2024）的例子来说明这一点。模型读到 “Diana, Princess of Wales” 时，研究者把最后一个 token “Wales” 在每一层的内部表示翻译成文字，结果发现：第 1–2 层它还只代表“英国的一个地区”，第 3 层是“欧洲的一个国家”，第 4 层变成“女性君主或王后的头衔”，第 5 层是“威尔士亲王妻子的头衔”，直到第 6 层才变成“戴安娜王妃这个人”。也就是说，模型花了五六层的计算，才把一个人人都知道的固定实体拼出来（原文表 3）。作者把这称为“用计算模拟检索”：本来查一次表就能得到的东西，模型在每次推理时都要花宝贵的层数重新构造一遍，而这些层数本可以留给更难的推理。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：条件计算（MoE）和条件记忆（Engram）用参数的方式不同</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box">这一层的隐藏状态 \(h_t\)</span><span class="dia-arrow">→</span><span class="dia-box reg">路由器打分<small>要先算出 \(h_t\) 才能选</small></span><span class="dia-arrow">→</span><span class="dia-box pred">选中 \(k\) 个专家做矩阵乘<small>计算量 ∝ 选中的参数量</small></span></div>
+      <div class="dia-note">条件计算：参数被“拿来算”。每多选一个专家，就多一份乘加；选哪个专家要等运行到这一层才知道。</div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box">输入 token 编号 \(x_{t-2},x_{t-1},x_t\)</span><span class="dia-arrow">→</span><span class="dia-box reg">哈希出表里的行号<small>只看 token，不看隐藏状态</small></span><span class="dia-arrow">→</span><span class="dia-box enc">直接读出几行向量<small>没有乘法，只有读内存</small></span></div>
+      <div class="dia-note">条件记忆：参数被“拿来查”。表再大，每个 token 也只读固定的几行；读哪几行在输入 token 确定时就已经知道。</div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图。两者都是“稀疏”的：一个 token 只用到全部参数里的一小部分。区别在于用的方式（算 vs 读）和决定用哪部分的时机（运行时 vs 输入时）。</div>
+</div>
+
+<p>基于这个观察，作者提出在条件计算之外再加一条稀疏维度：<b>条件记忆</b>。条件计算用稀疏激活的参数处理动态的逻辑；条件记忆用稀疏的查表操作，取出存放固定知识的静态向量。作为第一次尝试，他们回到了一个很老的结构：N-gram 嵌入。用最近几个 token 组成的片段当钥匙，在一张巨大的嵌入表里做常数时间的查找。作者说，单纯照搬这个老结构效果并不好，必须配上几项现代化的改造：分词器压缩、多头哈希、上下文门控、与多分支残差结构的结合（第 2 节逐一讲）。这个模块就叫 Engram（心理学里指“记忆痕迹”）。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/engram-arch.svg" alt="原文图 1：Engram 结构" loading="lazy"></div>
+<figcaption><b>原文图 1。怎么看：</b>左边是整个模型：输入句子 “Only Alexander the Great could tame the horse Bucephalus.” 先经过普通的词表嵌入（Vocab Embedding）和若干 Transformer 块，到了插有 Engram 的那一层，Engram 先把记忆加到残差流上，然后才是这一层照常的注意力（Attention）和 MoE。右边放大了 Engram 内部：当前位置的后缀 2-gram（“the Great”）和 3-gram（“Alexander the Great”）分别经过多个哈希头（图中的 h 表示有多个头），各自查出 2-gram 和 3-gram 的嵌入，拼接（Concat）后经过两路线性层；一路和来自主干的隐藏状态（Input Hidden）做缩放点积，得到门控值，另一路被门控值相乘，最后经过一个卷积（Conv）输出。图要表达的重点是：Engram 只插在个别层，原有的输入嵌入和输出层都不动。</figcaption></figure>
+
+<p>为了说清楚两种稀疏怎么配合，作者提出了<b>稀疏分配</b>问题：总参数固定时，应该分多少给 MoE 专家、多少给 Engram 的表？实验发现验证损失随分配比例呈 U 形（第 3 节）。按这个规律把 Engram 放大到 27B 总参数后，它在知识类任务上提升明显（MMLU、CMMLU），在推理、代码、数学上提升更大（BBH、HumanEval、MATH）。作者用 LogitLens 和 CKA 两种分析工具解释原因：Engram 替浅层承担了拼接静态模式的工作，相当于让网络变深（第 6.1 节）；又因为局部依赖交给了查表，注意力可以更专注于全局上下文，长上下文检索因此变好（第 5 节）。最后，Engram 的查表地址是确定的，可以在运行时从主机内存预取，把计算和通信重叠起来；把 100B 参数的表放到主机内存，额外开销小于 3%（第 6.4 节）。</p>
+
+<div class="note-warn"><b>读的时候容易误解的地方：</b>
+<ul>
+  <li>“条件记忆”不是检索增强生成（RAG）。Engram 的表是模型自己的参数，在预训练时和其他参数一起学出来，不是一个外部文档库；它的“钥匙”是固定的 N-gram 哈希，不是模型学出来的查询向量。</li>
+  <li>“O(1) 查表”说的是每个 token 的查表开销不随表的大小增长，不是说表不花资源：表越大，占的内存越多。论文的系统设计（第 2.5 节）正是为了把这份内存从昂贵的 GPU 显存挪到便宜的主机内存。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S1" target="_blank" rel="noopener">英文原文 §1 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 架构：Engram 怎么把一段 token 变成一份记忆</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>Engram 内部具体由哪几步组成？一段 token 怎么变成表里的行号，表大到存不下所有组合时怎么办？查出来的向量和上下文不符时怎么办？它和 DeepSeek 使用的多分支残差结构怎么接？最后，为什么它在训练和推理时都能把巨大的表放在 GPU 之外？</div>
+
+<h4 id="n-2-1">2.1 总览：先“取”，再“融”</h4>
+<p>设输入序列是 \(X=(x_1,\dots,x_T)\)，第 \(\ell\) 层的隐藏状态是 \(\mathbf{H}^{(\ell)}\in\mathbb{R}^{T\times d}\)（\(T\) 个位置，每个位置一个 \(d\) 维向量）。Engram 对每个位置 \(t\) 做两件事：第一步是<b>检索</b>，取出这个位置结尾的几个短片段，经过压缩和哈希，从表里取出静态的嵌入向量（2.2 节）；第二步是<b>融合</b>，用当前的隐藏状态给取出的向量打一个门控分，再经过一个轻量卷积，加回残差流（2.3 节）。之后这一层照常做注意力和 MoE。</p>
+<div class="dia">
+  <div class="dia-title">示意图：Engram 一次前向的完整数据流（括号里是 Engram-27B 的配置）</div>
+  <div class="dia-flow"><span class="dia-box">原始 token 编号</span><span class="dia-arrow">→</span><span class="dia-box reg">分词器压缩<small>12.9 万 → 约 9.9 万个编号</small></span><span class="dia-arrow">→</span><span class="dia-box reg">取后缀 2-gram、3-gram</span><span class="dia-arrow">→</span><span class="dia-box reg">每种 8 个哈希头<small>共 16 个行号</small></span><span class="dia-arrow">→</span><span class="dia-box enc">查 16 张表、拼接<small>得到 \(\mathbf{e}_t\)，1280 维</small></span></div>
+  <div class="dia-flow"><span class="dia-arrow">→</span><span class="dia-box act">门控：\(h_t\) 当查询，\(\mathbf{e}_t\) 当键和值<small>得到 0–1 之间的分数 \(\alpha_t\)</small></span><span class="dia-arrow">→</span><span class="dia-box act">短因果卷积 + SiLU<small>核长 4，空洞 3</small></span><span class="dia-arrow">→</span><span class="dia-box">加回残差流<small>\(\mathbf{H}\leftarrow\mathbf{H}+\mathbf{Y}\)</small></span><span class="dia-arrow">→</span><span class="dia-box">这一层的注意力、MoE</span></div>
+  <div class="dia-note">本站示意图。青色和蓝色的框（检索）只用到 token 编号，可以在模型算到这一层之前完成；绿色框（融合）要用到这一层的隐藏状态，只能在这一层里算。“约 9.9 万”是按论文给的 23.43% 压缩率推算的。</div>
+</div>
+
+<h4 id="n-2-2">2.2 用哈希 N-gram 做稀疏检索</h4>
+<div class="note-pre"><b>先补一点背景：N-gram、嵌入表，以及为什么查表“便宜在计算、贵在内存”。</b>
+<p><b>N-gram</b> 就是连续 \(N\) 个 token 组成的片段。在句子 “Alexander the Great” 里，以 “Great” 结尾的 2-gram 是（the, Great），3-gram 是（Alexander, the, Great）。经典的 N-gram 语言模型就是统计“某个片段后面通常跟什么”，用的是查表，不是神经网络计算。</p>
+<p><b>嵌入表</b>是一个 \(V\times d\) 的矩阵，每一行是一个向量。“查表”就是给定一个行号，把那一行读出来。读一行不需要任何乘法，代价只是从内存里读 \(d\) 个数。对比一下同样参数量的矩阵乘层：一个 token 经过它时，每个参数都要参与一次乘加。所以，一张有 57 亿参数的表和一组有 57 亿参数的专家，存储代价一样大，但每个 token 的计算代价完全不同：表只读固定的几行，专家被选中时要做上千万次乘加。</p>
+<p>拿 Engram-27B 算一下（推算）：它的 Engram 表共 5.7B 参数，如果按 BF16（每个数 2 字节）存储约 11.4 GB（论文没写表的存储精度）；每个 token 在每个 Engram 层只读 1280 个数，两层合计 2560 个数，约 5 KB。作为对照，MoE-27B 每层有 72 个路由专家，Engram-27B 把它减到 55 个，省下的 17 个专家（在 29 个 MoE 层上）换成了 5.7B 的表，由此推算一个专家约 1,160 万参数，被选中时每个 token 要为它做约 2,300 万次浮点运算。</p>
+<p>所以查表的问题不在计算，而在<b>存储</b>：表越大越占内存。另外，它每次只读零散的几小行，是典型的随机小块访问，内存带宽很难用满。推荐系统里的大嵌入表（上亿个用户或商品编号）早就面对过同样的问题，论文 v2 的相关工作专门讨论了这层联系。</p>
+</div>
+
+<p><b>第一步：分词器压缩。</b>现代的子词分词器追求“能把文本无损还原”，所以同一个词的不同写法会得到不同的编号，比如 “Apple” 和 “␣apple”（带前导空格的小写）是两个 token。对 N-gram 查表来说，这会把同一个模式拆散到不同的行里，浪费容量。作者因此预先算好一个满射 \(\mathcal{P}:V\to V'\)，按规范化后的文本把等价的 token 合并成同一个编号：NFKC 规范化、转小写等。对 DeepSeek-V3 的 128k 分词器（实际 129,280 个 token），有效词表缩小了 23.43%（附录 C），即从 129,280 缩到约 99,000 个（推算）。附录 C 列出的合并最多的例子是：各种空白字符（制表符、换行、多个空格等 163 个 token）都并成一个空格；“a” 的各种大小写、带空格、带音调的写法（54 个 token）并成一个 “a”。官方演示代码里的规范化链是 NFKC → NFD → 去掉重音符号 → 转小写 → 合并连续空白。</p>
+<p>压缩后，位置 \(t\) 的原始编号 \(x_t\) 变成 \(x'_t=\mathcal{P}(x_t)\)，以它结尾的 \(n\)-gram 记为 \(g_{t,n}=(x'_{t-n+1},\dots,x'_t)\)。Engram 只用 \(n\ge 2\) 的片段（单个 token 的信息已经由普通的输入嵌入提供）；主实验里最大阶数 \(N=3\)，即每个位置取一个 2-gram 和一个 3-gram。</p>
+
+<p><b>第二步：多头哈希。</b>把所有可能的 N-gram 都给一行是做不到的：压缩后约 9.9 万个编号，可能的 3-gram 就有约 \(10^{15}\) 种（推算）。所以作者沿用哈希的办法：用一个确定性的函数把任意片段映射成一个有限范围内的行号。为了减轻冲突，每种阶数 \(n\) 用 \(K\) 个不同的哈希头，第 \(k\) 个头把片段映射到一张大小为素数 \(M_{n,k}\) 的表 \(\mathbf{E}_{n,k}\) 里：</p>
+<div class="formula">$$z_{t,n,k}=\varphi_{n,k}(g_{t,n}),\qquad \mathbf{e}_{t,n,k}=\mathbf{E}_{n,k}[z_{t,n,k}]$$</div>
+<p>最后把所有阶数、所有头取出的向量拼接起来，得到这个位置的记忆向量：</p>
+<div class="formula">$$\mathbf{e}_t=\big\Vert_{n=2}^{N}\ \big\Vert_{k=1}^{K}\ \mathbf{e}_{t,n,k}\ \in\mathbb{R}^{d_{\text{mem}}}$$</div>
+<p>这里的 \(\Vert\) 表示拼接。论文说哈希函数是一个轻量的“乘法–异或”哈希。官方演示代码给出了具体写法：每个位置的 token 编号乘上一个随机奇数，再把几个乘积按位异或，最后对每个头各自的素数取模。以 3-gram 为例：</p>
+<div class="formula">$$\text{mix}=(x'_t\cdot m_0)\oplus(x'_{t-1}\cdot m_1)\oplus(x'_{t-2}\cdot m_2),\qquad z_{t,3,k}=\text{mix}\bmod M_{3,k}$$</div>
+<p>同一阶数的 8 个头共用同一个 \(\text{mix}\)，但模数是 8 个互不相同的素数，所以落到的行号各不相同。每个 Engram 层用一组不同的随机乘数，两层之间的哈希也互相独立。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：位置 “Great” 的一次查表（按 Engram-27B 的配置）</div>
+  <div class="dia-row"><span class="lbl">输入</span><div class="cells"><span class="cell">Only</span><span class="cell a" style="width:auto;padding:0 6px">Alexander</span><span class="cell a">the</span><span class="cell a" style="width:auto;padding:0 6px">Great</span><span class="cell" style="width:auto;padding:0 6px">could</span></div></div>
+  <div class="dia-out">先压缩成规范编号（大小写、空格变体合并），再取以 “Great” 结尾的 2-gram（the, great）和 3-gram（alexander, the, great）。</div>
+  <div class="dia-row"><span class="lbl">2-gram 的 8 个头</span><div class="cells"><span class="cell b">h1</span><span class="cell b">h2</span><span class="cell b">h3</span><span class="cell b">h4</span><span class="cell b">h5</span><span class="cell b">h6</span><span class="cell b">h7</span><span class="cell b">h8</span></div></div>
+  <div class="dia-row"><span class="lbl">3-gram 的 8 个头</span><div class="cells"><span class="cell c">h1</span><span class="cell c">h2</span><span class="cell c">h3</span><span class="cell c">h4</span><span class="cell c">h5</span><span class="cell c">h6</span><span class="cell c">h7</span><span class="cell c">h8</span></div></div>
+  <div class="dia-out">16 个哈希头各算出一个行号，各自从一张约 226 万行的表里读出一行 80 维向量。</div>
+  <div class="dia-row"><span class="lbl">拼接</span><div class="dia-track"><span class="dia-seg oth" style="flex:8">2-gram 部分：8 × 80 = 640 维</span><span class="dia-seg kv" style="flex:8">3-gram 部分：8 × 80 = 640 维</span></div></div>
+  <div class="dia-out">得到 \(\mathbf{e}_t\in\mathbb{R}^{1280}\)。两个 Engram 层合计：2 层 × 约 226 万行 × 1280 维 ≈ 5.79B 参数，和论文说的 5.7B 吻合（推算）。</div>
+  <div class="dia-note">本站示意图。附录 A 给出 \(d_{\text{mem}}=1280\)、8 个头、阶数 {2, 3}、“Engram Vocab Size” 2,262,400；每头 80 维、“每张表约 226 万行”是按官方演示代码的结构（每阶的维度平分给各个头）推算的，参数总量与论文吻合。</div>
+</div>
+
+<div class="note-pre"><b>先补一点背景：哈希冲突，以及为什么要“多头”。</b>
+<p>哈希把一个巨大的空间压进一个小空间，必然会有不同的片段落到同一行，这叫<b>冲突</b>。冲突的后果是：这一行的向量要同时为好几个不相干的片段服务，学出来的是它们的某种混合。</p>
+<p>多头哈希的作用可以这样理解（本站的解释）：单看某一个头，两个指定的片段落到同一行的概率约是 \(1/M\)，对约 226 万行的表就是约 \(4\times10^{-7}\)；要让它们在 8 个头上<b>同时</b>冲突，概率约是这个数的 8 次方，可以忽略（推算，假设各头独立）。所以虽然每一行都被很多片段共用，但每个片段拿到的“8 行组合”几乎是独一无二的，拼起来的向量仍能区分它们。</p>
+<p>但共用的程度并不低。假设训练数据里出现过 10 亿种不同的 3-gram（这是本站为说明数量级随便取的假设值，论文没有给），那么一张 226 万行的表平均每行要被约 440 种 3-gram 共用（推算）。好在自然语言的片段频率高度不均（齐夫分布，第 2.5 节还会用到）：一行的梯度更新主要来自最常落到它的那几个高频片段，低频片段的“噪声”要靠后面的门控来压制。</p>
+</div>
+
+<h4 id="n-2-3">2.3 上下文门控：查到的东西和上下文不符时怎么办</h4>
+<div class="note-pre"><b>先补一点背景：注意力里的“查询–键–值”和 sigmoid 门。</b>
+<p>注意力机制里，每个位置有一个查询向量 \(q\)（我想找什么）、键向量 \(k\)（我是什么）、值向量 \(v\)（我携带的内容）。\(q\) 和 \(k\) 的点积越大，说明越匹配。<b>sigmoid</b> 函数 \(\sigma(s)=1/(1+e^{-s})\) 把任意实数压到 0 到 1 之间，常用来做“开多大”的门。<b>RMSNorm</b> 把向量除以它各分量平方的均值的平方根，让向量长度稳定，避免点积因为向量太长而爆掉。</p>
+</div>
+<p>取出来的 \(\mathbf{e}_t\) 是一个和上下文无关的“先验”：同一个片段在任何句子里查到的都是同一个向量。这会带来两种问题。一是哈希冲突带来的噪声（上面讲过）；二是一词多义，同一个片段在不同语境下意思不同，比如“苹果发布”和“苹果削皮”里的“苹果”。作者借用注意力的思路做了一个门控：把当前位置的隐藏状态 \(\mathbf{h}_t\) 当作查询（它已经通过前面的注意力层看过了上下文），把记忆 \(\mathbf{e}_t\) 线性变换后当作键和值：</p>
+<div class="formula">$$\mathbf{k}_t=\mathbf{W}_K\mathbf{e}_t,\qquad \mathbf{v}_t=\mathbf{W}_V\mathbf{e}_t$$</div>
+<div class="formula">$$\alpha_t=\sigma\!\left(\frac{\mathrm{RMSNorm}(\mathbf{h}_t)^{\top}\,\mathrm{RMSNorm}(\mathbf{k}_t)}{\sqrt{d}}\right)\in(0,1),\qquad \tilde{\mathbf{v}}_t=\alpha_t\cdot\mathbf{v}_t$$</div>
+<p>直观地说：如果查到的记忆和当前上下文对得上，点积大，\(\alpha_t\) 接近 1，记忆被放进来；如果对不上（冲突来的噪声，或者意思不符），点积小，\(\alpha_t\) 接近 0，记忆就被挡在门外。注意这里的门是<b>一个标量</b>，只决定整份记忆用多少，不在多个候选之间做选择，这和注意力在多个位置之间分配权重不同。</p>
+<p>门控之后，作者再加一个很短的<b>深度可分离因果卷积</b>（每个通道单独卷，只看当前和之前的位置）。设 \(\tilde{\mathbf{V}}\in\mathbb{R}^{T\times d}\) 是所有位置门控后的值，卷积核长 \(w=4\)，空洞（dilation）\(\delta\) 取最大阶数（\(N=3\)），激活函数用 SiLU：</p>
+<div class="formula">$$\mathbf{Y}=\mathrm{SiLU}\big(\mathrm{Conv1D}(\mathrm{RMSNorm}(\tilde{\mathbf{V}}))\big)+\tilde{\mathbf{V}}$$</div>
+<p>作者说加卷积是为了扩大感受野、增加非线性。空洞为 3、核长为 4 意味着：位置 \(t\) 的输出混合了位置 \(t\)、\(t-3\)、\(t-6\)、\(t-9\) 的记忆向量，而每个位置的记忆本身又覆盖了最近 3 个 token，所以合起来能“看到”最近约 12 个 token 范围内的局部模式（推算）。卷积参数初始化为 0，于是训练刚开始时卷积分支输出为 0，\(\mathbf{Y}=\tilde{\mathbf{V}}\)，不会扰乱训练。</p>
+<div class="dia">
+  <div class="dia-title">示意图：核长 4、空洞 3 的因果卷积在位置 t 上看哪些位置</div>
+  <svg class="dg" viewBox="0 0 960 150" role="img" aria-label="空洞卷积的感受野" style="--dg-min:560px">
+    <text x="20" y="30" class="t-sm">位置</text>
+    <g>
+      <rect x="80" y="45" width="56" height="34" rx="4" class="tk enc"/><text x="108" y="62" class="t-c" style="fill:var(--surface)">t−9</text>
+      <rect x="140" y="45" width="56" height="34" rx="4" class="tk off"/><text x="168" y="62" class="t-c t-sm">t−8</text>
+      <rect x="200" y="45" width="56" height="34" rx="4" class="tk off"/><text x="228" y="62" class="t-c t-sm">t−7</text>
+      <rect x="260" y="45" width="56" height="34" rx="4" class="tk enc"/><text x="288" y="62" class="t-c" style="fill:var(--surface)">t−6</text>
+      <rect x="320" y="45" width="56" height="34" rx="4" class="tk off"/><text x="348" y="62" class="t-c t-sm">t−5</text>
+      <rect x="380" y="45" width="56" height="34" rx="4" class="tk off"/><text x="408" y="62" class="t-c t-sm">t−4</text>
+      <rect x="440" y="45" width="56" height="34" rx="4" class="tk enc"/><text x="468" y="62" class="t-c" style="fill:var(--surface)">t−3</text>
+      <rect x="500" y="45" width="56" height="34" rx="4" class="tk off"/><text x="528" y="62" class="t-c t-sm">t−2</text>
+      <rect x="560" y="45" width="56" height="34" rx="4" class="tk off"/><text x="588" y="62" class="t-c t-sm">t−1</text>
+      <rect x="620" y="45" width="56" height="34" rx="4" class="tk enc"/><text x="648" y="62" class="t-c" style="fill:var(--surface)">t</text>
+    </g>
+    <path d="M108,82 C108,120 600,120 640,92" class="edge enc"/>
+    <path d="M288,82 C288,112 600,112 642,92" class="edge enc"/>
+    <path d="M468,82 C468,104 600,104 644,92" class="edge enc"/>
+    <rect x="500" y="20" width="176" height="18" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/>
+    <text x="588" y="29" class="t-c t-xs">t 处的 3-gram 覆盖 t−2 到 t</text>
+    <text x="710" y="62" class="t-sm">蓝色：卷积读取的 4 个位置</text>
+    <text x="710" y="84" class="t-sm">每个位置的记忆又覆盖它前面 3 个 token</text>
+    <text x="710" y="106" class="t-sm">合起来约覆盖 t−11 到 t</text>
+  </svg>
+  <div class="dia-note">本站示意图（推算）。论文只给了核长 4 和空洞 = 最大阶数，没有讨论感受野；第 6.2 节的消融显示去掉这个卷积只让损失略微变差，DeepSeek-V4.1-Flash 后来干脆去掉了它（见“后来怎么样了”）。</div>
+</div>
+<p>最后，Engram 通过残差连接接入主干：\(\mathbf{H}^{(\ell)}\leftarrow\mathbf{H}^{(\ell)}+\mathbf{Y}\)，然后这一层照常做注意力和 MoE。Engram 不是每层都放，放在哪几层要同时照顾建模效果和第 2.5 节的系统延迟约束。主实验的 27B 模型放在第 2 层和第 15 层。</p>
+<div class="callout code-note"><span class="callout-title">论文 vs 官方代码（deepseek-ai/Engram 的 engram_demo_v1.py）</span>
+<p>官方仓库只提供一个演示实现，注意力、MoE、多分支连接都是占位的，它的超参（隐藏维度 1024、每阶 512 维、插在第 1 和第 15 层，层号从 0 数）也不是论文模型的配置。和论文公式对照，有一处不同：代码在 sigmoid 之前先对点积分数取“带符号的平方根”，即 \(\alpha=\sigma\big(\mathrm{sign}(s)\sqrt{|s|}\big)\)，把大的分数压小，论文的公式 (4) 里没有这一步。其余部分（每个分支各自的 RMSNorm 与键投影、共享的值投影、卷积输出加回门控值）与论文一致。想复现论文数字时应以论文为准，但要知道两者有这处差别。</p>
+</div>
+
+<h4 id="n-2-4">2.4 接入多分支残差结构（mHC）</h4>
+<div class="note-pre"><b>先补一点背景：残差流和超连接。</b>
+<p>标准 Transformer 只有一条残差流：每个子层的输出直接加回这条流。<b>超连接</b>（Hyper-Connections，HC）把残差流拓宽成 \(M\) 条并行的分支，各子层从这些分支里按可学习的权重读入、再按可学习的权重写回，让信息流动的方式更丰富。DeepSeek 的 <b>mHC</b>（Manifold-Constrained Hyper-Connections，arXiv 2512.24880，第一作者 Zhenda Xie 也是本文作者）把这些混合权重约束在一个特定的流形上，恢复残差连接“恒等映射”的性质，从而让训练在大规模下保持稳定。后来的 DeepSeek-V4 也用了 mHC，本站的 <a href="deepseek-v4.html">DeepSeek-V4 精读</a>对它有更多介绍。</p>
+</div>
+<p>本文的所有模型默认都用 mHC（\(M=4\)）作为主干。Engram 本身不依赖具体的连接方式，但接到多分支上要做一点取舍：如果每个分支一套表，存储翻 4 倍；如果所有分支完全共用，又失去了分支各自的个性。作者的折中是：<b>嵌入表和值投影 \(\mathbf{W}_V\) 所有分支共用，键投影每个分支一个</b>。于是第 \(m\) 个分支有自己的门控：</p>
+<div class="formula">$$\alpha_t^{(m)}=\sigma\!\left(\frac{\mathrm{RMSNorm}(\mathbf{h}_t^{(m)})^{\top}\,\mathrm{RMSNorm}(\mathbf{W}_K^{(m)}\mathbf{e}_t)}{\sqrt{d}}\right),\qquad \mathbf{u}_t^{(m)}=\alpha_t^{(m)}\cdot(\mathbf{W}_V\mathbf{e}_t)$$</div>
+<p>这个设计在工程上还有一个好处：1 个 \(\mathbf{W}_V\) 和 4 个 \(\mathbf{W}_K^{(m)}\) 的输入都是同一个 \(\mathbf{e}_t\)，可以拼成一个大矩阵，用一次 FP8 矩阵乘法算完，GPU 利用率更高。按 \(d_{\text{mem}}=1280\)、\(d=2560\) 算，这 5 个投影矩阵每层约 1,640 万参数，两层约 3,300 万（推算），只占 3.8B 激活参数的不到 1%。第 6.2 节的消融显示，“每个分支各自门控”是三个最重要的设计之一。</p>
+
+<h4 id="n-2-5">2.5 系统效率：把存储和计算分开</h4>
+<div class="note-ask"><b>这一小节要回答的问题：</b>表的参数再多也不增加计算，但它总得存在某个地方。GPU 显存（HBM）又贵又小，能不能把表放到别处？放到别处之后，读取的延迟怎么藏起来？这件事 MoE 为什么做不到，Engram 为什么做得到？</div>
+<div class="note-pre"><b>先补一点背景：显存、主机内存和 PCIe。</b>
+<p>一台 GPU 服务器里有几层存储。GPU 上的 <b>HBM 显存</b>带宽极高（H800 每秒约 3 TB 量级），但容量只有几十 GB（H800 是 80 GB）。CPU 那边的<b>主机内存</b>（DRAM）容量大得多，一台服务器常有 1–2 TB，价格也便宜得多，但 GPU 要通过 <b>PCIe</b> 总线去读它，PCIe 5.0 x16 的理论单向带宽约 64 GB/s，比显存慢两个数量级。再往下还有 NVMe 固态硬盘，容量更大、更慢。（这些是公开的硬件规格，不是论文的数字。）</p>
+<p>把参数放到慢速存储上并不新鲜，难点在于<b>延迟</b>：如果要用的时候才去取，GPU 就得停下来等。唯一的办法是<b>提前知道要用什么</b>，在 GPU 忙着算前面的层时，把后面要用的数据先搬过来，这叫<b>预取</b>，让通信和计算重叠。</p>
+</div>
+<p>这正是 Engram 和 MoE 的根本区别。MoE 选哪个专家，要等这一层的隐藏状态算出来、路由器打完分才知道，所以专家参数没法提前搬，基本只能放在显存里。Engram 查哪些行，只取决于输入的 token 编号：序列一确定，所有 Engram 层要读的行号就都能算出来，和模型的中间结果无关。作者把这称为“确定性寻址”，并据此在训练和推理两个阶段做了不同的安排（原文图 2）：</p>
+<ul>
+  <li><b>训练时</b>：用标准的模型并行把巨大的表按行切到所有 GPU 上。前向时用一次 All-to-All 通信，把每张卡需要的行从持有它们的卡上收集过来；反向时再用 All-to-All 把梯度发回各行的主人。这样表的总容量随 GPU 数量线性增长。</li>
+  <li><b>推理时</b>：把表整个放到主机内存里。因为行号在前向开始前就已知，系统可以通过 PCIe 异步取回需要的行。为了把这段传输时间藏起来，Engram 不放在第 1 层，而是放在中间某层，让它前面那些层的计算充当“缓冲时间”。</li>
+</ul>
+
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/engram-system.svg" alt="原文图 2：Engram 的训练与推理系统实现" loading="lazy"></div>
+<figcaption><b>原文图 2。怎么看：</b>(a) 训练阶段：画了两张 GPU 上的模型副本，每张卡上有 Engram、Attention、MoE；两张卡的 Engram 之间有一个 All2All，表示嵌入表被切开放在不同的卡上，查表时要跨卡取行。(b) 推理阶段：左边是 GPU 上的计算（On Device Computation），一摞 Transformer 块里有两个带 Engram 的块；右边是放在主机上的 Engram 表（Offloaded Engram，标注为内存层级 Memory Hierarchy）。输入的 token 编号同时送给 GPU 和主机：主机据此提前取出要用的行，通过通信（On Host Communication）送到对应的层，和 GPU 上前面几层的计算并行进行。</figcaption></figure>
+
+<div class="dia">
+  <div class="dia-title">示意图：为什么 Engram 的行可以预取，而 MoE 的专家不行（每格是一小段时间）</div>
+  <div style="overflow-x:auto">
+  <table class="gantt">
+    <tr><td colspan="9" class="gsub">① 如果专家放在主机内存（MoE）：选哪个专家要等第 2 层的路由结果</td></tr>
+    <tr><td class="lbl">GPU：第 1 层</td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU：第 2 层路由</td><td></td><td></td><td></td><td class="r"></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">PCIe：搬专家参数</td><td></td><td></td><td></td><td></td><td class="q"></td><td class="q"></td><td class="q"></td><td></td></tr>
+    <tr><td class="lbl">GPU：等待</td><td></td><td></td><td></td><td></td><td class="p"></td><td class="p"></td><td class="p"></td><td></td></tr>
+    <tr><td class="lbl">GPU：第 2 层专家计算</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="r"></td></tr>
+    <tr><td colspan="9" class="gsub">② Engram：token 一到就能算出行号，传输和第 1 层的计算重叠</td></tr>
+    <tr><td class="lbl">CPU：算哈希、收集行</td><td class="q"></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">PCIe：搬记忆向量</td><td></td><td class="q"></td><td class="q"></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU：第 1 层</td><td class="r"></td><td class="r"></td><td class="r"></td><td></td><td></td><td></td><td></td><td></td></tr>
+    <tr><td class="lbl">GPU：第 2 层（含 Engram）</td><td></td><td></td><td></td><td class="r"></td><td></td><td></td><td></td><td></td></tr>
+  </table>
+  </div>
+  <div class="dia-note">本站示意图，时间长短只表示先后关系。蓝色 = GPU 计算；斜纹 = 主机上的准备或 PCIe 传输；浅红色 = GPU 空等。数量级（推算，假设每个 token 每层读 1280 个 BF16 数，与 Engram-27B 相同）：解码时一批 512 条序列每步只需搬 512 × 2.5 KB ≈ 1.3 MB，按 64 GB/s 约 20 微秒；预填充时若一批共 30 万个 token，就是约 750 MB、十几毫秒，此时第 1 层的计算量也随 token 数成比例增大，所以仍有机会藏住。论文没有给出这些分解数据。</div>
+</div>
+
+<p>这里出现了一个“软硬件协同设计”的矛盾。从系统角度看，Engram 放得越深，前面可用来掩盖传输的计算就越多；但第 6.2 节的消融显示，从建模效果看，Engram 越早介入越好，因为它的任务就是替浅层分担局部模式的拼接。所以放在哪一层必须同时满足这两个约束。主实验的选择是第 2 层和第 15 层：第 2 层兼顾建模效果，只用 1 个块的计算来掩盖传输；第 15 层前面有十几层计算，掩盖起来很从容。</p>
+<p>作者还提出一个更进一步的设计（论文没有实现和测试）：自然语言的 N-gram 频率服从<b>齐夫分布</b>，即极少数高频片段占了绝大多数的访问。所以可以做一个<b>多级缓存</b>：最常用的行放在显存或主机内存里，大量罕见片段的行放在更慢但容量更大的 NVMe 固态硬盘上。这样表可以扩到非常大，而平均访问延迟几乎不受影响。</p>
+<div class="note-warn"><b>读的时候要注意：</b>
+<ul>
+  <li>“确定性寻址”只对 Engram 的<b>检索</b>部分成立。门控要用到这一层的隐藏状态，必须在 GPU 上、在这一层里算，所以能提前做的只是“把行搬过来”。</li>
+  <li>多级缓存在本文只是一个设想。第 6.4 节的实验恰恰没有用任何缓存，所有行都从主机内存经 PCIe 读取。</li>
+  <li>训练时表仍然在 GPU 显存里（切到所有卡上），只是推理时才放到主机内存。所以“绕开显存容量限制”主要是推理侧的结论。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S2" target="_blank" rel="noopener">英文原文 §2 ↗</a> · 附录 A、C：<a href="https://arxiv.org/html/2601.07372#A1" target="_blank" rel="noopener">超参与分词器压缩 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 缩放律与稀疏分配：专家和查表各分多少</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>既然 MoE 专家和 Engram 的表都是“不增加计算的参数”，那么在总参数固定时，把这份预算全给专家好，还是分一部分给查表好？如果分，分多少？另一方面，如果不限制总参数，只是一味加大查表的容量，效果会怎样增长？</div>
+
+<h4 id="n-3-1">3.1 总参数固定时：U 形的分配曲线</h4>
+<div class="note-pre"><b>先补一点背景：缩放律实验里的“计算预算”。</b>
+<p>训练一个模型的计算量，常用一个经验公式估计：\(C\approx 6\,P_{\mathrm{act}}\,D\)，即每个 token 前向加反向大约要 6 倍激活参数的浮点运算，再乘以训练 token 数 \(D\)。所以给定计算预算 \(C\) 和激活参数 \(P_{\mathrm{act}}\)，训练 token 数也就定了。缩放律实验通常固定 \(C\)，比较不同设计谁的损失更低。</p>
+</div>
+<p>作者先定义三个量：</p>
+<ul>
+  <li>\(P_{\mathrm{tot}}\)：可训练参数总数，<b>不含</b>词表嵌入和输出层；</li>
+  <li>\(P_{\mathrm{act}}\)：每个 token 激活的参数，它决定训练成本（FLOPs）；</li>
+  <li>\(P_{\mathrm{sparse}}=P_{\mathrm{tot}}-P_{\mathrm{act}}\)：不被激活的参数，也就是不增加计算的“免费”预算。对 MoE 来说是没被选中的专家，对 Engram 来说是没被查到的行。</li>
+</ul>
+<p>在同一个计算预算下，\(P_{\mathrm{tot}}\) 和 \(P_{\mathrm{act}}\) 都固定，所以所有对比模型参数一样多、每 token 计算量一样多。再定义分配比例 \(\rho\in[0,1]\)：免费预算里分给 MoE 专家的比例。</p>
+<div class="formula">$$P_{\mathrm{MoE}}^{(\mathrm{sparse})}=\rho\,P_{\mathrm{sparse}},\qquad P_{\mathrm{Engram}}=(1-\rho)\,P_{\mathrm{sparse}}$$</div>
+<p>\(\rho=1\) 就是纯 MoE；\(\rho\) 小于 1 时，减少路由专家的数量，把省下的参数变成 Engram 的行。拿主实验验算一下：Engram-27B 的 \(\rho=74.3\%\)。若 \(P_{\mathrm{tot}}\) 去掉约 0.66B 的嵌入和输出层后约为 26.0B，\(P_{\mathrm{sparse}}\approx 26.0-3.8=22.2\)B，Engram 的 5.7B 正好占其 25.7%，即 \(\rho\approx74.3\%\)（推算，嵌入和输出层按 129,280 × 2560 × 2 估计）。</p>
+<p>实验在两个计算预算下进行，两者的稀疏比 \(P_{\mathrm{tot}}/P_{\mathrm{act}}\) 都约为 10：</p>
+<div class="table-wrap"><table>
+  <tr><th>计算预算 \(C\)</th><th>\(P_{\mathrm{tot}}\)</th><th>\(P_{\mathrm{act}}\)</th><th>纯 MoE 的专家数</th><th>训练 token（推算，\(C/6P_{\mathrm{act}}\)）</th></tr>
+  <tr><td>\(2\times10^{20}\)</td><td>约 5.7B</td><td>568M</td><td>106</td><td>约 59B</td></tr>
+  <tr><td>\(6\times10^{20}\)</td><td>约 9.9B</td><td>993M</td><td>99</td><td>约 101B</td></tr>
+  <tr><td>对照：主实验</td><td>26.7B</td><td>3.8B</td><td>72（+2 共享）</td><td>262B（论文值），对应约 \(6\times10^{21}\)（推算）</td></tr>
+</table></div>
+<p>不同的 \(\rho\) 只通过改变路由专家的数量和 Engram 的行数来实现，训练流程和优化超参全部相同。</p>
+
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/scaling-law.svg" alt="原文图 3：稀疏分配与 Engram 的缩放" loading="lazy"></div>
+<figcaption><b>原文图 3。怎么看：</b><b>左图</b>横轴是分配比例 \(\rho\)（40% 到 100%，100% 即纯 MoE），纵轴是验证损失。深色圆点是 \(6\times10^{20}\) 的预算，读左边的纵轴（1.710–1.745）；青色菱形是 \(2\times10^{20}\)，读右边的纵轴（1.795–1.830）。虚线是拟合的抛物线。两条曲线都是 U 形：最右端标着 “Pure MoE” 的点（纯 MoE）都明显比中间高；拟合虚线的最低点在 70%–80% 之间，单看散点，两个预算下最低的点都在 85% 附近。<b>右图</b>是第 3.2 节的实验：横轴是 Engram 的槽位数（对数刻度），纵轴是验证损失，左上角灰点是没有 Engram 的纯 MoE 主干（约 1.808）；深色是 Engram，青色是对照方法 OverEncoding。两条线在对数横轴上都近似直线，Engram 一直在 OverEncoding 下方。</figcaption></figure>
+
+<p><b>结果。</b>两条曲线都呈 U 形。在 \(6\times10^{20}\) 的预算下，验证损失从纯 MoE（\(\rho=100\%\)）的 1.7248 降到 \(\rho\approx80\%\) 附近的 1.7109，差 0.0139。即使把 MoE 的份额砍到 \(\rho\approx40\%\)（5.7B 模型只剩 46 个专家，9.9B 模型只剩 43 个），损失也和纯 MoE 差不多。最优点的位置在两个预算下都稳定在 \(\rho\approx75\%\)–\(80\%\)，也就是把免费预算的 20%–25% 给 Engram。</p>
+<p>作者对 U 形的解释是两者结构互补：靠近 100% 时，模型没有专门存静态模式的地方，只能用深度和计算去重建它们；靠近 0% 时，模型失去了条件计算能力，需要动态、依赖上下文推理的任务受损，这时记忆替代不了计算。</p>
+<div class="dia">
+  <div class="dia-title">示意图：\(6\times10^{20}\) 预算下，同样 9.9B 总参数的三种分法</div>
+  <div class="dia-row"><span class="lbl">\(\rho=100\%\)（纯 MoE）</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">激活 0.99B</span><span class="dia-seg w" style="flex:8.9">未选中的专家 约 8.9B</span></div></div>
+  <div class="dia-out">验证损失 1.7248</div>
+  <div class="dia-row"><span class="lbl">\(\rho\approx80\%\)</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">激活</span><span class="dia-seg w" style="flex:7.1">未选中的专家 约 7.1B</span><span class="dia-seg kv" style="flex:1.8">Engram 约 1.8B</span></div></div>
+  <div class="dia-out">验证损失 1.7109（最优附近）</div>
+  <div class="dia-row"><span class="lbl">\(\rho\approx40\%\)</span><div class="dia-track"><span class="dia-seg cmp" style="flex:1">激活</span><span class="dia-seg w" style="flex:3.6">专家 约 3.6B</span><span class="dia-seg kv" style="flex:5.3">Engram 约 5.3B</span></div></div>
+  <div class="dia-out">验证损失与纯 MoE 相当（只剩 43 个专家）</div>
+  <div class="dia-note">本站示意图。各段大小按 \(P_{\mathrm{sparse}}\approx9.9-0.99\approx8.9\)B 推算；损失数字来自原文 §3.1。</div>
+</div>
+<div class="note-warn"><b>读这条曲线时要注意：</b>
+<ul>
+  <li>从原图看，U 形的“底”相当平：\(\rho\) 在 60% 到 95% 之间，各点的损失只差约 0.004–0.005，而且并不单调（相邻点之间有起伏）；最大的一跳发生在 95% 到 100% 之间（\(6\times10^{20}\) 预算下约 0.012）。所以更稳妥的读法是“只要分出一小部分给 Engram 就有明显收益，具体分 60% 还是 85% 差别不大”，而不是“最优点精确在 75%–80%”。（这是本站从原图读出的观察，论文没有给每个点的数值和误差。）</li>
+  <li>“最优比例在两个规模下都稳定”只基于两个点，两者的稀疏比都固定为约 10，最大的才 9.9B 总参数、约 100B token（推算），比主实验小一个数量级的计算量。稀疏比更高（比如专家更多、更稀疏）时最优点会不会移动，论文没有测。</li>
+</ul></div>
+
+<h4 id="n-3-2">3.2 不限总参数时：查表越大，损失按对数线性下降</h4>
+<p>上一小节是在固定预算里分配；这一小节换个问法：既然 Engram 的表可以放到便宜的存储里，如果不限制总参数，一直加大表，会怎样？</p>
+<p>实验用一个固定的 MoE 主干（\(P_{\mathrm{tot}}\approx3\)B，\(P_{\mathrm{act}}=568\)M，训练 100B token，作者说足以收敛），在它上面接一张 Engram 表，把槽位数 \(M\) 从 \(2.58\times10^{5}\) 扫到 \(1.0\times10^{7}\)，最多增加约 130 亿参数。按这个数，每个槽位约对应 1,300 个参数，和主实验 \(d_{\text{mem}}=1280\) 的规模一致（推算）。对照方法是 OverEncoding（Huang 等，ICML 2025）：它也用哈希 N-gram 嵌入，但只是把它们和输入层的词嵌入取平均。作者没有和 SCONE（Yu 等，NeurIPS 2025）比，因为后者是面向推理的，还要额外训练一个 f-gram 模型，没法放进严格等计算量的比较。</p>
+<p><b>结果</b>（原文图 3 右）：随着槽位增加，验证损失稳定下降，在对数横轴上是一条直线（幂律）。从图上读，Engram 从约 26 万槽位时的约 1.788 降到约 1000 万槽位时的约 1.743，没有 Engram 的主干是约 1.808。OverEncoding 也随表变大而变好，但在相同槽位数下始终比 Engram 差。作者的结论是：Engram 提供了一个可预测的“旋钮”，加大记忆就持续有回报，而且不需要额外计算。</p>
+<div class="note-warn"><b>这里比较的是什么：</b>这组实验<b>不</b>等总参数：加了表的模型比主干多出最多约 13B 参数。对齐的是主干结构、激活参数（Engram 的投影层很小）和训练 token。和 OverEncoding 的比较是在相同槽位数下进行的。所以它说明的是“多出来的参数放进查表是值得的”，不是“查表比别的放参数的方式更划算”。另外，损失下降的斜率并不陡：表扩大约 40 倍，损失降低约 0.045（从图上读，推算）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S3" target="_blank" rel="noopener">英文原文 §3 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 大规模预训练：27B 的对照实验</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>在小规模上找到的分配规律，放大到几十亿激活参数、几百亿 token 时还成立吗？在总参数、激活参数、训练数据都严格对齐的条件下，Engram 到底比纯 MoE 好多少？好在哪些任务上？</div>
+
+<h4 id="n-4-1">4.1 实验设置：四个模型，严格对齐</h4>
+<p>所有模型用同一份 262B token 的语料，数据顺序也相同；分词器是 DeepSeek-V3 的（词表 129,280）。主干是 30 层 Transformer，隐藏维度 2560；每层用 32 个头的多头潜在注意力（MLA，见 <a href="deepseek-v3.html#n-2-1">DeepSeek-V3 精读</a>），残差用扩展率为 4 的 mHC；主干参数用 Muon 优化器（见 <a href="muon.html">Muon 精读</a>）。附录 A 的其他超参：序列长度 4096，批大小 1280 条序列，训练 50,000 步（1280 × 4096 × 50,000 ≈ 262B token，推算），基础学习率 \(4\times10^{-4}\)，分段衰减的学习率计划，MoE 用无辅助损失的负载均衡，第 1 层是稠密层。</p>
+<ul>
+  <li><b>Dense-4B</b>（4.1B 总参数）：每层一个普通稠密 FFN。</li>
+  <li><b>MoE-27B</b>（26.7B 总参数）：把 FFN 换成 DeepSeekMoE，72 个路由专家加 2 个共享专家，每个 token 选 6 个路由专家。激活参数和 Dense-4B 相同，都是 3.8B。</li>
+  <li><b>Engram-27B</b>（26.7B 总参数）：从 MoE-27B 直接改出来，路由专家从 72 个减到 55 个，省下的参数变成 5.7B 的 Engram（\(\rho=74.3\%\)），总参数不变。Engram 插在第 2 层和第 15 层，最大阶数 3，8 个哈希头，维度 1280。嵌入表用 Adam 优化，学习率放大 5 倍，不加权重衰减；卷积参数初始化为 0。</li>
+  <li><b>Engram-40B</b>（39.5B 总参数）：主干和计算量与 Engram-27B 相同，只把 Engram 加大到 18.5B 参数，用来看继续加大记忆的效果。</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">示意图：四个模型的参数怎么分（单位：十亿参数）</div>
+  <div class="dia-row"><span class="lbl">Dense-4B</span><div class="dia-track" style="max-width:10%"><span class="dia-seg cmp" style="flex:1">4.1</span></div></div>
+  <div class="dia-row"><span class="lbl">MoE-27B</span><div class="dia-track" style="max-width:67.6%"><span class="dia-seg cmp" style="flex:3.8">激活 3.8</span><span class="dia-seg w" style="flex:22.9">未选中的专家等 22.9</span></div></div>
+  <div class="dia-row"><span class="lbl">Engram-27B</span><div class="dia-track" style="max-width:67.6%"><span class="dia-seg cmp" style="flex:3.8">激活 3.8</span><span class="dia-seg w" style="flex:17.2">专家等 17.2</span><span class="dia-seg kv" style="flex:5.7">Engram 5.7</span></div></div>
+  <div class="dia-row"><span class="lbl">Engram-40B</span><div class="dia-track"><span class="dia-seg cmp" style="flex:3.8">激活 3.8</span><span class="dia-seg w" style="flex:17.2">专家等 17.2</span><span class="dia-seg kv" style="flex:18.5">Engram 18.5</span></div></div>
+  <div class="dia-out">四个模型每个 token 的计算量相同（激活 3.8B），训练 token 相同（262B）。</div>
+  <div class="dia-note">本站示意图，条的长度按总参数等比例画（Engram-40B 为满宽）。“未选中的专家等”指总参数减去激活参数和 Engram 的部分，按论文表 1 的总数推算。</div>
+</div>
+<p>评测覆盖语言建模（The Pile 测试集损失、和训练数据同分布的验证集损失）、知识与推理（MMLU 系列、CMMLU、C-Eval、AGIEval、ARC、TriviaQA、PopQA、CCPM、BBH、HellaSwag、PIQA、WinoGrande）、阅读理解（DROP、RACE、C3）和代码数学（HumanEval、MBPP、CruxEval、GSM8K、MGSM、MATH）。所有评测都是在<b>预训练后的基座模型</b>上用少样本提示做的，没有经过指令微调。</p>
+
+<h4 id="n-4-2">4.2 结果：推理和代码数学的提升比知识类还大</h4>
+<p>先看最大的差距：三个稀疏模型（MoE-27B、Engram-27B、Engram-40B）在所有基准上都远好于计算量相同的 Dense-4B，比如 MMLU 从 48.6 到 57.4 以上，GSM8K 从 35.5 到 58.4 以上。这和以往的结论一致：同样的计算量下，稀疏模型的缩放效率更高。</p>
+<p>更重要的是 Engram-27B 和 MoE-27B 的比较，因为两者总参数、激活参数、训练数据全都一样，唯一的差别是 17 个专家换成了查表。语言建模损失：Pile 从 1.960 降到 1.950，验证集从 1.634 降到 1.622。下游任务的差距见下图：</p>
+<div class="dia">
+  <div class="dia-title">图表：Engram-27B 相对 MoE-27B 在每个基准上的提升（数据来自原文表 1）</div>
+  <svg class="dg" viewBox="0 0 960 700" role="img" aria-label="Engram-27B 相对 MoE-27B 在各基准上的分数变化" style="--dg-min:640px">
+    <line x1="250" y1="22" x2="250" y2="670" class="grid-ln"/>
+    <text x="250" y="684" class="t-c t-xs">0</text>
+    <line x1="320" y1="22" x2="320" y2="670" class="grid-ln"/>
+    <text x="320" y="684" class="t-c t-xs">+1</text>
+    <line x1="390" y1="22" x2="390" y2="670" class="grid-ln"/>
+    <text x="390" y="684" class="t-c t-xs">+2</text>
+    <line x1="460" y1="22" x2="460" y2="670" class="grid-ln"/>
+    <text x="460" y="684" class="t-c t-xs">+3</text>
+    <line x1="530" y1="22" x2="530" y2="670" class="grid-ln"/>
+    <text x="530" y="684" class="t-c t-xs">+4</text>
+    <line x1="600" y1="22" x2="600" y2="670" class="grid-ln"/>
+    <text x="600" y="684" class="t-c t-xs">+5</text>
+    <line x1="670" y1="22" x2="670" y2="670" class="grid-ln"/>
+    <text x="670" y="684" class="t-c t-xs">+6</text>
+    <line x1="740" y1="22" x2="740" y2="670" class="grid-ln"/>
+    <text x="740" y="684" class="t-c t-xs">+7</text>
+    <line x1="810" y1="22" x2="810" y2="670" class="grid-ln"/>
+    <text x="810" y="684" class="t-c t-xs">+8</text>
+    <text x="530" y="698" class="t-c t-sm">Engram-27B 减 MoE-27B 的分数差（百分点）</text>
+    <text x="12" y="40.5" class="t-b" style="fill:var(--c-enc)">知识与推理</text>
+    <text x="240" y="61.5" class="t-r t-sm">MMLU</text>
+    <rect x="250" y="55" width="210.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="466.0" y="61.5" class="t-xs" style="fill:var(--text-2)">+3.0（57.4 → 60.4）</text>
+    <text x="240" y="82.5" class="t-r t-sm">MMLU-Redux</text>
+    <rect x="250" y="76" width="238.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="494.0" y="82.5" class="t-xs" style="fill:var(--text-2)">+3.4（60.6 → 64.0）</text>
+    <text x="240" y="103.5" class="t-r t-sm">MMLU-Pro</text>
+    <rect x="250" y="97" width="126.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="382.0" y="103.5" class="t-xs" style="fill:var(--text-2)">+1.8（28.3 → 30.1）</text>
+    <text x="240" y="124.5" class="t-r t-sm">CMMLU</text>
+    <rect x="250" y="118" width="280.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="536.0" y="124.5" class="t-xs" style="fill:var(--text-2)">+4.0（57.9 → 61.9）</text>
+    <text x="240" y="145.5" class="t-r t-sm">C-Eval</text>
+    <rect x="250" y="139" width="329.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="585.0" y="145.5" class="t-xs" style="fill:var(--text-2)">+4.7（58.0 → 62.7）</text>
+    <text x="240" y="166.5" class="t-r t-sm">AGIEval</text>
+    <rect x="250" y="160" width="224.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="480.0" y="166.5" class="t-xs" style="fill:var(--text-2)">+3.2（38.6 → 41.8）</text>
+    <text x="240" y="187.5" class="t-r t-sm">ARC-Easy</text>
+    <rect x="250" y="181" width="175.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="431.0" y="187.5" class="t-xs" style="fill:var(--text-2)">+2.5（86.5 → 89.0）</text>
+    <text x="240" y="208.5" class="t-r t-sm">ARC-Challenge</text>
+    <rect x="250" y="202" width="259.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="515.0" y="208.5" class="t-xs" style="fill:var(--text-2)">+3.7（70.1 → 73.8）</text>
+    <text x="240" y="229.5" class="t-r t-sm">TriviaQA</text>
+    <rect x="250" y="223" width="133.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="389.0" y="229.5" class="t-xs" style="fill:var(--text-2)">+1.9（48.8 → 50.7）</text>
+    <text x="240" y="250.5" class="t-r t-sm">TriviaQA-ZH</text>
+    <rect x="250" y="244" width="105.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="361.0" y="250.5" class="t-xs" style="fill:var(--text-2)">+1.5（74.8 → 76.3）</text>
+    <text x="240" y="271.5" class="t-r t-sm">PopQA</text>
+    <rect x="250" y="265" width="14.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="270.0" y="271.5" class="t-xs" style="fill:var(--text-2)">+0.2（19.2 → 19.4）</text>
+    <text x="240" y="292.5" class="t-r t-sm">CCPM</text>
+    <rect x="250" y="286" width="525.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="781.0" y="292.5" class="t-xs" style="fill:var(--text-2)">+7.5（79.6 → 87.1）</text>
+    <text x="240" y="313.5" class="t-r t-sm">BBH</text>
+    <rect x="250" y="307" width="350.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="606.0" y="313.5" class="t-xs" style="fill:var(--text-2)">+5.0（50.9 → 55.9）</text>
+    <text x="240" y="334.5" class="t-r t-sm">HellaSwag</text>
+    <rect x="250" y="328" width="63.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="319.0" y="334.5" class="t-xs" style="fill:var(--text-2)">+0.9（71.8 → 72.7）</text>
+    <text x="240" y="355.5" class="t-r t-sm">PIQA</text>
+    <rect x="250" y="349" width="112.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="368.0" y="355.5" class="t-xs" style="fill:var(--text-2)">+1.6（71.9 → 73.5）</text>
+    <text x="240" y="376.5" class="t-r t-sm">WinoGrande</text>
+    <rect x="250" y="370" width="14.0" height="13" rx="2" style="fill:var(--c-enc);opacity:.8"/>
+    <text x="270.0" y="376.5" class="t-xs" style="fill:var(--text-2)">+0.2（67.6 → 67.8）</text>
+    <text x="12" y="397.5" class="t-b" style="fill:var(--c-act)">阅读理解</text>
+    <text x="240" y="418.5" class="t-r t-sm">DROP</text>
+    <rect x="250" y="412" width="231.0" height="13" rx="2" style="fill:var(--c-act);opacity:.8"/>
+    <text x="487.0" y="418.5" class="t-xs" style="fill:var(--text-2)">+3.3（55.7 → 59.0）</text>
+    <text x="240" y="439.5" class="t-r t-sm">RACE-Middle</text>
+    <rect x="250" y="433" width="133.0" height="13" rx="2" style="fill:var(--c-act);opacity:.8"/>
+    <text x="389.0" y="439.5" class="t-xs" style="fill:var(--text-2)">+1.9（80.9 → 82.8）</text>
+    <text x="240" y="460.5" class="t-r t-sm">RACE-High</text>
+    <rect x="250" y="454" width="196.0" height="13" rx="2" style="fill:var(--c-act);opacity:.8"/>
+    <text x="452.0" y="460.5" class="t-xs" style="fill:var(--text-2)">+2.8（75.4 → 78.2）</text>
+    <text x="240" y="481.5" class="t-r t-sm">C3</text>
+    <rect x="250" y="475" width="245.0" height="13" rx="2" style="fill:var(--c-act);opacity:.8"/>
+    <text x="501.0" y="481.5" class="t-xs" style="fill:var(--text-2)">+3.5（60.1 → 63.6）</text>
+    <text x="12" y="502.5" class="t-b" style="fill:var(--c-pred)">代码与数学</text>
+    <text x="240" y="523.5" class="t-r t-sm">HumanEval</text>
+    <rect x="250" y="517" width="210.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="466.0" y="523.5" class="t-xs" style="fill:var(--text-2)">+3.0（37.8 → 40.8）</text>
+    <text x="240" y="544.5" class="t-r t-sm">MBPP</text>
+    <rect x="250" y="538" width="112.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="368.0" y="544.5" class="t-xs" style="fill:var(--text-2)">+1.6（46.6 → 48.2）</text>
+    <text x="240" y="565.5" class="t-r t-sm">CruxEval-i</text>
+    <rect x="250" y="559" width="105.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="361.0" y="565.5" class="t-xs" style="fill:var(--text-2)">+1.5（30.7 → 32.2）</text>
+    <text x="240" y="586.5" class="t-r t-sm">CruxEval-o</text>
+    <rect x="250" y="580" width="63.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="319.0" y="586.5" class="t-xs" style="fill:var(--text-2)">+0.9（34.1 → 35.0）</text>
+    <text x="240" y="607.5" class="t-r t-sm">GSM8K</text>
+    <rect x="250" y="601" width="154.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="410.0" y="607.5" class="t-xs" style="fill:var(--text-2)">+2.2（58.4 → 60.6）</text>
+    <text x="240" y="628.5" class="t-r t-sm">MGSM</text>
+    <rect x="250" y="622" width="182.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="438.0" y="628.5" class="t-xs" style="fill:var(--text-2)">+2.6（46.8 → 49.4）</text>
+    <text x="240" y="649.5" class="t-r t-sm">MATH</text>
+    <rect x="250" y="643" width="168.0" height="13" rx="2" style="fill:var(--c-pred);opacity:.8"/>
+    <text x="424.0" y="649.5" class="t-xs" style="fill:var(--text-2)">+2.4（28.3 → 30.7）</text>
+  </svg>
+  <div class="dia-note">本站根据原文表 1 重画。每一行括号里是 MoE-27B → Engram-27B 的分数。所有基准上 Engram-27B 都不低于 MoE-27B。</div>
+</div>
+<p>几个值得注意的地方。第一，知识类任务确实有提升（MMLU +3.0、CMMLU +4.0、C-Eval +4.7、MMLU-Pro +1.8）。第二，作者特别强调，通用推理的提升更大（BBH +5.0、ARC-Challenge +3.7、DROP +3.3），代码和数学也有可观的提升（HumanEval +3.0、MATH +2.4、GSM8K +2.2）。这正是第 6 节要解释的现象：一个“查表”模块为什么能帮推理。第三，提升最大的是 CCPM（+7.5），这是一个中文古诗词匹配任务，大量依赖固定的词语搭配，正是 N-gram 查表擅长的东西。第四，一个有点反直觉的事实：纯事实问答的提升反而很小（TriviaQA +1.9、TriviaQA-ZH +1.5、PopQA 只有 +0.2）。第 6.3 节会看到，去掉 Engram 后这几项掉得最厉害，两件事放在一起才能读懂 Engram 在做什么（见那里的提示）。</p>
+<p>Engram-40B 把表加大到 18.5B 后，预训练损失进一步降低（Pile 1.942、验证集 1.610），大多数基准也继续变好，比如 AGIEval 从 41.8 到 45.9、CruxEval-i 从 32.2 到 36.2、PIQA 从 73.5 到 76.5。但它并没有在所有任务上都超过 Engram-27B：HumanEval（38.4 对 40.8）、MBPP（46.2 对 48.2）、C3（61.8 对 63.6）反而更低。作者认为这是训练不足造成的：Engram-40B 和基线的训练损失差距到训练结束时还在扩大，说明更大的记忆在 262B token 内还没“填满”。</p>
+
+<figure class="paper-fig"><div class="imgs one"><a href="conditional-memory/fig/benchmark-curves.svg" target="_blank" rel="noopener"><img src="conditional-memory/fig/benchmark-curves.svg" alt="原文图 8：预训练最后一万步的基准曲线" loading="lazy"></a></div>
+<figcaption><b>原文图 8（附录 B）。怎么看：</b>这是一张由 28 个小图组成的大图（点击可打开原尺寸），每个小图是一个基准，横轴是预训练的最后 1 万步（约 40k 到 50k 步，刻度标 42k、46k、50k），纵轴是这个基准的分数（第一个小图是 Pile 测试集损失，越低越好），两条线分别是 MoE-27B 和 Engram-27B。作者放这张图是为了回应“单个检查点的分数有噪声”的疑虑：如果 Engram-27B 的线在整段区间里都在 MoE-27B 之上，而不是只在最后一个点上领先，结论就更可信。读的时候可以挑表 1 里提升小的任务（如 WinoGrande、PopQA、HellaSwag）看两条线是不是交织在一起。</figcaption></figure>
+
+<h4 id="n-4-3">4.3 结果的份量：这些提升能说明什么</h4>
+<p><b>严格对齐的量。</b>Engram-27B 与 MoE-27B 的总参数（26.7B）、每 token 激活参数（3.8B）、训练 token（262B，相同数据和顺序）、主干结构、训练步数全部相同，这是本文最有说服力的地方。很多此前的 N-gram 嵌入工作只在主干上“加”参数，不扣掉别的参数，因而分不清提升来自结构还是来自参数变多。本文用“拿专家换查表”的方式避免了这个问题。</p>
+<p><b>近似对齐、但值得知道的量。</b></p>
+<ul>
+  <li><b>计算量</b>：Engram 自身有 5 个投影矩阵和一个卷积，约 3,300 万激活参数（推算），约占 3.8B 的 0.9%。表 1 给的激活参数精确到 0.1B，这部分藏在四舍五入里。所以 Engram-27B 每 token 的计算量其实略多于 MoE-27B，但差别在 1% 以内，不足以解释几个点的提升。</li>
+  <li><b>优化器</b>：Engram 的嵌入表用 Adam 和 5 倍学习率，主干用 Muon。这套设置是为 Engram 调过的；MoE 基线用同一条训练流程，论文没说是否为它单独调过超参。</li>
+  <li><b>内存与通信</b>：“等参数”是按参数个数算的。实际部署时，专家参数和表参数的存放位置、通信方式完全不同（训练时表要做 All-to-All），所以“等参数”不等于“等硬件成本”。</li>
+</ul>
+<p><b>没有对齐或没有报告的量。</b></p>
+<ul>
+  <li><b>随机性</b>：每种配置只训了一次，没有多个随机种子，也没有误差范围。附录 B 的训练曲线是作者对噪声问题的回应。可以用一个具体数字感受噪声：HumanEval 只有 164 道题，+3.0 个百分点相当于多做对约 5 道题（推算）。</li>
+  <li><b>Dense-4B</b> 只和其他模型对齐了激活参数和训练 token，总参数小得多；它说明的是“稀疏比稠密好”，不是 Engram 的贡献。<b>Engram-40B</b> 只对齐了激活参数和 token，总参数多了 12.8B，它和 MoE-27B 的比较不是等参数比较。</li>
+  <li><b>规模</b>：最大的对照是 3.8B 激活参数、262B token。生产级模型大一到两个数量级（DeepSeek-V3 是 37B 激活参数、14.8T token），提升在那个规模上是否保持，本文没有直接证据。</li>
+  <li><b>后训练</b>：所有结果都是基座模型的少样本分数，经过指令微调和强化学习后差距会怎样，没有报告。</li>
+</ul>
+<div class="note-warn"><b>一个数字上的不一致：</b>摘要和引言写的是 “MMLU +3.4”，但表 1 中 MMLU 是 57.4 → 60.4，即 +3.0，正文第 4.2 节写的也是 +3.0。+3.4 恰好是 MMLU-Redux 的提升（60.6 → 64.0），很可能是摘要把两个基准写混了。本页以表 1 为准。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S4" target="_blank" rel="noopener">英文原文 §4 ↗</a> · <a href="https://arxiv.org/html/2601.07372#A2" target="_blank" rel="noopener">附录 B 训练曲线 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 长上下文：把局部依赖交给查表，注意力去管全局</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>作者的假设是：既然局部的固定搭配由查表负责，注意力就不用再花力气处理它们，可以把“容量”留给远距离的上下文。如果这个假设对，Engram 模型做长上下文扩展后应该在长文本检索上更强。可是长上下文能力也取决于基座模型本身有多强，怎样才能把“结构的贡献”和“基座更强”分开？</div>
+<div class="note-pre"><b>先补一点背景：长上下文扩展和两种评测。</b>
+<p>预训练通常用较短的序列（本文是 4096）。要让模型处理更长的文本，常见做法是预训练之后再用长文本继续训练一段，同时调整位置编码，让模型适应更远的位置，这叫<b>上下文扩展</b>。本文沿用 DeepSeek-V3 的做法，用 <b>YaRN</b>（一种修改 RoPE 旋转频率的方法，见 <a href="roformer.html">RoPE 精读</a>）把上下文扩到 32768，再训练 5,000 步、共 30B token 的高质量长文本，YaRN 参数为 \(s=10,\alpha=1,\beta=32\)，缩放因子 \(f=0.707\)。</p>
+<p><b>LongPPL</b> 衡量模型在长文本上的困惑度（越低越好），它特别关注那些需要远处上下文才能预测准的 token。本文在四类长文本上测：长篇书籍、研究论文、代码仓库、长的思维链。<b>RULER</b> 是一组合成的长上下文任务：在很长的无关文本里藏一些“针”（比如一个键值对），让模型找出来，这就是“大海捞针”（NIAH）。它有单针（S）、多键（MK）、多值（MV）、多查询（MQ）几种变体；另外还有多跳变量追踪（VT）、常见词与高频词抽取（CWE、FWE）和问答（QA）。</p>
+</div>
+<p><b>怎么设计对比。</b>作者先观察到一个现象：同一个 Engram-27B，从预训练的 41k 步、46k 步、50k 步三个检查点出发，做完全相同的长上下文扩展，结果随预训练步数增加而变好。这说明长上下文能力不仅取决于注意力和位置编码这些结构，也和基座模型本身的建模能力紧密相关。因此，公平的结构比较应该让两个模型的<b>预训练损失</b>对齐，而不只是让训练步数对齐。于是作者设了三种比较，基线都是训满 50k 步的 MoE-27B（预训练损失 1.63）：</p>
+<ul>
+  <li><b>等损失</b>：Engram-27B 的 46k 步检查点，预训练损失也是 1.63。这个比较最能单独说明结构的作用。</li>
+  <li><b>等计算</b>：Engram-27B 训满 50k 步（损失 1.62），和基线的预训练计算量相同。</li>
+  <li><b>极端设置</b>：Engram-27B 的 41k 步检查点（损失 1.66），只用了基线 82% 的预训练计算量。</li>
+</ul>
+<p>四个模型的长上下文扩展训练完全相同。结果如下（原文表 2，长度均为 32k）：</p>
+<div class="table-wrap"><table>
+  <tr><th rowspan="2">模型（预训练步数，损失）</th><th colspan="4">LongPPL（越低越好）</th><th colspan="4">RULER 大海捞针（越高越好）</th><th colspan="4">RULER 其他任务</th></tr>
+  <tr><th>书</th><th>论文</th><th>代码</th><th>长思维链</th><th>S</th><th>MK</th><th>MV</th><th>MQ</th><th>VT</th><th>CWE</th><th>FWE</th><th>QA</th></tr>
+  <tr><td>MoE-27B（50k，1.63）</td><td>4.38</td><td>2.91</td><td>2.49</td><td>14.16</td><td>100.0</td><td>88.0</td><td>92.7</td><td>84.2</td><td>77.0</td><td>4.5</td><td>73.0</td><td>34.5</td></tr>
+  <tr><td>Engram-27B（41k，1.66）</td><td>4.37</td><td>2.92</td><td>2.50</td><td>14.26</td><td>99.6</td><td>88.3</td><td>93.0</td><td>89.5</td><td>83.2</td><td>3.8</td><td>99.6</td><td>44.0</td></tr>
+  <tr><td>Engram-27B（46k，1.63）</td><td>4.19</td><td>2.84</td><td>2.45</td><td>13.59</td><td>97.6</td><td>89.0</td><td>95.5</td><td>97.0</td><td>87.2</td><td>4.3</td><td>98.6</td><td>37.5</td></tr>
+  <tr><td>Engram-27B（50k，1.62）</td><td>4.14</td><td>2.82</td><td>2.44</td><td>13.41</td><td>99.3</td><td>89.3</td><td>96.5</td><td>97.0</td><td>89.0</td><td>5.9</td><td>99.3</td><td>40.5</td></tr>
+</table></div>
+<p><b>结果。</b>等损失时（46k），Engram 在复杂检索任务上明显更好：多查询大海捞针 97.0 对 84.2，变量追踪 87.2 对 77.0，四类 LongPPL 也都更低。等计算时（50k），差距进一步拉大，变量追踪到 89.0。只用 82% 预训练计算量的 41k 检查点，LongPPL 和基线基本持平（4.37 对 4.38 等），RULER 则多数更好，其中高频词抽取（FWE）从 73.0 跳到 99.6。作者据此认为 Engram 结构本身对长上下文有好处。</p>
+<div class="note-warn"><b>结果的份量：</b>
+<ul>
+  <li>“等损失”是一个有意思的设计，但它对齐的只是一个数（预训练损失），两个模型在其他方面并不等价。还有一个论文没讨论的变量：学习率计划是分段衰减（引用的是 DeepSeek LLM 的做法，那篇论文在训练进度 80% 和 90% 处两次降低学习率）。如果本文也是这样，41k 和 46k 两个中间检查点分别处在不同的学习率阶段，这本身就会影响后续扩展训练的效果。这一点是本站的推测，论文没写衰减点。</li>
+  <li>表 2 的说明写着“等损失和等计算两种设置下，Engram 在<b>所有</b>指标上都显著超过基线”，但表里并非如此：单针检索（S）基线是 100.0，Engram 46k 是 97.6、50k 是 99.3；CWE 上 46k 是 4.3，低于基线的 4.5。CWE 对所有模型都只有个位数，基本没有区分度。</li>
+  <li>“长上下文能力随预训练步数单调提升”也只对部分指标成立：LongPPL、MQ、VT 是单调的，但 QA 是 44.0 → 37.5 → 40.5，单针检索和 FWE 也有起伏。这些合成任务的分数本身波动不小，每个设置只测了一次。</li>
+  <li>“注意力容量被释放给了全局上下文”是一个解释，论文没有直接测量注意力模式（比如注意力有多少落在远处）来验证它。长度也只测到 32k。</li>
+</ul></div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S5" target="_blank" rel="noopener">英文原文 §5 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 分析：Engram 到底在模型里做了什么</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>第 4 节最令人意外的结果，是一个查表模块让推理和数学也变好了。作者的解释是 Engram 让网络“等效变深”：浅层不必再忙着拼接固定模式，可以更早地开始做真正的推理。这一节用两种可解释性工具检验这个解释，再做结构消融（哪些设计重要、放在哪层最好）、敏感性分析（关掉 Engram 会怎样）、系统吞吐测量和门控的可视化。</div>
+
+<h4 id="n-6-1">6.1 Engram 等于把网络变深了吗</h4>
+<div class="note-pre"><b>先补一点背景：LogitLens 和 CKA。</b>
+<p><b>LogitLens</b> 是一个看“模型在中间层想到哪了”的办法：把某一层的隐藏状态直接接上模型最后的输出层（LM Head），算出一个下一个 token 的概率分布，再和模型真正的最终输出分布比较。比较用 <b>KL 散度</b>，它衡量两个分布有多不一样，越小说明这一层的表示越接近“可以直接给出最终答案”。如果一个模型的 KL 在浅层就降得很低，说明它更早地完成了特征组合。</p>
+<p><b>CKA</b>（Centered Kernel Alignment）衡量两组表示的结构有多相似。拿同一批输入，分别取模型 A 第 \(i\) 层和模型 B 第 \(j\) 层的激活 \(X\)、\(Y\)，算出它们的格拉姆矩阵 \(K=XX^{\top}\)、\(L=YY^{\top}\)（描述“这批样本两两之间有多像”），再用 HSIC（一种衡量两个矩阵相关程度的统计量）归一化：</p>
+<div class="formula">$$\mathrm{CKA}(K,L)=\frac{\mathrm{HSIC}(K,L)}{\sqrt{\mathrm{HSIC}(K,K)\,\mathrm{HSIC}(L,L)}}$$</div>
+<p>结果在 0 到 1 之间，越接近 1 说明两层“看待这批样本的方式”越一致。如果 Engram 模型的第 5 层和 MoE 模型的第 12 层最像，就可以说 Engram 模型在第 5 层已经达到了 MoE 模型第 12 层的表示水平。</p>
+</div>
+<p><b>LogitLens 的结果。</b>作者对每一层算 KL 散度（原文图 4a）。和 MoE 基线相比，两个 Engram 模型的 KL 系统性地更小，差距在前面的层里最明显。作者的解读是：Engram 模型更快地完成了特征组合，更早地得到“可以直接用来预测”的表示。</p>
+<p><b>CKA 的结果。</b>作者在 Few-NERD（一个命名实体数据集）上，取每个命名实体最后一个 token 的隐藏状态，算出 Engram 模型各层和 MoE 模型各层两两之间的 CKA 相似度矩阵 \(S\)。为了把“Engram 第 \(j\) 层对应 MoE 第几层”变成一个数，作者定义了软对齐指数：取和 Engram 第 \(j\) 层最相似的 5 个 MoE 层，按相似度加权平均它们的层号：</p>
+<div class="formula">$$a_j=\frac{\sum_{i\in\mathcal{I}_j}S_{i,j}\cdot i}{\sum_{i\in\mathcal{I}_j}S_{i,j}},\qquad \mathcal{I}_j=\operatorname{argtop}k_{\,i}\,(S_{i,j}),\ k=5$$</div>
+<p>如果 \(a_j>j\)，说明 Engram 的第 \(j\) 层对应 MoE 更深的层。结果是在很大一段层范围内都有 \(a_j>j\)。例如，Engram-27B 第 5 层的表示，和 MoE 基线约第 12 层的表示最接近。作者据此得出本文的核心解释：通过显式查表绕过浅层的特征组合，Engram 在功能上等价于增加了模型的有效深度。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/logitlens-cka.png" alt="原文图 4：LogitLens 与 CKA 分析" loading="lazy"></div>
+<figcaption><b>原文图 4。怎么看：</b>(a) 横轴是层号（0 到约 28），纵轴是该层用 LogitLens 读出的分布与最终输出分布的 KL 散度。深蓝圆点是 MoE-27B，红色方块是 Engram-27B，橙色三角是 Engram-40B。可以看到三条线在第 2 层到第 16 层左右之间分开，Engram 的两条线更低（差距约 0.5 左右）；第 17–18 层所有模型都骤降，之后三条线基本重合。(b)(c) 横轴是 Engram 模型的层，纵轴是 MoE 模型的层，颜色越亮表示 CKA 越高；黑色虚线是对角线（“同一层对同一层”），白色虚线是软对齐指数 \(a_j\)。白线明显在对角线上方，说明 Engram 的浅层对应 MoE 的更深层。最值得看的是白线在横轴第 2 层处的那一跳：恰好在 Engram 插入的位置，对应的 MoE 层一下子跳到 11–12 层附近。</figcaption></figure>
+<p>论文开头的“戴安娜王妃”例子在这里闭环了：普通模型要用五六层才能把一个实体拼完整，而 Engram 在第 2 层就把“以这几个 token 结尾的固定片段”对应的向量直接送进了残差流，于是后面的层可以从一个更“成熟”的表示开始工作。</p>
+<div class="note-warn"><b>这组证据有多强：</b>
+<ul>
+  <li>CKA 只在命名实体的最后一个 token 上计算，这恰好是 Engram 最该起作用的位置。在普通 token 上（比如推理过程中的中间步骤），“等效加深”是否同样明显，论文没有测。</li>
+  <li>“表示相似”不等于“做了同样的计算”。CKA 说明 Engram 第 5 层和 MoE 第 12 层“看样本的方式”接近，但不能证明 Engram 模型把省下的层数用在了推理上。LogitLens 的差距也主要出现在前半部分，到最后几层三个模型几乎一样。</li>
+  <li>所以“查表帮了推理”的因果链（省下浅层 → 多出有效深度 → 推理变好）是一个合理且有一定证据的解释，但每一环的证据强度不同，最后一环（推理变好是因为多出了深度）没有直接检验。</li>
+</ul></div>
+
+<h4 id="n-6-2">6.2 结构消融：哪些设计重要，放在哪层最好</h4>
+<p>消融在一个较小的受控设置下做：主干是 12 层、3B 总参数、0.56B 激活参数的 MoE，训练 100B token，验证损失 1.808。在它上面加一个固定 1.6B 参数的 Engram 作为<b>参考配置</b>：用 2-gram 和 3-gram，插在第 2 层和第 6 层，验证损失 1.768，比基线好 0.04。下面所有变体都和这个参考配置比，Engram 的参数预算始终保持 1.6B。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/arch-ablation.svg" alt="原文图 5：结构消融" loading="lazy"></div>
+<figcaption><b>原文图 5。怎么看：</b>纵轴是验证损失（注意刻度不均匀：1.768 到 1.783 之间是细刻度，最上面的 1.808 是 3B MoE 基线，用橙色虚线表示）。左边的深蓝曲线是“层扫描”：把 1.6B 的 Engram 合成<b>一个</b>模块，分别插在第 1 到第 12 层，横轴是插入的层号；曲线在第 2 层最低，往深处逐渐变差。最下面那条线是参考配置（两个模块分别插在第 2、6 层，1.768）。右边的一列标记是成分消融：从参考配置出发分别去掉多分支融合（w/o multi branch）、去掉分词器压缩（w/o token compress）、去掉门控（w/o gating）、加入 4-gram（+ 4-gram）、去掉短卷积（w/o short conv），标记越高说明这个改动伤害越大。</figcaption></figure>
+<p><b>插在哪一层：一个取舍。</b>插得早，Engram 能在主干花掉计算深度之前就接手局部模式的拼接，这符合网络“浅层处理局部、深层处理抽象”的自然分工。但插得早也有代价：浅层的隐藏状态还没通过注意力聚合足够的上下文，用它做门控的查询不够准；多分支结构里各分支在浅层也还没分化，分支各自门控的优势发挥不出来。层扫描的结果是第 2 层最好（1.770），比第 1 层好，往深处逐渐变差。作者的解读是：经过一轮注意力，隐藏状态已经足以给门控当查询；同时第 2 层又足够浅，能替代主干底层的局部聚合。</p>
+<p><b>拆成两个模块更好。</b>把同样 1.6B 的预算拆成两个较小的模块（减小每个模块的维度 \(d_{\text{mem}}\)），分别放在第 2 层和第 6 层，损失进一步降到 1.768。这种分层设计调和了上面的矛盾：早的模块负责尽早介入，晚的模块享有更丰富的上下文来做门控。它还有系统上的好处：第 6 层前面有更多计算可以掩盖传输延迟，正好对应第 2.5 节的内存层级设计。</p>
+<p><b>哪些成分重要。</b>伤害最大的三项是：去掉多分支各自的融合（改成在 mHC 的输入映射之后只做一次融合）、去掉上下文门控、去掉分词器压缩。去掉短卷积只让损失略微变差。把一部分容量分给 4-gram 反而略差，作者推测是因为在固定的 1.6B 预算下，这稀释了更高频的 2-gram 和 3-gram 的容量；但他们也没有排除在更大的记忆规模下高阶 N-gram 会变得有用。（后来 DeepSeek-V4.1-Flash 在每个模块约 98B 参数的规模上确实用了 {2, 3, 4} 阶，见“后来怎么样了”。）</p>
+<div class="note-warn"><b>这里比较的是什么：</b>消融里所有 Engram 变体之间是等 Engram 预算（1.6B）比较的；但它们和 3B MoE 基线之间<b>不是</b>等总参数的比较：加了 Engram 的模型多了 1.6B 参数。所以“比基线好 0.04”说明的是“加一张 1.6B 的表有用”，不能和第 3.1 节的等参数结论直接混用。另外，这些消融只在 0.56B 激活参数、100B token 的规模上做过。</div>
+
+<h4 id="n-6-3">6.3 关掉 Engram 会怎样：事实知识塌了，阅读理解基本还在</h4>
+<p>为了看清 Engram 承担了什么功能，作者在推理时把 Engram 的输出完全置零，主干保持不变，测量每个基准还剩多少原来的分数。作者也承认，这种“训练时有、测试时突然没了”的做法会造成训练与推理不一致，在需要多种能力配合的复杂任务上会引入噪声，所以重点看敏感性谱的两个极端：事实知识和阅读理解。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/sensitivity.svg" alt="原文图 6：关掉 Engram 后保留的性能" loading="lazy"></div>
+<figcaption><b>原文图 6。怎么看：</b>每根柱子是一个基准，纵轴是关掉 Engram 后剩下的分数占原分数的百分比。柱子按能力分组，从左到右依次是：阅读理解（C3、RACE-Middle、RACE-High、DROP）、常识推理（HellaSwag、ARC-Challenge、PIQA）、知识密集型推理（CMMLU、MMLU、MMLU-Pro）、代码（CruxEval、MBPP、HumanEval）、算法推理（BBH、GSM8K、MGSM、MATH）、事实知识（TriviaQA-ZH、PopQA、TriviaQA）。整体趋势是从左到右越来越低：左端的阅读理解保留 81%–93%（C3 最高，93%），右端的事实知识只保留 29%–44%（TriviaQA 最低，29%）。中间的数学类也掉得很多，从图上读 MATH 约剩 36%、MGSM 约 44%。</figcaption></figure>
+<p>结果呈现出鲜明的两极。事实知识类基准几乎崩溃，只保留原来的 29%–44%（TriviaQA 只剩 29%），说明 Engram 成了模型存放参数化知识的主要仓库。阅读理解类则非常稳健，保留 81%–93%（C3 保留 93%），说明这类“答案就在给定文本里”的任务主要依赖主干的注意力，而不是 Engram。</p>
+<div class="note-warn"><b>把第 4 节和这一节放在一起读：</b>关掉 Engram 后 TriviaQA 掉了 71%，可是第 4 节里有 Engram 和没有 Engram（MoE-27B）相比，TriviaQA 只提升了 1.9 分，PopQA 只提升了 0.2 分。这两件事并不矛盾：这一节测的是<b>依赖</b>（训练好的 Engram 模型把事实存在了哪里），第 4 节测的是<b>增益</b>（有了 Engram 是否存得更多）。合起来的含义是：有了查表之后，模型把大量事实从 FFN 搬到了表里，但能记住的事实总量并没有多出很多；提升主要来自别处，比如第 6.1 节说的“浅层被解放出来”。另外，从图上读，关掉 Engram 后数学（MATH 约剩 36%）和代码（HumanEval 约剩 58%）也掉得很厉害，这说明训练与推理不一致造成的整体破坏不小，不能简单地把“掉得多”都读成“这项能力存在 Engram 里”。</div>
+
+<h4 id="n-6-4">6.4 系统效率：把 1000 亿参数的表放在主机内存里</h4>
+<p>Engram 对路由式 MoE 的一大系统优势是：它的稀疏激活由显式、静态的哈希编号决定，访问模式完全确定，下一次查表要用的行号在 token 序列确定时就已固定，可以在对应的层执行之前算好。作者用实验检验了“放到主机内存 + 预取”到底有多少开销。</p>
+<p><b>实验设置。</b>推理框架是基于 nano-vLLM 搭的（一个精简版的 vLLM 原型，vLLM 本身见 <a href="vllm.html">vLLM 精读</a>）。为了得到干净的延迟基线，避免 MoE 专家并行带来的通信干扰，他们用了两个<b>稠密</b>主干：Dense-4B 和 Dense-8B。在第 2 个 Transformer 块里插入一个 1000 亿参数的 Engram 层，整张表放在主机内存里。推理时系统异步预取这一层要用的嵌入，让 PCIe 传输和第 1 个块的计算重叠。硬件是 NVIDIA H800，负载是 512 条序列，长度在 100 到 1024 之间均匀分布。</p>
+<div class="dia">
+  <div class="dia-title">图表：端到端推理吞吐（原文表 4，单位 token/秒）</div>
+  <div class="dia-row"><span class="lbl">4B 稠密</span><div class="dia-track"><span class="dia-seg cmp" style="flex:9031.62">基线 9,031.62</span></div></div>
+  <div class="dia-row"><span class="lbl">4B + 100B Engram</span><div class="dia-track"><span class="dia-seg kv" style="flex:8858.28">CPU 卸载 8,858.28</span><span class="dia-seg oth" style="flex:173.34"></span></div></div>
+  <div class="dia-out">下降 1.9%（推算）</div>
+  <div class="dia-row"><span class="lbl">8B 稠密</span><div class="dia-track" style="max-width:69.9%"><span class="dia-seg cmp" style="flex:6315.52">基线 6,315.52</span></div></div>
+  <div class="dia-row"><span class="lbl">8B + 100B Engram</span><div class="dia-track" style="max-width:69.9%"><span class="dia-seg kv" style="flex:6140.02">CPU 卸载 6,140.02</span><span class="dia-seg oth" style="flex:175.5"></span></div></div>
+  <div class="dia-out">下降 2.8%（论文：最多 2.8%）</div>
+  <div class="dia-note">本站根据原文表 4 重画，条长按吞吐等比例画，灰色小段是损失的吞吐。</div>
+</div>
+<p><b>结果。</b>把 1000 亿参数的表整个放在主机内存里，吞吐最多只下降 2.8%（8B 主干）。作者的解释是：前面稠密块的计算量足够大，提供了足够的时间窗口来掩盖取数延迟；而且每一步实际要传输的数据量只和被查到的行数有关，和整张表有多大无关。作者还强调这是一个保守的基线：第 2.5 节设想的多级缓存会把高频的行缓存在显存里，而这个实验强制所有读取都走 PCIe，所以一个充分优化、利用局部性的实现开销会更小。</p>
+<div class="note-warn"><b>结果的份量：</b>
+<ul>
+  <li><b>测的是什么</b>：这是一个纯开销测试。基线是没有 Engram 的稠密模型，所以它只说明“多挂一张放在主机内存里的大表要付出多少吞吐”，不涉及模型质量；这个 100B 的 Engram 模型也没有训练过（论文没有说表里是什么值，但开销与值无关）。</li>
+  <li><b>和论文的主模型不同</b>：主模型是 MoE（Engram-27B），这里是稠密主干，而且只有一个 Engram 层、放在第 2 块。作者说选稠密主干是为了避开专家并行通信的干扰；但真实的 MoE 部署里，PCIe 和网卡带宽可能还要分给专家通信，开销会不会仍然这么小，没有测。</li>
+  <li><b>指标</b>：只有总吞吐（token/秒），没有首 token 延迟、每 token 延迟、P99 尾延迟；没说吞吐里预填充和解码各占多少，也没说 100–1024 指的是输入长度还是输出长度。批很大（512 条）时计算时间长，最容易藏住传输；小批量、低延迟的场景下掩盖窗口更短，结果可能不同。</li>
+  <li><b>没有披露</b>：主机内存容量和带宽、PCIe 代数、表的存储精度、CPU 端怎么做哈希和收集行。按 BF16 估算，100B 参数的表要占约 200 GB 主机内存（推算）。nano-vLLM 也不是生产级引擎，基线本身的效率与 vLLM 或 SGLang 有差距。</li>
+</ul></div>
+
+<h4 id="n-6-5">6.5 门控可视化：门在什么时候打开</h4>
+<p>最后，作者把 Engram-27B 的门控值 \(\alpha_t\) 画了出来，检验门控是否按设计工作。需要说明的是：这个模型用 mHC（4 个分支）且 Engram 插在第 2 和第 15 层，所以每个 token 有 8 个门控值。作者在脚注里说明并不是每个分支的门都有可解释的模式，图里展示的是和“语义模式匹配”相关性最强的那一个。</p>
+<figure class="paper-fig"><div class="imgs one"><img src="conditional-memory/fig/gate-visualization.svg" alt="原文图 7：门控可视化" loading="lazy"></div>
+<figcaption><b>原文图 7。怎么看：</b>五个句子（三句英文、两句中文），每个 token 一个格子，颜色越红表示门控值 \(\alpha_t\) 越大（左侧色条从 0.0 到 1.0）。因为 Engram 查的是“以当前 token 结尾”的后缀 N-gram（这里 \(N=3\)），某个 token 很红意味着“以它结尾的这两三个 token”被认成了一个静态模式。例如 “Alexander the Great” 里，红的是 “the” 和 “Great”，而不是 “Alexander”；“the Milky Way” 里红的是 “Way”；“Princess of Wales” 和中文的“张仲景”“四大发明”“伤寒杂病论”也是在片段的后半部分变红。图里也能看到一些不那么“像实体”的位置较红，比如句首的 “Only”“This study” 和逗号，说明门控并不是一个干净的实体检测器。</figcaption></figure>
+<p>作者的总结是：门控在局部的、静态的模式完成时被一致地激活，英文里是多 token 的命名实体和固定短语，中文里是成语式的表达和历史人物名，说明 Engram 确实在识别和处理这些程式化的依赖，替 Transformer 主干分担了记忆这些静态关联的负担。</p>
+<div class="note-warn"><b>注意：</b>这是定性的个例展示，而且是从 8 个门里挑了最“好看”的一个。它能说明门控“可以”表现出预期的选择性，但不能说明这种选择性有多普遍。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S6" target="_blank" rel="noopener">英文原文 §6 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-7">7–8 相关工作与结论：Engram 在哪些前人工作之上</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>“用 N-gram 嵌入扩大参数”“在模型里加一个大记忆”都不是新想法。Engram 和这些前人工作到底差在哪？作者自己认为的两点关键区别站不站得住？</div>
+<p>论文把相关工作分成五类，本站把它们和 Engram 的关系整理如下。</p>
+<ul>
+  <li><b>N-gram 建模与嵌入扩展。</b>N-gram 模型可以追溯到香农，传统上用平滑技术处理数据稀疏；神经网络时代，FastText 保留了 N-gram 查表的高效。近期“扩展嵌入表”重新流行：Gemma 3n 的 Per-Layer Embeddings、STEM、L3、DeepEmbed 用巨大的表扩充容量；更接近本文的一支把 N-gram 结构直接放进表示空间：N-Grammer、SuperBPE（把多词表达合并成“超级词”）、SCONE（用一个辅助模型给高频片段编码）、OverEncoding 和 Byte Latent Transformer（BLT，分别在 token 级和字节级用哈希 N-gram 嵌入）。</li>
+  <li><b>高基数类别嵌入。</b>这是 v2 新增的一类。推荐系统要给数以亿计的用户、商品编号学嵌入，发展出了多重哈希、按频率分配容量、冷热分层、量化压缩等一整套技术。Engram 面对的是同类问题（巨大的离散键空间、高度偏斜的访问分布），区别在于它的键是有序的文本 N-gram，查到的向量通过门控注入 Transformer 的中间层。</li>
+  <li><b>混合专家。</b>从 Shazeer 等人的稀疏门控 MoE，到 GShard、Switch Transformer、GLaM，再到 DeepSeekMoE 的细粒度专家和共享专家，以及 DeepSeek-V3、Kimi K2 这样的数千亿参数模型。</li>
+  <li><b>记忆网络。</b>参数化的记忆（PKM、PEER、UltraMem 等）在模型层里放大规模的稀疏键值存储；非参数化的记忆（REALM、RETRO、PlugLM 等）把知识放在外部可编辑的存储里。</li>
+  <li><b>知识存储机制。</b>可解释性研究认为 FFN 像键值记忆：第一层识别模式（键），第二层把对应信息写回残差流（值）；“知识神经元”、因果追踪，以及基于这些发现的模型编辑方法 ROME、MEMIT 都属于这一支。（本文作者之一 Damai Dai 正是“知识神经元”论文的第一作者。）</li>
+</ul>
+<div class="table-wrap"><table>
+  <tr><th>方法</th><th>怎么决定读哪几行</th><th>放在哪一层</th><th>能否在算到那一层之前预取</th></tr>
+  <tr><td>PKM / UltraMem 类参数化记忆</td><td>用隐藏状态算查询，再在学到的键里找最近的</td><td>中间层</td><td>不能：查询依赖运行时的隐藏状态</td></tr>
+  <tr><td>OverEncoding 等输入层 N-gram 嵌入</td><td>输入 token 的哈希</td><td>第 0 层（和词嵌入合并）</td><td>能，但没有前面的计算可以掩盖延迟，只能串行</td></tr>
+  <tr><td>Engram</td><td>输入 token 的哈希</td><td>中间层（如第 2、15 层）</td><td>能，且前面各层的计算正好用来掩盖传输</td></tr>
+</table></div>
+<p class="w-note">本站整理的对比表。“能否预取”一栏是按各方法的寻址方式推出来的，论文只明确讨论了输入层嵌入“把访存和计算串行化”这一点。</p>
+<p>作者认为本文和前人的区别主要有两点。第一是<b>评测协议</b>：以前的方法常把 N-gram 嵌入当作外挂，没有在严格公平的条件下验证效率；比如 SCONE 面向推理、需要额外训练计算，OverEncoding 即使在不等参数的条件下也没能在稀疏 MoE 主干上带来实质提升。本文则把条件记忆当成一等公民，在稀疏分配框架下与严格等参数、等计算的 MoE 比较。第二是<b>系统视角</b>：已有方法都把嵌入放在输入层（第 0 层），访存和计算只能串行；Engram 把记忆注入较深的层，从而能让通信和计算重叠，再加上利用 N-gram 的齐夫分布来使用硬件的存储层级。</p>
+<p><b>结论。</b>论文把条件记忆定位为与条件计算（MoE）互补的稀疏维度，目的是解决“用动态计算模拟知识检索”的低效。它用 Engram 这个现代化的 N-gram 嵌入模块实现了常数时间的静态模式查表；通过稀疏分配问题发现了 U 形缩放律，混合分配严格优于纯 MoE；放大到 27B 后在各领域都有提升，而且推理、代码、数学的提升比知识类更大。机理分析显示 Engram 通过替浅层卸下静态重建的任务，相当于加深了网络，也让注意力能专注于全局上下文，因而长上下文能力明显提升。最后，确定性寻址让存储和计算可以分离，巨大的参数表可以放到主机内存，推理开销可以忽略。作者预期条件记忆会成为下一代稀疏模型不可缺少的建模原语。</p>
+<div class="note-warn"><b>本站补充的局限：</b>论文没有一个单独的“局限性”讨论。综合前面各节，主要的开放问题是：缩放律只在两个小规模点上测过；主对照是 3.8B 激活参数、262B token 的基座模型，单次训练、无误差范围；系统实验用的是稠密主干、单个 Engram 层、只报吞吐；多级缓存只是设想；Engram 依赖分词器（换分词器就得重建表），对多模态输入也不直接适用。后来的 Lngram 正是从最后一点出发的（见下一节）。</div>
+<p class="note-links"><a href="https://arxiv.org/html/2601.07372#S7" target="_blank" rel="noopener">英文原文 §7 ↗</a> · <a href="https://arxiv.org/html/2601.07372#S8" target="_blank" rel="noopener">§8 ↗</a></p>
+</section>
+
+<section class="note">
+<h3 id="n-impact">后来怎么样了</h3>
+<p>论文 2026 年 1 月 12 日上传 arXiv，同日开源了演示代码；正式版发表于 ACL 2026 长文（Proceedings 第 4968–4990 页，Anthology 编号 2026.acl-long.226）。截至 2026-10，有三件事值得知道。</p>
+<h4 id="n-impact-1">DeepSeek-V4 没有用，DeepSeek-V4.1-Flash 用上了</h4>
+<p>2026 年 6 月的 <a href="deepseek-v4.html">DeepSeek-V4</a> 技术报告（arXiv 2606.19348）的架构里没有 Engram。报告的结论部分把“沿新的维度探索模型稀疏性，比如更多的稀疏嵌入模块”列为未来方向，引用的正是本文。V4 采用了本文主干里已经出现的 mHC 和 Muon。</p>
+<p>2026 年 9 月的 <a href="deepseek-v4-1-flash.html">DeepSeek-V4.1-Flash</a>（arXiv 2609.19969）则正式集成了 Engram，这是本文方法第一次出现在 DeepSeek 发布的大模型里。根据它的技术报告：</p>
+<ul>
+  <li><b>规模</b>：552B 主干参数之外另有 196B Engram 参数，平均分给两个模块，放在第 1 和第 14 层（从 0 数）。每个模块用 {2, 3, 4} 三种阶数、每阶 8 个哈希头、每阶总维度 2048，每个头的表约 1,600 万行，表大小取互不相同的素数。按这些数验算：3 阶 × 8 头 × 约 1,600 万行 × 256 维 ≈ 98B 每模块，两个模块约 196B，和报告一致（推算）。注意这里用了本文在 1.6B 小预算下觉得“略亏”的 4-gram，与本文“记忆更大时高阶可能有用”的保留意见相符。</li>
+  <li><b>改动</b>：去掉了短因果卷积，理由是它带来的收益抵不上在推理系统里增加的复杂度（本文消融里它也只是“略有帮助”）；嵌入表和投影层都用 FP8；嵌入表不再用 Adam，而是用“动量更新 + Sinkhorn 归一化”，因为给这么大的表配 Adam 的优化器状态太占内存；Engram 学习率仍放大 5 倍。</li>
+  <li><b>系统</b>：训练时嵌入表按行切到专门的“engram 并行”进程组上，查表预取在每个流水线阶段开始处理微批之前对整个本地批次一次性发起，梯度在反向结束后发回；推理时利用确定性寻址，通过后台 RDMA 从主机内存预取，第一个模块的预取和第一个 Transformer 块的计算重叠；强化学习采样时，表则常驻 GPU 显存，以减轻主机内存压力。</li>
+  <li><b>没有公开的</b>：报告里没有找到单独去掉 Engram 的对照实验，所以 Engram 在这个规模上具体贡献多少，外界仍无法量化。</li>
+</ul>
+<p>放在 DeepSeek 的技术脉络里看：注意力这条线是 MLA（<a href="deepseek-v3.html">V2/V3</a>）→ <a href="native-sparse-attention.html">NSA</a> 与 V3.2 的 DSA（<a href="deepseek-v3-2.html">V3.2 精读</a>）→ V4 的 CSA/HCA → V4.1-Flash 的 KV 缓存压缩，目标是让长上下文更便宜；FFN 这条线是 DeepSeekMoE 的条件计算。Engram 不属于这两条线中的任何一条，它是在“参数怎么用”这件事上新开的一条维度：不改注意力，也不改专家，而是另外加一张只查不算的表。本站的 <a href="deepseek-v3-hardware.html">DeepSeek-V3 硬件反思精读</a>讨论了这家公司“为硬件设计模型”的思路，Engram 的确定性寻址正是这种思路的一个例子。</p>
+<h4 id="n-impact-2">后续研究：Lngram</h4>
+<p>2026 年 5 月的 Lngram（Zheng 等，arXiv 2605.24869）直接以 Engram 为对照。它指出 Engram 的键绑在分词器的 token 编号和哈希压缩上，于是改为从隐藏状态学出离散符号，再在这些符号上做 N-gram 查表；这样就不依赖分词器，也能用到图像等非文本模态。作者报告它在所评测的设置下优于 Transformer 和 Engram 基线，并同样用 LogitLens 和 CKA 观察到“有效深度增加”。需要注意（本站的分析）：键从隐藏状态算出，就失去了 Engram “在算到那一层之前就知道读哪几行”的性质，第 2.5 节那种主机内存预取会更难做。截至 2026-10，本站没有找到对 Engram 主结果的独立复现。</p>
+<h4 id="n-impact-3">代码</h4>
+<p>官方仓库 <a href="https://github.com/deepseek-ai/Engram" target="_blank" rel="noopener">deepseek-ai/Engram</a>（Apache-2.0）只有一个约 400 行的演示脚本、论文 PDF 和插图源文件，注意力、MoE、mHC 都是占位实现，没有训练代码、没有预训练权重、也没有本文的推理系统；仓库在 2026-01-14 之后没有更新。所以本文的主实验目前无法由外部直接复现。</p>
+</section>
+
+</div>
+
+<h2 id="authors">作者</h2>
+<p class="w-note">单位按论文署名（arXiv v2）。背景只列可公开查证的信息：论文本身、arXiv 上的署名、机构页面。</p>
+<div class="author-cards">
+  <div class="author-card"><b>Xin Cheng</b>（共同一作）<div class="aff">北京大学；DeepSeek-AI（论文署名）</div>检索增强生成方向的 Selfmem（NeurIPS 2023）与 xRAG（NeurIPS 2024）的第一作者，两篇都与 Dongyan Zhao 合作；Selfmem 也在本文的相关工作里被引用。</div>
+  <div class="author-card"><b>Rui Tian</b>（共同一作）<div class="aff">DeepSeek-AI</div>arXiv v2 新增的共同一作；v1 和 ACL 版没有其署名。</div>
+  <div class="author-card"><b>Damai Dai</b><div class="aff">DeepSeek-AI</div>DeepSeekMoE（arXiv 2401.06066）的第一作者，本文的 MoE 基线就是这个结构；也是“知识神经元”论文（Knowledge Neurons in Pretrained Transformers，ACL 2022）的第一作者，本文第 7 节讨论的“FFN 存储知识”正出自这一方向。</div>
+  <div class="author-card"><b>Wangding Zeng</b><div class="aff">DeepSeek-AI</div>DeepSeekMoE 作者之一，也是 <a href="native-sparse-attention.html">NSA</a> 的作者之一。</div>
+  <div class="author-card"><b>Zhenda Xie</b><div class="aff">DeepSeek-AI</div>mHC（arXiv 2512.24880）的第一作者，本文的多分支主干即 mHC；DeepSeekMoE 作者之一。</div>
+  <div class="author-card"><b>Chengqi Deng、Chenggang Zhao、Yixuan Wei</b><div class="aff">DeepSeek-AI</div>三人都是 mHC 的作者；Chengqi Deng 与 Chenggang Zhao 也是 DeepSeekMoE 的作者。三人均为 v2 新增署名。</div>
+  <div class="author-card"><b>Qinyu Chen、Bingxuan Wang、Kezhao Huang、Xingkai Yu、Shangyan Zhou、Zhewen Hao、Yukun Li、Han Zhang、Zhengyan Zhang、M.Y Xu</b><div class="aff">DeepSeek-AI</div>Xingkai Yu 也是 DeepSeekMoE 的作者之一；Zhengyan Zhang 也是 NSA 的作者之一。</div>
+  <div class="author-card senior"><b>Huishuai Zhang</b><div class="aff">北京大学（论文署名）</div>xRAG 的作者之一。</div>
+  <div class="author-card senior"><b>Dongyan Zhao</b><div class="aff">北京大学（论文署名）</div>Selfmem 与 xRAG 的作者之一。</div>
+  <div class="author-card senior"><b>Wenfeng Liang</b><div class="aff">DeepSeek-AI</div>DeepSeek 创始人。</div>
+</div>
+
+<h2 id="impact">影响力</h2>
+<ul>
+  <li><b>引用</b>：见页首（Semantic Scholar 快照）。</li>
+  <li><b>发表</b>：ACL 2026 长文（第 64 届计算语言学年会，Proceedings Volume 1: Long Papers，第 4968–4990 页，<a href="https://aclanthology.org/2026.acl-long.226/" target="_blank" rel="noopener">2026.acl-long.226</a>）。ACL 版的署名是 v1 的 14 位作者。</li>
+  <li><b>开源</b>：<a href="https://github.com/deepseek-ai/Engram" target="_blank" rel="noopener">deepseek-ai/Engram</a> 仓库 4,766 个 star、363 个 fork（截至 2026-10-20），Apache-2.0 许可，创建于 2026-01-12；内容为演示代码，不含训练代码与权重。</li>
+  <li><b>采用</b>：DeepSeek-V4.1-Flash（arXiv 2609.19969，2026-09）集成了 196B 参数的 Engram；DeepSeek-V4（2026-06）未采用，但在结论中把稀疏嵌入模块列为未来方向。</li>
+  <li><b>后续研究</b>：Lngram（arXiv 2605.24869）以 Engram 为基线，把查表的键从 token 编号换成从隐藏状态学出的离散符号。</li>
+</ul>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="deepseek-v3.html">DeepSeek-V3 精读</a>：MLA、DeepSeekMoE 与无辅助损失负载均衡，即本文的主干和 MoE 基线。</li>
+  <li><a href="deepseek-v4.html">DeepSeek-V4 精读</a>：mHC 与 Muon 在旗舰模型上的使用；<a href="deepseek-v4-1-flash.html">DeepSeek-V4.1-Flash 精读</a>：Engram 第一次进入 DeepSeek 发布的模型。</li>
+  <li><a href="native-sparse-attention.html">NSA 精读</a>、<a href="deepseek-v3-2.html">DeepSeek-V3.2（DSA）精读</a>：DeepSeek 在注意力这条线上的稀疏化，可与本文的“参数稀疏”对照。</li>
+  <li><a href="muon.html">Muon 精读</a>：本文主干使用的优化器。</li>
+  <li><a href="mooncake.html">Mooncake 精读</a>、<a href="../legacy/tracks/ai-infra/21-kv-cache-tiering.html">KV 缓存分层存储（旧版拆解）</a>：同样是把数据放到主机内存或 SSD、按需取回，只是对象是 KV 缓存。</li>
+  <li><a href="../legacy/tracks/ai-infra/09-deepseek-v3.html">DeepSeek-V3（旧版结构拆解）</a>、<a href="../legacy/tracks/ai-infra/23-deepseek-v4.html">DeepSeek-V4（旧版结构拆解）</a>。</li>
+  <li><a href="../index.html">返回论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是对论文的中文精读笔记，正文为本站撰写，并非翻译。数字与结论以原文为准：<a href="https://arxiv.org/abs/2601.07372" target="_blank" rel="noopener">arXiv:2601.07372</a>（v2）。原文图 1–8 取自 arXiv HTML 版，论文以 <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a> 许可发布，作者为 Xin Cheng 等（DeepSeek-AI、北京大学）；图片未做修改，仅更改了文件名。“论文 vs 官方代码”一段参考的是 Apache-2.0 许可的官方演示代码。其余示意图与图表由本站绘制。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 论文精读</footer>
+</body>
+</html>
