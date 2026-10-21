@@ -1,0 +1,974 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>循环 Transformer 路线总览</title>
+<meta name="description" content="同一组层在深度上反复使用的循环 Transformer：它想用计算换参数。本页按“对齐了哪本账”梳理理论起点、循环语言模型、小网络递归推理、稳定性与扩展律、循环 × 扩散 LLM 五支，比较各家方法，并逐条掂量头条结论的份量。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="overview" data-track="looped">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">路线总览 · 循环 Transformer</div>
+  <h1>同一组层反复用：循环 Transformer 拿计算换参数，到底换到了多少</h1>
+  <p class="en-title">Looped / Recurrent-Depth Transformers</p>
+  <div class="paper-pills">
+    <a class="pill" href="../index.html">回到论文书架</a>
+  </div>
+  <p class="w-note" style="margin-top:6px">本页基于本站已有的精读页写成；每提到一篇论文都链接到它的精读页，细节和出处以精读页为准。标“推算”的数字是本站（或对应精读页）按论文数据算出的，不是论文原话。</p>
+</div>
+
+<h2 id="notes">路线总览</h2>
+<div id="notes-body">
+
+<!-- ============================================================ 0 -->
+<section class="note">
+<h3 id="n-0">0 导读：这条路线要解决什么问题</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>循环 Transformer 想解决的是什么问题？为什么这件事一句话就能说清，比较起来却格外麻烦？本类 19 篇精读大致分成哪几支，读完本页能回答哪些问题？</div>
+
+<p>普通的 Transformer 是一摞层，每一层有自己的一套参数，每个 token 从下往上把每一层恰好走一遍。这样一来，“模型存了多少参数”和“每个 token 算了多少”就被绑在了一起：想让每个 token 多算几步，就得多放几层参数；参数一多，显存、通信和部署的成本也跟着上涨。可是有不少任务恰恰需要“连续算很多步”：把几十个数加起来，在一段上下文里沿着线索跳好几跳，一步接一步地推一道数学题。一次前向计算里能连续做多少步，上限就是层数。</p>
+
+<p>循环 Transformer（looped transformer，也叫 recurrent-depth 或 recursive transformer）把这两件事拆开：只造一组层，让每个 token 的隐藏状态在这组层里反复走几圈。参数还是那一份，每多走一圈，计算就多一份。人们希望从中得到四样东西。第一，同样的参数做更深的计算，适合显存紧张而算力相对富余的场合。第二，让难的 token 多走几圈、容易的少走几圈，也就是自适应计算。第三，“同一个步骤反复做”的结构可能天然适合多步推理和长度外推。第四，2025 年以来，它被看作思维链之外另一种“推理时多花计算”的办法：模型不多写字，而是在内部多算几遍。</p>
+
+<p>难处在于比较。循环模型同时记着好几本账：存了多少参数，训练花了多少算力，推理时每个 token 花了多少算力，KV 缓存占了多少显存，以及训练看了多少数据。这几本账在普通模型里大致成比例，在循环模型里却各走各的。一个 1.4B 参数、整体循环 4 圈的模型，模型文件只有 1.4B，每生成一个 token 的计算却比一个 4B 的稠密模型还多（推算，见 §1.3）。所以“循环的小模型追平了大模型”这类说法，必须先问一句：<b>对齐的是哪本账？</b>本页把这个问题当作主线，讲到每一篇论文都会交代它的头条数字对齐了什么、没对齐什么。</p>
+
+<p>本类 19 篇精读大致分成五支（见下图）。第一支是起点和理论：<a href="universal-transformers.html">Universal Transformer</a> 第一次在深度上循环，“<a href="looped-programmable-computers.html">可编程计算机</a>”证明循环 Transformer 能执行写在输入里的程序，“<a href="reasoning-latent-thoughts.html">潜在思考</a>”把循环次数和思维链步数联系起来。第二支把循环做成真正的语言模型：<a href="huginn.html">Huginn</a>、<a href="mixture-of-recursions.html">Mixture-of-Recursions</a> 和 <a href="ouro.html">Ouro</a>。第三支在另一个世界里：HRM 和 <a href="tiny-recursive-model.html">TRM</a> 用几百万到几千万参数的小网络，在数独、迷宫和 ARC 上反复修正答案（HRM 在 TRM 精读里作为背景讲）。第四支回答“怎样训得稳、到底值多少”：<a href="parcae.html">Parcae</a>、<a href="iso-depth-scaling.html">Iso-Depth</a>、<a href="smelt.html">SMELT</a> 三条扩展律，<a href="loop-mup.html">Loop-μP</a>、<a href="elastic-latent-recurrence.html">ELR</a>、<a href="arloop.html">ARLoop</a> 三种训练或结构配方，以及一篇纯理论投稿<a href="loops-vs-parameters.html">“循环能替代多少参数”</a>。第五支把循环带进扩散语言模型（<a href="loopholing.html">Loopholing</a>、<a href="loopmdm.html">LoopMDM</a>、<a href="recursive-mdm.html">R-MDM</a>、<a href="alodlm.html">ALoDLM</a>、<a href="loop-distill.html">Loop-Distill</a>），那里的“循环”有两种完全不同的意思：在一个去噪步之内把网络多算几遍，或者在去噪步之间多传一份连续状态。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：本类 19 篇精读分成五支，各自在问什么</div>
+  <svg class="dg" viewBox="0 0 960 392" role="img" aria-label="中心是循环 Transformer，下面分出五支：起点与理论、做成语言模型、小网络递归推理、稳定性与扩展律、循环乘扩散 LLM，每支列出对应的论文" style="--dg-min:720px">
+    <rect x="290" y="10" width="380" height="58" rx="10" class="box"/>
+    <text x="480" y="31" class="t-c t-b">循环 Transformer：同一组层在深度上反复执行</text>
+    <text x="480" y="53" class="t-c t-sm">参数只存一份；每多走一圈，计算和 KV 缓存各多一份</text>
+    <path d="M480,68 V88" class="edge no-head"/>
+    <path d="M104,88 H856" class="edge no-head"/>
+    <path d="M104,88 V106" class="edge"/>
+    <path d="M292,88 V106" class="edge"/>
+    <path d="M480,88 V106" class="edge"/>
+    <path d="M668,88 V106" class="edge"/>
+    <path d="M856,88 V106" class="edge"/>
+    <g class="tgt"><rect x="16" y="110" width="176" height="270" rx="10" class="box"/></g>
+    <g class="enc"><rect x="204" y="110" width="176" height="270" rx="10" class="box"/></g>
+    <g class="reg"><rect x="392" y="110" width="176" height="270" rx="10" class="box"/></g>
+    <g class="pred"><rect x="580" y="110" width="176" height="270" rx="10" class="box"/></g>
+    <g class="act"><rect x="768" y="110" width="176" height="270" rx="10" class="box"/></g>
+    <text x="104" y="132" class="t-c t-b" style="fill:var(--c-tgt)">① 起点与理论</text>
+    <text x="292" y="132" class="t-c t-b" style="fill:var(--c-enc)">② 做成语言模型</text>
+    <text x="480" y="132" class="t-c t-b" style="fill:var(--c-reg)">③ 小网络递归推理</text>
+    <text x="668" y="132" class="t-c t-b" style="fill:var(--c-pred)">④ 稳定性与扩展律</text>
+    <text x="856" y="132" class="t-c t-b" style="fill:var(--c-act)">⑤ 循环 × 扩散 LLM</text>
+    <text x="104" y="152" class="t-c t-sm">循环在原理上能算什么？</text>
+    <text x="292" y="152" class="t-c t-sm">做大以后能不能用？</text>
+    <text x="480" y="152" class="t-c t-sm">反复修正能解谜题吗？</text>
+    <text x="668" y="152" class="t-c t-sm">怎么训稳？到底值多少？</text>
+    <text x="856" y="152" class="t-c t-sm">扩散模型里怎么循环？</text>
+    <line x1="28" y1="164" x2="180" y2="164" class="grid-ln"/>
+    <line x1="216" y1="164" x2="368" y2="164" class="grid-ln"/>
+    <line x1="404" y1="164" x2="556" y2="164" class="grid-ln"/>
+    <line x1="592" y1="164" x2="744" y2="164" class="grid-ln"/>
+    <line x1="780" y1="164" x2="932" y2="164" class="grid-ln"/>
+    <text x="28" y="184" class="t-sm">Universal Transformer</text>
+    <text x="28" y="204" class="t-sm">可编程计算机</text>
+    <text x="28" y="224" class="t-sm">潜在思考</text>
+    <text x="216" y="184" class="t-sm">Huginn（3.5B）</text>
+    <text x="216" y="204" class="t-sm">Mixture-of-Recursions</text>
+    <text x="216" y="224" class="t-sm">Ouro（1.4B / 2.6B）</text>
+    <text x="404" y="184" class="t-sm">HRM（背景，无精读页）</text>
+    <text x="404" y="204" class="t-sm">TRM（7M）</text>
+    <text x="592" y="184" class="t-sm">Parcae</text>
+    <text x="592" y="204" class="t-sm">Iso-Depth</text>
+    <text x="592" y="224" class="t-sm">SMELT</text>
+    <text x="592" y="244" class="t-sm">Loop-μP *</text>
+    <text x="592" y="264" class="t-sm">ELR *</text>
+    <text x="592" y="284" class="t-sm">ARLoop *</text>
+    <text x="592" y="304" class="t-sm">循环能替代多少参数 *</text>
+    <text x="780" y="184" class="t-sm">Loopholing（跨步传状态）</text>
+    <text x="780" y="204" class="t-sm">LoopMDM（一步内）</text>
+    <text x="780" y="224" class="t-sm">R-MDM（一步内）</text>
+    <text x="780" y="244" class="t-sm">ALoDLM（一步内、自适应）</text>
+    <text x="780" y="264" class="t-sm">Loop-Distill *（训练时）</text>
+    <text x="104" y="352" class="t-c t-xs">关心：表达能力、</text>
+    <text x="104" y="367" class="t-c t-xs">归纳偏置</text>
+    <text x="292" y="352" class="t-c t-xs">头条结论多为</text>
+    <text x="292" y="367" class="t-c t-xs">参数匹配</text>
+    <text x="480" y="352" class="t-c t-xs">没有预训练，</text>
+    <text x="480" y="367" class="t-c t-xs">每个任务单独训练</text>
+    <text x="668" y="352" class="t-c t-xs">关心：算力匹配下</text>
+    <text x="668" y="367" class="t-c t-xs">循环还剩多少价值</text>
+    <text x="856" y="352" class="t-c t-xs">两种“循环”，</text>
+    <text x="856" y="367" class="t-c t-xs">代价落在不同的账上</text>
+  </svg>
+  <div class="dia-note">怎么看：最上面是这条路线的共同出发点，下面五个框是本页的五支，框里列的是本站有精读页的论文（HRM 没有单独的精读页，在 TRM 精读里作为背景讲）。带 * 的是截至 2026-10 仍在 ICLR 2027 双盲评审中的匿名投稿，作者不公开，数字可能在修改稿中变化。最下面一行是这一支最关心的问题或最需要留神的地方。五支的颜色在本页后面的图里保持一致。</div>
+</div>
+
+<p>读完本页，你应该能回答这些问题：</p>
+<ul>
+  <li>循环模型怎样把“参数”和“计算”分开？前奏—循环块—尾声、输入注入、退出门、截断反传各是做什么的？</li>
+  <li>“同参数”“同训练算力”“同推理算力”“三项全对齐”四种比较各回答什么问题？为什么同一个模型在一种比较里赢、在另一种里输？</li>
+  <li>每个阶段卡在哪里、提出了什么想法、又留下了什么新问题？</li>
+  <li>Iso-Depth 的 \(\varphi\approx0.46\) 是什么意思？Parcae 的“87.5%”到底比的是什么？SMELT 的“省 14.7% 训练算力”对应多大的损失差？</li>
+  <li>扩散语言模型里的两种“循环”有什么区别，各自的代价落在哪本账上？</li>
+  <li>哪些头条结论站得住，哪些依赖不对齐的比较？</li>
+</ul>
+<div class="note-warn">本页只综述本站有精读页的工作。HRM、ALBERT、MoEUT、Closing the Loop 等没有单独精读页的工作，只在相关精读页里出现，这里也只作为背景引用，并注明出处页。</div>
+</section>
+
+<!-- ============================================================ 1 -->
+<section class="note">
+<h3 id="n-1">1 先把问题讲清楚：循环是什么，账有几本</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>“把同一组层反复用”落到一个具体的网络上，有哪几种摆法？要让它真正能训、能用，还需要哪些零件？循环之后，参数、训练算力、推理算力和 KV 缓存这几样东西各自怎样变化？为什么本页一直要求先问“对齐了什么”？</div>
+
+<div class="note-pre"><b>先补一点背景：残差流，以及“每 token 计算 ≈ 2 × 参数”。</b>
+<p>Transformer 的每一层都不直接替换自己的输入，而是算出一个增量，再加回到输入上；这条一路加下去的向量叫<b>残差流</b>，下一层读的就是它。一层里绝大部分计算是矩阵乘法：一个 \(d\times d\) 的矩阵作用在一个 token 上，大约要做 \(2d^2\) 次浮点运算（乘法和加法各 \(d^2\) 次），而这个矩阵恰好有 \(d^2\) 个参数。所以一个 token 前向走过 \(N\) 个参数，大约要 \(2N\) 次运算；训练时还要反向传播，合计约 \(6N\)。这条经验规则成立的前提是“每个参数对每个 token 只用一次”。循环模型打破的正是这个前提：同一组 \(N\) 个参数被用 \(r\) 遍，每个 token 的计算就变成约 \(2rN\)，而模型文件里仍然只有 \(N\) 个参数。</p></div>
+
+<h4 id="n-1-1">1.1 三种摆法：整体循环、中间循环、局部循环</h4>
+<p>最直接的摆法是<b>整体循环</b>：把整摞层当作一个函数，让数据连续经过它好几遍。2018 年的 <a href="universal-transformers.html#n-2">Universal Transformer</a> 就是这样做的，后来的 <a href="ouro.html#n-3-1">Ouro</a> 把 24 层或 48 层整体循环 4 遍，<a href="arloop.html#n-1">ARLoop</a> 也循环整摞层。<a href="reasoning-latent-thoughts.html#n-2">潜在思考</a>一文给这种模型起了一个方便的记号 \((k\otimes L)\)：\(k\) 层循环 \(L\) 遍，有效深度是 \(kL\)。</p>
+<p>第二种是<b>中间循环</b>，也叫“前奏—循环块—尾声”（prelude–recur–coda），由 <a href="huginn.html#n-3-1">Huginn</a> 系统地提出。它的理由来自对普通 Transformer 的观察：开头几层要把被切碎的子词拼成完整的概念，最后几层要把概念映射回词表，这两段的分工很特殊；中间各层的行为彼此相似，甚至可以调换顺序。于是只循环中间那段“处理概念”的层，开头和结尾各留几层只走一遍。<a href="parcae.html#n-2-1">Parcae</a>、<a href="iso-depth-scaling.html#n-3-1">Iso-Depth</a>、<a href="smelt.html#n-3-2">SMELT</a>、<a href="elastic-latent-recurrence.html#n-3-1">ELR</a>、<a href="alodlm.html#n-3-1">ALoDLM</a> 都用这种结构，<a href="mixture-of-recursions.html#n-2-1">Mixture-of-Recursions</a> 的 Middle-Cycle 共享方式也是同一个意思（首尾各留一层独立的层）。</p>
+<p>第三种是<b>局部循环</b>：只把很少几层反复算。<a href="loopmdm.html#n-3-1">LoopMDM</a> 在 12 层的扩散模型里只循环靠前的第 1、2 层（从 0 开始数）；<a href="loop-distill.html#n-4-1">Loop-Distill</a> 只在训练时，让 2–3 个浅层各自连续多算几遍。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：同样执行 8 层，三种模型各存了几份参数</div>
+  <svg class="dg" viewBox="0 0 960 336" role="img" aria-label="普通 Transformer 八层各不相同；整体循环把四层走两遍；中间循环由前奏、走三遍的两层循环块和尾声组成，每一遍开头注入前奏输出" style="--dg-min:720px">
+    <text x="12" y="48" class="t-b">普通 Transformer</text>
+    <text x="12" y="66" class="t-xs">每层一套参数</text>
+    <rect x="200" y="36" width="56" height="36" rx="6" class="box"/><text x="228" y="54" class="t-c">L1</text>
+    <rect x="264" y="36" width="56" height="36" rx="6" class="box"/><text x="292" y="54" class="t-c">L2</text>
+    <rect x="328" y="36" width="56" height="36" rx="6" class="box"/><text x="356" y="54" class="t-c">L3</text>
+    <rect x="392" y="36" width="56" height="36" rx="6" class="box"/><text x="420" y="54" class="t-c">L4</text>
+    <rect x="456" y="36" width="56" height="36" rx="6" class="box"/><text x="484" y="54" class="t-c">L5</text>
+    <rect x="520" y="36" width="56" height="36" rx="6" class="box"/><text x="548" y="54" class="t-c">L6</text>
+    <rect x="584" y="36" width="56" height="36" rx="6" class="box"/><text x="612" y="54" class="t-c">L7</text>
+    <rect x="648" y="36" width="56" height="36" rx="6" class="box"/><text x="676" y="54" class="t-c">L8</text>
+    <text x="724" y="48" class="t-sm">8 份参数</text>
+    <text x="724" y="66" class="t-xs">执行 8 层，存 8 层的 KV</text>
+
+    <text x="316" y="116" class="t-c t-xs">第 1 遍</text>
+    <text x="580" y="116" class="t-c t-xs">第 2 遍</text>
+    <path d="M200,126 V122 H432 V126" class="edge no-head"/>
+    <path d="M456,126 V122 H704 V126" class="edge no-head"/>
+    <text x="12" y="142" class="t-b">整体循环</text>
+    <text x="12" y="160" class="t-xs">UT · Ouro · ARLoop</text>
+    <g class="enc">
+      <rect x="200" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="264" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="328" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="392" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="456" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="520" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="584" y="130" width="56" height="36" rx="6" class="box"/>
+      <rect x="648" y="130" width="56" height="36" rx="6" class="box"/>
+    </g>
+    <text x="228" y="148" class="t-c">A</text><text x="292" y="148" class="t-c">B</text><text x="356" y="148" class="t-c">C</text><text x="420" y="148" class="t-c">D</text>
+    <text x="484" y="148" class="t-c">A</text><text x="548" y="148" class="t-c">B</text><text x="612" y="148" class="t-c">C</text><text x="676" y="148" class="t-c">D</text>
+    <text x="724" y="142" class="t-sm">4 份参数</text>
+    <text x="724" y="160" class="t-xs">执行 8 层，存 8 层的 KV</text>
+
+    <path d="M228,238 V214 H548" class="edge no-head" style="stroke:var(--c-reg)"/>
+    <path d="M292,214 V236" class="edge reg"/>
+    <path d="M420,214 V236" class="edge reg"/>
+    <path d="M548,214 V236" class="edge reg"/>
+    <text x="420" y="204" class="t-c t-xs" style="fill:var(--c-reg)">输入注入：每一遍开头，把前奏的输出 e 再送进循环块</text>
+    <text x="12" y="250" class="t-b">中间循环</text>
+    <text x="12" y="268" class="t-xs">前奏 — 循环块 — 尾声</text>
+    <g class="tgt"><rect x="200" y="238" width="56" height="36" rx="6" class="box"/></g>
+    <g class="pred">
+      <rect x="264" y="238" width="56" height="36" rx="6" class="box"/>
+      <rect x="328" y="238" width="56" height="36" rx="6" class="box"/>
+      <rect x="392" y="238" width="56" height="36" rx="6" class="box"/>
+      <rect x="456" y="238" width="56" height="36" rx="6" class="box"/>
+      <rect x="520" y="238" width="56" height="36" rx="6" class="box"/>
+      <rect x="584" y="238" width="56" height="36" rx="6" class="box"/>
+    </g>
+    <g class="act"><rect x="648" y="238" width="56" height="36" rx="6" class="box"/></g>
+    <text x="228" y="256" class="t-c">P</text>
+    <text x="292" y="256" class="t-c">R1</text><text x="356" y="256" class="t-c">R2</text>
+    <text x="420" y="256" class="t-c">R1</text><text x="484" y="256" class="t-c">R2</text>
+    <text x="548" y="256" class="t-c">R1</text><text x="612" y="256" class="t-c">R2</text>
+    <text x="676" y="256" class="t-c">C</text>
+    <text x="320" y="290" class="t-c t-xs">第 1 遍</text>
+    <text x="448" y="290" class="t-c t-xs">第 2 遍</text>
+    <text x="576" y="290" class="t-c t-xs">第 3 遍</text>
+    <text x="724" y="250" class="t-sm">4 份参数（P、R1、R2、C）</text>
+    <text x="724" y="268" class="t-xs">执行 8 层，存 8 层的 KV</text>
+
+    <text x="480" y="322" class="t-c t-sm">同色同名的格子是同一份权重。循环块每多走一遍：参数不变，计算多一份，KV 缓存也多一份。</text>
+  </svg>
+  <div class="dia-note">怎么看：三行都把一次前向“展开”成执行顺序，每格是一层。第一行 8 层各不相同。第二行只存 A–D 四层，整摞走两遍。第三行开头的 P（前奏）和结尾的 C（尾声）只走一遍，中间两层 R1、R2 组成循环块走三遍；青色线表示每一遍开头都把前奏的输出重新注入。三种模型执行的层数相同，所以每个 token 的计算量相近，存的参数却差了一倍。各遍的输入不同，K、V 要重新算，所以 KV 缓存按“执行了多少层”计，而不是按“存了多少层”计。本站示意图。</div>
+</div>
+
+<h4 id="n-1-2">1.2 让循环能训、能用的几个零件</h4>
+<p><b>输入注入。</b>如果循环块只读上一圈的状态，那么转很多圈之后，结果可能只取决于起点，而和题目本身关系越来越弱。Huginn 用梯度下降打了个比方：每走一步都要重新用到数据，迭代才会停在“和这道题有关”的地方。所以中间循环的模型通常在每一圈开头，把前奏的输出 \(e\) 和当前状态合在一起再送进循环块，相当于“每想一轮之前都重新看一眼题目”。Huginn 用的是拼接后接一个线性层；后来 <a href="parcae.html#n-3-2">Parcae</a> 发现，训练不稳定恰恰出在这个注入矩阵上（§5.1）。</p>
+<p><b>循环几圈由谁决定。</b>有四种做法。一是写死在结构里，训练和推理都转固定圈数，Iso-Depth、SMELT 是这样。二是训练时每一步随机抽圈数，让同一个模型在推理时可以自由调圈数：Huginn 抽的分布均值是 33 圈、带一条长尾；Parcae 按序列抽。三是同一次参数更新里混合多种圈数，<a href="elastic-latent-recurrence.html#n-3-2">ELR</a> 专门研究了这件事。四是让模型按 token 自己决定：Universal Transformer 给每个位置配一个自适应计算时间（ACT），<a href="ouro.html#n-3-2">Ouro</a> 在每一圈末尾放一个退出门，<a href="mixture-of-recursions.html#n-3">MoR</a> 用一个小路由器在一开始就为每个 token 分配圈数，ALoDLM 在扩散模型的一步之内按位置退出。</p>
+<p><b>截断反传。</b>转 30 圈就要沿 30 圈反向传播，显存和计算都受不了。常见的折中是只对最后几圈求梯度，前面各圈只做前向：Huginn 固定只反传最后 8 圈，Parcae 只反传后一半。这样训练省了不少，但 <a href="iso-depth-scaling.html#n-5-1">Iso-Depth</a> 后来量出，它会让“每一圈的价值”变低（§5.5）。</p>
+<p><b>KV 缓存。</b>生成文字时，模型要为每个已处理的 token、在每一层存下它的 key 和 value。循环模型每一圈的输入都变了，同一层在不同圈算出的 K、V 也不同，所以默认要按“执行的层数”存。Ouro 的默认实现因此是同参数稠密模型的 4 倍；它在解码阶段只留最后一圈的缓存，GSM8K 几乎不掉（78.85 对 78.92），MATH-500 掉 2 分（<a href="ouro.html#n-5-5">Ouro §5.5</a>）。MoR 则让每一圈只缓存仍在计算的 token（<a href="mixture-of-recursions.html#n-4">MoR §4</a>）。KV 缓存的基本概念见 <a href="vllm.html">vLLM 精读</a>。</p>
+
+<h4 id="n-1-3">1.3 四本账：参数、训练算力、推理算力、KV 缓存</h4>
+<p>有了上面的零件，就能说清楚“循环之后什么变了”。拿 <a href="ouro.html#n-1">Ouro 精读 §1</a> 算过的一组数做例子：Ouro-1.4B 整体循环 4 圈，参数 1.43B，而 Qwen3-4B 有 4.02B 参数，前者只有后者的三分之一多一点。但按每个 token 的前向计算，Ouro-1.4B 约 10.07 GFLOPs，Qwen3-4B 约 8.04 GFLOPs，循环模型反而多了约 25%；按每个 token 的 KV 缓存，Ouro 默认存 4 圈、768 KiB，Qwen3-4B 用分组查询注意力只要 144 KiB；按训练总算力，Ouro-1.4B 约 \(3.4\times10^{23}\) FLOPs，和 Qwen3-1.7B 差不多，少于 Qwen3-4B（均为推算）；训练数据则是 7.7T 对 36T，内容也完全不同。所以“1.4B 追平 4B”这句话，在参数这本账上对 Ouro 极为有利；在每 token 推理算力和 KV 缓存上对它不利；在训练算力上，它和 Qwen3-1.7B 相当、比 Qwen3-4B 省；而训练数据两边完全不同，无从比较。</p>
+<p>下图把本类几组最常被引用的比较放在同一张表上，每一格是“循环一方 ÷ 对手”的倍数。读这张图时会发现：<b>几乎没有一组比较在四本账上同时对齐</b>，唯一的例外 SMELT 需要借助混合专家（MoE）才做得到。</p>
+
+<div class="dia">
+  <div class="dia-title">图：几组常被引用的比较，在四本账上各是多少倍（循环一方 ÷ 对手）</div>
+  <svg class="dg" viewBox="0 0 960 412" role="img" aria-label="九组比较在参数、训练算力、每 token 推理算力和 KV 缓存四项上的倍数，用颜色标出循环一方更少、大致对齐或更多" style="--dg-min:760px">
+    <text x="12" y="22" class="t-sm t-b">比较（循环一方 对 对手）</text>
+    <text x="450" y="22" class="t-c t-sm t-b">参数</text>
+    <text x="590" y="22" class="t-c t-sm t-b">训练算力</text>
+    <text x="730" y="22" class="t-c t-sm t-b">每 token 推理算力</text>
+    <text x="870" y="22" class="t-c t-sm t-b">KV 缓存</text>
+
+    <text x="12" y="56" class="t-sm">Huginn-3.5B（r = 32）对 OLMo-2-7B</text>
+    <rect x="384" y="40" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="450" y="56" class="t-c t-sm">0.5×</text>
+    <rect x="524" y="40" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="590" y="56" class="t-c t-sm">≈ 1×</text>
+    <rect x="664" y="40" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="730" y="56" class="t-c t-sm">≈ 7×</text>
+    <rect x="804" y="40" width="132" height="32" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="870" y="56" class="t-c t-sm">未报告</text>
+
+    <text x="12" y="94" class="t-sm">Ouro-1.4B（4 圈）对 Qwen3-4B</text>
+    <rect x="384" y="78" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="450" y="94" class="t-c t-sm">0.36×</text>
+    <rect x="524" y="78" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="590" y="94" class="t-c t-sm">≈ 0.4×</text>
+    <rect x="664" y="78" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="730" y="94" class="t-c t-sm">1.25×</text>
+    <rect x="804" y="78" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="870" y="94" class="t-c t-xs">5.3×（只留末圈 1.3×）</text>
+
+    <text x="12" y="132" class="t-sm">Parcae-770M（8 圈）对 1.3B Transformer</text>
+    <rect x="384" y="116" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="450" y="132" class="t-c t-sm">0.58×</text>
+    <rect x="524" y="116" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="590" y="132" class="t-c t-sm">≈ 0.75×</text>
+    <rect x="664" y="116" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="730" y="132" class="t-c t-sm">≈ 1.74×</text>
+    <rect x="804" y="116" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="870" y="132" class="t-c t-sm">≈ 2.08×</text>
+
+    <text x="12" y="170" class="t-sm">Parcae-1.3B（8 圈）对同尺寸 Transformer</text>
+    <rect x="384" y="154" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="450" y="170" class="t-c t-sm">≈ 1×</text>
+    <rect x="524" y="154" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="590" y="170" class="t-c t-sm">≈ 2.44×</text>
+    <rect x="664" y="154" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="730" y="170" class="t-c t-sm">≈ 3.33×</text>
+    <rect x="804" y="154" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="870" y="170" class="t-c t-sm">≈ 3.33×</text>
+
+    <text x="12" y="208" class="t-sm">Iso-Depth r = 4 对 r = 1（同宽度、都执行 20 层）</text>
+    <rect x="384" y="192" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="450" y="208" class="t-c t-sm">0.41×</text>
+    <rect x="524" y="192" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="590" y="208" class="t-c t-sm">1.03×</text>
+    <rect x="664" y="192" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="730" y="208" class="t-c t-sm">1.03×</text>
+    <rect x="804" y="192" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="870" y="208" class="t-c t-sm">1×</text>
+
+    <text x="12" y="246" class="t-sm">MoR-2 对普通模型（同训练 FLOPs，360M 档）</text>
+    <rect x="384" y="230" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="450" y="246" class="t-c t-sm">0.53×</text>
+    <rect x="524" y="230" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="590" y="246" class="t-c t-sm">1×</text>
+    <rect x="664" y="230" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="730" y="246" class="t-c t-sm">≈ 0.77×</text>
+    <rect x="804" y="230" width="132" height="32" rx="6" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="870" y="246" class="t-c t-sm">≈ 0.77×</text>
+
+    <text x="12" y="284" class="t-sm">SMELT 对 MoE 基线（三项一起对齐）</text>
+    <rect x="384" y="268" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="450" y="284" class="t-c t-sm">≈ 1×（差 ≤ 1%）</text>
+    <rect x="524" y="268" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="590" y="284" class="t-c t-sm">≈ 1×（≤ 3.9%）</text>
+    <rect x="664" y="268" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="730" y="284" class="t-c t-sm">≈ 1×</text>
+    <rect x="804" y="268" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="870" y="284" class="t-c t-sm">≈ 1×（≤ 4%）</text>
+
+    <text x="12" y="322" class="t-sm">ALoDLM-8B 对 Qwen3-8B（自回归）</text>
+    <rect x="384" y="306" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="450" y="322" class="t-c t-sm">≈ 1×</text>
+    <rect x="524" y="306" width="132" height="32" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="590" y="322" class="t-c t-xs">另加 5B token 微调</text>
+    <rect x="664" y="306" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="730" y="322" class="t-c t-sm">≈ 5–9×</text>
+    <rect x="804" y="306" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="870" y="322" class="t-c t-sm">2.33×</text>
+
+    <text x="12" y="360" class="t-sm">Loop-Distill 对 Vanilla（块扩散，30B-A3B）</text>
+    <rect x="384" y="344" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="450" y="360" class="t-c t-sm">1×</text>
+    <rect x="524" y="344" width="132" height="32" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="590" y="360" class="t-c t-sm">≈ 1.1×（墙钟）</text>
+    <rect x="664" y="344" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="730" y="360" class="t-c t-sm">1×</text>
+    <rect x="804" y="344" width="132" height="32" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="870" y="360" class="t-c t-sm">1×</text>
+
+    <rect x="12" y="392" width="14" height="12" rx="3" style="fill:var(--c-enc-bg);stroke:var(--c-enc)"/><text x="32" y="398" class="t-xs">循环一方更少</text>
+    <rect x="140" y="392" width="14" height="12" rx="3" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="160" y="398" class="t-xs">大致对齐（±5% 以内）</text>
+    <rect x="300" y="392" width="14" height="12" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="320" y="398" class="t-xs">循环一方更多</text>
+    <rect x="430" y="392" width="14" height="12" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/><text x="450" y="398" class="t-xs">未报告或不适用</text>
+  </svg>
+  <div class="dia-note">怎么看：每一行是一组比较，四列是四本账，格子里是“循环一方 ÷ 对手”的倍数。蓝色表示循环一方用得少，橙色表示多，绿色表示基本相同。数字全部取自对应精读页，其中大部分是那一页按论文配置做的推算：Huginn 见 <a href="huginn.html#n-5-5">§5.5</a>，Ouro 见 <a href="ouro.html#n-1">§1</a>，Parcae 见 <a href="parcae.html#n-5-5">§5.5</a>，Iso-Depth 见 <a href="iso-depth-scaling.html#n-3-2">§3.2</a>，MoR 见 <a href="mixture-of-recursions.html#n-7-w">结果的份量</a>，SMELT 见 <a href="smelt.html#n-3-2">§3.2</a>，ALoDLM 见 <a href="alodlm.html#n-5-3">§5.3</a>（推理算力是单请求 GSM8K 设置下的估计），Loop-Distill 见 <a href="loop-distill.html#n-4-4">§4.4</a>。可以看到，橙色和蓝色几乎总是同时出现：循环一方在某本账上省下的，往往在另一本账上付出去。</div>
+</div>
+
+<p>为什么会这样？<a href="smelt.html#n-3-2">SMELT 精读 §3.2</a> 给了一个很干净的解释。在稠密模型里，每个参数都会被每个 token 用到，所以“每 token 计算量”和“参数量”成比例。循环让有效深度从 \(L\) 变成 \(L_{\text{eff}}\)，计算按比例上涨；如果要把计算压回去，就只能让模型变窄或变浅，参数也就跟着变少，而且没有任何旋钮能把参数补回来，因为新加的参数又会被每个 token 用到。只有在 MoE 里，“专家总数”只影响存储、不影响每个 token 的计算，才能一边收窄付计算、一边加专家补参数。这就是本页后面反复出现的分歧的根源：<b>在稠密模型里，“同算力”和“同参数”不可能同时成立</b>，每篇论文只能二选一，而它选哪一个，决定了它的结论长什么样。</p>
+<p>不同的账对应不同的部署问题。如果瓶颈是显存（比如端侧设备），同参数的比较最有参考价值；如果瓶颈是训练预算，要看同训练算力；如果要大规模提供服务，要看每 token 的推理算力和 KV 缓存。没有哪一种比较是“唯一公平”的，但每一种都只回答自己那个问题。</p>
+<div class="note-warn">两种常见误读。第一，“参数少”不等于“便宜”：Universal Transformer 的翻译模型参数和 Transformer base 相同，每个 token 的计算却约是它的 4 倍（<a href="universal-transformers.html#n-2-4">UT 精读 §2.4</a>，推算）。第二，“相当于 500 亿参数的计算量”说的是计算，不是能力：Huginn 摘要里的这句话，按 \(1.5+32\times1.5\approx49.5\)B 算出来的是每 token 的计算规模（<a href="iso-depth-scaling.html#n-7">Iso-Depth 精读 §7</a> 的推算），并不意味着它有 50B 模型的本事。</div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section class="note">
+<h3 id="n-2">2 起点：在深度上循环，以及“循环能算什么”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>2018 年到 2025 年初，人们为什么会想到让 Transformer 在深度上循环？理论上证明了什么，实验上看到了什么？这一阶段留给后来者的是哪几个问题？先用一张时间线看清全局，再逐篇讲。</div>
+
+<p>下图把本类 19 篇精读按首版时间和所属分支排开。可以粗略地分成三个阶段。第一阶段（2018 年到 2025 年初）问的是“能不能算”：循环在原理上能表达什么、带来什么归纳偏置。第二阶段（2025 年）把循环做成数十亿参数的语言模型，头条结论大多是“同参数下更强”。第三阶段（2026 年）开始系统地算账：怎么训得稳、怎么调参，以及在算力对齐之后循环还值多少；同时循环被带进了扩散语言模型。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：本类 19 篇精读的时间线（按 arXiv 首版年月，2025 年之前的横轴压缩）</div>
+  <svg class="dg" viewBox="0 0 960 316" role="img" aria-label="时间线：2018 年 Universal Transformer，2023 年可编程计算机，2025 年潜在思考、Huginn、MoR、Ouro、HRM、TRM、Loopholing，2026 年 Parcae、Iso-Depth、LoopMDM、R-MDM、SMELT 与多篇 ICLR 2027 投稿、Loop-Distill、ALoDLM" style="--dg-min:760px">
+    <text x="205" y="14" class="t-c t-xs t-b">阶段一：能不能算</text>
+    <text x="456" y="14" class="t-c t-xs t-b">阶段二：做大，多按参数比</text>
+    <text x="791" y="14" class="t-c t-xs t-b">阶段三：算账与配方</text>
+    <line x1="270" y1="22" x2="270" y2="290" class="frame"/>
+    <line x1="642" y1="22" x2="642" y2="290" class="frame"/>
+
+    <text x="8" y="60" class="t-xs t-b" style="fill:var(--c-tgt)">① 起点与理论</text>
+    <text x="8" y="105" class="t-xs t-b" style="fill:var(--c-enc)">② 语言模型</text>
+    <text x="8" y="150" class="t-xs t-b" style="fill:var(--c-reg)">③ 小网络递归</text>
+    <text x="8" y="200" class="t-xs t-b" style="fill:var(--c-pred)">④ 稳定性与扩展律</text>
+    <text x="8" y="252" class="t-xs t-b" style="fill:var(--c-act)">⑤ 循环 × 扩散</text>
+    <line x1="100" y1="60" x2="945" y2="60" class="grid-ln"/>
+    <line x1="100" y1="105" x2="945" y2="105" class="grid-ln"/>
+    <line x1="100" y1="150" x2="945" y2="150" class="grid-ln"/>
+    <line x1="100" y1="200" x2="945" y2="200" class="grid-ln"/>
+    <line x1="100" y1="252" x2="945" y2="252" class="grid-ln"/>
+
+    <circle cx="150" cy="60" r="6" style="fill:var(--c-tgt)"/><text x="150" y="46" class="t-c t-xs">Universal Transformer</text>
+    <circle cx="215" cy="60" r="6" style="fill:var(--c-tgt)"/><text x="215" y="76" class="t-c t-xs">可编程计算机</text>
+    <circle cx="301" cy="60" r="6" style="fill:var(--c-tgt)"/><text x="301" y="46" class="t-c t-xs">潜在思考</text>
+
+    <circle cx="301" cy="105" r="6" style="fill:var(--c-enc)"/><text x="301" y="91" class="t-c t-xs">Huginn</text>
+    <circle cx="456" cy="105" r="6" style="fill:var(--c-enc)"/><text x="456" y="91" class="t-c t-xs">MoR</text>
+    <circle cx="549" cy="105" r="6" style="fill:var(--c-enc)"/><text x="549" y="91" class="t-c t-xs">Ouro</text>
+
+    <circle cx="425" cy="150" r="6" style="fill:none;stroke:var(--c-reg);stroke-width:2"/><text x="425" y="136" class="t-c t-xs">HRM（背景）</text>
+    <circle cx="549" cy="150" r="6" style="fill:var(--c-reg)"/><text x="549" y="136" class="t-c t-xs">TRM</text>
+
+    <circle cx="735" cy="200" r="6" style="fill:var(--c-pred)"/><text x="735" y="186" class="t-c t-xs">Parcae</text><text x="735" y="216" class="t-c t-xs">Iso-Depth</text>
+    <circle cx="890" cy="200" r="6" style="fill:var(--c-pred)"/><text x="950" y="186" class="t-r t-xs">SMELT · Loop-μP* · ELR*</text><text x="950" y="216" class="t-r t-xs">ARLoop* · 循环能替代多少参数*</text>
+
+    <circle cx="549" cy="252" r="6" style="fill:var(--c-act)"/><text x="549" y="238" class="t-c t-xs">Loopholing</text>
+    <circle cx="766" cy="252" r="6" style="fill:var(--c-act)"/><text x="766" y="238" class="t-c t-xs">LoopMDM</text>
+    <circle cx="797" cy="252" r="6" style="fill:var(--c-act)"/><text x="797" y="268" class="t-c t-xs">R-MDM</text>
+    <circle cx="890" cy="252" r="6" style="fill:var(--c-act)"/><text x="890" y="238" class="t-c t-xs">Loop-Distill*</text>
+    <circle cx="921" cy="252" r="6" style="fill:var(--c-act)"/><text x="921" y="268" class="t-c t-xs">ALoDLM</text>
+
+    <line x1="120" y1="290" x2="945" y2="290" class="axis"/>
+    <path d="M178,284 l6,12 M186,284 l6,12" class="axis"/>
+    <path d="M238,284 l6,12 M246,284 l6,12" class="axis"/>
+    <line x1="150" y1="290" x2="150" y2="294" class="axis"/><text x="150" y="304" class="t-c t-xs">2018-07</text>
+    <line x1="215" y1="290" x2="215" y2="294" class="axis"/><text x="215" y="304" class="t-c t-xs">2023-01</text>
+    <line x1="270" y1="290" x2="270" y2="294" class="axis"/><text x="275" y="304" class="t-c t-xs">2025-01</text>
+    <line x1="456" y1="290" x2="456" y2="294" class="axis"/><text x="456" y="304" class="t-c t-xs">2025-07</text>
+    <line x1="642" y1="290" x2="642" y2="294" class="axis"/><text x="642" y="304" class="t-c t-xs">2026-01</text>
+    <line x1="828" y1="290" x2="828" y2="294" class="axis"/><text x="828" y="304" class="t-c t-xs">2026-07</text>
+  </svg>
+  <div class="dia-note">怎么看：横轴是时间，2025 年以前被压缩（两处斜线表示截断），2025-01 之后每个月等宽。五条横线是五支，颜色和导读的分支图一致。每个圆点是一篇精读，位置按 arXiv 首版年月；空心圆是没有单独精读页的 HRM。带 * 的是 ICLR 2027 匿名投稿。可以看到两件事：2025 年的工作集中在“把循环做大”，2026 年的工作集中在“算账”和“循环 × 扩散”；2026-09 一个月里就出现了五篇围绕稳定性、参数化和理论的工作。本站示意图，日期取自各精读页。</div>
+</div>
+
+<h4 id="n-2-1">2.1 Universal Transformer：把“很多不同的层”换成“同一个块用很多次”</h4>
+<p><b>当时卡在哪。</b>2017 年的 Transformer 在翻译上取代了 RNN，但在一些很简单的任务上反而不如 RNN：比如原样复制一串数字，只要测试的串比训练时长，它就出错。<a href="universal-transformers.html#n-1">UT 的作者</a>把原因归到结构上：RNN 每一步都用同一个变换，天然倾向于学“把同一个小步骤反复做”的解法，这种解法对任意长度都适用；Transformer 则是若干层各不相同的层叠起来，计算步数固定，也没有这种倾向。</p>
+<p><b>核心想法。</b>保留 Transformer 层内的并行计算和自注意力，但把“很多不同的层”换成“同一个块在深度上反复用”。在此之上，给每个位置配一个自适应计算时间（ACT），让每个位置自己决定被这个块处理几次（<a href="universal-transformers.html#n-3">§3</a>）。作者还论证，只要允许步数随输入增长，这样的模型是图灵完备的（<a href="universal-transformers.html#n-8-2">§8.2</a>）。</p>
+<p><b>结果与它的份量。</b>UT 在 bAbI 问答、LAMBADA 和算法任务上明显好于作者自己训练的 Transformer，翻译上比 Transformer base 高 0.9 BLEU。但翻译这组比较只对齐了参数：按官方代码的配置，UT base 的块和 Transformer big 的一层一样宽，每个 token 的计算约是 Transformer base 的 4 倍（推算）；计算大致对齐时，UT small 反而低 1.2 BLEU（<a href="universal-transformers.html#n-7-1">§7.1</a>）。2023 年一项独立复现用工具数了乘加次数，参数和 Transformer base 相同的 UT，计算量和 Transformer big 差不多，BLEU 也和它一样是 29.3。还有一个容易忽略的细节：在官方实现里，已经“停下”的位置每一步仍被照算，整批要等最慢的位置，所以 ACT 改变的是输出怎么组合，并不省计算（<a href="universal-transformers.html#n-3-3">§3.3</a>）。</p>
+<p><b>留下了什么。</b>UT 之后，层间共享在预训练模型上并不顺利。ALBERT 发现宽度不变时共享全部层会让下游平均分下降；直到 2024 年的 MoEUT，才第一次让层间共享的模型在语言建模上和同参数的普通 Transformer 打平甚至略胜（这两项都没有单独的精读页，见 <a href="universal-transformers.html#n-impact-1">UT 精读“后来怎么样了”</a>）。“在深度上循环”被大规模重新拾起，要等到 2025 年人们开始寻找“不加参数也能加计算”的扩展方式。</p>
+
+<h4 id="n-2-2">2.2 可编程计算机：存在这样的权重，但不说明能学到</h4>
+<p><b>当时卡在哪。</b>此前已有证明说 Transformer 是图灵完备的，但要么假设数字无限精确，要么要求层数随计算一起增长，也没人告诉你具体怎样设定权重，才能让一个 Transformer 执行你写好的程序。</p>
+<p><b>核心想法。</b><a href="looped-programmable-computers.html#n-0">这篇 ICML 2023 论文</a>不训练任何东西，而是手写每一个权重矩阵：把输入设计成一张“打孔卡”，一部分列放指令，一部分当内存，一部分当草稿区；再把 Transformer 的输出原样接回输入，每循环一轮执行一条指令。结论是：9～10 层的 Transformer 就能执行单指令计算机 SUBLEQ 的任意程序（<a href="looped-programmable-computers.html#n-5-1">§5.1</a>）；不超过 13 层的循环 Transformer 能当计算器、做矩阵求逆，甚至在上下文里跑带反向传播的 SGD。</p>
+<p><b>份量。</b>这是“存在一组权重”的表达能力结论，不涉及训练能不能找到它，也不说明真实语言模型内部是这样算的。它省的是参数，不是计算：在上下文里对 100 个数据点跑 10 遍线性模型 SGD，大约要循环一万轮（<a href="looped-programmable-computers.html#n-9-3">§9.3</a> 的推算）。精度要求随轮数上升，FLEQ 部分没有代码（<a href="looped-programmable-computers.html#n-9-4">§9.4</a>）。后续工作真正去训练循环 Transformer 做上下文学习，发现循环 30 轮的 1 层模型能追平 12 层的标准模型；但当循环 12 轮、有效深度和对手相同时，它追不上（<a href="looped-programmable-computers.html#n-11-1">§11.1</a> 介绍，本站未单独精读）。这又是一个“同参数赢、同深度输”的例子。</p>
+
+<h4 id="n-2-3">2.3 潜在思考：推理要的是深度，不一定是参数</h4>
+<p><b>当时卡在哪。</b>已有观察说，参数相同时更深更窄的模型推理更好。如果推理真正需要的是“连续算几步”，那它也许不需要那么多参数。</p>
+<p><b>核心想法与合成实验。</b><a href="reasoning-latent-thoughts.html#n-2">潜在思考</a>用 \((k\otimes L)\) 记号做了一组很干净的实验：在 \(n\) 元加法上，1 层模型只有 0.1% 的准确率，把这 1 层循环 12 次就到 99.6%–100%，和 12 层基线一样；在 p 跳归纳和合成数学题 i-GSM 上，准确率几乎只取决于有效深度，而和“深度来自新参数还是重复参数”关系不大。这里循环模型和基线的计算量相同，所以结论是“这些任务要的是串行计算”，而不是“循环省计算”。</p>
+<p><b>放到语言模型上。</b>在 1B 参数、250B token 的预训练里，循环模型和 24 层基线的训练算力、推理算力、KV 缓存都相同，只是独立参数少了 \(24/k\) 倍。结果是：困惑度全部更差（7.90–8.79 对 7.40），闭卷问答全部更差，开卷问答差得少，数学应用题有高有低，推理基元上循环模型全部更好（<a href="reasoning-latent-thoughts.html#n-3-2">§3.2</a>）。精读页核对附录发现，推理基元上的优势几乎全部来自“在上下文里找到一个值并抄出来”的单步查找，而不是多步推理。作者又把循环次数从 1 加到 12，发现除推理基元外，“循环得来的深度”带来的提升只有“新层带来的深度”的 0.5–0.6 倍（<a href="reasoning-latent-thoughts.html#n-3-5">§3.5</a>）。这个比值，是后来 Iso-Depth 用扩展律精确测量的那件事的早期版本。</p>
+<p><b>理论。</b>作者证明，\(T\) 次循环可以模拟 \(T\) 步思维链，所以循环的中间状态可以看作“潜在的思考”（<a href="reasoning-latent-thoughts.html#n-5-4">§5.4</a>）。但这是表达能力的结论：构造里每一轮只让一个位置干有用的活，模拟 \(m\) 步思维链的计算量约是思维链本身的 \(m\) 倍（精读页推算）。作者还提出一个“让相隔 \(k\) 层的权重彼此相似”的正则项，在困惑度不变（7.38 对 7.40）的情况下把 15 项平均从 26.0 提到 30.0（<a href="reasoning-latent-thoughts.html#n-4">§4</a>）；这个模型仍有 24 层独立参数，是训练技巧，不是省钱的办法。</p>
+<p><b>这一阶段留下的问题。</b>第一，循环能不能在推理时自由加圈，像思维链一样“想得越久越好”？潜在思考的不同循环次数是分别从头训练的模型，没有测这件事。第二，在严格匹配算力之后，循环到底值多少？潜在思考给出的是“困惑度输、推理类差得少”的定性图景。这两个问题分别由第二阶段的 Huginn 和第三阶段的 Iso-Depth 接手。</p>
+<div class="note-warn">“1 层循环 12 次就能做加法”“远好于同参数模型”这类说法成立的前提，是循环模型多花了 12 倍的计算。和计算相同的 12 层基线比，它是“打平”，不是“更好”。</div>
+</section>
+
+<!-- ============================================================ 3 -->
+<section class="note">
+<h3 id="n-3">3 做成语言模型：Huginn、Mixture-of-Recursions、Ouro</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>2025 年，循环第一次被做到数十亿参数、数千亿到数万亿 token 的规模。三家各自怎样设计循环、怎样决定转几圈？它们的头条数字是什么，又各对齐了哪本账？做大之后暴露出哪些新问题？</div>
+
+<h4 id="n-3-1">3.1 Huginn：不多说，而是多算</h4>
+<p><b>当时卡在哪。</b>让模型推理前“多想一会儿”，主流做法是写长长的思维链。它很有效，但要用专门的长推理示范训练，上下文越写越长，而且每一步内部的计算最后都要压成一个离散的词才能被下一步读到。<a href="huginn.html#n-1">Huginn</a> 想换一条路：每个词多算几遍，而不是多写几个词。</p>
+<p><b>核心想法。</b>前奏 2 层、循环块 4 层、尾声 2 层；循环块的初始状态是随机噪声，每一圈都把前奏的输出拼进来（输入注入）。训练时每一步随机抽一个圈数，分布均值是 33、带一条长尾，让模型在任意圈数下都能工作；只对最后 8 圈反向传播，所以抽到 120 圈也不会撑爆显存（<a href="huginn.html#n-3-3">§3.3</a>）。最终模型 Huginn-0125 有 3.5B 参数，在约 800B token 上训练，用了 4096 张 AMD MI250X。规模上去之后发生了两次失败：一次所有位置的隐藏状态变成同一个向量（表示坍塌），一次模型学会了无视传进来的状态、循环形同虚设；第三次改回三明治归一化、学习率降为十分之一才训稳（<a href="huginn.html#n-4-3">§4.3</a>）。</p>
+<p><b>头条结果。</b>圈数从 1 加到 32，GSM8K、MATH、HumanEval 这类推理任务从接近零涨到可观的水平；同一个模型不经额外训练就能做逐 token 提前退出、跨圈共享 KV 缓存和自投机解码（<a href="huginn.html#n-6">§6</a>）。权重、代码和全部训练数据都已公开，后来成了很多工作的公共试验台。</p>
+<p><b>对齐了什么。</b>和 OLMo、Pythia 的比较几乎什么都没对齐。按精读页的推算，Huginn 的训练总算力约 \(1.7\times10^{23}\) FLOPs，和训练了 4T token 的 OLMo-2-7B 同一档，而后者在通用基准和数学上全面领先，只有代码题输给 Huginn；推理时转 32 圈，每个 token 约 105 GFLOPs，是 7B 普通模型的约 7 倍（<a href="huginn.html#n-5-5">§5.5</a>）。控制得最好的一组是“结构相同、只走一遍循环块”的双胞胎：在同样 180B token 处，循环 32 次的 Huginn 在九项上全部领先，GSM8K 约高 5 倍；但两者训练算力差了 8–10 倍（推算），所以这是同参数、同数据的结论（<a href="huginn.html#n-5-3">§5.3</a>）。另外，训练时抽到 1 圈的概率约十万分之一，“只转 1 圈时很差”本身就是分布外条件。</p>
+<p><b>独立检验。</b>一项专门的探针研究检查 Huginn 有没有在潜空间里做“不说出来的思维链”，没有找到可以逐步读出的中间结果；在禁止写出推理过程时，GSM8K 从 4 圈的 3.11% 只涨到 32 圈的 4.93%（<a href="huginn.html#n-7-3">§7.3</a>）。表里漂亮的 GSM8K 分数，是“循环加写出来的思维链”共同取得的。</p>
+
+<h4 id="n-3-2">3.2 Mixture-of-Recursions：每个 token 转几圈，由路由器定</h4>
+<p><b>当时卡在哪。</b>参数共享省存储，自适应计算省计算，以前两条路各走各的；而且递归模型的 KV 缓存并没有因为共享参数而变小，提前退出的 token 在更深的圈里没有 KV，后面的 token 查不到它。</p>
+<p><b>核心想法。</b><a href="mixture-of-recursions.html#n-0">MoR</a> 用 Middle-Cycle 共享一叠层，最多循环 \(N_r\) 圈；一个小路由器为每个 token 决定转几圈（<a href="mixture-of-recursions.html#n-3">§3</a>）；每一圈只缓存仍在计算的 token 的 KV（<a href="mixture-of-recursions.html#n-4">§4</a>）；推理时用“连续深度批处理”，一个 token 停下，队列里的下一个 token 立刻补上它在共享块里的位置（<a href="mixture-of-recursions.html#n-7">§7</a>）。</p>
+<p><b>结果与对齐。</b>MoR 的主比较是按训练 FLOPs 对齐的，这比很多循环论文公平。在 360M 档、\(16.5\times10^{18}\) FLOPs 下，循环 2 圈的 MoR 只用约一半参数，因为一部分 token 少算几层，同样预算多看了 35% 的 token，验证 NLL 从 2.7824 降到 2.7511，few-shot 平均从 42.3% 升到 43.1%；循环 3、4 圈的版本 NLL 反而更差。1.7B 档上普通模型的 few-shot 平均是 48.9%，两个 MoR 是 48.4% 和 46.7%。“最高 2.06 倍吞吐”属于质量更差的 MoR-4，质量不输普通模型的 MoR-2 是 1.23–1.60 倍，而且推理代码没有公开（<a href="mixture-of-recursions.html#n-7-w">结果的份量</a>）。综合起来，MoR 稳定的收益是用一半到三分之一的参数达到相近质量、推理更快，而不是同等训练算力下更低的损失。</p>
+
+<h4 id="n-3-3">3.3 Ouro：7.7T token、整体循环 4 圈、学出来的退出门</h4>
+<p><b>核心想法。</b><a href="ouro.html#n-0">Ouro</a> 把 24 层（1.4B）或 48 层（2.6B）整体循环 4 圈，每一圈末尾放一个退出门，用“均匀先验 + 熵正则”的目标保证训练时各个深度都被探索，再用第二阶段只训练退出门（<a href="ouro.html#n-3-2">§3.2</a>）。训练一开始转 8 圈，出现损失尖峰，退回 4 圈（<a href="ouro.html#n-4-3">§4.3</a>）。这是循环模型里训练量最大的公开工作之一。</p>
+<p><b>头条结果。</b>1.4B 在推理类基准上追平甚至超过 Qwen3-4B（BBH 71.02 对 70.95，MATH500 82.40 对 59.60），2.6B 在推理密集的基准上接近或超过 8B 的稠密模型，作者称为 2–3 倍参数效率（<a href="ouro.html#n-5-1">§5.1</a>）。受控的小实验显示，循环不增加知识容量（循环与否都是每个参数约 2 bit），而是让模型更会组合已有知识（<a href="ouro.html#n-6-1">§6.1</a>）。</p>
+<p><b>对齐了什么。</b>只对齐了参数。逐项数，1.4B 对 Qwen3-4B 是 12 项里赢 4 项、输 8 项，对参数最接近的 Qwen3-1.7B 则 12 项全赢；每个 token 的计算比 Qwen3-4B 多约 25%，默认 KV 缓存是同参数稠密模型的 4 倍；训练数据里后期混入了 SFT 风格的数据，MATH500 的巨大优势可能部分来自数据（<a href="ouro.html#n-5-6">§5.6</a>）。把账对齐的研究给出了另一面：Ouro 自己的附录 D 在同前向计算下比较，不共享权重的标准模型在所有设置下都更好（<a href="ouro.html#n-8">§8</a>）；一篇 ICLR 2027 投稿 Closing the Loop 用同样结构在 310B token 上训练了数据完全相同的双胞胎，循环 4 圈在全部 12 项上胜过同参数的稠密双胞胎（GSM8K 高 14 分），但同推理算力的 3.9B 稠密双胞胎在每一项上都领先或持平（数字转引自 <a href="ouro.html#n-5-6">Ouro 精读 §5.6</a>，本站未单独精读）。</p>
+
+<h4 id="n-3-4">3.4 推理时多转几圈：收益在训练深度附近见顶</h4>
+<p>循环模型最吸引人的设想之一，是遇到难题时“多转几圈”。这一阶段的结果显示，这个旋钮多半只在训练见过的圈数以内好用。下图把 Ouro 和后来 ELR 的数字画在一起：两者训练时都最多转 4 圈。</p>
+
+<div class="dia">
+  <div class="dia-title">图：推理时的圈数与分数（Ouro 与 ELR，训练时最多 4 圈）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="Ouro 和 ELR 的分数随推理圈数变化：到第 4 圈附近见顶，超过训练深度后 Ouro 的生成式竞赛题分数大幅下降" style="--dg-min:720px">
+    <rect x="80" y="30" width="265.7" height="230" style="fill:var(--surface-2)"/>
+    <text x="212.8" y="42" class="t-c t-xs">训练时见过的圈数（1–4）</text>
+    <text x="522.9" y="42" class="t-c t-xs">超出训练深度（外推）</text>
+    <line x1="80" y1="260" x2="700" y2="260" class="grid-ln"/><text x="72" y="260" class="t-r t-xs">0</text>
+    <line x1="80" y1="202.5" x2="700" y2="202.5" class="grid-ln"/><text x="72" y="202.5" class="t-r t-xs">25</text>
+    <line x1="80" y1="145" x2="700" y2="145" class="grid-ln"/><text x="72" y="145" class="t-r t-xs">50</text>
+    <line x1="80" y1="87.5" x2="700" y2="87.5" class="grid-ln"/><text x="72" y="87.5" class="t-r t-xs">75</text>
+    <line x1="80" y1="30" x2="700" y2="30" class="grid-ln"/><text x="72" y="30" class="t-r t-xs">100</text>
+    <line x1="80" y1="260" x2="700" y2="260" class="axis"/><line x1="80" y1="260" x2="80" y2="30" class="axis"/>
+    <text x="80" y="274" class="t-c t-xs">1</text><text x="168.6" y="274" class="t-c t-xs">2</text><text x="257.1" y="274" class="t-c t-xs">3</text><text x="345.7" y="274" class="t-c t-xs">4</text>
+    <text x="434.3" y="274" class="t-c t-xs">5</text><text x="522.9" y="274" class="t-c t-xs">6</text><text x="611.4" y="274" class="t-c t-xs">7</text><text x="700" y="274" class="t-c t-xs">8</text>
+    <text x="390" y="292" class="t-c t-sm">推理时的循环圈数 T</text>
+    <text x="22" y="145" class="t-c t-sm" transform="rotate(-90 22 145)">分数（%）</text>
+
+    <line x1="80" y1="109" x2="345.7" y2="109" style="stroke:var(--c-act);stroke-width:1.4;stroke-dasharray:5 4"/>
+    <polyline points="80,145.2 168.6,106.1 257.1,95.4 345.7,93.5 434.3,96.0 522.9,96.4 611.4,97.9 700,99.3" style="fill:none;stroke:var(--c-enc);stroke-width:2"/>
+    <polyline points="80,216.4 168.6,102.2 257.1,86.2 345.7,84.2 434.3,94.7 522.9,100.9 611.4,127.4 700,169.7" style="fill:none;stroke:var(--c-pred);stroke-width:2"/>
+    <polyline points="80,260 168.6,174.1 257.1,116.6 345.7,110.5 434.3,120.5 522.9,143.5 611.4,162.6 700,171.1" style="fill:none;stroke:var(--c-loss);stroke-width:2"/>
+    <polyline points="80,110.2 168.6,97.0 257.1,94.2 345.7,93.5" style="fill:none;stroke:var(--c-act);stroke-width:2.4"/>
+    <g style="fill:var(--c-enc)"><circle cx="80" cy="145.2" r="3"/><circle cx="168.6" cy="106.1" r="3"/><circle cx="257.1" cy="95.4" r="3"/><circle cx="345.7" cy="93.5" r="3"/><circle cx="434.3" cy="96.0" r="3"/><circle cx="522.9" cy="96.4" r="3"/><circle cx="611.4" cy="97.9" r="3"/><circle cx="700" cy="99.3" r="3"/></g>
+    <g style="fill:var(--c-pred)"><circle cx="80" cy="216.4" r="3"/><circle cx="168.6" cy="102.2" r="3"/><circle cx="257.1" cy="86.2" r="3"/><circle cx="345.7" cy="84.2" r="3"/><circle cx="434.3" cy="94.7" r="3"/><circle cx="522.9" cy="100.9" r="3"/><circle cx="611.4" cy="127.4" r="3"/><circle cx="700" cy="169.7" r="3"/></g>
+    <g style="fill:var(--c-loss)"><circle cx="80" cy="260" r="3"/><circle cx="168.6" cy="174.1" r="3"/><circle cx="257.1" cy="116.6" r="3"/><circle cx="345.7" cy="110.5" r="3"/><circle cx="434.3" cy="120.5" r="3"/><circle cx="522.9" cy="143.5" r="3"/><circle cx="611.4" cy="162.6" r="3"/><circle cx="700" cy="171.1" r="3"/></g>
+    <g style="fill:var(--c-act)"><rect x="77" y="107.2" width="6" height="6"/><rect x="165.6" y="94" width="6" height="6"/><rect x="254.1" y="91.2" width="6" height="6"/><rect x="342.7" y="90.5" width="6" height="6"/></g>
+
+    <line x1="720" y1="70" x2="744" y2="70" style="stroke:var(--c-enc);stroke-width:2"/><text x="750" y="70" class="t-xs">Ouro-1.4B 基座：6 项平均</text>
+    <line x1="720" y1="94" x2="744" y2="94" style="stroke:var(--c-pred);stroke-width:2"/><text x="750" y="94" class="t-xs">Ouro-2.6B-Thinking：OlympiadBench</text>
+    <line x1="720" y1="118" x2="744" y2="118" style="stroke:var(--c-loss);stroke-width:2"/><text x="750" y="118" class="t-xs">Ouro-1.4B-Thinking：AIME24</text>
+    <line x1="720" y1="142" x2="744" y2="142" style="stroke:var(--c-act);stroke-width:2.4"/><text x="750" y="142" class="t-xs">ELR-4B：10 项平均（只测 1–4 圈）</text>
+    <line x1="720" y1="166" x2="744" y2="166" style="stroke:var(--c-act);stroke-width:1.4;stroke-dasharray:5 4"/><text x="750" y="166" class="t-xs">ELR 的非循环基线 65.65</text>
+  </svg>
+  <div class="dia-note">怎么看：横轴是推理时转的圈数，灰底是训练时见过的范围（1–4 圈），纵轴是各自基准的分数。数字取自 <a href="ouro.html#n-5-3">Ouro 精读 §5.3</a>（原文表 10–13）和 <a href="elastic-latent-recurrence.html#n-4-2">ELR 精读 §4.2</a>（原文表 6）。所有曲线都在第 3–4 圈附近见顶；超过 4 圈后，Ouro 的选择题平均分缓慢下降，生成式竞赛题掉得很快（2.6B-Thinking 的 OlympiadBench 从 76.44 掉到 39.26）。ELR 第 2 圈涨得最多，第 3 圈已拿到 1→4 圈总涨幅的 96%。本站根据论文数字重画。</div>
+</div>
+
+<p>其他论文看到的是同一个形状。Parcae 在测试时从 1 圈转到 16 圈，收益在训练时的平均圈数（8 圈）附近就到头（<a href="parcae.html#n-7-1">Parcae §7.1</a>）；ARLoop 给超出训练深度的新子层专门训练了查询向量，仍然没有改善（<a href="arloop.html#n-6-2">ARLoop §6.2</a>）；MoR 的“测试时扩展”只是在训练过的深度以内逐步放开（<a href="mixture-of-recursions.html#n-9-3">MoR §9.3</a>）。Huginn 训练时就见过很深的展开，所以在极深处是稳定的：ARC-C 一直测到 1024 圈，准确率始终在 37.0–37.9 之间，但多出来的计算也不再带来收益（<a href="huginn.html#n-5-3">Huginn §5.3</a>）。</p>
+
+<p><b>这一阶段留下的问题。</b>第一，训练不稳：Huginn 两次失败，Ouro 从 8 圈退回 4 圈，每换一个圈数都要重新试学习率。第二，头条结论全是参数匹配的，“算力对齐后还值多少”没人正面量过。第三，部署的账没算清：KV 缓存翻倍、可变深度难以组批。第四，“只转 1 圈时比同成本的普通模型差一大截”，同一个检查点做不到“着急时少转、难题时多转”。第三阶段的工作逐一回应了这些问题。</p>
+<div class="note-warn">三篇论文都说“测试时扩展”，意思并不一样：Huginn 是训练时随机抽圈数，推理时可以任意加；Ouro 是在训练的 4 圈以内选择，外推变差；MoR 是在固定的最大圈数以内逐步放开。不要把它们读成“推理时多算就能一直变好”。</div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section class="note">
+<h3 id="n-4">4 另一个世界：小网络递归推理（HRM 与 TRM）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>差不多同一时期，另一批工作在完全不同的设定里用“反复迭代”：没有预训练，只用每类任务约一千个样本，从零训练几百万到几千万参数的小网络，去解极难的数独、大迷宫和 ARC 图形谜题。它们为什么这样设计？分数主要从哪里来？和循环语言模型是什么关系？</div>
+
+<p><b>当时卡在哪。</b>逐个 token 往外写的大语言模型，在“答案唯一、必须一次全对”的谜题上表现很差：按 <a href="tiny-recursive-model.html#n-0">TRM 精读</a>引用的数字，DeepSeek R1、Claude 3.7、o3-mini-high 在极难数独和大迷宫上都是 0%。2025 年 6 月的 HRM 换了一条路：一个 27M 参数的小模型，两个子网络以不同频率交替运行，在隐藏状态上反复迭代，报告了数独 55.0%、迷宫 74.5%、ARC-AGI-1 40.3%。它的设计相当复杂：用隐函数定理论证的“一步梯度”、外层的深度监督（同一道题改很多轮、每轮算一次损失）、用 Q 学习训练的停止机制，外加一层“模仿大脑”的解释（<a href="tiny-recursive-model.html#n-2">TRM 精读 §2</a>）。</p>
+<p><b>第三方复核改变了叙述。</b>ARC Prize 团队复核 HRM 后发现：把“层级”结构换成同参数的普通 Transformer，分数只低约 5 个百分点；真正起作用的是外层的反复修正（从 1 轮加到 2 轮就高 13 个百分点）；而且大部分分数来自训练时就见过评估题的示范样例，只用 400 个评估任务训练，分数也只从 41% 降到 31%（<a href="tiny-recursive-model.html#n-arc">TRM 精读插曲</a>）。也就是说，这类模型本质上是“在每道题自己的示范上做测试时训练”。</p>
+<p><b>TRM 的想法。</b>TRM 把 HRM 剥到最简：只有一个 2 层的网络，维护两个状态，答案 \(y\) 和推理草稿 \(z\)。先用 \(z\leftarrow f(x+y+z)\) 改写草稿 6 次，再用 \(y\leftarrow f(y+z)\) 改写答案 1 次，这叫一轮完整递归；一个监督步做 3 轮，前 2 轮不求梯度，最后 1 轮完整反传；同一道题最多做 16 个监督步（<a href="tiny-recursive-model.html#n-4-0">§4.0</a>）。影响最大的改动是放弃一步梯度：改回一步梯度，数独准确率从 87.4% 掉到 56.5%（<a href="tiny-recursive-model.html#n-4-1">§4.1</a>）。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：HRM 与 TRM 的循环结构对照</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-flow"><span class="dia-box reg"><b>HRM（27M）</b><small>两个 4 层网络</small></span></div>
+      <div class="dia-flow"><span class="dia-box">f<sub>L</sub>：跑得勤<small>维护 z<sub>L</sub></small></span><span class="dia-arrow">⇄</span><span class="dia-box">f<sub>H</sub>：跑得少<small>维护 z<sub>H</sub></small></span></div>
+      <div class="dia-flow"><span class="dia-box">一步梯度<small>只对最后两次调用求导，依赖“已到不动点”的假设</small></span></div>
+      <div class="dia-flow"><span class="dia-box">外层深度监督 + Q 学习停止<small>训练时每个优化步做两次前向</small></span></div>
+    </div>
+    <div>
+      <div class="dia-flow"><span class="dia-box act"><b>TRM（5–7M）</b><small>一个 2 层网络，两个状态</small></span></div>
+      <div class="dia-flow"><span class="dia-box enc">z ← f(x + y + z)<small>改写草稿，6 次</small></span><span class="dia-arrow">→</span><span class="dia-box pred">y ← f(y + z)<small>改写答案，1 次</small></span></div>
+      <div class="dia-flow"><span class="dia-box">× 3 轮 = 一个监督步<small>前 2 轮不求梯度，最后 1 轮完整反传（7 次调用、14 层）</small></span></div>
+      <div class="dia-flow"><span class="dia-box">× 最多 16 个监督步<small>深度监督；状态切断梯度后传给下一步</small></span></div>
+    </div>
+  </div>
+  <div class="dia-note">怎么看：左边是 HRM，右边是 TRM，每一行从内到外是一层循环。TRM 把两个网络合成一个，把“层级”换成“答案和草稿”两个状态，把一步梯度换成对一整轮递归的完整反传。两者都保留了最外层的深度监督，而 ARC Prize 的复核表明这层外循环是分数的主要来源。本站示意图，依据 <a href="tiny-recursive-model.html#n-4-0">TRM 精读 §4.0</a> 与 <a href="tiny-recursive-model.html#n-2">§2</a>。</div>
+</div>
+
+<p><b>结果。</b>TRM 把数独从 55.0% 提到 87.4%，迷宫从 74.5% 提到 85.3%，ARC-AGI-1 从 40.3% 提到 44.6%，ARC-AGI-2 从 5.0% 提到 7.8%，参数只有 HRM 的四分之一左右。ARC Prize 按官方代码在不公开的半私有集上复核，得到 ARC-AGI-1 40%、ARC-AGI-2 6.2%，降幅比 HRM 小（HRM 复核为 32% 和 2%）。论文获得了 ARC Prize 2025 的论文奖第一名。</p>
+<p><b>份量。</b>TRM 对 HRM 的提升有同一份代码下的消融支撑，并经过了半私有集复核，是可信的。但“7M 参数打败千亿大模型”比较的是完全不同的东西（<a href="tiny-recursive-model.html#n-5-4">§5.4</a>）：每个基准单独训练一个模型；“7M”没有算上题目编号嵌入表，按复核检查点推算，ARC-AGI-1 上这张表约有 4.5 亿个可学习的数，相当于“每道题的解法存储”；每个测试输入要跑 1000 个变体再投票；大模型是零样本作答，分数来自半私有集，TRM 的是公开集。参数少也不等于计算少：TRM 每个监督步调用 21 次 2 层网络，计算约是 HRM 的 1.75 倍（推算）。</p>
+<p><b>和循环语言模型的关系。</b>TRM 能迁移到语言模型上的是几个想法：对整轮递归做完整反传，而不是一步梯度或截断；把“答案”和“草稿”分成两个状态；训练时就让模型反复修正。它的数字不能迁移：TRM 一次输出一个确定的网格，靠题目编号而不是上下文学习知道该做什么，“2 层比 4 层好”是在约一千个样本、极易过拟合的条件下得出的，这些都和语言模型预训练相反（<a href="tiny-recursive-model.html#n-5-5">§5.5</a>）。</p>
+<div class="note-warn">“直接预测、不用思维链”说的是推理时的形式，不等于测试时没花训练算力：要解一道新的 ARC 题，这类模型必须先把这道题的示范样例放进训练集重新训练一遍。</div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section class="note">
+<h3 id="n-5">5 训得稳、调得动、算得清：稳定性、参数化与扩展律</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>2026 年的一批工作分别回应第二阶段留下的问题。训练为什么会发散，怎样从结构上避免？换一个圈数为什么要重扫学习率？后面几圈算出来的东西，残差流能不能挑着用？最低一档（只转 1 圈）能不能不吃亏？最重要的是：在不同的对齐方式下，循环到底值多少？</div>
+
+<h4 id="n-5-1">5.1 为什么会发散：把循环看成动力系统（Parcae）</h4>
+<div class="note-pre"><b>先补一点背景：线性迭代什么时候会爆炸。</b>
+<p>考虑一个最简单的迭代 \(h_{t+1}=\bar a\,h_t+\bar b\,e\)，其中 \(e\) 每一步都是同一个输入。解出来是 \(h_t=\bar a^{\,t}h_0+(1+\bar a+\cdots+\bar a^{\,t-1})\bar b\,e\)。如果 \(|\bar a|&lt;1\)，第一项随圈数衰减，第二项是收敛的几何级数，状态停在一个只由输入决定的不动点 \(\bar b\,e/(1-\bar a)\)；如果 \(\bar a=1\)，常数输入一圈圈累积；如果 \(|\bar a|&gt;1\)，状态按指数增长。代个数（推算）：\(\bar a=1.1\) 时，转 24 圈后初始状态被放大约 9.8 倍；\(\bar a=0.9\) 时，初始状态只剩约 8%，状态收敛到 \(10\,\bar b\,e\)。对矩阵来说，决定这件事的是绝对值最大的特征值，叫<b>谱半径</b>。</p></div>
+<p><a href="parcae.html#n-3">Parcae</a> 把循环块的更新恒等地改写成“线性部分 + 非线性部分”：\(h_{t+1}=\bar A h_t+\bar B e+\bar{\mathcal R}(h_t,e)\)，线性部分里的 \(\bar A\) 正是注入方式决定的那个矩阵。相加注入的 \(\bar A=I\)，谱半径恰好是 1，属于临界情形；Huginn 的拼接注入让 \(\bar A\) 成为一个完全自由的矩阵，谱半径可以涨到 1 以上；而作者实测发现，发散的训练确实学出了大于 1 的谱半径（<a href="parcae.html#n-3-2">§3.2</a>）。修补办法借用了状态空间模型的离散化：令 \(\bar A=\exp(\Delta\odot A)\)，\(A\) 是对角元全为负的对角矩阵、\(\Delta\) 为正，于是 \(\bar A\) 的每个对角元都严格落在 0 和 1 之间，不稳定的区域根本到达不了（<a href="parcae.html#n-4-1">§4.1</a>）。1.3B 模型后来又在前奏输出上加了一层归一化，因为那次爆炸来自前奏输出本身变成了天文数字。和 Huginn 式的循环模型在参数、数据都对齐时比，Parcae 在 100M、350M 上把验证困惑度降低 4.5% 和 6.2%。</p>
+
+<h4 id="n-5-2">5.2 为什么换个圈数就要重扫学习率（Loop-μP）</h4>
+<p><a href="loop-mup.html#n-0">Loop-μP</a>（ICLR 2027 匿名投稿）给出的解释很直观。若干个互不相同的层往残差流里加的增量，方向几乎互不相关，加起来像随机游走，总量按层数的平方根增长，所以已有的 Depth-μP 规则给每个残差分支乘 \(1/\sqrt L\) 就够了。而循环的每一圈用的是同一套权重，各圈加进去的增量方向相近，加起来像沿直线走，总量按圈数 \(N\) 增长。于是 \(L\) 层循环 \(N\) 圈时，残差分支应乘 \(a/(N\sqrt L)\)，学习率则不必随 \(N\) 改变（<a href="loop-mup.html#n-4-1">§4.1</a>）。如果把循环当成 \(NL\) 层的普通加深，系数会大 \(\sqrt N\) 倍，\(N=8\) 时一步更新已经是应有大小的 2.83 倍（推算）。实验在 4.4 亿参数以内、每个模型 100 亿 token：Loop-μP 下，循环 1–8 次、执行深度最多 384 层的所有组合，最优基础学习率都是同一个值 \(1.25\times10^{-3}\)；不缩放时最优值漂到 \(7.5\times10^{-4}\)，较大的学习率直接发散（<a href="loop-mup.html#n-6-2">§6.2</a>）。一篇公开的 arXiv 论文（2606.18524）研究了同一个问题、结论方向一致（<a href="loop-mup.html#n-10">§10</a> 有内容对照）。证据的边界是：单种子、只看验证损失、规模不超过 4.4 亿参数，而且它本身不回答“循环值不值”。</p>
+
+<h4 id="n-5-3">5.3 后面几圈算的东西，能不能挑着用（ARLoop）</h4>
+<p>标准的 PreNorm 残差把所有子层的输出以系数 1 加到同一条流上。循环越多，加进去的东西越多，后面的子层没有办法说“我只要上一圈某一段的结果”。<a href="arloop.html#n-2">ARLoop</a>（ICLR 2027 匿名投稿）借用 2026 年提出的注意力残差：每个子层用自己的查询向量，对前面各段的输出做一次 softmax 注意力，按需取用；并且发现循环模型只看最近 3 段输出加原始词向量就够，看全部历史反而略差（<a href="arloop.html#n-3">§3</a>）。在 140M、370M、循环 1–5 次的受控实验里，它在每一列都最低，但和最强的对照（Parcae 加输入注入）只差 0.12–0.17 的困惑度，约 1%（<a href="arloop.html#n-4-3">§4.3</a>）；在 0.6B、同配方的对比里，GSM8K 高 5.2、MATH 高 5.4，代码题的提升落在抽样误差以内（<a href="arloop.html#n-5-2">§5.2</a>）。它的附录也给了一个对循环不利的数字：同样的有效深度下，不循环的 24 层模型要好得多（<a href="arloop.html#n-5-4">§5.4</a>）。</p>
+
+<h4 id="n-5-4">5.4 最低一档不能吃亏：“单圈税”（ELR）</h4>
+<p>“同一个检查点，着急时转 1 圈、难题时转 4 圈”这个卖点，取决于最低一档的质量。<a href="elastic-latent-recurrence.html#n-1">ELR</a>（ICLR 2027 匿名投稿）把“只转 1 圈时比同成本普通模型差”的差距叫作单圈税：Huginn 训练到 800B token 后只转 1 圈，ARC-Easy 是 34.89，而只训练了 180B token 的不循环双胞胎是 46.42；Parcae 140M 只转 1 圈时困惑度约 27，同尺寸 Transformer 是 21.48（读图值，见 <a href="parcae.html#n-5-5">Parcae §5.5</a>）。ELR 的配方有两个关键选择：每一圈只沿“循环块提议的修改”走一个由门控决定的步长（初始约 0.05），而不是直接替换状态；在同一次参数更新里混合多种圈数，强制约 10% 的数据并行进程只转 1 圈（<a href="elastic-latent-recurrence.html#n-3-2">§3.2</a>）。结果是 4B 模型（1T token）转 1 圈的十项平均 65.13，基线 65.65；转 4 圈 72.38，比基线高 6.7 分；30B-A3B 模型转 1 圈 66.08，略高于基线的 65.04（<a href="elastic-latent-recurrence.html#n-4-2">§4.2</a>）。代价是训练算力约 1.16 倍，转 4 圈时首 token 延迟是 2.33 倍；论文没有把多圈的结果和同样推理成本的更大模型比较，这是它有意留下的空白（<a href="elastic-latent-recurrence.html#n-4-5">§4.5</a>）。</p>
+
+<h4 id="n-5-5">5.5 循环到底值多少：三条扩展律，三种对齐方式</h4>
+<p>第三阶段最重要的是三条扩展律。它们之所以常常被读成互相矛盾，是因为各自固定了不同的东西。下图先把三者摆在一起。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：三条扩展律各固定了什么、回答了什么</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-box pred"><b>Parcae：固定参数</b><small>参数和数据量不变；圈数增加时，执行深度、每 token 推理算力、KV 缓存都跟着涨</small></div>
+      <div class="dia-flow"><span class="dia-box">问：显存只放得下这么多权重时，算力该怎么花？</span></div>
+      <div class="dia-flow"><span class="dia-box">答：最优圈数 ∝ C<sup>0.40</sup>，最优数据量 ∝ C<sup>0.78</sup>；预算大时循环胜过只加数据</span></div>
+    </div>
+    <div>
+      <div class="dia-box pred"><b>Iso-Depth：固定执行深度</b><small>都执行 20 层；同宽度时每 token 训练、推理算力和 KV 相同；循环越多，独立参数越少</small></div>
+      <div class="dia-flow"><span class="dia-box">问：一圈循环能顶几块独立的层？</span></div>
+      <div class="dia-flow"><span class="dia-box">答：r 圈 ≈ r<sup>0.46</sup> 块；算力相同时循环吃亏</span></div>
+    </div>
+    <div>
+      <div class="dia-box pred"><b>SMELT：三项一起对齐（MoE）</b><small>每 token 算力、总参数、KV 缓存都对齐；收窄付计算，加专家补参数，压注意力头补 KV</small></div>
+      <div class="dia-flow"><span class="dia-box">问：预算全部对齐后，循环本身还有没有好处？</span></div>
+      <div class="dia-flow"><span class="dia-box">答：中间一半循环两遍，省 6.8–18.0% 训练算力（约 0.01 nats）</span></div>
+    </div>
+  </div>
+  <div class="dia-note">怎么看：三列是三条扩展律，每列第一格写它固定了什么、让什么随圈数变化，第二格是它要回答的问题，第三格是答案。三者回答的是三个不同的问题，结论并不冲突：固定参数时循环是“花更多算力换更低损失”的一条路；固定算力时，循环在稠密模型里要用参数去换，换不回来；只有在 MoE 里把参数补回来，才看到一个小的净收益。本站示意图，依据 <a href="parcae.html#n-6">Parcae §6</a>、<a href="iso-depth-scaling.html#n-2">Iso-Depth §2</a>、<a href="smelt.html#n-3-2">SMELT §3.2</a>。</div>
+</div>
+
+<p><b>Parcae 的扩展律（固定参数）。</b>在 140M 和 370M 两个尺寸上固定参数和训练算力、扫描平均圈数，最优圈数按 \(C^{0.40}\)、最优数据量按 \(C^{0.78}\) 随算力增长：算力扩大 10 倍时，最优圈数约扩大 2.5 倍，数据约扩大 6 倍（推算）。和参数相同但不循环、把算力全用来看数据的模型比，预算较大时循环更好（Core 高 1.2–2.0 分），预算较小时不循环反而更好（<a href="parcae.html#n-6-4">§6.4</a>）。它回答的是“权重内存固定时算力怎么花”，不回答“同样的算力，循环和更大的普通模型谁好”。</p>
+
+<p><b>Iso-Depth 的汇率 \(\varphi\)（固定深度）。</b><a href="iso-depth-scaling.html#n-0">Iso-Depth</a> 让四种模型（循环 \(r=1,2,4,8\) 圈）每个 token 都恰好执行 20 层：同宽度时，四者的训练算力、推理算力和 KV 缓存几乎相同，唯一的区别是共享越多、独立参数越少。作者在 6 个算力预算上训练了 116 个模型，拟合出一条把圈数写进去的扩展律，参数项写成 \(N_{\text{once}}+r^{\varphi}N_{\text{rec}}\)：只用一次的前奏、尾声参数照常计，循环块的参数乘上 \(r^{\varphi}\)。拟合得到 \(\varphi=0.46\)，95% 置信区间 0.41–0.53（<a href="iso-depth-scaling.html#n-4-3">§4.3</a>）。</p>
+<p>这个数该怎么读？\(\varphi=1\) 表示循环一圈和一组独立的层一样值钱；\(\varphi=0\) 表示多转几圈完全没用；0.46 表示 \(r\) 圈合起来只值 \(r^{0.46}\) 块：2 圈约 1.38 块，4 圈约 1.89 块，8 圈约 2.60 块，而它们分别花了 2、4、8 块的计算。换成模型大小（<a href="iso-depth-scaling.html#n-3-3">§3.3</a>）：一个循环 4 圈、独立参数 410M 的模型，用同样多的 token 训练，损失和一个 580M 的普通模型相当，训练成本却和一个 1B 的普通模型一样；反过来说，要达到同样的损失，循环模型要多付约 1.8 倍的训练算力，换来的是权重内存只占 41%。注意 \(\varphi\) 不是“每一圈值 0.46 块”，它是一个指数，边际收益随圈数递减。</p>
+
+<div class="dia">
+  <div class="dia-title">图：r 圈循环折合几块独立的层（不同训练配方下的 φ，以及理论模型的 1/2）</div>
+  <svg class="dg" viewBox="0 0 960 300" role="img" aria-label="r 等于 2、4、8 时，循环花掉的计算是 r 块，而按 phi 折合的独立块数远小于 r：phi 为 0.65、0.46、0.38 时分别约为 1.57、1.38、1.30；2.46、1.89、1.69；3.86、2.60、2.20" style="--dg-min:720px">
+    <line x1="80" y1="270" x2="620" y2="270" class="grid-ln"/><text x="72" y="270" class="t-r t-xs">0</text>
+    <line x1="80" y1="214" x2="620" y2="214" class="grid-ln"/><text x="72" y="214" class="t-r t-xs">2</text>
+    <line x1="80" y1="158" x2="620" y2="158" class="grid-ln"/><text x="72" y="158" class="t-r t-xs">4</text>
+    <line x1="80" y1="102" x2="620" y2="102" class="grid-ln"/><text x="72" y="102" class="t-r t-xs">6</text>
+    <line x1="80" y1="46" x2="620" y2="46" class="grid-ln"/><text x="72" y="46" class="t-r t-xs">8</text>
+    <line x1="80" y1="270" x2="620" y2="270" class="axis"/><line x1="80" y1="270" x2="80" y2="40" class="axis"/>
+    <text x="24" y="158" class="t-c t-sm" transform="rotate(-90 24 158)">折合几块独立的层</text>
+
+    <rect x="133" y="214" width="24" height="56" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+    <rect x="163" y="226" width="24" height="44" style="fill:var(--c-act)"/>
+    <rect x="193" y="231.4" width="24" height="38.6" style="fill:var(--c-pred)"/>
+    <rect x="223" y="233.6" width="24" height="36.4" style="fill:var(--c-loss)"/>
+    <text x="145" y="208" class="t-c t-xs">2</text><text x="175" y="220" class="t-c t-xs">1.57</text><text x="205" y="225.4" class="t-c t-xs">1.38</text><text x="235" y="227.6" class="t-c t-xs">1.30</text>
+    <line x1="252" y1="230.4" x2="272" y2="230.4" style="stroke:var(--c-tgt);stroke-width:1.8;stroke-dasharray:4 3"/><path d="M262,225.4 L267,230.4 L262,235.4 L257,230.4 Z" style="fill:var(--c-tgt)"/>
+
+    <rect x="303" y="158" width="24" height="112" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+    <rect x="333" y="201.1" width="24" height="68.9" style="fill:var(--c-act)"/>
+    <rect x="363" y="217.1" width="24" height="52.9" style="fill:var(--c-pred)"/>
+    <rect x="393" y="222.7" width="24" height="47.3" style="fill:var(--c-loss)"/>
+    <text x="315" y="152" class="t-c t-xs">4</text><text x="345" y="195.1" class="t-c t-xs">2.46</text><text x="375" y="211.1" class="t-c t-xs">1.89</text><text x="405" y="216.7" class="t-c t-xs">1.69</text>
+    <line x1="422" y1="214" x2="442" y2="214" style="stroke:var(--c-tgt);stroke-width:1.8;stroke-dasharray:4 3"/><path d="M432,209 L437,214 L432,219 L427,214 Z" style="fill:var(--c-tgt)"/>
+
+    <rect x="473" y="46" width="24" height="224" style="fill:var(--surface-3);stroke:var(--border-strong)"/>
+    <rect x="503" y="161.9" width="24" height="108.1" style="fill:var(--c-act)"/>
+    <rect x="533" y="197.2" width="24" height="72.8" style="fill:var(--c-pred)"/>
+    <rect x="563" y="208.4" width="24" height="61.6" style="fill:var(--c-loss)"/>
+    <text x="485" y="40" class="t-c t-xs">8</text><text x="515" y="155.9" class="t-c t-xs">3.86</text><text x="545" y="191.2" class="t-c t-xs">2.60</text><text x="575" y="202.4" class="t-c t-xs">2.20</text>
+    <line x1="592" y1="190.8" x2="612" y2="190.8" style="stroke:var(--c-tgt);stroke-width:1.8;stroke-dasharray:4 3"/><path d="M602,185.8 L607,190.8 L602,195.8 L597,190.8 Z" style="fill:var(--c-tgt)"/>
+    <text x="262" y="246" class="t-c t-xs" style="fill:var(--c-tgt)">1.41</text><text x="432" y="230" class="t-c t-xs" style="fill:var(--c-tgt)">2.00</text><text x="602" y="207" class="t-c t-xs" style="fill:var(--c-tgt)">2.83</text>
+
+    <text x="190" y="288" class="t-c t-sm">r = 2</text>
+    <text x="360" y="288" class="t-c t-sm">r = 4</text>
+    <text x="530" y="288" class="t-c t-sm">r = 8</text>
+
+    <rect x="650" y="56" width="14" height="12" style="fill:var(--surface-3);stroke:var(--border-strong)"/><text x="672" y="62" class="t-xs">r 圈花掉的计算（折合 r 块）</text>
+    <rect x="650" y="80" width="14" height="12" style="fill:var(--c-act)"/><text x="672" y="86" class="t-xs">φ = 0.65：循环边界加超连接</text>
+    <rect x="650" y="104" width="14" height="12" style="fill:var(--c-pred)"/><text x="672" y="110" class="t-xs">φ = 0.46：基线配方（完整反传）</text>
+    <rect x="650" y="128" width="14" height="12" style="fill:var(--c-loss)"/><text x="672" y="134" class="t-xs">φ = 0.38：改用截断反传</text>
+    <path d="M657,153 L662,158 L657,163 L652,158 Z" style="fill:var(--c-tgt)"/><text x="672" y="158" class="t-xs">紫色菱形：理论模型的 r^(1/2)（只是阶）</text>
+    <text x="650" y="196" class="t-xs">灰柱和彩柱的差距，就是</text>
+    <text x="650" y="212" class="t-xs">“参数共享成本”：花了 r 块的计算，</text>
+    <text x="650" y="228" class="t-xs">只换回 r^φ 块的能力。</text>
+  </svg>
+  <div class="dia-note">怎么看：每组四根柱子对应一个圈数 r。灰柱是这 r 圈花掉的计算，折合 r 块独立的层；三根彩柱是按不同训练配方测得的 \(\varphi\) 算出的 \(r^{\varphi}\)，也就是这 r 圈实际“值”几块；每组右侧的紫色菱形是理论投稿“循环能替代多少参数”在它的逼近论模型里得到的 \(r^{1/2}\)（只代表阶，常数未定）。\(\varphi\) 取自 <a href="iso-depth-scaling.html#n-4-3">Iso-Depth §4.3</a> 和 <a href="iso-depth-scaling.html#n-5-1">§5.1–5.2</a>，柱高按两位小数推算；理论对照见 <a href="loops-vs-parameters.html#n-7-4">该页 §7.4</a>。本站根据定义重画。</div>
+</div>
+
+<p>Iso-Depth 还把 \(\varphi\) 当作诊断工具（<a href="iso-depth-scaling.html#n-5-1">§5</a>）。截断反传让所有运行的验证损失都下降了，看上去是好方法，但 \(\varphi\) 从 0.46 降到 0.38：省下约 30% 的训练计算，换成了约 31.5% 更多的 token，循环本身却训得更差了，最优模型也变得更宽、推理更贵。超连接则把 \(\varphi\) 提到 0.65，最优模型变窄，是真正的结构改进。光看验证损失分不出这两种情况。它的边界也要记住：最大的对照实验约 11 亿参数、470 亿 token；只有一种配方（前奏 2 层、尾声 2 层、有效深度 20、FineWeb-Edu）；下游评测里，知识类任务跟着损失走，推理类任务在这个规模上分辨不出架构差异（<a href="iso-depth-scaling.html#n-6-1">§6.1</a>）；而且没有公开代码，尚无独立复现。</p>
+
+<p><b>SMELT：三项一起对齐（MoE）。</b>SMELT 对 Iso-Depth 提出一个批评：固定计算量时，循环模型被迫少存了参数，所以它测到的落后，可能反映的是“参数变少”，而不是循环本身不好。<a href="smelt.html#n-3-2">SMELT</a> 用 MoE 把三项预算同时对齐：循环多花的计算，靠把模型收窄来抵消；收窄损失的参数，靠增加专家数量补回来（专家多了，存的参数多，但每个 token 仍只用其中几个）；多出来的 KV 缓存，靠更小的注意力头和更高的分组比例压回去。对齐误差是计算 3.9% 以内、总参数 1% 以内、KV 缓存 4% 以内。三组消融定下的配方是：只循环中间一半的层，循环两遍（三遍、四遍都更差，因为预算封顶后每多一遍都要用更窄的模型换，见 <a href="smelt.html#n-3-5">§3.5</a>）。在 100M 到 1.6B 激活参数（最大总参数约 54B）的网格上，SMELT 每一格的损失都更低；按分别拟合的扩展律，在 \(10^{20}\) FLOPs 处省 6.8–10.0% 的训练算力，在 \(10^{21}\) 处省 14.7–18.0%（<a href="smelt.html#n-4-3">§4.3</a>）。</p>
+<p>这个结果要配着两句话读。第一，收益是真实但很小的：按论文自己的系数推算，\(10^{21}\) FLOPs 处 14.7% 的算力节省，对应前沿上约 0.01 nats 的损失差，和拟合误差同一个量级；之所以“看起来”有 15%，是因为前沿在对数算力坐标上越来越平，同样 0.01 nats 的差距要多花很多算力才能追上。第二，它没有推翻 Iso-Depth：在稠密模型里，“计算相同”就意味着“参数更少”，这是结构的事实，不是实验设计的瑕疵；SMELT 的结论只适用于 MoE（<a href="smelt.html#n-5-4">§5.4</a>）。SMELT 精读页还提到另一项 MoE 研究：当不循环的 MoE 对手多存了约一倍参数时，循环的 MoE 在损失上仍然不如它。参数是否对齐，会直接翻转结论。</p>
+
+<h4 id="n-5-6">5.6 理论能说什么：存储与调用的乘积（循环能替代多少参数）</h4>
+<p><a href="loops-vs-parameters.html#n-0">这篇纯理论投稿</a>（ICLR 2027 匿名）用逼近论问同一个问题：用 \(J\) 个固定大小的 ReLU 模块、总共调用 \(T\) 次，最好能把 \(d\) 维的 Lipschitz 函数逼近到什么程度？主定理说，最坏情况的误差恰好是 \((JT)^{-1/d}\) 的阶，上下界相同（<a href="loops-vs-parameters.html#n-4-1">§4.1</a>）。所以在这个模型里，存储和计算以乘积的形式决定精度：模块少一半，调用多一倍，误差的阶不变。但如果固定调用次数（也就是固定计算），共享参数会让误差多出 \((T/J)^{1/d}\) 倍（<a href="loops-vs-parameters.html#n-4-3">§4.3</a>），这正是“循环的好处只在参数量固定时出现”的理论版本。它还证明调用顺序有讲究：先把大部分调用花在少数几个模块上、很晚才见到后面的模块，就保不住这条前沿（<a href="loops-vs-parameters.html#n-5-3">§5.3</a>）。</p>
+<p>精读页做了一个有趣的换算（推算）：在这个理论模型里，全部模块参与循环时，循环 \(r\) 次在阶的意义上相当于 \(r^{1/2}\) 倍的独立模块，也就是 \(\varphi=1/2\)，恰好落在 Iso-Depth 的置信区间里。但这只能算一个巧合：理论衡量的是最坏函数的一致误差，Iso-Depth 是语言模型的平均损失；理论的 1/2 依赖极高精度的权重和随目标跳跃的取值；经验的 \(\varphi\) 随配方在 0.38 到 0.65 之间变动，已经超过 1/2。理论常数也很大：按附录的显式常数推算，\(d=2\) 时 \(JT\) 要超过约 \(2.7\times10^4\)，上界才开始提供信息（<a href="loops-vs-parameters.html#n-7-4">§7.4</a>）。</p>
+<div class="note-warn">“Parcae 说循环有用、Iso-Depth 说循环吃亏、SMELT 说循环省算力”并不是三个互相矛盾的结论，而是三个不同问题的答案：分别固定了参数、执行深度和全部三项预算。引用其中任何一个数时，都要连同它固定的东西一起引用。</div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section class="note">
+<h3 id="n-6">6 循环 × 扩散语言模型：一步之内多算，还是步与步之间多传</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散语言模型本来就要把同一个网络调用几十到上千次，它为什么还需要“循环”？本类里同时属于“扩散 LLM”分类的五篇论文，“循环”分别指什么？各自多花了哪本账，换来了什么？</div>
+
+<div class="note-pre"><b>先补一点背景：掩码扩散语言模型怎样生成文字。</b>
+<p>掩码扩散模型先摆出一张长度固定、全是 [MASK] 的“画布”，然后分很多步：每一步把整张画布送进一个双向 Transformer，网络为每个被遮住的位置给出一个词表上的分布，再挑一部分位置“提交”成具体的词，其余留到下一步。步数越多，每步同时提交的位置越少，“各自独立地猜”造成的冲突越少，质量越好，但前向次数（NFE）也越多。从零训练这类模型的代表是 <a href="mdlm.html">MDLM</a>；另一条路线是把现成的自回归模型改造成“块扩散”，块与块之间从左往右写，块内并行去噪，见 <a href="block-diffusion.html">Block Diffusion</a>、<a href="sdar.html">SDAR</a>、<a href="fast-dllm-v2.html">Fast-dLLM v2</a> 的精读。</p></div>
+
+<h4 id="n-6-1">6.1 两种“循环”</h4>
+<p>在扩散语言模型里，“循环”有两种完全不同的意思（五篇精读的开头都专门做了区分，例如 <a href="loopmdm.html#n-1-1">LoopMDM §1.1</a>、<a href="loopholing.html#n-0-1">Loopholing</a>）。第一种是<b>深度方向的循环</b>：在一个去噪步之内，把同一组层反复算几遍再输出这一步的预测，步与步之间仍然只传离散的 token。打个比方，这是“同一盘棋多想几遍再落子”。它的代价很直接：每一步的计算变成约 \(S\) 倍，而生成要走很多步，整段生成的计算也乘上 \(S\)。LoopMDM、R-MDM、ALoDLM 属于这一种，Loop-Distill 也是，但它的循环只发生在训练时。第二种是<b>跨去噪步的循环</b>：每一步网络只算一遍，但把这一步采样之前的连续状态带到下一步，相当于“把上一步的思路笔记带进下一步”，几乎不增加推理计算。Loopholing 属于这一种。</p>
+
+<div class="dia">
+  <div class="dia-title">示意图：扩散语言模型里的三种“循环”，代价落在不同的账上</div>
+  <svg class="dg" viewBox="0 0 960 290" role="img" aria-label="左：一步之内循环，同一组层算 S 遍再提交，步间只传 token；中：跨去噪步传隐状态 h；右：只在训练时让教师浅层多算几遍，再蒸馏回学生" style="--dg-min:760px">
+    <line x1="320" y1="10" x2="320" y2="280" class="frame"/>
+    <line x1="640" y1="10" x2="640" y2="280" class="frame"/>
+
+    <text x="160" y="20" class="t-c t-b">① 一步之内循环</text>
+    <text x="160" y="38" class="t-c t-xs">LoopMDM · R-MDM · ALoDLM</text>
+    <g class="data"><rect x="30" y="52" width="260" height="30" rx="6" class="box"/></g>
+    <text x="160" y="67" class="t-c t-sm">第 k 步画布：部分位置是 [MASK]</text>
+    <path d="M160,82 V98" class="edge"/>
+    <g class="pred"><rect x="70" y="100" width="180" height="34" rx="6" class="box"/></g>
+    <text x="160" y="117" class="t-c t-sm">循环块（同一组层）</text>
+    <path d="M250,108 C282,108 282,126 252,126" class="edge pred"/>
+    <text x="284" y="117" class="t-xs" style="fill:var(--c-pred)">×S</text>
+    <path d="M160,134 V150" class="edge"/>
+    <rect x="30" y="152" width="260" height="30" rx="6" class="box"/>
+    <text x="160" y="167" class="t-c t-sm">读出 → 提交一部分位置</text>
+    <path d="M160,182 V206" class="edge"/>
+    <text x="168" y="195" class="t-xs">只传离散 token</text>
+    <g class="data"><rect x="30" y="208" width="260" height="30" rx="6" class="box"/></g>
+    <text x="160" y="223" class="t-c t-sm">第 k+1 步画布</text>
+    <text x="160" y="258" class="t-c t-xs">每一步的计算 ≈ S 倍，</text>
+    <text x="160" y="274" class="t-c t-xs">代价落在推理上</text>
+
+    <text x="480" y="20" class="t-c t-b">② 跨去噪步传状态</text>
+    <text x="480" y="38" class="t-c t-xs">Loopholing</text>
+    <g class="enc"><rect x="350" y="52" width="260" height="34" rx="6" class="box"/></g>
+    <text x="480" y="69" class="t-c t-sm">第 k 步：网络只算 1 遍</text>
+    <path d="M410,86 V150" class="edge"/>
+    <text x="416" y="112" class="t-xs">token</text>
+    <text x="416" y="126" class="t-xs">（采样后）</text>
+    <path d="M550,86 V150" class="edge enc sg"/>
+    <text x="556" y="112" class="t-xs" style="fill:var(--c-enc)">隐状态 h</text>
+    <text x="556" y="126" class="t-xs" style="fill:var(--c-enc)">（采样前）</text>
+    <g class="enc"><rect x="350" y="152" width="260" height="34" rx="6" class="box"/></g>
+    <text x="480" y="169" class="t-c t-sm">第 k+1 步：网络只算 1 遍</text>
+    <path d="M410,186 V206" class="edge"/>
+    <path d="M550,186 V206" class="edge enc sg"/>
+    <rect x="350" y="208" width="260" height="28" rx="6" class="box"/>
+    <text x="480" y="222" class="t-c t-sm">第 k+2 步 ……</text>
+    <text x="480" y="258" class="t-c t-xs">每步计算几乎不变；训练多约 30%，</text>
+    <text x="480" y="274" class="t-c t-xs">代价落在训练上</text>
+
+    <text x="800" y="20" class="t-c t-b">③ 只在训练时循环</text>
+    <text x="800" y="38" class="t-c t-xs">Loop-Distill</text>
+    <g class="enc"><rect x="670" y="52" width="270" height="32" rx="6" class="box"/></g>
+    <text x="805" y="68" class="t-c t-sm">学生：每层算 1 遍（部署的就是它）</text>
+    <g class="tgt"><rect x="670" y="110" width="270" height="44" rx="6" class="box"/></g>
+    <text x="805" y="125" class="t-c t-sm">教师：同一套权重，浅层 2–3 层</text>
+    <text x="805" y="143" class="t-c t-sm">各连算 2–3 遍，不求梯度</text>
+    <path d="M805,110 V88" class="edge loss"/>
+    <text x="805" y="172" class="t-c t-xs">箭头：[MASK] 位置的隐藏状态蒸馏，</text>
+    <text x="805" y="186" class="t-c t-xs">只在教师损失更低时打开</text>
+    <g class="act"><rect x="670" y="206" width="270" height="32" rx="6" class="box"/></g>
+    <text x="805" y="222" class="t-c t-sm">部署：只留学生，推理成本不变</text>
+    <text x="805" y="258" class="t-c t-xs">推理不多花；训练多约 10% 墙钟，</text>
+    <text x="805" y="274" class="t-c t-xs">代价落在训练上</text>
+  </svg>
+  <div class="dia-note">怎么看：三栏是三种做法。左栏在一个去噪步之内把循环块算 S 遍，步与步之间只传离散 token，所以推理的每一步都更贵。中栏每步只算一遍，实线是采样出的 token（每个位置只剩一个词），虚线是绕过采样、直接交给下一步的连续隐状态。右栏的循环只存在于训练时的教师支路里，部署的模型和原来完全一样。最下面一行写的是代价落在哪本账上。本站示意图，依据各精读页的“两种循环”小节。</div>
+</div>
+
+<p>为什么一步之内的循环会有用？<a href="recursive-mdm.html#n-5-2">R-MDM</a> 给出了这一支最清楚的框架。并行解码的误差可以精确拆成两块：一块是“同时提交的几个位置彼此相关、却被独立采样”造成的<b>依赖误差</b>，它只由“每步提交哪些位置”决定，循环再多也动不了它，只有少提交、多走步才能降低；另一块是模型的每个位置的分布偏离真实分布造成的<b>保真误差</b>，循环恰好能降低它。步数少时每步提交很多位置，保真误差被放大，循环特别有用；步数多时循环的空间就小了。</p>
+
+<h4 id="n-6-2">6.2 Loopholing：在“采样墙”上开一条通路（跨步）</h4>
+<p><b>当时卡在哪。</b>离散扩散的每一步，网络算出的是很丰富的东西：每个位置一个完整的分布，还有最后一层的隐藏向量；可一旦采样，留在画布上的只有一个词，下一步只能从这个词重新推断。<a href="loopholing.html#n-3-1">Loopholing</a> 把这个现象叫作采样墙。</p>
+<p><b>核心想法。</b>每一步照常采样，同时把网络最后一层的隐状态原样交给下一步，和下一步的词嵌入加在一起。训练时不展开整条生成链，而是借用自条件化：在同一张带噪画布上先算一遍（输入的隐状态为零、不求梯度），把得到的隐状态当作“上一步传来的”再算第二遍，只对第二遍求损失（<a href="loopholing.html#n-3-3">§3.3</a>）。训练时间因此多约 30%，推理几乎不多花。</p>
+<p><b>结果与份量。</b>在 1.69 亿参数、OWT 上训练的模型上，生成 1024 个 token、走 1024 步时，生成困惑度从 MDLM 的 108.94 降到 49.13；均匀态版本从 73.95 降到 28.76，低于自回归基线的 34.40，但熵也略低（<a href="loopholing.html#n-6-3">§6.3</a>）。和基线的比较对齐了骨干、参数、数据和训练步数，比较干净；但步数很少时优势会反转：32 步时 LDDM-M 是 248.02，反而比 MDLM 的 198.72 差。精读页的一个读法是：基线多走的步数大多是画布一个词都没变的“空转步”，Loopholing 把这些步变成了跨步累积的计算。它被 ICLR 2026 接收，代码公开，但规模只到 4.24 亿参数（<a href="loopholing.html#n-6-7">§6.7</a>）。</p>
+
+<h4 id="n-6-3">6.3 LoopMDM：只循环靠前的两层（一步之内）</h4>
+<p><b>核心想法。</b>在 12 层、1.7 亿参数的掩码扩散模型里，只把第 1、2 层反复过 \(S\) 遍，训练时每一步随机抽 1 到 12 圈（<a href="loopmdm.html#n-3-1">§3.1</a>）。作者让它和同尺寸的 MDM 总训练 FLOPs 相同，所以 LoopMDM 每步更贵、步数更少，只看了约一半的数据（<a href="loopmdm.html#n-3-4">§3.4</a>）。</p>
+<p><b>头条结果。</b>评测时转 6 圈以上，LoopMDM 在三个语料上达到基线最终 NLL 所需的训练 FLOPs 少 2.34–3.34 倍（<a href="loopmdm.html#n-4-2">§4.2</a>）；在 TinyGSM 上训练的 1.25 亿参数数学模型，转 16 圈时 GSM8K 比 14 层基线高 8.5 个点，比每步训练 FLOPs 相同的 21 层基线高 3.4 个点（<a href="loopmdm.html#n-5">§5</a>）。</p>
+<p><b>按推理算力重新对齐。</b>这些比较都对齐了训练算力，却没有对齐推理算力：评测时每个去噪步要过 22 到 58 层次，是基线的 1.8 到 4.8 倍。精读页把生成困惑度换算到“生成一个样本要过多少层次”上（下图），结论变成：同样的推理计算，拿去让不循环的 MDM 多走去噪步，通常比拿去多转几圈更划算（<a href="loopmdm.html#n-4-3">§4.3</a>）。在 GSM8K 上，每次前向计算最接近的一对（转 4 圈的 20 层次对 21 层基线）大致打平。</p>
+
+<div class="dia">
+  <div class="dia-title">图：生成困惑度对“生成一个样本的总推理计算”（LoopMDM 与同尺寸 MDM）</div>
+  <svg class="dg" viewBox="0 0 960 306" role="img" aria-label="横轴是生成一个样本经过的层次数，对数刻度；纵轴是生成困惑度。同样的计算下，不循环的 MDM 多走去噪步通常比 LoopMDM 多转圈更低" style="--dg-min:720px">
+    <line x1="80" y1="244.4" x2="700" y2="244.4" class="grid-ln"/><text x="72" y="244.4" class="t-r t-xs">40</text>
+    <line x1="80" y1="193.3" x2="700" y2="193.3" class="grid-ln"/><text x="72" y="193.3" class="t-r t-xs">60</text>
+    <line x1="80" y1="142.2" x2="700" y2="142.2" class="grid-ln"/><text x="72" y="142.2" class="t-r t-xs">80</text>
+    <line x1="80" y1="91.1" x2="700" y2="91.1" class="grid-ln"/><text x="72" y="91.1" class="t-r t-xs">100</text>
+    <line x1="80" y1="40" x2="700" y2="40" class="grid-ln"/><text x="72" y="40" class="t-r t-xs">120</text>
+    <line x1="80" y1="270" x2="700" y2="270" class="axis"/><line x1="80" y1="270" x2="80" y2="34" class="axis"/>
+    <line x1="178.1" y1="270" x2="178.1" y2="274" class="axis"/><text x="178.1" y="284" class="t-c t-xs">1 千</text>
+    <line x1="276.2" y1="270" x2="276.2" y2="274" class="axis"/><text x="276.2" y="284" class="t-c t-xs">2 千</text>
+    <line x1="405.8" y1="270" x2="405.8" y2="274" class="axis"/><text x="405.8" y="284" class="t-c t-xs">5 千</text>
+    <line x1="503.9" y1="270" x2="503.9" y2="274" class="axis"/><text x="503.9" y="284" class="t-c t-xs">1 万</text>
+    <line x1="602" y1="270" x2="602" y2="274" class="axis"/><text x="602" y="284" class="t-c t-xs">2 万</text>
+    <text x="390" y="298" class="t-c t-xs">生成一个样本经过的 Transformer 层次 = 去噪步数 × 每步层数（对数轴，推算）</text>
+    <text x="24" y="155" class="t-c t-sm" transform="rotate(-90 24 155)">生成困惑度（越低越好）</text>
+
+    <polyline points="140.7,48.4 238.8,130.2 336.9,143.7 435.0,204.8 533.0,237.9" style="fill:none;stroke:var(--c-data);stroke-width:2.4"/>
+    <polyline points="226.5,76.8 324.6,150.5 422.7,182.9 520.7,221.0 618.8,246.4" style="fill:none;stroke:var(--c-enc);stroke-width:2"/>
+    <polyline points="288.1,93.5 386.2,172.3 484.2,202.4 582.3,223.6 680.4,248.2" style="fill:none;stroke:var(--c-pred);stroke-width:2"/>
+    <g style="fill:var(--c-data)"><circle cx="140.7" cy="48.4" r="3.5"/><circle cx="238.8" cy="130.2" r="3.5"/><circle cx="336.9" cy="143.7" r="3.5"/><circle cx="435.0" cy="204.8" r="3.5"/><circle cx="533.0" cy="237.9" r="3.5"/></g>
+    <g style="fill:var(--c-enc)"><circle cx="226.5" cy="76.8" r="3"/><circle cx="324.6" cy="150.5" r="3"/><circle cx="422.7" cy="182.9" r="3"/><circle cx="520.7" cy="221.0" r="3"/><circle cx="618.8" cy="246.4" r="3"/></g>
+    <g style="fill:var(--c-pred)"><circle cx="288.1" cy="93.5" r="3"/><circle cx="386.2" cy="172.3" r="3"/><circle cx="484.2" cy="202.4" r="3"/><circle cx="582.3" cy="223.6" r="3"/><circle cx="680.4" cy="248.2" r="3"/></g>
+    <text x="132.7" y="48.4" class="t-r t-xs">64 步</text>
+    <text x="230.8" y="130.2" class="t-r t-xs">128</text>
+    <text x="328.9" y="143.7" class="t-r t-xs">256</text>
+    <text x="427" y="204.8" class="t-r t-xs">512</text>
+    <text x="525" y="252" class="t-r t-xs">1024</text>
+    <text x="296" y="93.5" class="t-xs" style="fill:var(--c-pred)">64 步</text>
+    <text x="394" y="172.3" class="t-xs" style="fill:var(--c-pred)">128</text>
+    <text x="492" y="202.4" class="t-xs" style="fill:var(--c-pred)">256</text>
+    <text x="590" y="223.6" class="t-xs" style="fill:var(--c-pred)">512</text>
+    <text x="688" y="244" class="t-xs" style="fill:var(--c-pred)">1024</text>
+
+    <line x1="720" y1="64" x2="744" y2="64" style="stroke:var(--c-data);stroke-width:2.4"/><text x="750" y="64" class="t-xs">MDM 基线（每步 12 层次）</text>
+    <line x1="720" y1="88" x2="744" y2="88" style="stroke:var(--c-enc);stroke-width:2"/><text x="750" y="88" class="t-xs">LoopMDM 转 6 圈（每步 22 层次）</text>
+    <line x1="720" y1="112" x2="744" y2="112" style="stroke:var(--c-pred);stroke-width:2"/><text x="750" y="112" class="t-xs">LoopMDM 转 12 圈（每步 34 层次）</text>
+    <text x="720" y="150" class="t-xs">约 1.2 万层次处：</text>
+    <text x="720" y="166" class="t-xs">MDM 走 1024 步 → 42.6</text>
+    <text x="720" y="182" class="t-xs">转 6 圈走 512 步 → 49.2</text>
+    <text x="720" y="206" class="t-xs">同一横坐标附近，</text>
+    <text x="720" y="222" class="t-xs">越低的曲线越划算。</text>
+  </svg>
+  <div class="dia-note">怎么看：每条线是一种模型，线上的五个点从左到右依次是 64、128、256、512、1024 个去噪步。横坐标把“步数 × 每步要过的层数”算成生成一个样本的总计算（只数 Transformer 层，推算），纵坐标是论文报告的生成困惑度（原文表 1，越低越好）。如果只比同一个步数，橙线总在灰线下方，这是论文的读法；按横坐标对齐以后，灰线在大部分范围内更低，也就是把推理计算花在“多走几步去噪”上更划算。本站根据 <a href="loopmdm.html#n-4-3">LoopMDM 精读 §4.3</a> 的数字重画；转 1 圈的曲线和灰线几乎重合，未画出。</div>
+</div>
+
+<h4 id="n-6-4">6.4 R-MDM：把循环当作扩散模型的第三条扩展轴</h4>
+<p><a href="recursive-mdm.html#n-0">R-MDM</a> 在每个去噪步里把整个共享块循环 \(L\) 遍，并系统地比了三种对齐（<a href="recursive-mdm.html#n-4-5">§4.5</a>）。同参数时，循环越多越好、步数越少越明显：数独只走 5 步时，基线 65.2%，循环 5 遍 93.6%（<a href="recursive-mdm.html#n-4-1">§4.1</a>）。同 FLOPs 时（循环 \(L\) 遍的 \(K\) 层块对不循环的 \(KL\) 层模型，每次前向计算、步数和训练步数都相同），数独上循环模型几乎全面占优，Countdown 上步数少时深的普通模型反而更好（Countdown-4 走 10 步：43.6% 对 58.0%），而且深层基线没有单独调参（<a href="recursive-mdm.html#n-4-2">§4.2</a>）。同前向次数时，10 次前向下普通模型走 10 步是 85.0%，循环模型一步循环 10 遍是 94.2%，但这个循环模型用了课程训练，训练算力约是普通模型的 5.5 倍（推算，<a href="recursive-mdm.html#n-4-3">§4.3</a>）。在 6.1 节的误差分解基础上，作者用熵同时决定“这一步再循环一遍”还是“提交哪些位置”（<a href="recursive-mdm.html#n-7-3">§7.3</a>）。模型从 550 万到 1.61 亿参数，任务全是有明确约束的填空，没有开放式文本生成，也没有和自回归模型比较（<a href="recursive-mdm.html#n-8-2">§8.2</a>）。</p>
+
+<h4 id="n-6-5">6.5 ALoDLM：一步之内按位置自适应地循环</h4>
+<p><a href="alodlm.html#n-0">ALoDLM</a> 把 Qwen3 中间的一段层做成循环核心（8B 版本是第 10–25 层），每一步去噪里最多跑 4 遍：每跑一遍就读出一次预测，有把握的位置立刻提交、变成普通 token 给别人当上下文，没把握的位置保留自己的隐藏状态进入下一遍，一个退出门决定这一步什么时候停；训练时把“每个位置在第几遍提交”当作隐变量（<a href="alodlm.html#n-3-1">§3.1</a>）。只做了 5B token 的监督微调，1.7B 和 8B 两个规模在 11 项基准上的平均分都高于所评测的扩散模型和对应的 Qwen3（65.5 对 63.8，80.3 对 78.5）；单请求时，GSM8K 上比 vLLM 上的 Qwen3-8B 快约 2.67 倍（612.4 对 229.3 token/s，<a href="alodlm.html#n-5-3">§5.3</a>）。</p>
+<p>精读页的掂量是（<a href="alodlm.html#n-5-6">§5.6</a>）：质量表用的是“一遍提交一个 token、从左到右”的解码，而 2.7 倍速度用的是并行提交，两者不是同一个设置；对 Qwen3 的 1.7–1.8 分优势落在评测流程本身的摆动范围之内（同一对模型 <a href="wedlm.html">WeDLM</a>-8B 和 Qwen3-8B 的先后顺序，在两套评测流程下会翻过来）；速度只在批大小为 1、只有 GSM8K 时测过，每个 token 的算术量约是自回归模型的 5–9 倍、KV 缓存是 2.33 倍（推算），高并发时谁快没有测；最关键的“同数据、不循环”对照缺失。代码和权重都已公开，这一点比同批多数工作好。</p>
+
+<h4 id="n-6-6">6.6 Loop-Distill：只在训练时循环，推理成本不变</h4>
+<p><a href="loop-distill.html#n-0">Loop-Distill</a>（ICLR 2027 匿名投稿）研究的是从自回归模型改造来的块扩散模型。作者发现，[MASK] 位置的隐藏状态在第 1 层被大幅改写（相对变化平均 69%），之后几层几乎不动（第 2 层只变 0.74%），像是“过早定型”。办法是训练时用同一套权重临时搭一个教师：把 2–3 个浅层各连续算 2–3 遍，不求梯度；只在教师的损失确实更低时，让学生在这几层、只在 [MASK] 位置上朝教师靠（<a href="loop-distill.html#n-4-1">§4.1</a>）。部署的模型结构、参数、每次前向的计算和 KV 缓存都与原来相同（<a href="loop-distill.html#n-4-4">§4.4</a>）。在两个 30B-A3B 模型、13 个评测上，平均分高约 2 分（GLM 2.05、Qwen 2.21），批大小为 1 时吞吐高约 11%（<a href="loop-distill.html#n-7">§7</a>）。没对齐的是训练：每步多一次不求梯度的前向，墙钟多约 10%，论文没有给“把这 10% 拿去多训对照组”的比较；块长 32 仍比块长 4 低约 10 分，大块并行的质量损失主要还在（<a href="loop-distill.html#n-10">§10</a>）。</p>
+<p><b>这一支的共同信号。</b>一步之内的深度循环让每一步更贵；一旦按推理算力对齐，收益要么大体消失（LoopMDM），要么需要额外的训练算力才能换来（R-MDM 的课程模型）。跨步传状态（Loopholing）和只在训练时循环（Loop-Distill）不增加推理成本，所以在推理这本账上更“干净”，但前者规模很小、在极少步数时反转，后者没有对齐训练成本。两类做法并不互斥，至今没有工作把它们叠加起来。</p>
+<div class="note-warn">在扩散模型里比较“同样的去噪步数”，并不等于比较“同样的推理计算”：一步之内循环 \(S\) 遍的模型，每一步都比基线贵约 \(S\) 倍。看到“步数受限时循环特别有用”，要先问推理算力是否也对齐了。</div>
+</section>
+
+<!-- ============================================================ 7 -->
+<section class="note">
+<h3 id="n-7">7 方法对比</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把前面各支的方法放在一起：它们各自循环的是什么、圈数怎么定、靠什么训练技巧？头条结论对齐了哪本账、没对齐哪本？扩散一支的五篇各把代价放在了哪里？</div>
+
+<h4 id="n-7-1">7.1 结构与训练配方</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>方法</th><th>循环什么</th><th>训练时圈数</th><th>推理时圈数</th><th>圈数由谁定</th><th>关键训练做法</th><th>规模</th></tr></thead>
+<tbody>
+<tr><td><a href="universal-transformers.html">UT</a></td><td>同一个块（编码器、解码器各一）</td><td>固定或 ACT</td><td>同训练</td><td>ACT，每个位置一个</td><td>—</td><td>翻译约 65M</td></tr>
+<tr><td><a href="reasoning-latent-thoughts.html">潜在思考</a></td><td>\(k\) 层整体（也试中间循环）</td><td>固定 \(L\)</td><td>同训练</td><td>固定</td><td>另有“层间相似”正则（不真循环）</td><td>1B，250B token</td></tr>
+<tr><td><a href="huginn.html">Huginn</a></td><td>中间 4 层（前奏 2、尾声 2）</td><td>随机，均值 33</td><td>任意，常用 32–64</td><td>零样本按收敛退出</td><td>只反传最后 8 圈；随机初始状态；拼接注入</td><td>3.5B，0.8T token</td></tr>
+<tr><td><a href="mixture-of-recursions.html">MoR</a></td><td>中间（Middle-Cycle）</td><td>最多 \(N_r\)=2–4</td><td>≤ \(N_r\)</td><td>路由器，每个 token</td><td>按圈缓存 KV；连续深度批处理</td><td>135M–1.7B</td></tr>
+<tr><td><a href="ouro.html">Ouro</a></td><td>整个 24 / 48 层</td><td>4（起初 8）</td><td>1–4，外推变差</td><td>退出门（熵正则）</td><td>两阶段：先联合训练，再只训退出门</td><td>1.4B / 2.6B，7.7T token</td></tr>
+<tr><td><a href="tiny-recursive-model.html">TRM</a></td><td>一个 2 层网络</td><td>6 + 1 次 × 3 轮 × ≤16 步</td><td>跑满 16 步</td><td>训练时 Q 头</td><td>一整轮完整反传；深度监督；EMA</td><td>5–19M，每任务单独训练</td></tr>
+<tr><td><a href="parcae.html">Parcae</a></td><td>中间三分之一</td><td>按序列随机（均值如 8）</td><td>约在训练均值处饱和</td><td>固定</td><td>负对角注入；前奏归一化；截断反传</td><td>140M–1.3B</td></tr>
+<tr><td><a href="iso-depth-scaling.html">Iso-Depth</a></td><td>中间（有效深度 20）</td><td>固定 1 / 2 / 4 / 8</td><td>同训练</td><td>固定</td><td>完整反传；线性注入</td><td>独立参数 ≤ 1.1B</td></tr>
+<tr><td><a href="smelt.html">SMELT</a></td><td>中间一半，两遍</td><td>2</td><td>2</td><td>固定</td><td>残差乘 \(1/r\)；加专家补参数；压注意力头补 KV</td><td>激活 100M–1.6B（MoE）</td></tr>
+<tr><td><a href="loop-mup.html">Loop-μP</a></td><td>整叠 \(L\) 层</td><td>\(N\)=1–8</td><td>同训练</td><td>固定</td><td>残差分支乘 \(a/(N\sqrt L)\)</td><td>≤ 438M</td></tr>
+<tr><td><a href="elastic-latent-recurrence.html">ELR</a></td><td>中间约一半</td><td>1–4 混合（同一次更新里）</td><td>1–4 任选</td><td>请求方指定</td><td>门控状态更新；单圈 rank 覆盖</td><td>4B / 30B-A3B</td></tr>
+<tr><td><a href="arloop.html">ARLoop</a></td><td>整叠</td><td>1–5</td><td>同训练，外推无用</td><td>固定</td><td>块注意力残差，窗口 3 块</td><td>140M–1.3B</td></tr>
+</tbody></table></div>
+<p>这张表能读出两条演化线。第一条是“循环哪一段”：从 UT、Ouro 的整体循环，逐渐收敛到“前奏—循环块—尾声”的中间循环；SMELT 的消融也显示循环中间一半好过循环全部。第二条是“圈数怎么定”：早期偏向让模型自己决定（UT 的 ACT、Ouro 的退出门、MoR 的路由器），但这些机制在批处理里都不容易真正省下墙钟时间；2026 年的工作更多回到固定圈数或请求方指定圈数，把精力放在“每一圈值多少”和“最低一档不吃亏”上。另外，截断反传从 Huginn、Parcae 的默认做法，变成了 Iso-Depth 明确指出会降低 \(\varphi\) 的做法，TRM 和 ELR 也都选择对整轮递归完整反传。</p>
+
+<h4 id="n-7-2">7.2 头条结论对齐了哪本账</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>方法</th><th>头条说法</th><th>参数</th><th>训练算力</th><th>每 token 推理算力</th><th>KV 缓存</th><th>数据</th><th>更稳妥的读法</th></tr></thead>
+<tbody>
+<tr><td><a href="universal-transformers.html#n-7-2">UT</a></td><td>翻译 +0.9 BLEU</td><td>同</td><td>未报告</td><td>约 4×（推算）</td><td>—</td><td>同</td><td>计算对齐时大致打平</td></tr>
+<tr><td><a href="huginn.html#n-5-5">Huginn</a></td><td>推理题随圈数大涨；“相当于 50B 的计算量”</td><td>0.5×（对 OLMo-2-7B）</td><td>≈ 1×</td><td>≈ 7×</td><td>未报告</td><td>不同</td><td>同训练算力时落后 OLMo-2-7B</td></tr>
+<tr><td><a href="mixture-of-recursions.html#n-7-w">MoR</a></td><td>同 FLOPs 下参数更少、略好；最高 2.06× 吞吐</td><td>0.53×（MoR-2）</td><td>同</td><td>≈ 0.77×</td><td>≈ 0.77×</td><td>多看 35%</td><td>稳定收益是参数效率；2.06× 属于更差的 MoR-4</td></tr>
+<tr><td><a href="ouro.html#n-5-6">Ouro</a></td><td>1.4B ≈ 4B，2–3 倍参数效率</td><td>0.36×</td><td>≈ 0.4×</td><td>1.25×</td><td>4×（默认）</td><td>7.7T 对 36T，内容不同</td><td>同推理算力的稠密双胞胎更强</td></tr>
+<tr><td><a href="tiny-recursive-model.html#n-5-4">TRM</a></td><td>7M 超过 HRM、超过大模型</td><td>约 HRM 的 1/4（不计编号表）</td><td>—</td><td>每监督步约 1.75× HRM</td><td>—</td><td>在评估题示范上训练</td><td>对 HRM 的提升可信；对大模型几乎无对齐</td></tr>
+<tr><td><a href="parcae.html#n-5-5">Parcae</a></td><td>Core +2.99；770M 补上 87.5% 差距</td><td>同（1.3B 对 1.3B）</td><td>≈ 2.44×</td><td>≈ 3.33×</td><td>≈ 3.33×</td><td>同</td><td>省的是权重内存，不是算力</td></tr>
+<tr><td><a href="iso-depth-scaling.html#n-4-4">Iso-Depth</a></td><td>\(\varphi=0.46\)</td><td>0.41×（r=4）</td><td>同</td><td>同</td><td>同</td><td>同</td><td>算力对齐时循环吃亏</td></tr>
+<tr><td><a href="smelt.html#n-5-4">SMELT</a></td><td>省 6.8–18.0% 训练算力</td><td>同</td><td>同</td><td>同</td><td>同</td><td>同</td><td>严格对齐后的小净收益，只在 MoE</td></tr>
+<tr><td><a href="elastic-latent-recurrence.html#n-4-5">ELR</a></td><td>1 圈追平，4 圈 +6.7 分</td><td>同</td><td>≈ 1.16×</td><td>1 圈同；4 圈首 token 2.33×</td><td>未讨论</td><td>同</td><td>没有和同推理成本的模型比</td></tr>
+<tr><td><a href="arloop.html#n-5-4">ARLoop</a></td><td>0.6B 同配方 GSM8K +5.2</td><td>同</td><td>≈ 同</td><td>同</td><td>同</td><td>同</td><td>残差设计的干净对比；对外部模型的比较不对齐</td></tr>
+</tbody></table></div>
+<p>这张表是本页的骨架。按“对齐了什么”把头条结论分成三类：<b>同参数</b>的结论（UT、Huginn、Ouro、Parcae、ELR 的多圈结果）几乎都是“循环更强”，但循环一方都多花了训练或推理算力；<b>同算力</b>的结论（Iso-Depth、潜在思考的 1B 实验、MoR 的大规模点、Ouro 附录 D）多是“循环打平或吃亏”；<b>三项全对齐</b>的只有 SMELT 一篇，结论是小而真实的净收益。ARLoop、Loop-μP 这类配方论文比较的是循环模型之间的不同设计，对齐得很干净，但它们本身不回答“循环值不值”。</p>
+
+<h4 id="n-7-3">7.3 循环 × 扩散 LLM：代价放在了哪里</h4>
+<div class="table-wrap"><table>
+<thead><tr><th>方法</th><th>循环的是什么</th><th>推理多花什么</th><th>训练多花什么</th><th>头条结果</th><th>对齐与缺口</th></tr></thead>
+<tbody>
+<tr><td><a href="loopholing.html">Loopholing</a></td><td>跨步传最后一层隐状态</td><td>几乎不多</td><td>约 +30%（两遍前向）</td><td>1024 步生成困惑度 108.94 → 49.13</td><td>骨干、参数、数据、步数对齐；32 步时反转；只到 4.24 亿参数</td></tr>
+<tr><td><a href="loopmdm.html">LoopMDM</a></td><td>一步内循环第 1、2 层</td><td>每步 1.8–4.8×</td><td>总训练 FLOPs 相同（只看一半数据）</td><td>少用 2.3–3.3× 训练 FLOPs 达到基线 NLL</td><td>推理算力未对齐；对齐后多走步更划算</td></tr>
+<tr><td><a href="recursive-mdm.html">R-MDM</a></td><td>一步内整个共享块，熵决定循环与提交</td><td>每步 \(L\) 倍或自适应</td><td>课程训练约 3–5.5×</td><td>同前向次数下数独更好、上限更高</td><td>只在结构化任务；深层基线未单独调参</td></tr>
+<tr><td><a href="alodlm.html">ALoDLM</a></td><td>一步内循环核心，按位置退出</td><td>每 token 约 5–9× 自回归；KV 2.33×</td><td>5B token 微调</td><td>平均分超过 Qwen3；单请求约 2.67×</td><td>缺同数据不循环对照；速度只测批大小 1</td></tr>
+<tr><td><a href="loop-distill.html">Loop-Distill</a></td><td>训练时教师的浅层循环</td><td>无</td><td>墙钟约 +10%</td><td>13 项平均约 +2 分</td><td>推理完全对齐；训练算力未对齐</td></tr>
+</tbody></table></div>
+<p>扩散一支的五篇，正好把代价放在了不同的账上：Loopholing 和 Loop-Distill 把代价放在训练上，推理不变；LoopMDM、R-MDM、ALoDLM 把代价放在推理的每一步上。前者的头条结论更容易在部署中兑现，后者的头条结论更需要按推理算力重新对齐来读。ALoDLM 的速度优势建立在“单请求时 GPU 算力闲置”之上：此时一次前向同时定下多个 token，就能突破自回归逐 token 读参数的上限；批大小一大，“每个 token 多算几倍”就会实打实地变成更慢。</p>
+</section>
+
+<!-- ============================================================ 8 -->
+<section class="note">
+<h3 id="n-8">8 结果的份量（跨论文）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>这一类论文的头条数字常常不能直接拿来比。哪些“比较方式上的问题”反复出现？每一种在本类精读里有哪些具体例子？综合起来，哪些结论站得住，哪些要打折扣？</div>
+
+<h4 id="n-8-1">8.1 参数匹配被读成了算力匹配</h4>
+<p>这是本类最常见的问题，几乎每一篇规模化工作都有。UT 的 +0.9 BLEU 是参数对齐、计算约 4 倍；Huginn 的“相当于 50B 的计算量”说的是计算规模；Ouro 的“2–3 倍参数效率”在每 token 计算上反而多 25%、KV 缓存 4 倍。最值得细看的是 Parcae 的“87.5%”（<a href="parcae.html#n-5-4">Parcae §5.4</a>）。它的算法是：770M 的 Parcae 在 Core 上是 25.07，同参数的 770M Transformer 是 22.42，大一号的 1.3B Transformer 是 25.45，于是 \((25.07-22.42)/(25.45-22.42)\approx87.5\%\)，意思是“770M 的 Parcae 把从 770M 走到 1.3B 的那段路走了 87.5%”。这个数有三处要读准：它是“填补差距的比例”，不是“分数的比例”（分数之比是 98.5%）；它只在 Core 上成立，同一对模型在 Core-Extended 上只填补了 58.2%，验证困惑度上 770M Parcae（12.49）还不如 1.3B Transformer（11.95）；它也不省推理算力：770M Parcae 的训练算力约是 1.3B Transformer 的 0.75 倍（它只训练了 61.6B token，后者 104B），但推理时每个 token 的计算约 1.74 倍、KV 缓存约 2.08 倍（推算，<a href="parcae.html#n-5-5">§5.5</a>）。所以 87.5% 说的是：花更多的推理计算，省下权重显存，换到了接近大一号模型的 Core 分数。</p>
+<p>ARLoop 说 1.3B 模型和 Qwen3.5-2B “有竞争力”，也是同类情况：参数相近，训练算力约是后者的 1/29，推理时每个 token 的计算约是它的两倍（推算，<a href="arloop.html#n-5-2">ARLoop §5.2</a>）。</p>
+
+<h4 id="n-8-2">8.2 算力对齐之后，循环还剩多少</h4>
+<p>把本类所有“算力至少部分对齐”的证据放在一张表上，结论出奇地一致。</p>
+
+<div class="dia">
+  <div class="dia-title">图：同一批证据，在不同的对齐方式下谁赢</div>
+  <svg class="dg" viewBox="0 0 960 452" role="img" aria-label="十组证据在同参数、同训练算力、同推理算力、三项全对齐四种比较下的结论：同参数几乎都是循环赢，同算力多为打平或输，三项全对齐只有 SMELT 一项小赢" style="--dg-min:780px">
+    <text x="275" y="22" class="t-c t-xs t-b">同参数（循环多花算力）</text>
+    <text x="465" y="22" class="t-c t-xs t-b">同训练算力</text>
+    <text x="655" y="22" class="t-c t-xs t-b">同推理算力（每 token）</text>
+    <text x="845" y="22" class="t-c t-xs t-b">参数、算力、KV 全对齐</text>
+
+    <text x="8" y="57" class="t-sm">UT（翻译）</text>
+    <rect x="184" y="40" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="51" class="t-c t-xs">赢：+0.9 BLEU</text><text x="275" y="64" class="t-c t-xs">（每 token 计算约 4×）</text>
+    <rect x="374" y="40" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="465" y="57" class="t-c t-xs">—</text>
+    <rect x="564" y="40" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="655" y="51" class="t-c t-xs">约打平：复现中与</text><text x="655" y="64" class="t-c t-xs">Transformer big 同为 29.3</text>
+    <rect x="754" y="40" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="57" class="t-c t-xs">—</text>
+
+    <text x="8" y="95" class="t-sm">潜在思考（1B）</text>
+    <rect x="184" y="78" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="89" class="t-c t-xs">赢：同参数的浅模型</text><text x="275" y="102" class="t-c t-xs">全面落后</text>
+    <rect x="374" y="78" width="372" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="560" y="89" class="t-c t-xs">困惑度、闭卷问答输（7.90–8.79 对 7.40）；推理基元赢，</text><text x="560" y="102" class="t-c t-xs">但几乎全来自单步查找（训练、推理算力都对齐）</text>
+    <rect x="754" y="78" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="95" class="t-c t-xs">—</text>
+
+    <text x="8" y="133" class="t-sm">Huginn（3.5B）</text>
+    <rect x="184" y="116" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="127" class="t-c t-xs">赢：GSM8K 约 5×</text><text x="275" y="140" class="t-c t-xs">（对不循环双胞胎）</text>
+    <rect x="374" y="116" width="182" height="34" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text x="465" y="127" class="t-c t-xs">输：与 OLMo-2-7B 同档，</text><text x="465" y="140" class="t-c t-xs">后者几乎全面领先</text>
+    <rect x="564" y="116" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="655" y="133" class="t-c t-xs">—</text>
+    <rect x="754" y="116" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="133" class="t-c t-xs">—</text>
+
+    <text x="8" y="171" class="t-sm">Ouro（含同数据双胞胎）</text>
+    <rect x="184" y="154" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="165" class="t-c t-xs">赢：同数据的 1.4B 双胞胎</text><text x="275" y="178" class="t-c t-xs">12 项全输给循环版</text>
+    <rect x="374" y="154" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="465" y="165" class="t-c t-xs">对 Qwen3-1.7B 12 项全胜，</text><text x="465" y="178" class="t-c t-xs">但数据完全不同</text>
+    <rect x="564" y="154" width="182" height="34" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text x="655" y="165" class="t-c t-xs">输：3.9B 稠密双胞胎</text><text x="655" y="178" class="t-c t-xs">每项领先或持平</text>
+    <rect x="754" y="154" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="171" class="t-c t-xs">—</text>
+
+    <text x="8" y="209" class="t-sm">MoR（360M–1.7B）</text>
+    <rect x="184" y="192" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="203" class="t-c t-xs">赢：加深递归后</text><text x="275" y="216" class="t-c t-xs">NLL 2.968 → 2.911</text>
+    <rect x="374" y="192" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="465" y="203" class="t-c t-xs">小赢：MoR-2 NLL −0.031；</text><text x="465" y="216" class="t-c t-xs">1.7B 时普通模型更好</text>
+    <rect x="564" y="192" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="655" y="209" class="t-c t-xs">—</text>
+    <rect x="754" y="192" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="209" class="t-c t-xs">—</text>
+
+    <text x="8" y="247" class="t-sm">Iso-Depth（≤ 1.1B）</text>
+    <rect x="184" y="230" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="275" y="247" class="t-c t-xs">—</text>
+    <rect x="374" y="230" width="372" height="34" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text x="560" y="241" class="t-c t-xs">输：r 圈只值 r^0.46 块；410M 循环 4 圈 ≈ 580M，</text><text x="560" y="254" class="t-c t-xs">训练成本却等于 1B（训练、推理算力和 KV 都对齐）</text>
+    <rect x="754" y="230" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="247" class="t-c t-xs">—</text>
+
+    <text x="8" y="285" class="t-sm">SMELT（MoE）</text>
+    <rect x="184" y="268" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="275" y="285" class="t-c t-xs">—</text>
+    <rect x="374" y="268" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="465" y="285" class="t-c t-xs">—</text>
+    <rect x="564" y="268" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="655" y="285" class="t-c t-xs">—</text>
+    <rect x="754" y="268" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="845" y="279" class="t-c t-xs">小赢：省 6.8–18.0% 训练算力</text><text x="845" y="292" class="t-c t-xs">（前沿损失差约 0.01 nats）</text>
+
+    <text x="8" y="323" class="t-sm">ARLoop（附录对照）</text>
+    <rect x="184" y="306" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="275" y="323" class="t-c t-xs">—</text>
+    <rect x="374" y="306" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="465" y="323" class="t-c t-xs">—</text>
+    <rect x="564" y="306" width="182" height="34" rx="6" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text x="655" y="317" class="t-c t-xs">输：同有效深度的不循环</text><text x="655" y="330" class="t-c t-xs">24 层模型好得多</text>
+    <rect x="754" y="306" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="323" class="t-c t-xs">—</text>
+
+    <text x="8" y="361" class="t-sm">LoopMDM（扩散）</text>
+    <rect x="184" y="344" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="275" y="361" class="t-c t-xs">—</text>
+    <rect x="374" y="344" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="465" y="355" class="t-c t-xs">赢：少用 2.3–3.3× 训练</text><text x="465" y="368" class="t-c t-xs">FLOPs 达到基线 NLL</text>
+    <rect x="564" y="344" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="655" y="355" class="t-c t-xs">多走去噪步更划算（生成）；</text><text x="655" y="368" class="t-c t-xs">GSM8K 上打平</text>
+    <rect x="754" y="344" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="361" class="t-c t-xs">—</text>
+
+    <text x="8" y="399" class="t-sm">R-MDM（扩散）</text>
+    <rect x="184" y="382" width="182" height="34" rx="6" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="275" y="393" class="t-c t-xs">赢：步数越少</text><text x="275" y="406" class="t-c t-xs">越明显</text>
+    <rect x="374" y="382" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="465" y="393" class="t-c t-xs">同 FLOPs（推理也对齐）：</text><text x="465" y="406" class="t-c t-xs">数独赢，Countdown 互有胜负</text>
+    <rect x="564" y="382" width="182" height="34" rx="6" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="655" y="393" class="t-c t-xs">同前向次数：小预算更好</text><text x="655" y="406" class="t-c t-xs">（但训练算力约 5.5×）</text>
+    <rect x="754" y="382" width="182" height="34" rx="6" style="fill:var(--surface-2);stroke:var(--border)"/><text x="845" y="399" class="t-c t-xs">—</text>
+
+    <rect x="8" y="432" width="14" height="12" rx="3" style="fill:var(--c-act-bg);stroke:var(--c-act)"/><text x="28" y="438" class="t-xs">循环一方更好</text>
+    <rect x="130" y="432" width="14" height="12" rx="3" style="fill:var(--c-pred-bg);stroke:var(--c-pred)"/><text x="150" y="438" class="t-xs">打平、互有胜负或有混杂</text>
+    <rect x="300" y="432" width="14" height="12" rx="3" style="fill:var(--c-loss-bg);stroke:var(--c-loss)"/><text x="320" y="438" class="t-xs">循环一方更差</text>
+    <rect x="420" y="432" width="14" height="12" rx="3" style="fill:var(--surface-2);stroke:var(--border)"/><text x="440" y="438" class="t-xs">没有做这种比较</text>
+  </svg>
+  <div class="dia-note">怎么看：每一行是一篇（或一组）证据，四列是四种对齐方式；横跨两列的格子表示那组比较同时对齐了训练和推理算力。绿色多集中在第一列，红色和橙色集中在中间两列，第四列只有 SMELT 一格。数字取自各精读页：UT <a href="universal-transformers.html#n-7-1">§7.1</a>，潜在思考 <a href="reasoning-latent-thoughts.html#n-3-6">§3.6</a>，Huginn <a href="huginn.html#n-5-5">§5.5</a>，Ouro <a href="ouro.html#n-5-6">§5.6</a>（同数据双胞胎来自 Closing the Loop），MoR <a href="mixture-of-recursions.html#n-7-w">结果的份量</a>，Iso-Depth <a href="iso-depth-scaling.html#n-4-4">§4.4</a>，SMELT <a href="smelt.html#n-5-4">§5.4</a>，ARLoop <a href="arloop.html#n-5-4">§5.4</a>，LoopMDM <a href="loopmdm.html#n-5-w">§5.1</a>，R-MDM <a href="recursive-mdm.html#n-4-5">§4.5</a>。本站整理。</div>
+</div>
+
+<p>读法可以归结为一句话：<b>循环本质上是“用计算换内存”，汇率在稠密模型里大约是 \(r\) 份计算换 \(r^{0.46}\) 份参数。</b>所以在参数固定时它几乎总是赢（花了更多算力），在算力固定时它多半打平或输（被迫少存了参数），只有在 MoE 里把参数补回来以后，才剩下一个约 0.01 nats 的小净收益。几处细节值得记住。其一，潜在思考在 1B 规模上测得“循环得来的深度只值新层的 0.5–0.6 倍”，和 Iso-Depth 的 \(\varphi\) 方向一致，尽管两者的量法不同。其二，\(\varphi\) 随配方变化（0.38 到 0.65），所以“循环值多少”不是一个常数，而是可以被训练方法和结构改进推高的量；超连接把它推到 0.65，已经明显高于基线。其三，扩散一支里 LoopMDM 的 GSM8K 实验在每次前向计算相同时打平，说明“一圈约值一层”在个别程序化任务上可能成立，但这只是一组目测读数，不是扩展律（<a href="loopmdm.html#n-5">LoopMDM §5</a>）。</p>
+
+<h4 id="n-8-3">8.3 “推理时多转几圈”多半只在训练深度以内有效</h4>
+<p>§3.4 的图已经说明：Ouro 超过 4 圈后生成式竞赛题大幅下降，Parcae 在训练均值附近饱和，ARLoop 外推无用，MoR 只在训练深度以内放开，ELR 第 3 圈就拿到了 96% 的收益。Huginn 是一个例外，它在训练时就见过很深的展开，所以极深处稳定，但 64 圈以后也不再提高；扩散一支的 LoopMDM 转 24 圈（超过训练最大 12 圈）仍略好于 12 圈，是少数“外推还有一点用”的例子（<a href="loopmdm.html#n-4-2">LoopMDM §4.2</a>）。所以“循环深度是第三条扩展轴”这句话，目前更准确的说法是：它是一条在<b>训练时</b>就要定下来的轴，推理时能调的只是训练范围以内的档位。</p>
+
+<h4 id="n-8-4">8.4 只转 1 圈的分数，常常是在分布外测的</h4>
+<p>Huginn 训练时抽到 1 圈的概率约十万分之一，所以“只转 1 圈时几乎不会做题、训练后期也不进步”既可能说明能力都在循环里，也可能只是模型从没学过 1 圈时怎样输出（<a href="huginn.html#n-5-3">Huginn §5.3</a>）。Parcae 只转 1 圈时比同尺寸 Transformer 差得多。ELR 证明这个“单圈税”可以用训练配方去掉，但它的消融也显示，一部分功劳来自门控结构本身让 1 圈的模型变好了：同样带门、只在 1 圈下训练的小模型，损失比无门基线低 0.025，而混合圈数训练的 ELR 在 1 圈时只是和无门基线持平（<a href="elastic-latent-recurrence.html#n-4-5">ELR §4.5</a>）。</p>
+
+<h4 id="n-8-5">8.5 数据与评测流程把架构效果混了进去</h4>
+<p>Ouro 的基座模型在预训练后期就读过 SFT 风格的数据，MATH500 这类“写步骤再按格式给答案”的评测对它天然有利；同样结构在 310B token 上训练的版本，MATH500 只有约 63，而 Ouro-1.4B 是 82.4，说明高分大部分来自训练量和数据，不是循环结构本身（<a href="ouro.html#n-5-6">Ouro §5.6</a>）。Huginn 的数据约四分之一是代码，它在数学、代码上对 OLMo-2-32B 中间检查点的领先，分不清有多少来自循环（<a href="huginn.html#n-5-5">Huginn §5.5</a>）。ARLoop 的第三阶段专门加入了数学和代码推理数据（<a href="arloop.html#n-5-2">ARLoop §5.2</a>）。ALoDLM 的例子说明评测流程本身就能带来几分的摆动。TRM 的例子最极端：两组数字甚至不在同一个评估集上，而且一边在评估题的示范上训练过、对每个输入投票 1000 次，另一边是零样本。</p>
+
+<h4 id="n-8-6">8.6 规模、随机种子和自家基线</h4>
+<p>本类绝大多数实验每个配置只训练一次，没有种子方差。规模普遍不大：Iso-Depth 最大的对照约 11 亿参数、470 亿 token；Loop-μP 不超过 4.4 亿参数；Parcae 到 1.3B；SMELT 拟合用到的累计训练算力最多 \(2.2\times10^{21}\) FLOPs，而 <a href="deepseek-v3.html">DeepSeek-V3</a> 粗算约 \(3\times10^{24}\) FLOPs，差了三个数量级（推算，<a href="smelt.html#n-5-4">SMELT §5.4</a>）。基线几乎都是作者用同一套代码自己训练的，这让流程一致，但也意味着基线没有为各自的结构单独调参：R-MDM 的深层普通模型“越深越好”并不单调（<a href="recursive-mdm.html#n-4-2">R-MDM §4.2</a>）；反过来，SMELT 的基线是一个为它自己调好的 MoE 模型族，这对基线有利。SMELT 的模型、数据和训练框架都是专有的，Iso-Depth 和 LoopMDM 没有公开代码，五篇 ICLR 2027 匿名投稿的数字都可能在修改稿中变化。开放程度最好的是 Huginn（权重、代码、全部数据）、Parcae（代码与四个尺寸的权重）、Ouro（权重）、Loopholing、TRM 和 ALoDLM（代码与权重）。</p>
+
+<h4 id="n-8-7">8.7 扩散里的“同步数”与“单请求速度”</h4>
+<p>扩散一支的比较有两个特有的陷阱。第一个是只比同样的去噪步数，而一步之内循环的模型每步更贵：LoopMDM 按推理算力对齐后结论反过来（§6.3），Loopholing 在 32 步时反而更差（<a href="loopholing.html#n-6-3">Loopholing §6.3</a>），R-MDM 的“同前向次数更好”背后是约 5.5 倍的训练算力。第二个是速度只在批大小为 1 时测：ALoDLM 的 2.67 倍和 Loop-Distill 的 11% 都是单请求数字，而且 ALoDLM 的工作点是在测试集上从 94 组设置里挑出来的，对手只扫了 21 组（<a href="alodlm.html#n-5-3">ALoDLM §5.3</a>）。</p>
+
+<h4 id="n-8-8">8.8 理论结论只说“存在”</h4>
+<p>本类三篇偏理论的工作都是表达能力或逼近论的结论：可编程计算机证明存在执行程序的权重，但精度要求随轮数上升，也不说明训练能学到（<a href="looped-programmable-computers.html#n-9-4">§9.4</a>）；潜在思考证明 \(T\) 次循环能模拟 \(T\) 步思维链，但构造的计算量约是思维链的 \(m\) 倍；“循环能替代多少参数”的最优速率藏着很大的常数，而且建立在无限精度的实数参数上。它们给出的是“循环在原理上能做什么”的边界，不是“训练出来的循环模型实际在做什么”。Huginn 的探针检验也提醒我们，“潜在思考”目前还只是一种解释，没有在训练好的模型里被逐步读出来。</p>
+
+<div class="note-warn">比较稳妥的总结：循环确实能用更少的参数换到更深的计算，在显存受限的场景里是有用的工具；在算力对齐的比较里，稠密模型上它目前吃亏，MoE 上有小的净收益；推理时加圈多半只在训练深度以内有效；“循环让模型在潜空间里推理”仍缺少直接证据。</div>
+</section>
+
+<!-- ============================================================ 9 -->
+<section class="note">
+<h3 id="n-9">9 还没解决的问题与走向（截至 2026-10）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>截至 2026 年 10 月，这条路线还有哪些问题没有答案？从各精读页“后来怎么样了”一节能看出哪些方向正在推进？</div>
+
+<p><b>严格对齐下的收益能否放大。</b>目前唯一的三项全对齐证据是 SMELT 在 MoE 上的约 0.01 nats，最大规模的拟合算力比前沿模型小三个数量级，\(10^{22}\) FLOPs 处的数字已经是外推，置信区间下限为 0。稠密模型上，Iso-Depth 的 \(\varphi\) 只在 11 亿参数以内测过。循环在更大规模上是变得更值钱还是更不值钱，没有数据。</p>
+<p><b>把 \(\varphi\) 推高。</b>Iso-Depth 建议今后提出新配方时，在验证损失之外同时报告 \(\Delta\varphi\)，因为只有它能区分“省下算力多看了数据”和“循环本身变强了”（<a href="iso-depth-scaling.html#n-6-2">§6.2</a>）。已知能推高它的是循环边界上的超连接（0.65）；ARLoop 的注意力残差、ELR 的门控更新也属于“让每一圈更有用”的改动，但它们没有报告 \(\varphi\)。截断反传会把它拉低，这让训练成本和循环质量之间有一个尚未解决的取舍。</p>
+<p><b>推理系统。</b>KV 缓存按执行深度增长是部署的主要障碍。Ouro 只留最后一圈的缓存在长生成上开始掉分；Ouro 精读提到的一项后续研究（Looped Latent Attention，arXiv 2607.15456，本站未单独精读）认为循环缓存是低秩的，但不能安全地塌缩成一圈（<a href="ouro.html#n-5-5">Ouro §5.5</a>）。可变深度难以组批：Iso-Depth 作者的后续论文用“连续深度批处理”在 Ouro 上拿到估计最大加速的 99%，在 Huginn 上是 83%–96%，并发现全循环结构最适合这种调度（<a href="iso-depth-scaling.html#n-impact">Iso-Depth“后来怎么样了”</a>，本站未单独精读）。循环的第二遍必须等第一遍算完，是串行的；SMELT 这类对齐了算术量的论文都没有报告墙钟时间。</p>
+<p><b>测试时外推。</b>没有一篇工作做到“训练时转 4 圈、推理时转 8 圈还继续变好”的稳定外推。ARLoop 的实验说明，更好地取用前面的表示并不能带来外推；Parcae 的结论是训练深度决定了测试时扩展的天花板。这和合成算法任务上观察到的长度外推形成对比，原因还不清楚。</p>
+<p><b>潜在推理是不是推理。</b>Huginn 的探针检验没有读出潜在思维链；Ouro 关于“循环的中间状态比显式思维链更忠实”“有害性随圈数下降”的说法，证据还有限。循环到底是在做多步推理，还是在反复精炼同一个表示，需要更细的可解释性工具。</p>
+<p><b>从现成模型改装。</b>从头预训练循环模型很贵，越来越多的工作从预训练好的普通模型出发：Huginn 精读提到的“改装循环”（Retrofitted Recurrence，2025-11，本站未单独精读）把现成模型的若干层改成循环块，报告从预训练权重初始化在每单位训练算力上好得多（<a href="huginn.html#n-impact">Huginn“后来怎么样了”</a>）；ALoDLM 从 Qwen3 改装，Loop-Distill 在改造的 SFT 阶段加循环教师。这条路便宜，但普遍缺少“同数据、不循环”的对照，收益里有多少来自额外的微调数据，说不清。</p>
+<p><b>循环 × 扩散。</b>深度循环和跨步传状态可以叠加，但还没有工作这样做。R-MDM 的误差分解给出了一个分配原则：保真误差靠循环降，依赖误差靠多走步降，两者可以按熵动态分配。反方向的联系也在建立：Huginn 精读介绍的并行采样器工作（ICML 2026，本站未单独精读）把循环深度模型看成“连续但因果的扩散语言模型”，直接用在 Huginn 上最多带来约 5 倍的加速（<a href="huginn.html#n-impact">Huginn“后来怎么样了”</a>）。</p>
+<p><b>小模型递归推理。</b>TRM 在半私有集上的 ARC-AGI-2 只有 6.2%，而且依赖每题的编号嵌入和大量测试时计算；一份对复核检查点的分析发现，去掉正确的题目编号，准确率直接降到 0，最终准确率的大部分在第一次递归时就已达到。后续工作朝几个方向推进：先在公开任务上预训练、比赛时只做少量微调，把“每道题从零训练”改成“预训练加测试时微调”；在潜在状态里加噪声、并行跑多条轨迹再挑最好的一条；把“隐藏状态收敛到不动点”重新拿回来当作停止信号（<a href="tiny-recursive-model.html#n-impact">TRM“后来怎么样了”</a>，这些工作本站都未单独精读）。这类小网络的递归到底在做多深的推理，仍有争议。</p>
+</section>
+
+<!-- ============================================================ 10 -->
+<section class="note">
+<h3 id="n-10">10 阅读路线</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>本类 19 篇精读，按什么顺序读最省力？不同兴趣的读者可以从哪里进入？</div>
+
+<p><b>路线一：入门，先养成算账的习惯（6 篇）。</b>从最早的想法读到最严格的对齐，每读一篇都问“它对齐了什么”。</p>
+<ol>
+  <li><a href="universal-transformers.html#n-2-4">Universal Transformer</a>：深度循环的起点，§2.4 第一次把“参数和计算是两回事”摆上台面。</li>
+  <li><a href="reasoning-latent-thoughts.html#n-3-6">潜在思考</a>：\((k\otimes L)\) 记号、同参数与同算力两种基线，以及“推理与记忆”的分化。</li>
+  <li><a href="huginn.html#n-5-5">Huginn</a>：第一个从头预训练的大规模循环模型，§5.5 是很好的算账练习。</li>
+  <li><a href="ouro.html#n-5-6">Ouro</a>：参数匹配的头条结论，以及同数据双胞胎给出的另一面。</li>
+  <li><a href="iso-depth-scaling.html#n-3-3">Iso-Depth</a>：\(\varphi\) 这个“汇率”，本页大部分折算的依据。</li>
+  <li><a href="smelt.html#n-3-2">SMELT</a>：三项全对齐怎么做，以及对齐之后还剩多少。</li>
+</ol>
+
+<p><b>路线二：偏工程，训得稳、调得动、用得上（7 篇）。</b>适合准备自己训练或部署循环模型的读者。</p>
+<ol>
+  <li><a href="huginn.html#n-4-3">Huginn §4.3</a>：大规模训练的两次失败，问题从哪里暴露出来。</li>
+  <li><a href="parcae.html#n-3">Parcae</a>：用动力系统解释发散，从结构上保证稳定；再读它的扩展律 <a href="parcae.html#n-6">§6</a>。</li>
+  <li><a href="loop-mup.html#n-4-1">Loop-μP</a>：残差分支为什么要乘 \(1/N\)，学习率怎样跨圈数迁移。</li>
+  <li><a href="arloop.html#n-3">ARLoop</a>：残差流里的东西怎样按需取用。</li>
+  <li><a href="elastic-latent-recurrence.html#n-3-2">ELR</a>：一个检查点多个档位，最低一档不吃亏。</li>
+  <li><a href="mixture-of-recursions.html#n-4">MoR</a>：按 token 路由深度、按圈缓存 KV、连续深度批处理。</li>
+  <li><a href="ouro.html#n-5-5">Ouro §5.5</a>：KV 缓存共享在什么时候可行。</li>
+</ol>
+
+<p><b>路线三：偏前沿，循环 × 扩散语言模型（5 篇，建议先读扩散基础）。</b>先读 <a href="mdlm.html">MDLM</a> 了解掩码扩散怎样训练和生成，再按下面的顺序读：</p>
+<ol>
+  <li><a href="loopholing.html#n-0-1">Loopholing</a>：跨步传状态，顺便把“两种循环”分清楚。</li>
+  <li><a href="loopmdm.html#n-4-3">LoopMDM</a>：一步之内循环，以及按推理算力重新对齐的读法。</li>
+  <li><a href="recursive-mdm.html#n-5">R-MDM</a>：依赖误差与保真误差，循环和去噪步各管哪一块。</li>
+  <li><a href="alodlm.html#n-3">ALoDLM</a>：从现成模型改装、按位置自适应地循环，以及单请求速度的条件。</li>
+  <li><a href="loop-distill.html#n-1-loops">Loop-Distill</a>：只在训练时循环、推理成本不变的另一种用法。</li>
+</ol>
+<p>对理论感兴趣的读者，可以按 <a href="looped-programmable-computers.html">可编程计算机</a> → <a href="reasoning-latent-thoughts.html#n-5">潜在思考 §5</a> → <a href="loops-vs-parameters.html">循环能替代多少参数</a> 的顺序读，最后回到 <a href="iso-depth-scaling.html#n-3-3">Iso-Depth §3.3</a> 对照经验的 \(\varphi\)。对小网络递归推理感兴趣的读者，<a href="tiny-recursive-model.html">TRM</a> 一篇就包含了 HRM 的背景和 ARC Prize 的复核。</p>
+</section>
+
+</div>
+
+<h2 id="papers">本类全部精读</h2>
+<p class="notes-intro">下面的列表由书架数据自动生成，按首版时间排列，新加的精读页会自动出现在这里。其中 Loopholing、LoopMDM、R-MDM、ALoDLM、Loop-Distill 同时属于“扩散 LLM”分类。</p>
+<div data-paper-list></div>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../index.html">论文书架</a>：选“循环 Transformer”分类可以看到本类全部卡片；选“扩散 LLM”分类可以看到与第 6 节相关的扩散语言模型精读。</li>
+  <li>背景：<a href="vllm.html">vLLM</a>（KV 缓存与按迭代组批，理解循环模型部署成本的前提）、<a href="mdlm.html">MDLM</a>（掩码扩散语言模型）、<a href="block-diffusion.html">Block Diffusion</a>（块扩散）。</li>
+</ul>
+
+<p class="license-note">本页是本站对这条研究路线的综述，正文为本站撰写；各论文的数字与结论以原文和对应精读页为准。所有图都是本站自己画的示意图，或根据精读页整理的论文数字重画的简图；标“推算”的数字为本站或对应精读页的估算。ICLR 2027 匿名投稿的作者身份不公开，本站不作推测。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 路线总览</footer>
+</body>
+</html>

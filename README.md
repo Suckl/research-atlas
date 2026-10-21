@@ -15,6 +15,13 @@
 
 论文可以放进“未读 / 在读 / 已读 / 收藏”书架，精读页的阅读进度会自动记录。这些都只保存在本机浏览器里。
 
+每个有精读页的类别都有一篇**路线总览**，用通俗的话讲这条路线要解决什么、方法怎么一步步演化、各家方法怎么比、哪些结论站得住，并给出阅读顺序。书架左侧列出这些总览，选中某个类别时顶部也会出现入口：
+
+- [AI Infra 路线总览](papers/overview-ai-infra.html)
+- [扩散 LLM 路线总览](papers/overview-dllm.html)
+- [循环 Transformer 路线总览](papers/overview-looped.html)
+- [统一多模态路线总览](papers/overview-multimodal.html)
+
 已有精读页（`papers/`）：
 
 - AI Infra：
@@ -162,9 +169,9 @@ python scripts/serve.py
 
 ```
 index.html  registry.js  AGENTS.md  404.html
-papers/<slug>.html  papers/<slug>/fig/  papers/metrics.js
+papers/<slug>.html  papers/overview-<track>.html  papers/<slug>/fig/  papers/metrics.js
 assets/css/atlas.css  assets/js/{atlas,papers}.js  assets/js/widgets/*.js
-templates/{reading-page,model-page}.html
+templates/{reading-page,overview-page,model-page}.html
 legacy/index.html  legacy/tracks/{jepa,ai-infra,few-step,video-memory,dllm}/…
 scripts/{check,serve,fetch_metrics,arxiv_blocks}.py
 ```

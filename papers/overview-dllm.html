@@ -1,0 +1,1174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>扩散 LLM 路线总览</title>
+<meta name="description" content="扩散语言模型路线总览：为什么要用反复去噪代替从左到右逐词生成，离散文本为什么难做扩散；噪声与目标、规模化、块扩散与 AR 改造、解码加速、后训练与生成顺序、代码与多模态、循环×扩散各分支怎样演化；以及在参数、训练 token、训练算力、推理速度分别对齐时，扩散模型和自回归模型到底差多少。">
+<script>try{var t=localStorage.getItem("atlas-theme");if(t&&t!=="auto")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" href="../assets/css/atlas.css">
+<script defer src="../registry.js"></script>
+<script defer src="metrics.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script defer src="../assets/js/atlas.js"></script>
+<script defer src="../assets/js/papers.js"></script>
+</head>
+<body data-root="../" data-page-kind="overview" data-track="dllm">
+<header id="site-header"></header>
+<svg class="atlas-defs" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--text-2)"/></marker>
+  <marker id="ah-enc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-enc)"/></marker>
+  <marker id="ah-tgt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-tgt)"/></marker>
+  <marker id="ah-pred" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-pred)"/></marker>
+  <marker id="ah-loss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-loss)"/></marker>
+  <marker id="ah-act" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-act)"/></marker>
+  <marker id="ah-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--c-reg)"/></marker>
+  <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" style="fill:var(--surface-3)"/><line x1="0" y1="0" x2="0" y2="6" style="stroke:var(--c-mask);stroke-width:2.2"/></pattern>
+</defs></svg>
+<div class="layout">
+<nav class="toc" aria-label="目录"></nav>
+<main class="content">
+
+<div class="paper-head">
+  <div class="kicker">路线总览 · 扩散 LLM</div>
+  <h1>扩散语言模型：不再一个词一个词地往后写</h1>
+  <p class="en-title">Diffusion Language Models, 2021–2026: from D3PM to DiffusionGemma</p>
+  <div class="paper-pills">
+    <a class="pill" href="../index.html">回到论文书架</a>
+    <a class="pill" href="../legacy/tracks/dllm/index.html">旧版路线总览（演化图、逐篇对比表、简答题）</a>
+    <a class="pill" href="../legacy/tracks/dllm/index.html#eval">旧版：读速度与分数时的检查清单</a>
+  </div>
+  <p class="w-note" style="margin-top:6px">本页基于本站已有的 48 篇精读页写成（其中 5 篇同时属于“循环 Transformer”分类）；每提到一篇论文都链接到它的精读页，细节和出处以精读页为准。标“推算”的数字是本站根据论文数据算出来的，标“读自原图”的是从原文图中读出的约值。所有图都是本站自己画的示意图或用报告数字重画的简图。</p>
+</div>
+
+<h2 id="notes">路线总览</h2>
+<div id="notes-body">
+
+<section class="note">
+<h3 id="n-0">0 导读：这条路线要解决什么问题</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散语言模型想解决自回归模型的什么问题？把扩散搬到文字上难在哪里？这个领域分成哪几条分支，它们之间是怎样一环扣一环发展起来的？和自回归模型相比，扩散模型今天大致处在什么位置？</div>
+<p>今天几乎所有大语言模型都是自回归（autoregressive，下文简称 AR）模型：它从左到右写字，每次根据前面已经写好的内容预测下一个 token（一个词或词的一部分），写下的 token 以后不再改。这种写法有两个与生俱来的限制。第一，写 \(N\) 个 token 就要把整个网络完整地算 \(N\) 遍，而且必须一遍接一遍地排队，前一个没写完，后一个就不能开始。第二，模型写到一半时看不到后文，所以“先定结尾再补中间”“按格式填空”“写错了回头改”这类事情，它都做不到或者做得很别扭。</p>
+<p>扩散语言模型（diffusion language model，下文常简称 dLLM）想换一种写法。它借用图像扩散模型的思路：先摆出一整段“被弄脏”的草稿（对文字来说，最常见的是一整排特殊的遮罩符号 [MASK]），然后反复做同一件事：把整段草稿送进一个能同时看到左右两边的网络，网络为每个位置给出预测，采样器把其中有把握的一部分写定，剩下的留到下一轮。人们期待它带来三样东西：<b>并行</b>（一次前向能写下好几个 token，所以可能更快）、<b>双向</b>（写每个位置时都能看到右边，所以擅长填空和满足全局约束）、<b>可修改</b>（某些变体允许改掉已经写下的字）。</p>
+<p>可是把扩散搬到文字上一点也不顺。文字是离散的，图像扩散里“往像素上加一点高斯噪声”的做法对 token 编号没有意义，必须重新设计加噪方式；扩散模型给不出一句话的精确概率，只能给出一个上界，于是困惑度比较、强化学习都变得麻烦；它用双向注意力，自回归模型最重要的提速工具 KV 缓存用不上；一步同时写定好几个位置时，这几个位置是彼此独立抽出来的，相关的词会拼出不一致的组合。过去五年这个领域的几乎每一条分支，都是在处理其中某一个困难。</p>
+<p>本站的 48 篇精读可以按八个方向来读，它们之间有一条清楚的因果链。<b>噪声与训练目标</b>这条线（D3PM → SEDD → MDLM）先证明：只要用“把词换成 [MASK]”的方式加噪，扩散的训练目标就化简成一个加权的完形填空损失，这让放大规模变得和训练 BERT 一样简单。于是<b>规模化</b>这条线（LLaDA、Dream、LLaDA2.x、iLLaDA，以及 Mercury、Seed Diffusion、DiffusionGemma 这些工业模型）把模型做到了 8B 乃至 100B。放大之后，人们发现开源扩散模型实际跑起来比同尺寸的 AR 模型还慢，<b>解码加速</b>这条线（Fast-dLLM、dKV-Cache、D2F、dParallel、d3LLM）开始补缓存、提并行度。与此同时，<b>块扩散</b>（BD3-LM）给出了一个折中：块与块之间从左到右，块内部做扩散，这样既有精确的缓存，又能把一个现成的 AR 模型便宜地“改造”成扩散模型（Fast-dLLM v2、SDAR、LLaDA2.0），甚至让扩散模型反过来给 AR 模型打草稿（TiDAR、DFlash、Nemotron-Labs-Diffusion）。<b>后训练</b>这条线（d1、LLaDA 1.5、DiffuCoder、TraceRL、灵活性陷阱）解决“没有精确概率怎么做强化学习”，并且追问“任意顺序生成到底是优点还是陷阱”。<b>代码与多模态</b>是检验扩散“天然优势”的两个主场。2026 年还出现了把<b>循环 Transformer</b> 和扩散结合的一小批工作。</p>
+<p>这个领域里最常被问、也最容易被数字误导的问题是：<b>在参数、训练 token、训练算力、推理速度分别对齐的条件下，扩散模型和自回归模型到底差多少？</b>本页把它当作主线。先给一个粗略的答案，后面各节再逐条拆开：在“每条数据只看一遍”的训练里，掩码扩散要达到 AR 的验证损失大约需要 14–16 倍的算力；数据有限、需要反复训练时，扩散退化得更慢，最终可以反超；把现成 AR 模型改造成扩散模型，平均分大体能保住，但数学、指令遵循这类能力常常掉分；单个请求时扩散模型确实能快几倍，但并发一高，优势会迅速缩小，在少数测过的设置里，大约到 32–64 个并发请求时 AR 就追平或反超。</p>
+<p>读完本页，你应该能回答这几个问题：</p>
+<ul>
+  <li>为什么不能直接把图像扩散搬到文字上？掩码扩散的训练目标为什么会变成“加权的完形填空”？</li>
+  <li>扩散相对 AR 付出了哪三笔代价？每一条分支各自在补哪一笔？</li>
+  <li>从零训练、AR 初始化、AR 改造成块扩散、和 AR 合为一体，这几种做大模型的路线各有什么取舍？</li>
+  <li>“比 AR 快 N 倍”这类数字，要连同哪些条件一起读？为什么批大小一变，结论可能反过来？</li>
+  <li>扩散模型做强化学习难在哪里？“任意顺序生成”在什么任务上是优点，在什么任务上反而有害？</li>
+  <li>哪些头条结论建立在对齐得比较好的比较上，哪些建立在弱基线或不对等的比较上？</li>
+</ul>
+<div class="dia">
+  <div class="dia-title">总图：本类 48 篇精读，按方向（行）与首版时间（列）排列</div>
+  <svg class="dg" viewBox="0 0 960 735" role="img" aria-label="本类 48 篇精读按方向与时间排列的总图" style="--dg-min:880px">
+  <rect x="2" y="34.0" width="956" height="102.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="77.0" class="t-sm t-b">噪声与</text>
+  <text x="10" y="93.0" class="t-sm t-b">训练目标</text>
+  <a href="d3pm.html"><g class="enc"><rect class="box" x="100.0" y="41.0" width="135.3" height="19" rx="4"/><text x="106.0" y="51.0" class="t-sm">D3PM</text><text x="230.3" y="51.0" class="t-r t-xs">21-07</text></g></a>
+  <a href="diffusion-lm.html"><g class="enc"><rect class="box" x="100.0" y="64.0" width="135.3" height="19" rx="4"/><text x="106.0" y="74.0" class="t-sm">Diffusion-LM</text><text x="230.3" y="74.0" class="t-r t-xs">22-05</text></g></a>
+  <a href="sedd.html"><g class="enc"><rect class="box" x="100.0" y="87.0" width="135.3" height="19" rx="4"/><text x="106.0" y="97.0" class="t-sm">SEDD</text><text x="230.3" y="97.0" class="t-r t-xs">23-10</text></g></a>
+  <a href="mdlm.html"><g class="enc"><rect class="box" x="243.3" y="41.0" width="135.3" height="19" rx="4"/><text x="249.3" y="51.0" class="t-sm">MDLM / MD4</text><text x="373.7" y="51.0" class="t-r t-xs">24-06</text></g></a>
+  <a href="discrete-flow-matching.html"><g class="enc"><rect class="box" x="243.3" y="64.0" width="135.3" height="19" rx="4"/><text x="249.3" y="74.0" class="t-sm">离散流匹配</text><text x="373.7" y="74.0" class="t-r t-xs">24-07</text></g></a>
+  <a href="duo.html"><g class="enc"><rect class="box" x="386.7" y="41.0" width="135.3" height="19" rx="4"/><text x="392.7" y="51.0" class="t-sm">Duo</text><text x="517.0" y="51.0" class="t-r t-xs">25-06</text></g></a>
+  <a href="scaling-beyond-masked.html"><g class="enc"><rect class="box" x="673.3" y="41.0" width="135.3" height="19" rx="4"/><text x="679.3" y="51.0" class="t-sm">Beyond-Masked</text><text x="803.7" y="51.0" class="t-r t-xs">26-02</text></g></a>
+  <a href="flow-map-lm.html"><g class="enc"><rect class="box" x="673.3" y="64.0" width="135.3" height="19" rx="4"/><text x="679.3" y="74.0" class="t-sm">FLM</text><text x="803.7" y="74.0" class="t-r t-xs">26-02</text></g></a>
+  <a href="langflow.html"><g class="enc"><rect class="box" x="673.3" y="87.0" width="135.3" height="19" rx="4"/><text x="679.3" y="97.0" class="t-sm">LangFlow</text><text x="803.7" y="97.0" class="t-r t-xs">26-04</text></g></a>
+  <a href="elf.html"><g class="enc"><rect class="box" x="673.3" y="110.0" width="135.3" height="19" rx="4"/><text x="679.3" y="120.0" class="t-sm">ELF</text><text x="803.7" y="120.0" class="t-r t-xs">26-05</text></g></a>
+  <rect x="2" y="141.0" width="956" height="102.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="184.0" class="t-sm t-b">规模与</text>
+  <text x="10" y="200.0" class="t-sm t-b">配方</text>
+  <a href="llada.html"><g class="tgt"><rect class="box" x="386.7" y="148.0" width="135.3" height="19" rx="4"/><text x="392.7" y="158.0" class="t-sm">LLaDA</text><text x="517.0" y="158.0" class="t-r t-xs">25-02</text></g></a>
+  <a href="mercury.html"><g class="tgt"><rect class="box" x="386.7" y="171.0" width="135.3" height="19" rx="4"/><text x="392.7" y="181.0" class="t-sm">Mercury</text><text x="517.0" y="181.0" class="t-r t-xs">25-06</text></g></a>
+  <a href="diffusion-data-constrained.html"><g class="tgt"><rect class="box" x="530.0" y="148.0" width="135.3" height="19" rx="4"/><text x="536.0" y="158.0" class="t-sm">数据受限</text><text x="660.3" y="158.0" class="t-r t-xs">25-07</text></g></a>
+  <a href="dream.html"><g class="tgt"><rect class="box" x="530.0" y="171.0" width="135.3" height="19" rx="4"/><text x="536.0" y="181.0" class="t-sm">Dream 7B</text><text x="660.3" y="181.0" class="t-r t-xs">25-08</text></g></a>
+  <a href="seed-diffusion.html"><g class="tgt"><rect class="box" x="530.0" y="194.0" width="135.3" height="19" rx="4"/><text x="536.0" y="204.0" class="t-sm">Seed Diffusion</text><text x="660.3" y="204.0" class="t-r t-xs">25-08</text></g></a>
+  <a href="llada2.html"><g class="tgt"><rect class="box" x="530.0" y="217.0" width="135.3" height="19" rx="4"/><text x="536.0" y="227.0" class="t-sm">LLaDA2.0</text><text x="660.3" y="227.0" class="t-r t-xs">25-12</text></g></a>
+  <a href="llada2-1.html"><g class="tgt"><rect class="box" x="673.3" y="148.0" width="135.3" height="19" rx="4"/><text x="679.3" y="158.0" class="t-sm">LLaDA2.1</text><text x="803.7" y="158.0" class="t-r t-xs">26-02</text></g></a>
+  <a href="illada.html"><g class="tgt"><rect class="box" x="673.3" y="171.0" width="135.3" height="19" rx="4"/><text x="679.3" y="181.0" class="t-sm">iLLaDA</text><text x="803.7" y="181.0" class="t-r t-xs">26-06</text></g></a>
+  <a href="diffusiongemma.html"><g class="tgt"><rect class="box" x="816.7" y="148.0" width="135.3" height="19" rx="4"/><text x="822.7" y="158.0" class="t-sm">DiffusionGemma</text><text x="947.0" y="158.0" class="t-r t-xs">26-07</text></g></a>
+  <rect x="2" y="248.0" width="956" height="102.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="291.0" class="t-sm t-b">块扩散与</text>
+  <text x="10" y="307.0" class="t-sm t-b">AR 混合</text>
+  <a href="block-diffusion.html"><g class="reg"><rect class="box" x="386.7" y="255.0" width="135.3" height="19" rx="4"/><text x="392.7" y="265.0" class="t-sm">BD3-LM</text><text x="517.0" y="265.0" class="t-r t-xs">25-03</text></g></a>
+  <a href="fast-dllm-v2.html"><g class="reg"><rect class="box" x="530.0" y="255.0" width="135.3" height="19" rx="4"/><text x="536.0" y="265.0" class="t-sm">Fast-dLLM v2</text><text x="660.3" y="265.0" class="t-r t-xs">25-09</text></g></a>
+  <a href="sdar.html"><g class="reg"><rect class="box" x="530.0" y="278.0" width="135.3" height="19" rx="4"/><text x="536.0" y="288.0" class="t-sm">SDAR</text><text x="660.3" y="288.0" class="t-r t-xs">25-10</text></g></a>
+  <a href="tidar.html"><g class="reg"><rect class="box" x="530.0" y="301.0" width="135.3" height="19" rx="4"/><text x="536.0" y="311.0" class="t-sm">TiDAR</text><text x="660.3" y="311.0" class="t-r t-xs">25-11</text></g></a>
+  <a href="wedlm.html"><g class="reg"><rect class="box" x="530.0" y="324.0" width="135.3" height="19" rx="4"/><text x="536.0" y="334.0" class="t-sm">WeDLM</text><text x="660.3" y="334.0" class="t-r t-xs">25-12</text></g></a>
+  <a href="dflash.html"><g class="reg"><rect class="box" x="673.3" y="255.0" width="135.3" height="19" rx="4"/><text x="679.3" y="265.0" class="t-sm">DFlash</text><text x="803.7" y="265.0" class="t-r t-xs">26-02</text></g></a>
+  <a href="nemotron-diffusion.html"><g class="reg"><rect class="box" x="816.7" y="255.0" width="135.3" height="19" rx="4"/><text x="822.7" y="265.0" class="t-sm">Nemotron-Diff</text><text x="947.0" y="265.0" class="t-r t-xs">26-07</text></g></a>
+  <rect x="2" y="355.0" width="956" height="79.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="386.5" class="t-sm t-b">解码</text>
+  <text x="10" y="402.5" class="t-sm t-b">加速</text>
+  <a href="token-ordering.html"><g class="pred"><rect class="box" x="386.7" y="362.0" width="135.3" height="19" rx="4"/><text x="392.7" y="372.0" class="t-sm">Token Ordering</text><text x="517.0" y="372.0" class="t-r t-xs">25-02</text></g></a>
+  <a href="fast-dllm.html"><g class="pred"><rect class="box" x="386.7" y="385.0" width="135.3" height="19" rx="4"/><text x="392.7" y="395.0" class="t-sm">Fast-dLLM</text><text x="517.0" y="395.0" class="t-r t-xs">25-05</text></g></a>
+  <a href="dkv-cache.html"><g class="pred"><rect class="box" x="386.7" y="408.0" width="135.3" height="19" rx="4"/><text x="392.7" y="418.0" class="t-sm">dKV-Cache</text><text x="517.0" y="418.0" class="t-r t-xs">25-05</text></g></a>
+  <a href="d2f.html"><g class="pred"><rect class="box" x="530.0" y="362.0" width="135.3" height="19" rx="4"/><text x="536.0" y="372.0" class="t-sm">D2F</text><text x="660.3" y="372.0" class="t-r t-xs">25-08</text></g></a>
+  <a href="dparallel.html"><g class="pred"><rect class="box" x="530.0" y="385.0" width="135.3" height="19" rx="4"/><text x="536.0" y="395.0" class="t-sm">dParallel</text><text x="660.3" y="395.0" class="t-r t-xs">25-09</text></g></a>
+  <a href="d3llm.html"><g class="pred"><rect class="box" x="673.3" y="362.0" width="135.3" height="19" rx="4"/><text x="679.3" y="372.0" class="t-sm">d3LLM</text><text x="803.7" y="372.0" class="t-r t-xs">26-01</text></g></a>
+  <rect x="2" y="439.0" width="956" height="79.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="470.5" class="t-sm t-b">后训练</text>
+  <text x="10" y="486.5" class="t-sm t-b">与 RL</text>
+  <a href="d1.html"><g class="loss"><rect class="box" x="386.7" y="446.0" width="135.3" height="19" rx="4"/><text x="392.7" y="456.0" class="t-sm">d1</text><text x="517.0" y="456.0" class="t-r t-xs">25-04</text></g></a>
+  <a href="llada-1-5.html"><g class="loss"><rect class="box" x="386.7" y="469.0" width="135.3" height="19" rx="4"/><text x="392.7" y="479.0" class="t-sm">LLaDA 1.5</text><text x="517.0" y="479.0" class="t-r t-xs">25-05</text></g></a>
+  <a href="diffucoder.html"><g class="loss"><rect class="box" x="386.7" y="492.0" width="135.3" height="19" rx="4"/><text x="392.7" y="502.0" class="t-sm">DiffuCoder</text><text x="517.0" y="502.0" class="t-r t-xs">25-06</text></g></a>
+  <a href="tracerl.html"><g class="loss"><rect class="box" x="530.0" y="446.0" width="135.3" height="19" rx="4"/><text x="536.0" y="456.0" class="t-sm">TraceRL</text><text x="660.3" y="456.0" class="t-r t-xs">25-09</text></g></a>
+  <a href="flexibility-trap.html"><g class="loss"><rect class="box" x="673.3" y="446.0" width="135.3" height="19" rx="4"/><text x="679.3" y="456.0" class="t-sm">灵活性陷阱</text><text x="803.7" y="456.0" class="t-r t-xs">26-01</text></g></a>
+  <rect x="2" y="523.0" width="956" height="56.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="551.0" class="t-sm t-b">代码</text>
+  <a href="dream-coder.html"><g class="act"><rect class="box" x="530.0" y="530.0" width="135.3" height="19" rx="4"/><text x="536.0" y="540.0" class="t-sm">Dream-Coder</text><text x="660.3" y="540.0" class="t-r t-xs">25-09</text></g></a>
+  <a href="stable-diffcoder.html"><g class="act"><rect class="box" x="673.3" y="530.0" width="135.3" height="19" rx="4"/><text x="679.3" y="540.0" class="t-sm">Stable-DiffCoder</text><text x="803.7" y="540.0" class="t-r t-xs">26-01</text></g></a>
+  <a href="dreamon.html"><g class="act"><rect class="box" x="673.3" y="553.0" width="135.3" height="19" rx="4"/><text x="679.3" y="563.0" class="t-sm">DreamOn</text><text x="803.7" y="563.0" class="t-r t-xs">26-02</text></g></a>
+  <rect x="2" y="584.0" width="956" height="79.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="623.5" class="t-sm t-b">多模态</text>
+  <a href="mmada.html"><g class="data"><rect class="box" x="386.7" y="591.0" width="135.3" height="19" rx="4"/><text x="392.7" y="601.0" class="t-sm">MMaDA</text><text x="517.0" y="601.0" class="t-r t-xs">25-05</text></g></a>
+  <a href="llada-v.html"><g class="data"><rect class="box" x="386.7" y="614.0" width="135.3" height="19" rx="4"/><text x="392.7" y="624.0" class="t-sm">LLaDA-V</text><text x="517.0" y="624.0" class="t-r t-xs">25-05</text></g></a>
+  <a href="lavida.html"><g class="data"><rect class="box" x="386.7" y="637.0" width="135.3" height="19" rx="4"/><text x="392.7" y="647.0" class="t-sm">LaViDa</text><text x="517.0" y="647.0" class="t-r t-xs">25-05</text></g></a>
+  <rect x="2" y="668.0" width="956" height="56.0" rx="6" style="fill:var(--surface-2);stroke:none"/>
+  <text x="10" y="688.0" class="t-sm t-b">循环 ×</text>
+  <text x="10" y="704.0" class="t-sm t-b">扩散</text>
+  <a href="loopholing.html"><g><rect class="box" x="530.0" y="675.0" width="135.3" height="19" rx="4" style="stroke-dasharray:4 3"/><text x="536.0" y="685.0" class="t-sm">Loopholing</text><text x="660.3" y="685.0" class="t-r t-xs">25-10</text></g></a>
+  <a href="loopmdm.html"><g><rect class="box" x="673.3" y="675.0" width="135.3" height="19" rx="4" style="stroke-dasharray:4 3"/><text x="679.3" y="685.0" class="t-sm">LoopMDM</text><text x="803.7" y="685.0" class="t-r t-xs">26-05</text></g></a>
+  <a href="recursive-mdm.html"><g><rect class="box" x="673.3" y="698.0" width="135.3" height="19" rx="4" style="stroke-dasharray:4 3"/><text x="679.3" y="708.0" class="t-sm">R-MDM</text><text x="803.7" y="708.0" class="t-r t-xs">26-06</text></g></a>
+  <a href="loop-distill.html"><g><rect class="box" x="816.7" y="675.0" width="135.3" height="19" rx="4" style="stroke-dasharray:4 3"/><text x="822.7" y="685.0" class="t-sm">Loop-Distill</text><text x="947.0" y="685.0" class="t-r t-xs">26-09</text></g></a>
+  <a href="alodlm.html"><g><rect class="box" x="816.7" y="698.0" width="135.3" height="19" rx="4" style="stroke-dasharray:4 3"/><text x="822.7" y="708.0" class="t-sm">ALoDLM</text><text x="947.0" y="708.0" class="t-r t-xs">26-10</text></g></a>
+  <text x="167.7" y="16" class="t-c t-sm t-b">2021–2023</text>
+  <text x="311.0" y="16" class="t-c t-sm t-b">2024</text>
+  <line x1="239.3" y1="26" x2="239.3" y2="731.0" class="grid-ln" style="stroke-dasharray:3 3"/>
+  <text x="454.3" y="16" class="t-c t-sm t-b">2025 上半年</text>
+  <line x1="382.7" y1="26" x2="382.7" y2="731.0" class="grid-ln" style="stroke-dasharray:3 3"/>
+  <text x="597.7" y="16" class="t-c t-sm t-b">2025 下半年</text>
+  <line x1="526.0" y1="26" x2="526.0" y2="731.0" class="grid-ln" style="stroke-dasharray:3 3"/>
+  <text x="741.0" y="16" class="t-c t-sm t-b">2026 上半年</text>
+  <line x1="669.3" y1="26" x2="669.3" y2="731.0" class="grid-ln" style="stroke-dasharray:3 3"/>
+  <text x="884.3" y="16" class="t-c t-sm t-b">2026-07 至 10 月</text>
+  <line x1="812.7" y1="26" x2="812.7" y2="731.0" class="grid-ln" style="stroke-dasharray:3 3"/>
+</svg>
+  <div class="dia-note">本站示意图，每个方块链接到对应的精读页，右侧小字是 arXiv 首版的年-月。<b>怎么看：</b>每一行是一个方向，每一列是一个时间段，越往右越新；虚线框的一行是“循环 Transformer”分类里同时属于扩散 LLM 的 5 篇。可以看出 2021–2024 年几乎只有“噪声与训练目标”一行在动，属于打地基；2025 年 2 月 LLaDA 证明 8B 规模可行之后，其余各行几乎同时启动；2025 下半年的重心转向块扩散与解码加速；2026 年则同时出现了 100B 级的工业模型、连续扩散的回归和循环结构。一篇论文只放在它最主要的方向里，例如 DiffuCoder 既是代码模型又提出了 RL 算法，这里放在“后训练与 RL”。</div>
+</div>
+</section>
+
+<section class="note">
+<h3 id="n-1">1 先把问题讲清楚：AR 怎么写字，扩散想怎么写，难在哪</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>自回归模型生成一段话时，时间到底花在哪里？掩码扩散模型怎么训练、怎么生成，它的训练目标为什么是一个加权的完形填空？扩散模型相对 AR 要付出哪几笔代价？以后在各篇论文里看到“和 AR 相当”“比 AR 快”时，应该先问清楚哪几样东西对齐了？后面所有的分支都建立在这一节的概念上。</div>
+
+<h4 id="n-1-1">1.1 自回归模型：一次一个 token，时间主要花在“搬参数”上</h4>
+<div class="note-pre"><b>先补一点背景：自回归分解与 KV 缓存。</b>
+<p>自回归模型把一句话 \(x=(x^1,\dots,x^L)\) 的概率拆成一串条件概率的乘积：</p>
+<div class="formula">$$p(x)=\prod_{i=1}^{L}p\big(x^i\mid x^{&lt;i}\big)$$</div>
+<p>训练时，每个位置都在学“已知左边，猜下一个”，一次前向就能对整句话的每个位置同时算出这个条件概率，所以 AR 模型能精确地算出一句话的概率。语言模型最常用的指标困惑度（perplexity），就是把平均每个 token 的负对数概率取指数，可以理解为“模型平均在几个等可能的词之间犹豫”，越低越好；AR 的困惑度是精确值。生成时，它只能一个一个往后写。因为注意力是因果的（每个位置只看左边），已经写好的 token 在后面任何一步都不会被改变，它们在每一层算出的 key 和 value 也就不会变，可以存下来反复使用，这就是 KV 缓存。有了缓存，每写一个新 token 只需要为这一个位置做计算。</p>
+</div>
+<p>只服务一个请求时，AR 模型写一个 token 要把全部参数从显存读一遍，而只为一个位置做乘加运算。读参数比做运算慢得多，所以这时 GPU 的算力大半闲着，耗时几乎完全由显存带宽决定，这种状态叫“访存受限”。<a href="fast-dllm-v2.html#n-10">Fast-dLLM v2 精读</a>给过一个量级：7B 模型的 BF16 参数约 15 GB，A100 的显存带宽约 1.5–2 TB/s，所以单条请求每秒最多写约 100–130 个 token（推算）。这个数字是理解整条路线的钥匙：如果一次前向不只处理 1 个位置、而是处理 16 个、32 个，在访存受限时几乎不多花时间。扩散模型和投机解码想利用的，都是这些闲着的算力。反过来，同时服务很多请求时，AR 模型可以把几十个请求拼成一批，参数仍然只读一遍，闲置的算力就被填满了，这时“多处理几个位置”就不再免费。第 6 节会看到，这一点决定了扩散模型在真实服务里能快多少。</p>
+
+<h4 id="n-1-2">1.2 掩码扩散：训练是加权的完形填空，生成是一轮轮揭开</h4>
+<p>今天几乎所有大规模扩散语言模型用的都是掩码扩散（也叫吸收态扩散，第 2 节讲它是怎么来的）。它的训练过程是这样的：从训练语料里拿一句话 \(x_0\)，随机抽一个遮挡比例 \(t\in(0,1)\)，让每个 token 各自以概率 \(t\) 被换成 [MASK]，得到加噪后的 \(x_t\)；然后让一个双向 Transformer 看着 \(x_t\)，为每个被遮住的位置猜出原来的词。LLaDA 写出的训练损失是：</p>
+<div class="formula">$$\mathcal{L}(\theta)=-\,\mathbb{E}_{t,\,x_0,\,x_t}\Big[\frac{1}{t}\sum_{i=1}^{L}\mathbf{1}\big[x_t^i=\mathrm{M}\big]\,\log p_\theta\big(x_0^i\mid x_t\big)\Big]$$</div>
+<p>方括号里就是 BERT 那种“只在被遮的位置算交叉熵”的完形填空损失，唯一的新东西是前面的权重 \(1/t\)。这个权重从哪来？生成时是倒过来走的：从全遮（\(t=1\)）一步步走到全不遮（\(t=0\)）；按这种线性的加噪日程，处在时刻 \(t\) 的每个被遮位置，在接下来很短的一段时间 \(dt\) 里被揭开的概率是 \(dt/t\)。扩散模型的训练目标（负的证据下界，NELBO）统计的是“每个 token 在它被揭开的那一刻猜对的对数概率”，所以每个被遮位置的损失要乘上它“在此刻被揭开的速率” \(1/t\)。用一个 8 个 token 的句子算一下（本站算例）：\(t=0.25\) 时平均遮 2 个，每个的损失乘 4；\(t=0.75\) 时平均遮 6 个，每个乘 4/3。遮得少的题目每道更“值钱”，遮得多的题目每道权重更低；平均下来，每个 \(t\) 上的总权重都等于句长 8（\(8t\times\frac{1}{t}=8\)），没有哪个噪声水平被偏重。<a href="mdlm.html#n-3-6">MDLM 精读 §3.6</a>和 <a href="llada.html#n-2-1">LLaDA 精读 §2.1</a>把这个推导完整走了一遍。这个损失是负对数似然的<b>上界</b>，所以扩散模型报告的困惑度都写成“≤”。</p>
+<p>生成过程是训练的反面：先放一张长度为 \(L\) 的全 [MASK] 画布，每一轮把画布送进网络，网络为所有被遮位置给出预测分布，采样器从中挑一部分位置写定（最初是随机挑，后来普遍按“置信度”挑最有把握的），其余位置保持 [MASK]，进入下一轮。走 \(T\) 轮，网络就前向 \(T\) 次。</p>
+<div class="note-pre"><b>先补一点背景：读速度数字要用到的三个量。</b>
+<p><b>NFE</b>（number of function evaluations）是生成一段文字一共做了几次网络前向。<b>TPF</b>（tokens per forward）是平均每次前向写定几个 token，等于生成长度除以 NFE。<b>TPS</b>（tokens per second）是每秒写出几个 token，才是用户真正感受到的速度。三者的关系是：TPS = TPF ÷ 每次前向的耗时。AR 模型的 TPF 恒为 1，但它每次前向只处理 1 个新位置、又有缓存，所以很便宜；扩散模型的 TPF 可以大于 1，但每次前向要处理整张画布（或至少一整块），也更贵。只报 TPF 或只报步数，都不能说明谁更快。</p>
+</div>
+<div class="dia">
+  <div class="dia-title">示意图：同一句话，三种写法各要几次前向</div>
+  <div class="dia-row"><span class="lbl">自回归 第 1 次</span><div class="cells"><span class="cell a">今天</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">自回归 第 2 次</span><div class="cells"><span class="cell b">今天</span><span class="cell a">下午</span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span><span class="cell"></span></div></div>
+  <div class="dia-row"><span class="lbl">自回归 第 8 次</span><div class="cells"><span class="cell b">今天</span><span class="cell b">下午</span><span class="cell b">我们</span><span class="cell b">去</span><span class="cell b">公园</span><span class="cell b">散步</span><span class="cell b">了</span><span class="cell a">。</span></div></div>
+  <div class="dia-out">共 8 次前向，每次只为 1 个新位置计算，前面的 key/value 全部走缓存。</div>
+  <div class="dia-row"><span class="lbl">掩码扩散 第 1 轮</span><div class="cells"><span class="cell a">今天</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell a">。</span></div></div>
+  <div class="dia-row"><span class="lbl">掩码扩散 第 2 轮</span><div class="cells"><span class="cell b">今天</span><span class="cell">M</span><span class="cell a">我们</span><span class="cell">M</span><span class="cell a">公园</span><span class="cell">M</span><span class="cell a">了</span><span class="cell b">。</span></div></div>
+  <div class="dia-row"><span class="lbl">掩码扩散 第 3 轮</span><div class="cells"><span class="cell b">今天</span><span class="cell a">下午</span><span class="cell b">我们</span><span class="cell a">去</span><span class="cell b">公园</span><span class="cell a">散步</span><span class="cell b">了</span><span class="cell b">。</span></div></div>
+  <div class="dia-out">共 3 次前向（TPF ≈ 2.7），但每次都要把 8 个位置全部重算一遍，因为双向注意力下任何位置一变，其余位置的 key/value 都跟着变。</div>
+  <div class="dia-row"><span class="lbl">块扩散 块 1</span><div class="cells"><span class="cell a">今天</span><span class="cell a">下午</span><span class="cell a">我们</span><span class="cell a">去</span><span class="cell">·</span><span class="cell">·</span><span class="cell">·</span><span class="cell">·</span></div></div>
+  <div class="dia-row"><span class="lbl">块扩散 块 2</span><div class="cells"><span class="cell c">今天</span><span class="cell c">下午</span><span class="cell c">我们</span><span class="cell c">去</span><span class="cell a">公园</span><span class="cell a">散步</span><span class="cell a">了</span><span class="cell a">。</span></div></div>
+  <div class="dia-out">块长 4：块与块之间从左到右，写完的块（橙色）进入精确的 KV 缓存；每块内部像掩码扩散一样用几轮写完。</div>
+  <div class="dia-note">本站示意图，句子与每轮写定的位置都是虚构的。蓝色是这一次前向新写下的 token，绿色是之前写下的，灰色 M 是仍被遮住的位置，橙色是已经进入缓存的块。<b>怎么看：</b>比较的不只是“几次前向”，还有“每次前向要算多少个位置、有没有缓存”。扩散的轮数少，但每轮更贵；块扩散处在两者之间：块长为 1 时它就是 AR，块长等于整段时它就是普通的掩码扩散（<a href="block-diffusion.html#n-3">BD3-LM 精读 §3</a>）。</div>
+</div>
+
+<h4 id="n-1-3">1.3 扩散付出的三笔代价</h4>
+<p><b>第一笔：没有精确似然。</b>扩散模型只能算出负对数似然的一个上界，而且这个上界本身还要用随机遮挡去估计。这带来两个后果。其一，扩散模型的困惑度永远写作“≤ 某个数”，它和 AR 的精确困惑度不是同一种量，真实差距可能比表上小，但小多少无从得知（<a href="mdlm.html#n-5-8">MDLM 精读 §5.8</a>）。其二，强化学习和偏好优化的每一步都要用到“模型生成这段回答的对数概率”，AR 一次前向就能精确算出，扩散模型却只能估计，第 7 节整节都在处理这件事。</p>
+<p><b>第二笔：没有现成的 KV 缓存。</b>双向注意力让每个位置都能看见右边尚未写定的位置，所以右边一变，左边已经写好的 token 在每一层的 key/value 也会变，算过的结果不能直接复用。开源的 LLaDA、Dream 在默认设置下每一轮都把“提示 + 整个回答区”从头算一遍，再加上为了保住质量通常一轮只写 1 个 token，结果反而比同尺寸的 AR 模型慢（<a href="fast-dllm.html#n-1">Fast-dLLM 精读 §1</a>）。第 6 节的近似缓存和第 5 节的块扩散，都是在补这一笔。</p>
+<p><b>第三笔：一步写多个 token 时的“因子分解误差”。</b>网络在一次前向里为每个位置给出的是各自的边缘分布，采样器从这些分布里分别抽词，相当于假设这几个位置互相独立。真实的语言里，相邻的词往往强相关，于是即使每个位置的分布都完全正确，拼在一起也可能是错的。下面这个例子把它算清楚：</p>
+<div class="dia">
+  <div class="dia-title">示意图：两个位置各自都对，一起抽却有一半是错的</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-box enc"><b>真实的联合分布</b><small>“New York”50%，“Los Angeles”50%，其他组合 0%</small></div>
+      <div class="dia-flow"><span class="dia-box">位置 1：New 50% / Los 50%</span><span class="dia-box">位置 2：York 50% / Angeles 50%</span></div>
+      <div class="dia-out" style="margin-left:0">每个位置单独看，网络给出的边缘分布都和真实情况一模一样。</div>
+    </div>
+    <div>
+      <div class="dia-box pred"><b>同一轮里独立抽两个位置</b><small>四种组合各 25%：New York ✓、Los Angeles ✓、New Angeles ✗、Los York ✗ → 50% 是错的</small></div>
+      <div class="dia-box act" style="margin-top:6px"><b>分两轮写</b><small>先抽位置 1 得到 New，下一轮网络看到 New，再给位置 2 的分布就是 York 100% → 0% 错误，但多花了一次前向</small></div>
+    </div>
+  </div>
+  <div class="dia-note">本站算例。<b>怎么看：</b>错误不是来自网络学得不好，而是来自“同一轮里各位置分别抽样”这个做法本身；网络再准也消除不了。消除它的办法只有两种：少在同一轮里写强相关的位置（按置信度挑、一轮少写几个），或者换一种不靠逐位置抽样的生成方式（第 3 节的连续流、第 5 节的“AR 验证”）。<a href="flow-map-lm.html#n-2">Flow Map LM 精读 §2</a>和 <a href="fast-dllm.html#n-2-3">Fast-dLLM 精读 §2.3</a>各有一个同类的例子。</div>
+</div>
+<p>这三笔代价解释了为什么“扩散天然并行、所以更快”这个直觉在 2025 年之前一直没有兑现：并行写得越多，第三笔代价越大；而每一轮又因为第二笔代价而很贵。整条路线后来的大部分工作，都可以理解为在这三笔账之间重新分配。</p>
+
+<h4 id="n-1-4">1.4 和 AR 比，先问清楚对齐了哪几样</h4>
+<p>“扩散和 AR 谁更好”这个问题如果不加条件，几乎没有意义，因为至少有五样东西可以对齐，也可以不对齐。下面先把它们列出来，后面各节和第 11 节的“结果的份量”都会反复用到：</p>
+<ul>
+  <li><b>参数量。</b>最容易对齐，也是论文最常强调的。但“同参数”经常掩盖了其余几样的差别。例如 <a href="llada.html#n-weight">LLaDA 8B 与 LLaMA3 8B</a> 参数几乎一样（8.02B 对 8.03B），训练 token 却是 2.3T 对 15T。</li>
+  <li><b>训练 token 数。</b>扩散模型每一步只有被遮的位置产生损失。<a href="mdlm.html#n-5-8">MDLM</a> 按“计入损失的 token 数”对齐，于是让 AR 只训一半的步数，扩散一方实际多做了一倍的梯度步。</li>
+  <li><b>训练算力。</b>同样的 token 数，扩散模型常常更贵：块扩散训练要同时送入干净和加噪两份序列，<a href="sdar.html#n-4-3">SDAR</a> 估计有效速度约为 AR 的一半；<a href="fast-dllm-v2.html#n-10">Fast-dLLM v2</a> 每条样本要过两个互补视图，送进网络的 token 约是 AR 的 4 倍（推算）。按算力对齐的比较最少，<a href="scaling-beyond-masked.html#n-3">Scaling Beyond Masked</a> 是其中做得最干净的一个。</li>
+  <li><b>解码设置。</b>同一个扩散模型，每轮写 1 个 token 和每轮写 4 个 token，分数可以差很多。很多论文的质量数字在最慢的“每轮 1 个”下测得，速度数字却在最快的设置下测得。</li>
+  <li><b>测速条件与评测协议。</b>批大小（并发数）、硬件、AR 一侧用的推理引擎（是 Hugging Face 的逐步生成，还是 vLLM、SGLang 这类优化过的服务引擎），以及提示格式、答案抽取方式、选择题怎么打分。后面会看到，换一套评测协议，同一个 AR 模型的平均分可以变 6 分以上。</li>
+</ul>
+<div class="note-warn"><b>一个贯穿全页的提醒：</b>“扩散模型 X 与 AR 模型 Y 相当”这句话，最有信息量的版本是“与它自己的出发点相当”。很多 2025–2026 年的扩散模型是从某个 AR 模型改造来的，拿它去和另一家、另一代的 AR 模型比，比出来的主要是底座的差别。第 4、5 节会逐个指出各篇论文里最干净的那组对照。</div>
+</section>
+
+<section class="note">
+<h3 id="n-2">2 噪声与训练目标：从 D3PM 到 MDLM（2021–2024）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>文字是离散的，高斯噪声加不上去，那该怎么“给文字加噪声”？2021–2024 年出现了哪几种办法，为什么最后是“把词换成 [MASK]”这一种胜出？这一阶段的扩散模型在同等条件下离 AR 有多远，差距是怎么一步步缩小的？这一阶段奠定的训练目标，正是后来 LLaDA 等大模型直接拿来用的那一个。</div>
+<div class="note-pre"><b>先补一点背景：扩散模型训练的是什么。</b>
+<p>图像扩散模型规定一个“加噪过程”：每一步往像素上加一点高斯噪声，加到最后图像变成纯噪声。再训练一个网络学“去噪”：给它一张加了某个程度噪声的图，让它猜出干净的图（或猜出加进去的噪声）。生成时从纯噪声出发，反复去噪。训练目标可以从“让模型给真实数据的概率尽量大”推出来，但精确概率算不出，只能优化它的一个下界，叫证据下界（ELBO）；取负号以后就是负对数似然的上界（NELBO）。所以扩散模型的“困惑度”是从这个上界换算出来的，写作“≤”。</p>
+</div>
+<p>把这套方法搬到文字上，第一个问题就是加噪：token 只是词表里的一个编号，“给编号 1532 加 0.3”没有意义，编号之间也没有远近。2021–2022 年出现了两条截然不同的回答，后来的所有方法都可以看作这两条路的延续。</p>
+<div class="dia">
+  <div class="dia-title">示意图：三种给文字加噪的方式</div>
+  <svg class="dg" viewBox="0 0 960 330" role="img" aria-label="掩码、均匀替换与连续加噪三种方式下一句话随时间的变化" style="--dg-min:820px">
+  <text x="231" y="18" class="t-c t-sm t-b">t = 0（干净）</text>
+  <text x="431" y="18" class="t-c t-sm t-b">t = 0.5</text>
+  <text x="631" y="18" class="t-c t-sm t-b">t = 1（纯噪声）</text>
+  <path class="edge" d="M 316 34 L 346 34"/><text x="331" y="26" class="t-c t-xs">加噪</text>
+  <path class="edge" d="M 516 34 L 546 34"/><text x="531" y="26" class="t-c t-xs">加噪</text>
+  <path class="edge pred" d="M 640 312 L 230 312"/><text x="435" y="298" class="t-c t-xs">生成时反过来走：从右边的纯噪声出发，一轮轮去噪回到左边</text>
+  <text x="10" y="66" class="t-sm t-b">掩码（吸收态）</text>
+  <text x="10" y="84" class="t-xs">把词换成 [M]</text>
+  <g class="enc"><rect class="box" x="150" y="54" width="30" height="30" rx="3"/></g><text x="165" y="69" class="t-c t-sm">猫</text>
+  <g class="enc"><rect class="box" x="183" y="54" width="30" height="30" rx="3"/></g><text x="198" y="69" class="t-c t-sm">坐</text>
+  <g class="enc"><rect class="box" x="216" y="54" width="30" height="30" rx="3"/></g><text x="231" y="69" class="t-c t-sm">在</text>
+  <g class="enc"><rect class="box" x="249" y="54" width="30" height="30" rx="3"/></g><text x="264" y="69" class="t-c t-sm">垫</text>
+  <g class="enc"><rect class="box" x="282" y="54" width="30" height="30" rx="3"/></g><text x="297" y="69" class="t-c t-sm">上</text>
+  <g class="enc"><rect class="box" x="350" y="54" width="30" height="30" rx="3"/></g><text x="365" y="69" class="t-c t-sm">猫</text>
+  <rect class="tk mask" x="383" y="54" width="30" height="30" rx="3"/><text x="398" y="69" class="t-c t-xs">M</text>
+  <g class="enc"><rect class="box" x="416" y="54" width="30" height="30" rx="3"/></g><text x="431" y="69" class="t-c t-sm">在</text>
+  <rect class="tk mask" x="449" y="54" width="30" height="30" rx="3"/><text x="464" y="69" class="t-c t-xs">M</text>
+  <g class="enc"><rect class="box" x="482" y="54" width="30" height="30" rx="3"/></g><text x="497" y="69" class="t-c t-sm">上</text>
+  <rect class="tk mask" x="550" y="54" width="30" height="30" rx="3"/><text x="565" y="69" class="t-c t-xs">M</text>
+  <rect class="tk mask" x="583" y="54" width="30" height="30" rx="3"/><text x="598" y="69" class="t-c t-xs">M</text>
+  <rect class="tk mask" x="616" y="54" width="30" height="30" rx="3"/><text x="631" y="69" class="t-c t-xs">M</text>
+  <rect class="tk mask" x="649" y="54" width="30" height="30" rx="3"/><text x="664" y="69" class="t-c t-xs">M</text>
+  <rect class="tk mask" x="682" y="54" width="30" height="30" rx="3"/><text x="697" y="69" class="t-c t-xs">M</text>
+  <text x="730" y="58" class="t-sm">写定后不再改</text>
+  <text x="730" y="74" class="t-xs">（LLaDA2.1 另加“改字”）</text>
+  <text x="730" y="90" class="t-xs">D3PM 吸收态 · MDLM · LLaDA · Dream</text>
+  <text x="10" y="156" class="t-sm t-b">均匀替换</text>
+  <text x="10" y="174" class="t-xs">换成词表里随机的词</text>
+  <g class="enc"><rect class="box" x="150" y="144" width="30" height="30" rx="3"/></g><text x="165" y="159" class="t-c t-sm">猫</text>
+  <g class="enc"><rect class="box" x="183" y="144" width="30" height="30" rx="3"/></g><text x="198" y="159" class="t-c t-sm">坐</text>
+  <g class="enc"><rect class="box" x="216" y="144" width="30" height="30" rx="3"/></g><text x="231" y="159" class="t-c t-sm">在</text>
+  <g class="enc"><rect class="box" x="249" y="144" width="30" height="30" rx="3"/></g><text x="264" y="159" class="t-c t-sm">垫</text>
+  <g class="enc"><rect class="box" x="282" y="144" width="30" height="30" rx="3"/></g><text x="297" y="159" class="t-c t-sm">上</text>
+  <g class="enc"><rect class="box" x="350" y="144" width="30" height="30" rx="3"/></g><text x="365" y="159" class="t-c t-sm">猫</text>
+  <g class="pred"><rect class="box" x="383" y="144" width="30" height="30" rx="3"/></g><text x="398" y="159" class="t-c t-sm">跑</text>
+  <g class="enc"><rect class="box" x="416" y="144" width="30" height="30" rx="3"/></g><text x="431" y="159" class="t-c t-sm">在</text>
+  <g class="pred"><rect class="box" x="449" y="144" width="30" height="30" rx="3"/></g><text x="464" y="159" class="t-c t-sm">云</text>
+  <g class="enc"><rect class="box" x="482" y="144" width="30" height="30" rx="3"/></g><text x="497" y="159" class="t-c t-sm">上</text>
+  <g class="pred"><rect class="box" x="550" y="144" width="30" height="30" rx="3"/></g><text x="565" y="159" class="t-c t-sm">书</text>
+  <g class="pred"><rect class="box" x="583" y="144" width="30" height="30" rx="3"/></g><text x="598" y="159" class="t-c t-sm">跑</text>
+  <g class="pred"><rect class="box" x="616" y="144" width="30" height="30" rx="3"/></g><text x="631" y="159" class="t-c t-sm">红</text>
+  <g class="pred"><rect class="box" x="649" y="144" width="30" height="30" rx="3"/></g><text x="664" y="159" class="t-c t-sm">云</text>
+  <g class="pred"><rect class="box" x="682" y="144" width="30" height="30" rx="3"/></g><text x="697" y="159" class="t-c t-sm">走</text>
+  <text x="730" y="148" class="t-sm">任何一轮都能把词改掉</text>
+  <text x="730" y="164" class="t-xs">（似然更难学）</text>
+  <text x="730" y="180" class="t-xs">D3PM 均匀 · Duo · DiffusionGemma</text>
+  <text x="10" y="246" class="t-sm t-b">连续（加高斯噪声）</text>
+  <text x="10" y="264" class="t-xs">在向量上加噪声</text>
+  <rect class="box" x="150" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="153.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="159.5" y="238.0" width="5" height="22.0" style="fill:var(--c-enc)"/>
+  <rect x="166.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="172.5" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect class="box" x="183" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="186.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="192.5" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="199.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="205.5" y="238.0" width="5" height="22.0" style="fill:var(--c-enc)"/>
+  <rect class="box" x="216" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="219.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="225.5" y="238.0" width="5" height="22.0" style="fill:var(--c-enc)"/>
+  <rect x="232.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="238.5" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect class="box" x="249" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="252.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="258.5" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="265.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="271.5" y="238.0" width="5" height="22.0" style="fill:var(--c-enc)"/>
+  <rect class="box" x="282" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="285.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="291.5" y="238.0" width="5" height="22.0" style="fill:var(--c-enc)"/>
+  <rect x="298.0" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect x="304.5" y="258.2" width="5" height="1.8" style="fill:var(--c-enc)"/>
+  <rect class="box" x="350" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="353.0" y="253.3" width="5" height="6.7" style="fill:var(--c-reg)"/>
+  <rect x="359.5" y="243.7" width="5" height="16.3" style="fill:var(--c-reg)"/>
+  <rect x="366.0" y="252.5" width="5" height="7.5" style="fill:var(--c-reg)"/>
+  <rect x="372.5" y="257.0" width="5" height="3.0" style="fill:var(--c-reg)"/>
+  <rect class="box" x="383" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="386.0" y="253.3" width="5" height="6.7" style="fill:var(--c-reg)"/>
+  <rect x="392.5" y="253.0" width="5" height="7.0" style="fill:var(--c-reg)"/>
+  <rect x="399.0" y="257.0" width="5" height="3.0" style="fill:var(--c-reg)"/>
+  <rect x="405.5" y="238.0" width="5" height="22.0" style="fill:var(--c-reg)"/>
+  <rect class="box" x="416" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="419.0" y="252.4" width="5" height="7.6" style="fill:var(--c-reg)"/>
+  <rect x="425.5" y="238.9" width="5" height="21.1" style="fill:var(--c-reg)"/>
+  <rect x="432.0" y="256.9" width="5" height="3.1" style="fill:var(--c-reg)"/>
+  <rect x="438.5" y="257.3" width="5" height="2.7" style="fill:var(--c-reg)"/>
+  <rect class="box" x="449" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="452.0" y="255.8" width="5" height="4.2" style="fill:var(--c-reg)"/>
+  <rect x="458.5" y="254.9" width="5" height="5.1" style="fill:var(--c-reg)"/>
+  <rect x="465.0" y="252.1" width="5" height="7.9" style="fill:var(--c-reg)"/>
+  <rect x="471.5" y="242.5" width="5" height="17.5" style="fill:var(--c-reg)"/>
+  <rect class="box" x="482" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="485.0" y="256.2" width="5" height="3.8" style="fill:var(--c-reg)"/>
+  <rect x="491.5" y="247.2" width="5" height="12.8" style="fill:var(--c-reg)"/>
+  <rect x="498.0" y="256.5" width="5" height="3.5" style="fill:var(--c-reg)"/>
+  <rect x="504.5" y="249.8" width="5" height="10.2" style="fill:var(--c-reg)"/>
+  <rect class="box" x="550" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="553.0" y="255.2" width="5" height="4.8" style="fill:var(--c-data)"/>
+  <rect x="559.5" y="247.1" width="5" height="12.9" style="fill:var(--c-data)"/>
+  <rect x="566.0" y="245.7" width="5" height="14.3" style="fill:var(--c-data)"/>
+  <rect x="572.5" y="258.2" width="5" height="1.8" style="fill:var(--c-data)"/>
+  <rect class="box" x="583" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="586.0" y="248.6" width="5" height="11.4" style="fill:var(--c-data)"/>
+  <rect x="592.5" y="238.9" width="5" height="21.1" style="fill:var(--c-data)"/>
+  <rect x="599.0" y="258.2" width="5" height="1.8" style="fill:var(--c-data)"/>
+  <rect x="605.5" y="251.5" width="5" height="8.5" style="fill:var(--c-data)"/>
+  <rect class="box" x="616" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="619.0" y="249.8" width="5" height="10.2" style="fill:var(--c-data)"/>
+  <rect x="625.5" y="255.3" width="5" height="4.7" style="fill:var(--c-data)"/>
+  <rect x="632.0" y="245.2" width="5" height="14.8" style="fill:var(--c-data)"/>
+  <rect x="638.5" y="249.5" width="5" height="10.5" style="fill:var(--c-data)"/>
+  <rect class="box" x="649" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="652.0" y="258.2" width="5" height="1.8" style="fill:var(--c-data)"/>
+  <rect x="658.5" y="242.6" width="5" height="17.4" style="fill:var(--c-data)"/>
+  <rect x="665.0" y="243.8" width="5" height="16.2" style="fill:var(--c-data)"/>
+  <rect x="671.5" y="241.7" width="5" height="18.3" style="fill:var(--c-data)"/>
+  <rect class="box" x="682" y="234" width="30" height="30" rx="3" style="fill:var(--surface)"/>
+  <rect x="685.0" y="238.0" width="5" height="22.0" style="fill:var(--c-data)"/>
+  <rect x="691.5" y="246.2" width="5" height="13.8" style="fill:var(--c-data)"/>
+  <rect x="698.0" y="248.1" width="5" height="11.9" style="fill:var(--c-data)"/>
+  <rect x="704.5" y="258.2" width="5" height="1.8" style="fill:var(--c-data)"/>
+  <text x="730" y="238" class="t-sm">整段连续地变，最后取最近的词</text>
+  <text x="730" y="254" class="t-xs">（可走确定性轨迹）</text>
+  <text x="730" y="270" class="t-xs">Diffusion-LM · LangFlow · FLM · ELF</text>
+</svg>
+  <div class="dia-note">本站示意图，句子和替换的词都是虚构的。<b>怎么看：</b>每一行是一种加噪方式，从左到右噪声越来越大；生成时沿底部的橙色箭头反过来走。蓝色是原词，橙色是被换成别的词的位置，斜线格是 [M]，第三行每个小格里的竖条代表一个向量（干净时只有一根高的竖条，像 one-hot；加噪后被高斯噪声搅乱）。第一行的特点是一个位置要么是原词、要么是 [M]，生成时只会“从 [M] 变成词”，所以写定后不再改；第二行任何时刻都可能把词改掉；第三行整段在连续空间里移动，最后才取最近的词。右侧列出各自的代表工作。</div>
+</div>
+
+<h4 id="n-2-1">2.1 两条起点：转移矩阵（D3PM）与连续嵌入（Diffusion-LM）</h4>
+<p><a href="d3pm.html">D3PM</a>（2021-07）的回答是：不加高斯噪声，而是写一个转移矩阵 \(Q_t\)，规定“这一步里词 \(i\) 变成词 \(j\) 的概率”。只要矩阵满足几个条件，任意一步的加噪结果和训练需要的后验都能用矩阵乘法精确算出，连续扩散的整套变分下界训练就能原样搬过来。更重要的是，矩阵怎么选变成了一个设计空间。论文比较了四种（<a href="d3pm.html#n-4">D3PM 精读 §4</a>）：均匀替换（换成词表里随机的词）、吸收态（换成 [MASK] 后再也不变）、离散高斯、按词向量近邻替换。文本上吸收态最好，而且它的损失化简后正是按 \(1/t\) 加权的掩码语言模型损失，这就是后来整个领域的起点。</p>
+<p>当时离 AR 还很远。D3PM 的 AR 基线和它用同样的 12 层结构、约 7000 万参数，按附录的说法训练量也对齐，这是一组干净的比较：text8 上 1.45 对 1.23 bits/char，LM1B 上困惑度 76.9 对 43.6，扩散一方的上界多出约 15–18%（推算，<a href="d3pm.html#n-9-4">D3PM 精读 §9.4</a>）。速度上也没有优势：1000 步时 D3PM 生成一条样本 3.4 秒，比 AR 的 0.357 秒慢约 10 倍；只有压到 20 步才比 AR 快约 4.5 倍，此时质量降到 1.56 对 1.23 bits/char（推算）。</p>
+<p><a href="diffusion-lm.html">Diffusion-LM</a>（2022-05）走另一条路：先把每个词变成一个向量，在整句的向量上做普通的高斯扩散，最后把每个向量“取整”成离它最近的词。它的动机不是速度，而是可控生成：因为中间状态是连续的，每一步都可以对它求梯度，用一个小分类器把它往“满足要求”的方向推。于是句法树、指定片段、长度、填空这类 AR 即插即用方法做不好的精细控制，它都做得很好（<a href="diffusion-lm.html#n-5">Diffusion-LM 精读 §5</a>）。代价也很明显：作为语言模型，它的似然比同设置的 AR 差约 0.69 nats/token，解码也慢得多（<a href="diffusion-lm.html#n-7-5">§7.5</a>）。此后连续路线沉寂了几年，直到 2026 年才以流匹配的形式回来（第 3 节）。</p>
+
+<h4 id="n-2-2">2.2 SEDD：学“概率比”，第一次在 GPT-2 规模上逼近 AR</h4>
+<p>连续扩散的理论核心是 score，即对数概率密度的梯度，告诉模型“往哪个方向挪一点概率会变大”。离散空间里没有“挪一点”，<a href="sedd.html">SEDD</a>（2023-10，ICML 2024 最佳论文）指出它的天然对应物是概率比 \(p_t(y)/p_t(x)\)：把当前序列换成某个邻居，概率会变成原来的几倍。反向去噪完全由这些比值决定。难点在于比值必须是正数，直接用平方误差回归会训练发散，作者为此设计了 score entropy 损失，它只接受正值、可以去噪式地计算，而且恰好是负对数似然的上界（<a href="sedd.html#n-3">SEDD 精读 §3</a>）。用吸收态加噪时，SEDD 在 GPT-2 small/medium 规模上的零样本困惑度上界，在 5 个数据集中有 3 个低于 GPT-2。</p>
+<div class="note-pre"><b>先补一点背景：生成困惑度与熵。</b>
+<p>困惑度衡量的是模型给真实文本的概率；扩散模型的困惑度只是上界，所以很多论文还报告“生成困惑度”：让模型无条件地生成一批样本，再用一个更大的 AR 模型（通常是 GPT-2 Large）给这些样本打困惑度，看它们“像不像通顺的文字”。它有一个漏洞：重复、保守的样本也很容易拿到低分。所以它必须和样本的熵（用词有多丰富）一起看，熵越低，生成困惑度越容易低。真实数据的熵是一个参照，例如 OpenWebText 约 5.4。</p>
+</div>
+<p>这个“追平”要打折扣（<a href="sedd.html#n-5-4">SEDD 精读 §5.4</a>）。和 GPT-2 比，网络形状对齐了，训练数据和训练量没有（GPT-2 用 WebText，SEDD 用 OpenWebText，双方训练量都没写清）；真正同设定的两处对照里，AR 都略好：One Billion Words 上 31.98 对 ≤ 32.79，text8 上 1.23 对 ≤ 1.39。生成质量的数字问题更大：后来的研究发现，常用的 32 位浮点 Gumbel 采样（从类别分布里抽样的一种标准技巧）在类别很多时会被截断，效果上等于悄悄降低了采样温度。RADD 用 64 位重测 SEDD medium，4096 步时生成困惑度是 81，而 32 位下是 22，“比 GPT-2 好 6–8 倍”的大部分来自数值精度。</p>
+<p>SEDD 之后，RADD（本站没有精读页，见<a href="../legacy/tracks/dllm/02-sedd.html#radd">旧版拆解</a>和 <a href="sedd.html#n-impact-radd">SEDD 精读“后来怎么样了”</a>）证明：在吸收态下，SEDD 学的概率比等于一个解析的时间因子乘以一个与时间无关的条件概率，也就是说“学概率比”和“学一个完形填空模型”是同一件事，网络甚至不需要知道当前时刻 \(t\)。</p>
+
+<h4 id="n-2-3">2.3 MDLM / MD4：化简成加权完形填空，配方比目标更重要</h4>
+<p><a href="mdlm.html">MDLM</a>（2024-06）和同期的 MD4 从两条不同的推导得到了同一个结论：掩码扩散的连续时间 NELBO 就是第 1.2 节那个按 \(1/t\) 加权、只在被遮位置计算的交叉熵（<a href="mdlm.html#n-3-6">MDLM 精读 §3.6</a>，<a href="mdlm.html#n-7">§7 MD4</a>）。MDLM 还给反向过程设计了 SUBS 参数化，把“干净文本里不会有 [MASK]”和“没被遮的词不用改”两条事实直接写进网络输出，并配上一套现代训练配方。结果在约 1.1 亿参数的规模上，LM1B 训练 330 亿 token 时困惑度上界是 ≤ 27.04，同训练量的 AR 是 22.32（SEDD 自报 32.79）；训到 3270 亿 token 时是 ≤ 23.00 对 AR 的 20.86；OpenWebText 上是 ≤ 23.21 对 AR 的 17.54（<a href="mdlm.html#n-5-2">§5.2</a>）。</p>
+<p>这组比较的对齐方式值得记住（<a href="mdlm.html#n-5-8">MDLM 精读 §5.8</a>）。参数、数据、分词器、上下文长度都对齐了；训练量按“计入损失的 token 数”对齐，因为扩散模型每一步平均只有一半位置被遮，作者就让 AR 只训一半的步数，结果扩散一方的训练算力约是 AR 的两倍（推算），而 AR 在这个规模上还没有饱和。另一个发现更有启发性：消融表把 LM1B 上从 32.79 到 27.04 的 5.75 拆开，约 4.28 来自代码和训练配方，约 1.47 来自新的参数化和目标（推算）。也就是说，此前扩散模型的落后有相当一部分是“实现太旧”，而不是扩散本身的问题。</p>
+<p>到 2024 年年中，掩码扩散成了公认的默认选择：目标最简单（一个加权的 BERT 损失），困惑度在扩散族里最好，而且训练代码几乎可以照搬 BERT。这种简单性直接促成了下一阶段的放大（第 4 节）。</p>
+
+<h4 id="n-2-4">2.4 离散流匹配：更一般的框架，以及第一个干净的大模型对照</h4>
+<p><a href="discrete-flow-matching.html">Discrete Flow Matching</a>（2024-07）把连续流匹配“先规定一条从噪声到数据的概率路径、再学让样本沿路径走的速度”的做法搬到离散空间。掩码扩散、均匀噪声扩散都是它的特例，它还给出一个能把已写的 token 重新遮回去、理论上不破坏分布的 corrector 采样（<a href="discrete-flow-matching.html#n-2">DFM 精读 §2</a>）。这篇论文对本页主线最有价值的是一组 1.7B 规模的对照（<a href="discrete-flow-matching.html#n-4-8">§4.8</a>）：参数量相同、数据配比大概率相同，代码任务上 DFM 的 HumanEval 和 MBPP Pass@1 都是 6.7%，同规模的 AR 是 14.3% 和 17.0%。这是非自回归模型第一次在代码上拿到不平凡的分数，但同时也清楚地表明，在 2024 年的配方下，扩散在严格的生成任务上离 AR 还差一倍多。它的生成困惑度数字同样受采样精度影响：150M 主表里 DFM 优于 AR（22.5 对 31.4），换成双精度后变成 50.1 对 31.4。</p>
+<div class="note-warn"><b>这一阶段的数字怎么读：</b>所有“扩散追上 AR”的说法都是在一亿到十几亿参数的小模型上、用困惑度上界或生成困惑度得出的。上界和 AR 的精确值不是同一种量；生成困惑度会被低熵（重复、保守）的样本压低，还会被采样的数值精度改变。这一阶段最站得住的结论是“掩码扩散是扩散族里最好的一种，差距在缩小”，而不是“已经追平”。</div>
+</section>
+
+<section class="note">
+<h3 id="n-3">3 噪声族之争：均匀态、连续扩散与“困惑度不能横比”（2025–2026）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散成了主流之后，为什么 2025–2026 年又有人回头研究均匀态扩散和连续扩散？它们各自想补掩码扩散的哪个短板？在同样的训练算力下，几族扩散模型离 AR 各差多少？为什么说不同噪声族报告的困惑度不能直接比较？</div>
+<p>掩码扩散有两个结构性的短板。第一，一个位置一旦从 [MASK] 变成词，就再也不会被改，早期写错的词会一直留着；第二，步数一少质量就崩，原因正是第 1.3 节的因子分解误差，蒸馏也救不了，因为蒸馏只能让学生更像老师，改变不了“各位置独立抽样”的结构（<a href="flow-map-lm.html#n-2-1">Flow Map LM 精读 §2.1</a>）。均匀态扩散天然能改字，连续扩散则可以走一条确定性的轨迹，这是它们重新被重视的原因。</p>
+
+<h4 id="n-3-1">3.1 Duo：均匀态扩散借来高斯一侧的工具</h4>
+<p><a href="duo.html">Duo</a>（2025-06）证明了一个漂亮的对应关系：对 one-hot 向量做普通的高斯扩散、每个时刻取一次 argmax，得到的 token 分布恰好是某个均匀态离散扩散在对应时刻的分布（<a href="duo.html#n-3">Duo 精读 §3</a>）。借这层“对偶”，图像扩散里的工具可以搬过来：训练时用低温 softmax 代替硬 argmax、只在一段窄的噪声区间采样，把训练步数约减半；采样时沿高斯一侧的确定性轨迹做一致性蒸馏，把 1024 步生成压到 16 步（加上降低熵的 Greedy-Tail 技巧可到 8 步）。但似然仍落后于掩码扩散：OpenWebText 上 Duo 是 ≤ 25.2，MDLM 约 ≤ 23.2，同设置的 AR 是 17.5（<a href="duo.html#n-6-5">§6.5</a>）。少步的生成困惑度要和熵一起看：Greedy-Tail 把样本熵压到 5.2–5.3，应该和核采样的 AR 比，而不是和不截断采样的 AR 比。</p>
+
+<h4 id="n-3-2">3.2 Scaling Beyond Masked：同样的算力，几族各差多少</h4>
+<p>到 2026 年初，比较各族扩散的数字都来自不同论文、不同设置。<a href="scaling-beyond-masked.html">Scaling Beyond Masked Diffusion Language Models</a>（2026-02）把四类模型放在同一套骨干、同一份数据、同样的训练算力下，给每一类拟合扩展律：AR、掩码扩散（MDLM）、均匀态扩散（Duo）、插值扩散（Eso-LM，一种用因果注意力、可以用 KV 缓存的掩码扩散变体，本站没有精读页，见<a href="../legacy/tracks/dllm/11-block-diffusion.html#eso-lm">旧版拆解</a>）。这是本类里在“训练算力对齐”这个维度上做得最干净的一篇。</p>
+<div class="dia">
+  <div class="dia-title">图表：同样的训练算力下，四族模型的计算最优验证损失</div>
+  <svg class="dg" viewBox="0 0 960 360" role="img" aria-label="四族模型在五个算力预算下的计算最优验证损失" style="--dg-min:780px">
+  <line class="grid-ln" x1="90" y1="280.9" x2="700" y2="280.9"/><text x="82" y="280.9" class="t-r t-xs">2.4</text>
+  <line class="grid-ln" x1="90" y1="242.6" x2="700" y2="242.6"/><text x="82" y="242.6" class="t-r t-xs">2.6</text>
+  <line class="grid-ln" x1="90" y1="204.4" x2="700" y2="204.4"/><text x="82" y="204.4" class="t-r t-xs">2.8</text>
+  <line class="grid-ln" x1="90" y1="166.2" x2="700" y2="166.2"/><text x="82" y="166.2" class="t-r t-xs">3.0</text>
+  <line class="grid-ln" x1="90" y1="127.9" x2="700" y2="127.9"/><text x="82" y="127.9" class="t-r t-xs">3.2</text>
+  <line class="grid-ln" x1="90" y1="89.7" x2="700" y2="89.7"/><text x="82" y="89.7" class="t-r t-xs">3.4</text>
+  <line class="grid-ln" x1="90" y1="51.5" x2="700" y2="51.5"/><text x="82" y="51.5" class="t-r t-xs">3.6</text>
+  <line class="axis" x1="90" y1="300" x2="700" y2="300"/><line class="axis" x1="90" y1="300" x2="90" y2="40"/>
+  <line class="axis" x1="125.1" y1="300" x2="125.1" y2="305"/><text x="125.1" y="318" class="t-c t-xs">6×10¹⁸</text>
+  <line class="axis" x1="224.6" y1="300" x2="224.6" y2="305"/><text x="224.6" y="318" class="t-c t-xs">10¹⁹</text>
+  <line class="axis" x1="438.6" y1="300" x2="438.6" y2="305"/><text x="438.6" y="318" class="t-c t-xs">3×10¹⁹</text>
+  <line class="axis" x1="573.6" y1="300" x2="573.6" y2="305"/><text x="573.6" y="318" class="t-c t-xs">6×10¹⁹</text>
+  <line class="axis" x1="673.1" y1="300" x2="673.1" y2="305"/><text x="673.1" y="318" class="t-c t-xs">10²⁰</text>
+  <text x="395" y="340" class="t-c t-sm">训练算力（FLOPs，对数刻度）</text>
+  <text x="26" y="170" class="t-c t-sm" transform="rotate(-90 26 170)">计算最优验证损失（nats/token）</text>
+  <line x1="125.1" y1="193.7" x2="641.4" y2="193.7" style="stroke:var(--text-3);stroke-width:1.2;stroke-dasharray:5 4"/>
+  <circle cx="641.4" cy="193.7" r="5" style="fill:none;stroke:var(--text-2);stroke-width:1.5"/>
+  <text x="631.4" y="211.7" class="t-r t-xs">MDLM 要到约 8.5×10¹⁹ 才达到 AR 在 6×10¹⁸ 的损失：约 14 倍</text>
+  <polyline points="125.1,193.7 224.6,214.2 438.6,253.5 573.6,274.6 673.1,287.6" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+  <circle cx="125.1" cy="193.7" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="224.6" cy="214.2" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="438.6" cy="253.5" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="573.6" cy="274.6" r="3.2" style="fill:var(--c-enc)"/>
+  <circle cx="673.1" cy="287.6" r="3.2" style="fill:var(--c-enc)"/>
+  <polyline points="125.1,94.3 224.6,119.3 438.6,158.1 573.6,181.5 673.1,199.6" style="fill:none;stroke:var(--c-pred);stroke-width:2.4"/>
+  <circle cx="125.1" cy="94.3" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="224.6" cy="119.3" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="438.6" cy="158.1" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="573.6" cy="181.5" r="3.2" style="fill:var(--c-pred)"/>
+  <circle cx="673.1" cy="199.6" r="3.2" style="fill:var(--c-pred)"/>
+  <polyline points="125.1,62.6 224.6,85.9 438.6,134.8 573.6,160.6 673.1,178.2" style="fill:none;stroke:var(--c-act);stroke-width:2.4;stroke-dasharray:8 3"/>
+  <circle cx="125.1" cy="62.6" r="3.2" style="fill:var(--c-act)"/>
+  <circle cx="224.6" cy="85.9" r="3.2" style="fill:var(--c-act)"/>
+  <circle cx="438.6" cy="134.8" r="3.2" style="fill:var(--c-act)"/>
+  <circle cx="573.6" cy="160.6" r="3.2" style="fill:var(--c-act)"/>
+  <circle cx="673.1" cy="178.2" r="3.2" style="fill:var(--c-act)"/>
+  <polyline points="125.1,51.7 224.6,76.7 438.6,122.6 573.6,149.2 673.1,164.3" style="fill:none;stroke:var(--c-loss);stroke-width:2.4;stroke-dasharray:3 3"/>
+  <circle cx="125.1" cy="51.7" r="3.2" style="fill:var(--c-loss)"/>
+  <circle cx="224.6" cy="76.7" r="3.2" style="fill:var(--c-loss)"/>
+  <circle cx="438.6" cy="122.6" r="3.2" style="fill:var(--c-loss)"/>
+  <circle cx="573.6" cy="149.2" r="3.2" style="fill:var(--c-loss)"/>
+  <circle cx="673.1" cy="164.3" r="3.2" style="fill:var(--c-loss)"/>
+  <line x1="730" y1="70" x2="764" y2="70" style="stroke:var(--c-enc);stroke-width:2.4"/><text x="772" y="70" class="t-sm">AR（精确负对数似然）</text>
+  <line x1="730" y1="96" x2="764" y2="96" style="stroke:var(--c-pred);stroke-width:2.4"/><text x="772" y="96" class="t-sm">MDLM（低方差训练）</text>
+  <line x1="730" y1="122" x2="764" y2="122" style="stroke:var(--c-act);stroke-width:2.4;stroke-dasharray:8 3"/><text x="772" y="122" class="t-sm">Duo（均匀态）</text>
+  <line x1="730" y1="148" x2="764" y2="148" style="stroke:var(--c-loss);stroke-width:2.4;stroke-dasharray:3 3"/><text x="772" y="148" class="t-sm">Eso-LM（插值，可缓存）</text>
+  <text x="730" y="190" class="t-xs">要达到 AR 的验证损失，所需算力约为：</text>
+  <text x="730" y="208" class="t-xs">MDLM 14–16 倍 · Duo 约 23 倍 · Eso-LM 约 32 倍</text>
+  <text x="730" y="226" class="t-xs">（论文数字；后两者要外推到测量范围外）</text>
+  <text x="730" y="252" class="t-xs">三族扩散的纵轴是各自的上界（NELBO），</text>
+  <text x="730" y="270" class="t-xs">AR 是精确值；跨族比较上界本身也有偏差。</text>
+</svg>
+  <div class="dia-note">本站根据 <a href="scaling-beyond-masked.html#n-3">Scaling Beyond Masked 精读 §3.2</a> 的读图表（该页从原文图 3a 的矢量坐标读出，精度约 ±0.005）重画。<b>怎么看：</b>横轴是训练算力，纵轴是在每个算力预算下挑出最优模型大小后的验证损失，越低越好。四条线的斜率很接近，但整体上下错开：AR 一直最低。虚线从 AR 在最小预算时的损失向右画，碰到 MDLM 曲线的地方（空心圈）就是“MDLM 要多少算力才能追上”，约 14 倍。注意三族扩散的纵轴是各自的上界，和 AR 的精确值不是同一种量。</div>
+</div>
+<p>结论有三层（<a href="scaling-beyond-masked.html#n-3-4">精读 §3.4</a>）。第一，三族扩散的损失随算力下降的斜率和 AR 相当，但常数差得很大：要达到 AR 的验证损失，MDLM 约需 14–16 倍算力（用 ELBO 训练是 16 倍，复现了更早的 SMDM 扩展律，见<a href="../legacy/tracks/dllm/06-llada.html#smdm">旧版拆解</a>；换成不加时间权重的低方差损失降到约 14 倍），Duo 约 23 倍，Eso-LM 约 32 倍。第二，三族扩散的计算最优模型都比 AR 小一半左右，也就是说同样的算力它们更愿意“小模型、多看数据”。第三，这些倍数本身也是在拿各族的上界去对齐 AR 的精确损失，按论文自己的逻辑，倍数里有多少是“模型真的差”、多少是“上界松”，分不开；Duo 和 Eso-LM 的倍数还要外推到测量范围以外才算得出来。</p>
+<p>论文还把四族都扩到 17 亿参数、各训 2.1 万亿 token（参数、数据、训练 token、SFT 全部相同，这在本类里极少见）：AR 在六个按似然打分的基准上全面领先；但在 GSM8K 上微调后，困惑度更差的 Duo 以 65.8% 领先 AR 的 62.9%，MDLM 是 58.8%（<a href="scaling-beyond-masked.html#n-4-3">§4.3</a>）。读这个反差要注意两点：所有模型都是一次一个 token、从左到右生成的，扩散的并行和少步都没有用上；2.9 个点约为 1.5 个标准误，按“5 个 epoch 的最好值”重排后 MDLM 和 AR 只差 1.2 个点。它支持的是“困惑度不能说明一切”，还不足以说“均匀态在推理任务上更强”。</p>
+
+<h4 id="n-3-3">3.3 连续扩散的回归：FLM、LangFlow、ELF</h4>
+<p>2026 年上半年连续出现了三篇连续扩散语言模型，都在约 1–2 亿参数、OpenWebText 或 LM1B 这个学术标准设定上，都把“流匹配”当作统一语言，但押注的方向不同：</p>
+<ul>
+  <li><a href="flow-map-lm.html">Flow Map LM</a>（2026-02）在 one-hot 向量上做连续流匹配（FLM），网络预测每个位置的词概率、用交叉熵训练；因为生成是一条确定性的常微分方程轨迹，可以把“从任意时刻直接跳到终点”的流映射蒸馏出来（FMLM）。一步生成时，LM1B 上生成困惑度 119.34，而蒸馏后的掩码与均匀扩散一步都在 1200 以上，或者靠熵塌缩换来低分（<a href="flow-map-lm.html#n-5-3">§5.3</a>）。这直接回应了因子分解误差：连续轨迹上没有“各位置独立抽样”这一步。但它没有似然评测，也没有 AR 基线。</li>
+  <li><a href="langflow.html">LangFlow</a>（2026-04）在可学习的词嵌入上做流匹配，推出一个基于常微分方程的似然界，并提出按信息量分配噪声的 Gumbel 调度。论文报告 OpenWebText 困惑度 24.6，与 MDLM 的 23.2 相当；但后续的 RePlaid 用公开权重复算发现，开着自条件时散度少算了一项，补上后约 32–33，仍明显落后于 MDLM 和 Duo（<a href="langflow.html#n-5-6">§5.6</a>）。</li>
+  <li><a href="elf.html">ELF</a>（2026-05）用一个冻结的 T5 编码器把句子变成连续向量，在上面做图像式的流匹配，只在最后一步解码成词，于是图像扩散里的无分类器引导（CFG）、随机采样器、蒸馏都能直接用。1 亿参数的 ELF-B 用 32 步得到约 24 的生成困惑度，低于用 1024 步的离散和连续对手（约 36 或更高）。但它不报告似然，样本熵约 5.15，低于对手和真实数据（约 5.4），而且借用了在超过 1 万亿 token 上预训练过的 T5 表示（<a href="elf.html#n-4-5">§4.5</a>）。</li>
+</ul>
+<p>这一节的共同教训是：三族扩散现在各自占着一个不同的评价维度。掩码扩散在似然和规模化上领先；均匀态扩散能改字，在少步和某些推理任务上有优势；连续扩散靠确定性轨迹在一两步生成上领先。可是它们报告的指标彼此不可比：跨族的似然上界松紧不同，生成困惑度又随熵变化。2026-07 的 <a href="diffusiongemma.html">DiffusionGemma</a> 用均匀噪声做到了 26B 规模（第 4 节），说明这场争论已经不只是小模型上的学术问题。</p>
+<div class="note-warn"><b>容易误读的地方：</b>“ELF 的生成困惑度比 MDLM 低一大截”“LangFlow 比肩离散扩散”“Duo 少步更好”这类结论，都要先看熵是否对齐、似然是否可比、对手是否用了各自最强的采样器。在本节的五篇里，只有 Scaling Beyond Masked 的扩展律比较和 17 亿参数比较是在同算力、同数据下完成的。</div>
+</section>
+
+<section class="note">
+<h3 id="n-4">4 放大规模：从零训练、数据受限、AR 改造与工业模型</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>掩码扩散的目标确定之后，人们怎样把它做到 8B、100B？从零训练和“拿现成 AR 模型改造”各花了多少代价、换来了什么？“扩散用更少的 token 追平 AR”“扩散更省数据”这些说法分别在什么条件下成立？Mercury、Seed Diffusion、DiffusionGemma 这些工业模型的数字，哪些是第三方测的，哪些是自报的？</div>
+<div class="note-pre"><b>先补一点背景：用 6ND 粗估训练算力。</b>
+<p>训练一个参数量为 \(N\) 的 Transformer、看 \(D\) 个 token，前向加反向大约要 \(6ND\) 次浮点运算（每个参数对每个 token 做一次乘加约 2 次运算，反向传播约是前向的 2 倍）。这只是量级估算，忽略了注意力本身的计算，但足以比较“两个模型训练时花的算力差几倍”。本页引用的 6ND 数字都取自对应精读页，\(N\) 用的是非嵌入参数。要注意的是，扩散模型每看一个 token 的实际计算往往比 AR 多（第 1.4 节），所以按 6ND 算出的“同算力”对扩散模型略偏有利。</p>
+</div>
+
+<h4 id="n-4-1">4.1 LLaDA：第一次从零训练到 8B</h4>
+<p><a href="llada.html">LLaDA</a>（2025-02）把掩码扩散目标原样用到一个 8B 的双向 Transformer 上，从零预训练 2.3T token（约 13 万 H800 GPU 小时），再用 450 万对指令数据做监督微调（SFT）。预训练版在 15 个基准上整体和 LLaMA3 8B Base 互有胜负，数学和中文更强；指令版能多轮对话；在“给出下一句写上一句”的反向古诗补全上超过 GPT-4o。这篇论文最重要的贡献是一个存在性证明：上下文学习、指令遵循这些能力，并不是“预测下一个词”独有的。</p>
+<p>它的头条比较需要逐条拆开（<a href="llada.html#n-weight">LLaDA 精读“结果的份量”</a>）。和 LLaMA3 8B 比，参数对齐了（非嵌入都是 6.98B），训练 token 是 2.3T 对 15T，按 6ND 算训练算力约 \(9.6\times10^{22}\) 对 \(6.3\times10^{23}\)，数据分布也完全不同，所以“用约 1/6.5 的 token 追平”只在 token 数这一个维度上成立。真正同数据、只换建模方式的对照只有扩展曲线里 1B 那一组，而在那一点上 AR 在四个任务上领先。此外，主表的每一个质量数字都是在“每步只写 1 个 token、步数等于生成长度”的最慢设置下测的；选择题上 LLaMA3 用精确似然打分，LLaDA 用 128 次随机遮挡估计的上界；指令版只做了 SFT，而对手都做过 RL；“吞吐是 LLaMA3 的 1.5 倍”是批大小 1、AR 一侧推理实现未说明的结果。反向古诗本来就是为暴露 AR 的方向性缺陷设计的任务。</p>
+
+<h4 id="n-4-2">4.2 数据受限：扩散在“同一份数据反复训练”时更耐用</h4>
+<p>前面说过，在每条数据只看一遍的设定下，扩散要多花十几倍算力才能追上 AR。<a href="diffusion-data-constrained.html">Diffusion Beats Autoregressive in Data-Constrained Settings</a>（2025-07）指出，这个设定默认数据取之不尽；如果独特数据固定、算力继续增长，多出的算力只能用来在同一份数据上反复训练。作者把独特数据固定在 2500 万、5000 万、1 亿 token，让两类模型最多重复 800 遍，共训练了 200 个模型。结论是：算力少时 AR 更好；AR 重复几十遍后开始过拟合，扩散重复几百遍仍在变好，最终验证损失更低（1 亿独特 token 时 3.55 对 3.71）。拟合出的“重复数据贬值常数”扩散约 500、AR 约 31，即扩散的重复数据贬值慢得多；由此推出扩散开始反超的临界算力约为 \(C_{\mathrm{crit}}\approx 192\cdot U^{2.174}\)（\(U\) 为独特 token 数，<a href="diffusion-data-constrained.html#n-7">精读 §7</a>）。</p>
+<p>这组结论的份量（<a href="diffusion-data-constrained.html#n-weight">精读 §8.3</a>）：同一个骨干、同一份数据、同一套为 AR 调过的超参数，但最佳点的参数量（416M 对 144M）、epoch 数（500 对 50）和训练算力（约 29 倍）都不同，所以 3.55 对 3.71 回答的是“数据固定、算力不限时谁的上限更高”，而不是“同样的算力谁更好”。AR 只用了常规的权重衰减，后续研究表明数据受限时把正则化调强，AR 的过拟合可以大幅推迟。扩展律只在 25M–100M 独特 token 上拟合，按公式外推，1 万亿独特 token 时临界算力约 \(2.3\times10^{28}\) FLOPs（推算），远超任何现实的训练；所以在数据充足的通用预训练里，这个结论不改变“AR 更省算力”的判断，它的用武之地是数据真正稀缺的场合。同期的 Super Data Learners（本站没有精读页，见<a href="../legacy/tracks/dllm/08-data-constrained.html#super-data">旧版拆解</a>，两篇之间的争论见<a href="diffusion-data-constrained.html#n-11">精读 §11</a>）用不同的数据和规模独立得到了同方向的结论，这种独立重复比任何单篇的数字都更有说服力；它也估计扩散至少要约 100 倍于 AR 的训练算力才能发挥全部潜力。</p>
+
+<h4 id="n-4-3">4.3 Dream 与 iLLaDA：AR 初始化，还是从零重训</h4>
+<p>从零训练太贵，<a href="dream.html">Dream 7B</a>（2025-08）换了一条路：用 Qwen2.5-7B 的权重初始化，保留 AR 模型“在位置 \(i\) 预测第 \(i+1\) 个词”的输出约定（称为 shift），在 580B token 上用掩码扩散目标继续训练，并按每个被遮 token 周围已知内容的多少单独给它定损失权重（CART，<a href="dream.html#n-4">Dream 精读 §4</a>）。在作者的同协议重测里，Dream 全面高于 LLaDA 8B，数独、Countdown 这类规划任务上大幅领先 AR。但“只用了 LLaDA 1/4 的数据”只算了扩散阶段，加上 Qwen2.5 继承来的 18T，总量约 18.6T，是 LLaDA 的 8 倍左右（推算）。最该看的对照是它自己的出发点 Qwen2.5 7B：13 项常规基准里 8 项更低、5 项更高，MBPP、BBH、HellaSwag 降了 5.7–7.4 分（<a href="dream.html#n-5-8">§5.8</a>）。所以 Dream 说明的是“已经有一个强 AR 模型时，改造的额外成本远低于从零训练，代价是常规任务上一定的退步”。它的前身 DiffuLLaMA（本站没有精读页，见<a href="../legacy/tracks/dllm/07-dream.html#diffullama">旧版拆解</a>）第一次在 7B 规模上做了这种改造，但知识类任务掉得很厉害。</p>
+<p>一年多以后，LLaDA 团队给出了从零路线的答卷 <a href="illada.html">iLLaDA</a>（2026-06）：训练目标一字不改，预训练从 2.3T 扩到 12T token，改用 GQA 和共享嵌入，SFT 改成和预训练同一种“整段随机遮挡”的格式、训 12 个 epoch，生成改为按块变长，选择题改用置信度打分。预训练版 8 项平均 63.9，LLaDA 是 51.1，Dream 论文重测的 Qwen2.5 7B 是 63.3；指令版仍比 Qwen2.5 7B Instruct 低约 10 分。它的份量同样取决于对齐（<a href="illada.html#n-weight">iLLaDA 精读“结果的份量”</a>）：按 6ND，iLLaDA 预训练约 \(5.0\times10^{23}\)，Qwen2.5 7B 约 \(7.0\times10^{23}\)；改用 Qwen 官方报告的分数，iLLaDA 平均反而低 5.7 分。两套协议下 Qwen2.5 的平均分相差 6.3 分，比论文要证明的 0.6 分大一个数量级。合理的读法是“从零训练的扩散模型在约七成算力下达到了同一档次”，而不是“略强”。</p>
+<div class="dia">
+  <div class="dia-title">图表：从零训练与“AR 改造”各用了多少预训练 token</div>
+  <svg class="dg" viewBox="0 0 960 308" role="img" aria-label="从零训练与 AR 改造的扩散模型各自用了多少预训练 token" style="--dg-min:820px">
+  <text x="200" y="18" class="t-sm t-b">预训练 token（条长按比例，1T ≈ 16.7 个单位）</text>
+  <text x="952" y="18" class="t-r t-sm t-b">6ND 粗估</text>
+  <text x="190" y="49" class="t-r t-sm">LLaDA 8B · 从零</text>
+  <g class="pred"><rect class="box" x="200.0" y="40" width="38.3" height="18" rx="3"/></g>
+  <text x="244.3" y="49" class="t-xs">扩散 2.3T</text>
+  <text x="952" y="49" class="t-r t-xs">≈0.96×10²³</text>
+  <text x="190" y="79" class="t-r t-sm">iLLaDA 8B · 从零</text>
+  <g class="pred"><rect class="box" x="200.0" y="70" width="200.0" height="18" rx="3"/></g>
+  <text x="208.0" y="79" class="t-xs">扩散 12T</text>
+  <text x="952" y="79" class="t-r t-xs">≈5.0×10²³</text>
+  <text x="190" y="109" class="t-r t-sm">LLaMA3 8B · AR 对照</text>
+  <g class="tgt"><rect class="box" x="200.0" y="100" width="250.0" height="18" rx="3"/></g>
+  <text x="208.0" y="109" class="t-xs">AR 15T</text>
+  <text x="952" y="109" class="t-r t-xs">≈6.3×10²³</text>
+  <text x="190" y="139" class="t-r t-sm">Qwen2.5 7B · AR 对照</text>
+  <g class="tgt"><rect class="box" x="200.0" y="130" width="300.0" height="18" rx="3"/></g>
+  <text x="208.0" y="139" class="t-xs">AR 18T</text>
+  <text x="952" y="139" class="t-r t-xs">≈7.0×10²³</text>
+  <text x="190" y="169" class="t-r t-sm">Dream 7B · AR 初始化</text>
+  <g class="tgt"><rect class="box" x="200.0" y="160" width="300.0" height="18" rx="3"/></g>
+  <text x="208.0" y="169" class="t-xs">继承 Qwen2.5 的 18T</text>
+  <g class="pred"><rect class="box" x="500.0" y="160" width="9.7" height="18" rx="3"/></g>
+  <text x="515.7" y="169" class="t-xs">+0.58T 扩散</text>
+  <text x="190" y="199" class="t-r t-sm">Fast-dLLM v2 7B · 改块扩散</text>
+  <g class="tgt"><rect class="box" x="200.0" y="190" width="300.0" height="18" rx="3"/></g>
+  <text x="208.0" y="199" class="t-xs">继承 Qwen2.5-Instruct</text>
+  <g class="pred"><rect class="box" x="500.0" y="190" width="3.0" height="18" rx="3"/></g>
+  <text x="509.0" y="199" class="t-xs">+约 1.3B token SFT</text>
+  <text x="190" y="229" class="t-r t-sm">SDAR 8B · 改块扩散</text>
+  <g class="tgt"><rect class="box" x="200.0" y="220" width="600.0" height="18" rx="3"/></g>
+  <text x="208.0" y="229" class="t-xs">继承 Qwen3（约 36T）</text>
+  <g class="pred"><rect class="box" x="800.0" y="220" width="3.0" height="18" rx="3"/></g>
+  <text x="809.0" y="229" class="t-xs">+50B 继续训练 +4B SFT</text>
+  <text x="190" y="259" class="t-r t-sm">LLaDA2.0 100B · 改块扩散</text>
+  <g class="tgt"><rect class="box" x="200.0" y="250" width="333.3" height="18" rx="3"/></g>
+  <text x="208.0" y="259" class="t-xs">继承 Ling 2.0（20T 以上）</text>
+  <rect x="533.3" y="250" width="14" height="18" rx="3" style="fill:url(#hatch);stroke:var(--c-pred)"/>
+  <text x="553.3" y="259" class="t-xs">+未公开</text>
+  <g class="tgt"><rect class="box" x="200" y="286" width="14" height="12" rx="2"/></g><text x="220" y="292" class="t-xs">自回归预训练（含继承来的）</text>
+  <g class="pred"><rect class="box" x="400" y="286" width="14" height="12" rx="2"/></g><text x="420" y="292" class="t-xs">扩散训练（继续预训练或 SFT）</text>
+  <text x="640" y="292" class="t-xs">右列：6 × 非嵌入参数 × token，单位 FLOPs</text>
+</svg>
+  <div class="dia-note">数字取自 <a href="llada.html#n-weight">LLaDA</a>、<a href="illada.html#n-weight">iLLaDA</a>、<a href="dream.html#n-5-8">Dream</a>、<a href="fast-dllm-v2.html#n-0">Fast-dLLM v2</a>、<a href="sdar.html#n-0">SDAR</a>、<a href="llada2.html#n-11-3">LLaDA2.0</a> 精读页；Qwen3 的约 36T 是 Qwen3 系列报告的预训练量。<b>怎么看：</b>紫色是自回归预训练（包括改造模型继承来的），橙色是扩散训练。从零训练的两行全是橙色；改造路线的橙色只是紫色末端的一小截，Fast-dLLM v2 和 SDAR 的那一截细到几乎看不见。所以“改造后的扩散模型与 AR 相当”，说的其实是“一个训练了十几到几十 T token 的 AR 模型，经过很短的扩散训练后能力大体保住”。右列 6ND 只给了稠密模型从零训练的四行。</div>
+</div>
+
+<h4 id="n-4-4">4.4 LLaDA2.0 与 LLaDA2.1：把 100B 的 AR MoE 改成块扩散</h4>
+<p>LLaDA 团队先从零训练了一个 MoE 扩散模型 LLaDA-MoE（约 20T token，总参数 7B、激活 1.4B，能力与 Qwen2.5-3B-Instruct 相当；本站没有精读页，见<a href="../legacy/tracks/dllm/09-llada2.html#llada-moe">旧版拆解</a>），随后改走转换路线。<a href="llada2.html">LLaDA2.0</a>（2025-12）把自家的 AR 混合专家模型（MoE：每个 token 只经过少数几个“专家”子网络，所以总参数很大、每个 token 实际用到的参数很少）Ling 2.0 看作“块长为 1 的块扩散模型”，用 WSD 课程把块长逐级放大到整条序列（4096）、大规模训练，再缩回 32（<a href="llada2.html#n-4">§4</a>），之后做 SFT、让模型更笃定从而能并行出字的 CAP 训练和 DPO，得到 16B 和 100B 两个模型。100B 的 flash 在 47 个基准上平均 73.18，Qwen3-30B-A3B-Instruct-2507 是 73.60，它自己的起点 Ling-flash-2.0 是 72.15。最有信息量的对照仍是“和自己的起点比”：flash 高 1.03 分，mini 低 1.43 分，而且两边的后训练数据并不相同（<a href="llada2.html#n-11-3">LLaDA2.0 精读“结果的份量”</a>）。速度上，flash-CAP 在四个代码与数学基准上每秒 535 个 token，Ling-flash-2.0 是 256、Qwen3-30B-A3B 是 237，但 GPU 型号、批大小、并发数都没有公开，CAP 版本的平均分还低了 1.72 分。</p>
+<p><a href="llada2-1.html">LLaDA2.1</a>（2026-02）针对“一个位置写定后不能改，所以阈值不敢放低”这一点，加入了把已写的词改成另一个词的编辑操作（T2T），用填空和编辑两个阈值组成快速（S）与高质量（Q）两种模式（<a href="llada2-1.html#n-2">§2</a>）。flash 在 S 模式下以基本不变的平均分，把每次前向写定的 token 数从 3.08 提到 5.93。但它相对 LLaDA2.0 同时改了解码规则、训练目标、强化学习和数据，论文没有任何消融把它们拆开；测速硬件和批大小也没有交代（<a href="llada2-1.html#n-6-6">§5.6</a>）。</p>
+
+<h4 id="n-4-5">4.5 工业模型：Mercury、Seed Diffusion、DiffusionGemma</h4>
+<p>三份工业报告的共同点是速度数字醒目、配方披露很少，读它们的关键是分清“谁测的、在什么条件下测的”。</p>
+<ul>
+  <li><a href="mercury.html">Mercury Coder</a>（2025-02 上线，6 月发布报告）没有公开参数量、数据、噪声类型和采样步数。能独立核实的是第三方测速机构 Artificial Analysis 测得的单请求输出速度：Mini 每秒 1,109 个 token，Small 737 个，同一批测量里常见的速度优化型 AR 模型在 60–200 之间；以及 Copilot Arena 的用户投票，Mini 的 993 分与 Codestral 的 992 分并列第二档。但第三方测的是 Inception 自己运营的 API 端点，用几张 GPU、多大的批都由它决定；其余基准是厂商自测。质量上，Mini 与最好的 7B 级开源代码模型互有胜负，速度快 5.7 倍以上（<a href="mercury.html#n-5-6">Mercury 精读 §5.6</a>）。</li>
+  <li><a href="seed-diffusion.html">Seed Diffusion Preview</a>（2025-08）只做代码，提出先掩码、后加“插入删除替换”编辑噪声的两段训练，按 ELBO 挑选生成轨迹的受限顺序蒸馏，以及直接减少步数的 on-policy 学习。它自报在 H20 上每秒 2,146 个 token，但卡数、批大小、模型大小都没有公开，权重也没有发布，至今没有第三方测量；与同一数据管线的 AR 模型 Seed-Coder-8B-Instruct 相比，八项代码基准里七项更低，只有代码编辑 CanItEdit 高 3.8 分（<a href="seed-diffusion.html#n-7-5">§7.5</a>）。</li>
+  <li><a href="diffusiongemma.html">DiffusionGemma</a>（2026-07）是迄今最透明的一份：Google DeepMind 把已发布的 Gemma 4 26B A4B（总参数 252 亿、每个 token 激活约 38.5 亿的 MoE）用不到原训练量 10% 的数据改造成扩散模型，均匀噪声、每块 256 个 token 的画布，同一套权重既当因果编码器又当双向解码器，再用把强化学习和少步蒸馏合成一步的 SD·RL 训练。单张 H100、FP8、批大小 1 时七项基准平均每秒约 1,479 个 token（每次前向平均写定 19.74 个），同一张卡上原始 Gemma 4 是 204，加多 token 预测（MTP）投机解码是 303。代价是质量下降：AIME 2026 从 88.3 降到 69.1，GPQA-Diamond 从 82.3 降到 73.2；平均输出也短得多（4,001 对 7,207 个 token），速度优势和“想得少”是同一件事的两面（<a href="diffusiongemma.html#n-7-3">§7.3</a>）。和自己的 AR 起点比，参数、权重来源、硬件、精度、批大小全部相同，这是本类里“同一模型、两种生成方式”最干净的一组速度与质量对照。</li>
+</ul>
+<div class="note-warn"><b>这一节的数字怎么读：</b>“扩散模型 X 和 AR 模型 Y 相当”几乎都没有对齐训练量；最有信息量的永远是“和它自己的出发点比”：Dream 对 Qwen2.5（8 项更低）、LLaDA2.0 对 Ling 2.0（±1 分左右）、DiffusionGemma 对 Gemma 4（AIME 掉约 19 分）、Seed Diffusion 对 Seed-Coder（8 项里 7 项更低）。从零训练的 LLaDA、iLLaDA 则要和训练算力接近的 AR 比，而它们离同规模最强的 AR 仍有一段距离，指令版尤其明显。</div>
+</section>
+
+<section class="note">
+<h3 id="n-5">5 向自回归靠拢：块扩散、AR 改造与“合体”</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>全序列扩散没有 KV 缓存、只能生成固定长度，块扩散怎样用“块间自回归、块内扩散”同时解决这两件事？为什么块扩散让“把现成 AR 模型改造成扩散模型”变得很便宜？WeDLM 怎样只用因果注意力做掩码扩散？TiDAR、DFlash、Nemotron-Labs-Diffusion 为什么干脆让扩散给 AR 打草稿？这一节的方法越往后越像 AR，这个趋势本身说明了什么？</div>
+
+<h4 id="n-5-1">5.1 BD3-LM：块长是一个旋钮</h4>
+<p><a href="block-diffusion.html">Block Diffusion（BD3-LM）</a>（2025-03）把序列切成长度为 \(L'\) 的块，块与块之间按 AR 顺序生成，每个块内部用掩码扩散。块长 1 时它就是 AR，块长等于整条序列时它就是 MDLM（<a href="block-diffusion.html#n-3">§3</a>）。因为块间是因果的，写完的块可以精确地缓存 key/value，生成也可以一块接一块往后写、长度不受限制；块内是扩散，几个 token 原则上可以并行写出。</p>
+<p>论文的另一半是一个诊断（<a href="block-diffusion.html#n-5">§5</a>）：即使块长设成 1、训练目标在期望上与 AR 完全相同，用扩散目标训出的模型困惑度仍比 AR 差约 2.68（LM1B 上 ≤ 25.56 对 22.88）。原因是扩散目标平均只让一半的 token 产生损失，梯度估计的方差大得多；把块长 1 的加噪改成“永远全遮”，困惑度就回到 22.88。作者据此设计了裁剪掩码率区间的低方差调度，1.1 亿参数的模型在 OpenWebText 上做到 ≤ 20.73（此前 MDLM 为 ≤ 22.98），同规模 AR 是 17.54。这组比较参数、数据、训练 token 都对齐，是一组干净的小规模对照；但生成质量是在“每次前向只揭开 1 个 token”下测的，生成困惑度 25.7 对 AR 的 14.1，块内并行的加速没有被测量（<a href="block-diffusion.html#n-7-5">§7.5</a>）。</p>
+<div class="dia">
+  <div class="dia-title">示意图：三种注意力掩码，以及各方法在“块长”这个旋钮上的位置</div>
+  <svg class="dg" viewBox="0 0 960 400" role="img" aria-label="三种注意力掩码，以及各方法在块长这一旋钮上的位置" style="--dg-min:820px">
+  <text x="142" y="20" class="t-c t-sm t-b">因果注意力（AR）</text>
+  <rect class="tk enc" x="90" y="32" width="12" height="12"/>
+  <rect class="tk off" x="103" y="32" width="12" height="12"/>
+  <rect class="tk off" x="116" y="32" width="12" height="12"/>
+  <rect class="tk off" x="129" y="32" width="12" height="12"/>
+  <rect class="tk off" x="142" y="32" width="12" height="12"/>
+  <rect class="tk off" x="155" y="32" width="12" height="12"/>
+  <rect class="tk off" x="168" y="32" width="12" height="12"/>
+  <rect class="tk off" x="181" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="45" width="12" height="12"/>
+  <rect class="tk off" x="116" y="45" width="12" height="12"/>
+  <rect class="tk off" x="129" y="45" width="12" height="12"/>
+  <rect class="tk off" x="142" y="45" width="12" height="12"/>
+  <rect class="tk off" x="155" y="45" width="12" height="12"/>
+  <rect class="tk off" x="168" y="45" width="12" height="12"/>
+  <rect class="tk off" x="181" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="58" width="12" height="12"/>
+  <rect class="tk off" x="129" y="58" width="12" height="12"/>
+  <rect class="tk off" x="142" y="58" width="12" height="12"/>
+  <rect class="tk off" x="155" y="58" width="12" height="12"/>
+  <rect class="tk off" x="168" y="58" width="12" height="12"/>
+  <rect class="tk off" x="181" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="129" y="71" width="12" height="12"/>
+  <rect class="tk off" x="142" y="71" width="12" height="12"/>
+  <rect class="tk off" x="155" y="71" width="12" height="12"/>
+  <rect class="tk off" x="168" y="71" width="12" height="12"/>
+  <rect class="tk off" x="181" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="129" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="142" y="84" width="12" height="12"/>
+  <rect class="tk off" x="155" y="84" width="12" height="12"/>
+  <rect class="tk off" x="168" y="84" width="12" height="12"/>
+  <rect class="tk off" x="181" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="129" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="142" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="155" y="97" width="12" height="12"/>
+  <rect class="tk off" x="168" y="97" width="12" height="12"/>
+  <rect class="tk off" x="181" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="129" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="142" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="155" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="168" y="110" width="12" height="12"/>
+  <rect class="tk off" x="181" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="90" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="103" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="116" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="129" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="142" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="155" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="168" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="181" y="123" width="12" height="12"/>
+  <text x="84" y="84" class="t-r t-xs">查询</text>
+  <text x="142" y="148" class="t-c t-xs">被看的位置</text>
+  <text x="142" y="170" class="t-c t-sm">KV 缓存：精确</text>
+  <text x="142" y="188" class="t-c t-sm">每次前向写 1 个</text>
+  <text x="462" y="20" class="t-c t-sm t-b">块因果（块长 4）</text>
+  <rect class="tk enc" x="410" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="32" width="12" height="12"/>
+  <rect class="tk off" x="462" y="32" width="12" height="12"/>
+  <rect class="tk off" x="475" y="32" width="12" height="12"/>
+  <rect class="tk off" x="488" y="32" width="12" height="12"/>
+  <rect class="tk off" x="501" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="45" width="12" height="12"/>
+  <rect class="tk off" x="462" y="45" width="12" height="12"/>
+  <rect class="tk off" x="475" y="45" width="12" height="12"/>
+  <rect class="tk off" x="488" y="45" width="12" height="12"/>
+  <rect class="tk off" x="501" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="58" width="12" height="12"/>
+  <rect class="tk off" x="462" y="58" width="12" height="12"/>
+  <rect class="tk off" x="475" y="58" width="12" height="12"/>
+  <rect class="tk off" x="488" y="58" width="12" height="12"/>
+  <rect class="tk off" x="501" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="71" width="12" height="12"/>
+  <rect class="tk off" x="462" y="71" width="12" height="12"/>
+  <rect class="tk off" x="475" y="71" width="12" height="12"/>
+  <rect class="tk off" x="488" y="71" width="12" height="12"/>
+  <rect class="tk off" x="501" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="462" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="475" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="488" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="501" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="462" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="475" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="488" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="501" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="462" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="475" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="488" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="501" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="410" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="423" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="436" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="449" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="462" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="475" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="488" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="501" y="123" width="12" height="12"/>
+  <text x="404" y="84" class="t-r t-xs">查询</text>
+  <text x="462" y="148" class="t-c t-xs">被看的位置</text>
+  <text x="462" y="170" class="t-c t-sm">块与块之间：精确缓存</text>
+  <text x="462" y="188" class="t-c t-sm">块内双向，一次可写多个</text>
+  <text x="782" y="20" class="t-c t-sm t-b">全双向（LLaDA、Dream）</text>
+  <rect class="tk enc" x="730" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="32" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="45" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="58" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="71" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="84" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="97" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="110" width="12" height="12"/>
+  <rect class="tk enc" x="730" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="743" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="756" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="769" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="782" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="795" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="808" y="123" width="12" height="12"/>
+  <rect class="tk enc" x="821" y="123" width="12" height="12"/>
+  <text x="724" y="84" class="t-r t-xs">查询</text>
+  <text x="782" y="148" class="t-c t-xs">被看的位置</text>
+  <text x="782" y="170" class="t-c t-sm">没有现成缓存，只能近似</text>
+  <text x="782" y="188" class="t-c t-sm">整段一次可写多个</text>
+  <line x1="70" y1="290" x2="900" y2="290" style="stroke:var(--text-2);stroke-width:2;marker-start:url(#ah);marker-end:url(#ah)"/>
+  <text x="70" y="330" class="t-xs">块长 1 = 自回归</text>
+  <text x="900" y="330" class="t-r t-xs">块长 = 整段 = 全序列扩散</text>
+  <text x="480" y="226" class="t-c t-sm t-b">块长是一个旋钮：越往左越像 AR（质量高、缓存精确），越往右越像全序列扩散（并行度高、双向）</text>
+  <circle cx="70.0" cy="290" r="5" style="fill:var(--c-reg)"/>
+  <text x="70.0" y="264" class=" t-xs">TiDAR · DFlash · Nemotron 三模式</text>
+  <text x="70.0" y="278" class=" t-xs">（扩散起草，AR 验证）</text>
+  <circle cx="220.9" cy="290" r="5" style="fill:var(--c-reg)"/>
+  <text x="220.9" y="310" class="t-c t-xs">Stable-DiffCoder：块长 4</text>
+  <circle cx="447.3" cy="290" r="5" style="fill:var(--c-reg)"/>
+  <text x="447.3" y="264" class="t-c t-xs">Fast-dLLM v2 · LLaDA2.0：块长 32</text>
+  <circle cx="673.6" cy="290" r="5" style="fill:var(--c-reg)"/>
+  <text x="673.6" y="310" class="t-c t-xs">DiffusionGemma：每块 256</text>
+  <circle cx="900.0" cy="290" r="5" style="fill:var(--c-reg)"/>
+  <text x="900.0" y="264" class="t-r t-xs">LLaDA · Dream · MDLM：整段</text>
+  <line x1="220.9" y1="342" x2="522.7" y2="342" style="stroke:var(--c-reg);stroke-width:3"/>
+  <text x="371.8" y="358" class="t-c t-xs">SDAR：块长 4–64 各训一个模型</text>
+  <line x1="220.9" y1="376" x2="371.8" y2="376" style="stroke:var(--c-enc);stroke-width:3"/>
+  <text x="379.8" y="376" class="t-xs">BD3-LM：块长 4–16（从零训练的小模型）</text>
+</svg>
+  <div class="dia-note">本站示意图。<b>怎么看：</b>上面三个 8×8 方阵里，第 \(i\) 行第 \(j\) 列为蓝色表示第 \(i\) 个位置能看到第 \(j\) 个位置。因果注意力只看左边，所以写过的位置永远不变，可以精确缓存；块因果在块内双向、块间只看左边，写完的块可以缓存；全双向谁都能看，所以任何位置一变，其余位置都要重算。下面的横轴是块长（对数刻度），左端是 AR，右端是全序列扩散。TiDAR、DFlash、Nemotron 三模式内部也按块起草，但最终输出由 AR 方式验证，所以放在最左端。WeDLM 用的是另一种思路（全程因果注意力，靠重排输入让被遮位置看到所有已知内容），不在这条轴上。</div>
+</div>
+
+<h4 id="n-5-2">5.2 从 AR 改造成块扩散：Fast-dLLM v2 与 SDAR</h4>
+<p>块长为 1 的块扩散就是 AR，这意味着一个训练好的 AR 模型已经是一个“块长为 1 的块扩散模型”，把它改成块长 4 或 32 只需要一段短的继续训练，而不需要像 Dream 那样用几千亿 token 把它改成全注意力扩散。2025 年下半年两篇工作几乎同时验证了这一点。</p>
+<p><a href="fast-dllm-v2.html">Fast-dLLM v2</a>（2025-09）只用约 13.1 亿 token 的 SFT，就把 Qwen2.5-7B-Instruct 改成块长 32 的块扩散模型（块对齐填充、互补掩码、token shift，<a href="fast-dllm-v2.html#n-4">§3.2</a>），推理时叠加精确的块级缓存、块内置信度阈值并行和子块缓存。它最有价值的对照是 Nemo-FT：同一个起点、同样的数据、同样的步数，只把目标换回 AR。平均分 60.3 对 59.6，看起来相当，但逐项看代码明显更好（HumanEval +11.0），MATH 低 10.4 分、IFEval 低 8.1 分；换成按 7 个基准平均（代码题的 Base 和 Plus 先合并），次序反过来，约 60.5 对 61.8（推算，<a href="fast-dllm-v2.html#n-7">§4.2</a>）。而且这些分数是在阈值 1、即不并行时测的；2.5 倍速度对应的阈值 0.9 下只报告了 GSM8K 一项。</p>
+<p><a href="sdar.html">SDAR</a>（2025-10）把 Qwen3 的 1.7B 到 30B-A3B 模型各用 50B token 继续训练加 4B token SFT 改成块扩散。它做了全类对齐得最好的一组受控实验（<a href="sdar.html#n-4-3">§4.3</a>）：约 2B 规模，参数、语料、token 数、结构、分词器、退火与 SFT 数据全部相同，差别只在训练目标和注意力掩码。结果是 AR 明显强于从零训练的掩码扩散，而从 AR 转出来的块扩散基本保住了 AR 的分数。两个附注：块扩散训练要同时处理干净和加噪两份序列，同样 token 数下实际算力约为 AR 的两倍（本站据附录推论）；表里块扩散用的是每次前向只定 1 个 token 的静态解码，所以它说明的是“转换后的模型在最保守的解码下质量如何”。</p>
+<p>SDAR 还在工业级引擎 LMDeploy、单张 H200 上把速度和同引擎的 AR 对比，从批大小 1 扫到 512，这是本类里测速条件交代得最完整的一组（<a href="sdar.html#n-6-4">§5.2.4</a>）：块长 16 时，批大小 4 约快 2.3 倍，32 时约 1.2 倍，64 时已慢于 AR，128 时只有 AR 的约 0.6 倍（读自原图后推算）。第 6 节的并发图会把它和另外三项放在一起看。</p>
+
+<h4 id="n-5-3">5.3 WeDLM：全程因果注意力的掩码扩散</h4>
+<p>块扩散虽然能缓存写完的块，块内仍是双向的，块里的 token 要等整块写完才能进缓存。<a href="wedlm.html">WeDLM</a>（2025-12）走得更远：全程只用标准的因果注意力。它的关键技巧是“拓扑重排”：把已知 token 挪到输入的最前面，被遮位置排在后面，同时让每个 token 保留它在原句里的位置编号，旋转位置编码就仍按原来的位置计算注意力，于是每个被遮位置都能看到全部已知内容（<a href="wedlm.html#n-4">§4</a>）。解码时维护一个固定大小的窗口，最左边已经连成一段的 token 立刻提交进 KV 缓存。速度上，它和 vLLM 上的 Qwen3-8B 比：GSM8K 保守设置约快 1.97 倍（准确率 92.3%），激进设置 3.2 倍，但准确率低了约 10 分；GPU、批大小和并发数都没有写明，120–140 token/秒的 AR 基线只和单条或极少几条并发请求的状态相符（<a href="wedlm.html#n-6-7">§6.7</a>）。值得肯定的是，它是少数直接拿优化过的 AR 服务引擎当基线的工作。</p>
+
+<h4 id="n-5-4">5.4 和 AR 合为一体：扩散打草稿，AR 来验证</h4>
+<div class="note-pre"><b>先补一点背景：投机解码。</b>
+<p>投机解码先让一个便宜的草稿器猜出后面几个 token，再让大模型用一次前向把这几个 token 一起检查：从左到右，凡是和大模型自己会写的一致的就接受，第一处不一致的地方改用大模型的结果。因为检查的规则保证最终输出与大模型逐个生成的结果相同（贪心时逐词相同，采样时分布相同），这种加速是“无损”的。它利用的正是第 1.1 节说的闲置算力：单请求时大模型一次前向检查 16 个位置和检查 1 个位置几乎一样快。瓶颈在草稿器：传统草稿器自己也是一个一个地猜，为了便宜只能做得很小，猜不远。</p>
+</div>
+<p>扩散模型一次前向就能猜一整块，正好适合当草稿器。<a href="tidar.html">TiDAR</a>（2025-11）让同一个模型在同一次前向里干两件事：一部分位置用因果注意力验证上一轮的草稿，另一部分位置放上掩码 token、用块内双向注意力为下一轮起草；因为事先不知道这一轮会接受几个，它为每一种可能的接受结果都预先起草一份（<a href="tidar.html#n-4">§4</a>）。从 Qwen2.5-1.5B 和 Qwen3-8B 分别继续预训练 50B、150B token 后，单张 H100、批大小 1 时每秒产出的 token 数是同尺寸 AR 的 4.71 和 5.91 倍；但 8B 的平均分比 Qwen3-8B 低约 2.78 分，唯一对齐了数据的 AR 对照（1.5B 的 AR 继续训练）也比它高约 1.3–3 分，而且没有任何批大小大于 1 的数据（<a href="tidar.html#n-9-5">§9.5</a>）。它的“无损”是经验意义上的，输出并不等于任何外部 AR 模型的输出。</p>
+<p><a href="dflash.html">DFlash</a>（2026-02）把扩散严格地放在草稿器的位置：一个只有 5 层的块扩散模型一次前向猜出后面 16 个位置，并把目标模型 5 个不同深度的隐状态融合后作为额外的 key/value 注入草稿器的每一层，所以小而准（<a href="dflash.html#n-4">§4</a>）。验证是严格的，输出与目标模型逐词贪心的结果在数学上相同，论文因此不需要报告任何准确率。Qwen3-8B 上单请求平均快 4.86 倍（同条件下，当时最强的 AR 式草稿器方法之一 EAGLE-3 为 1.76–2.02 倍）；放进 SGLang、单张 B200 上，并发从 1 升到 32，MATH-500 的加速从 5.1 倍降到 2.8 倍（<a href="dflash.html#n-7">§7</a>）。和 EAGLE-3 的头条比较没有对齐草稿器大小和训练数据，对齐了数据的那组（表 5）差距是 1.2–1.4 倍（<a href="dflash.html#n-8-5">§8.5</a>）。它在发布后几个月内被合入 vLLM（2026-03-30）和 SGLang（2026-04-07）。</p>
+<p><a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a>（2026-07）把这个思路做成一个模型族：在 Ministral3 基座上用“AR 损失 + 0.3 倍块扩散损失”继续训练出 3B、8B、14B 模型，同一套权重只换注意力掩码，就能做普通 AR 生成、块扩散并行生成，或者“扩散一次前向起草、AR 一次前向验证”的自推测解码（<a href="nemotron-diffusion.html#n-3">§3</a>）。低并发时自推测在 GB200 上比本模型的 AR 模式快 3.3 倍（定制 kernel 下 3.97 倍），高并发时作者建议退回 AR 模式。它的受控对照显示，加不加扩散损失，AR 模式的平均分只差 +0.14（基座）和 +0.43（指令），在噪声之内，而加扩散损失的一方训练算力约是两倍（推算，<a href="nemotron-diffusion.html#n-6-6">§6.6</a>）。</p>
+<div class="note-warn"><b>这一节的趋势说明了什么：</b>从 BD3-LM 到 DFlash，方法越来越靠近 AR：先是块间自回归，再是从 AR 权重出发，再是全程因果注意力，最后干脆由 AR 决定输出。这样做换来了精确缓存、现成的服务引擎和与 AR 相当的质量，代价是离“双向、任意顺序、可修改”这些扩散最初的卖点越来越远。到 2026 年，部署信号最强的两项（DFlash 进入 vLLM / SGLang，Nemotron 的自推测模式）都让扩散为 AR 的输出分布服务；而 DiffusionGemma、LLaDA2.1、Mercury 坚持纯扩散生成。两条路线并存，这是第 12 节的一个开放问题。</div>
+</section>
+
+<section class="note">
+<h3 id="n-6">6 解码加速：让“并行”真正兑现</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>开源扩散模型放大到 8B 之后反而比 AR 慢，慢在哪里？免训练的缓存和阈值并行、需要训练的蒸馏，各自从哪个因子上省时间？“快 27.6 倍”“快 50 倍”“比 AR 快 5 倍”这些数字的分母是谁？最关键的问题：到了真实的多用户服务里，扩散模型还快吗？</div>
+<p>一段文字的生成时间等于“前向次数 × 每次前向的耗时”。扩散模型相对 AR 的速度可以写成两个因子的比（<a href="diffusiongemma.html#n-6">DiffusionGemma 精读 §6.1</a> 和 <a href="sdar.html#n-6-4">SDAR 精读 §5.2.4</a> 都推过这个式子）：</p>
+<div class="formula">$$\frac{\text{扩散的速度}}{\text{AR 的速度}}\approx\frac{\text{每次前向写定的 token 数（TPF）}}{\text{扩散单次前向的耗时}\,/\,\text{AR 单次前向的耗时}}$$</div>
+<p>2025 年 LLaDA、Dream 的默认设置下，分子是 1（每轮只写 1 个），分母远大于 1（每轮重算整段、没有缓存），所以比 AR 慢。所有加速方法要么让分母变小（缓存），要么让分子变大（并行），要么两者都做；还有一类干脆换一种保证质量的方式。</p>
+<div class="dia">
+  <div class="dia-title">示意图：解码加速方法按“从哪个因子省时间”分类</div>
+  <div class="dia-cols">
+    <div>
+      <div class="dia-box enc"><b>让每次前向更便宜（缓存）</b><small>分母变小</small></div>
+      <div class="dia-flow"><span class="dia-box">近似缓存，免训练<small><a href="fast-dllm.html#n-3">Fast-dLLM</a> 块级缓存 / DualCache；<a href="dkv-cache.html#n-5">dKV-Cache</a> 延迟缓存已写定的 token</small></span></div>
+      <div class="dia-flow"><span class="dia-box">精确缓存，要训练<small><a href="block-diffusion.html">BD3-LM</a> 与 AR 改造（<a href="fast-dllm-v2.html">Fast-dLLM v2</a>、<a href="sdar.html">SDAR</a>、<a href="llada2.html">LLaDA2.0</a>）；<a href="d2f.html#n-4">D2F</a> 块因果蒸馏；<a href="wedlm.html#n-4">WeDLM</a> 因果注意力 + 拓扑重排</small></span></div>
+    </div>
+    <div>
+      <div class="dia-box pred"><b>让前向次数更少（每次多写几个）</b><small>分子变大</small></div>
+      <div class="dia-flow"><span class="dia-box">改采样规则，免训练<small><a href="fast-dllm.html#n-4">Fast-dLLM</a> 置信度阈值；<a href="llada2-1.html#n-2">LLaDA2.1</a> 可改字后放低阈值</small></span></div>
+      <div class="dia-flow"><span class="dia-box">让模型更笃定，要训练<small><a href="dparallel.html#n-5">dParallel</a> 确定性强制；<a href="d3llm.html#n-3">d3LLM</a> 伪轨迹蒸馏；LLaDA2.0 的 CAP；Seed Diffusion 的 on-policy；DiffusionGemma 的 SD·RL</small></span></div>
+      <div class="dia-flow"><span class="dia-box">几块同时写<small>D2F 流水线；d3LLM 多块并行</small></span></div>
+    </div>
+    <div>
+      <div class="dia-box act"><b>换一种保证质量的方式</b><small>不再靠“只写有把握的”</small></div>
+      <div class="dia-flow"><span class="dia-box">AR 验证，输出与 AR 一致或接近<small><a href="dflash.html">DFlash</a>；<a href="tidar.html">TiDAR</a>；<a href="nemotron-diffusion.html">Nemotron</a> 自推测</small></span></div>
+      <div class="dia-flow"><span class="dia-box">连续轨迹蒸馏到一两步<small><a href="flow-map-lm.html">FLM</a>；<a href="elf.html">ELF</a>（小模型、无条件生成）</small></span></div>
+    </div>
+  </div>
+  <div class="dia-note">本站示意图。<b>怎么看：</b>左列减小每次前向的耗时，中列减少前向次数，右列换掉“各位置独立抽样”这个产生因子分解误差的环节。同一篇论文常常同时用几招，例如 Fast-dLLM 是“近似缓存 + 阈值并行”，D2F 是“块因果精确缓存 + 几块同时写”。左、中两列的方法最终都受因子分解误差的约束：一次写得越多，越可能把强相关的位置拼错。</div>
+</div>
+
+<h4 id="n-6-1">6.1 免训练：Fast-dLLM 与 dKV-Cache</h4>
+<p><a href="fast-dllm.html">Fast-dLLM</a>（2025-05）不动模型权重，针对两个因子各给一招（<a href="fast-dllm.html#n-3">§3</a>、<a href="fast-dllm.html#n-4">§4</a>）。缓存方面，把回答切成长 32 的块从左到右写，写某一块的那几轮里，把块外位置的 key/value 当作不变直接读缓存，这一块写完再整段重算、刷新缓存；凭据是相邻几轮的 key/value 几乎一样。并行方面，只写定最大概率超过 0.9 的位置，并用一个定理说明：每个位置都足够有把握时，各位置分别取最可能的词，和按整体取最可能的一组词结果相同。单张 A100、批大小 1、GSM8K 生成长度 1024 时，LLaDA 从每秒 0.7 个 token 提到 19.3 个，这就是 27.6 倍，准确率从 77.3% 变为 76.0%。</p>
+<p>这个倍数要拆开读（<a href="fast-dllm.html#n-5-5">§5.5</a>）。分母是原版最慢的设置：每轮写 1 个、每轮整段重算、Hugging Face 实现。只加并行已有 13.3 倍，缓存再贡献约 2.1 倍（推算）。倍数随生成长度上涨，主要是因为原版垮得更快：生成长度设成 1024 时，答案后面是几百个结束符，原版仍要一轮一个地把它们填完，而这些位置模型很有把握，阈值规则几轮就能填完。比任何倍数都更能说明阈值规则价值的，是“每轮写的 token 数相同”时的对比：平均每轮约 4 个时，阈值规则的 GSM8K 约 77.7%，每轮固定写 4 个只有约 66.5%（读自原图）。和 AR 比，论文在同样的“A100、批大小 1、不用推理框架、生成长度 256”条件下测了 LLaMA-3-8B（约 37 token/秒、77.9%）和 Qwen2.5-7B（约 40 token/秒、83.5%），加速后的 LLaDA 是 54.4 token/秒、78.5%（读自原图）。所以“追上甚至超过 AR”只在单条请求、两边都不用推理引擎时成立；附录的批大小实验里，批大小 32 时 LLaMA 约 435–650 token/秒，只开缓存的 LLaDA 约 141–211（<a href="fast-dllm.html#n-6-6">§6.6</a>）。</p>
+<p>同期的 <a href="dkv-cache.html">dKV-Cache</a>（2025-05）基于另一个观察：一个 token 被写定之后它的 key/value 就相当稳定，变化最大的恰好是写定前后那一步。于是只缓存已写定的 token、晚一步再存、定期整段刷新（<a href="dkv-cache.html#n-5">§5</a>）。论文报告 2–10 倍加速；其中 10 倍来自长提示、短输出、只缓存提示的设置，对短提示的一般问答，近乎无损的主力版本大约是 2 倍。它的分母同样是原版扩散模型，没有测任何 AR 模型的速度，批大小也没有写明（<a href="dkv-cache.html#n-weight">§10</a>）。</p>
+
+<h4 id="n-6-2">6.2 要训练：D2F、dParallel、d3LLM</h4>
+<p>免训练方法有一个天花板：阈值放低就掉分，因为模型本身每一轮只对少数位置有把握。2025 下半年的几项工作开始改模型本身。</p>
+<ul>
+  <li><a href="d2f.html">D2F</a>（2025-08）用 LoRA（只训练少量低秩附加参数的轻量微调）把 LLaDA、Dream 蒸馏成“块内双向、块间因果”的学生：训练时越靠后的块遮得越多，学生只看前文，却要模仿看全文的老师（<a href="d2f.html#n-4">§4</a>）。于是写完的块能精确缓存，后一块也不必等前一块写完就能开写（流水线）。单条请求下 D2F-Dream 在 GSM8K 上每秒 119.9 个 token，约为 LLaMA3-8B（48.0）的 2.5 倍。但 AR 一侧的推理实现没说明，按带宽估算 48.0 只有理论上限的一半左右；和同源的 Qwen2.5-7B 比，D2F-Dream 更快但分数低 7–10 分；“快 50 倍”只出现在 LLaDA 的 MBPP 一项，那一项原版要填完的 512 个位置里约 87% 是答案后面的结束符（推算，<a href="d2f.html#n-5-6">§5.6</a>）。</li>
+  <li><a href="dparallel.html">dParallel</a>（2025-09）发现模型的“把握”是从左到右一个接一个出现的：每一轮只有紧挨已知内容的少数位置变得确定（<a href="dparallel.html#n-4">§4</a>）。它让模型在自己生成且答对的答案上做自蒸馏，并对已经预测对的位置压低预测熵，让更多位置提前变得确定。LLaDA-8B-Instruct 在 GSM8K 上的解码步数从 256 降到 30，单条请求延迟快 8.5 倍，准确率 75.7% → 76.1%。它没有让每一轮变快（每轮约 73 毫秒不变），只让轮数变少；测速是工作站显卡、批大小 1、不开缓存（<a href="dparallel.html#n-6-7">§6.7</a>）。</li>
+  <li><a href="d3llm.html">d3LLM</a>（2026-01）先让原模型逐个 token 地解码，记下它揭开各位置的先后顺序（伪轨迹），再按这个顺序决定训练时遮哪些位置；推理时几块按熵阈值同时解码，并配延迟写入、定期刷新的 KV 缓存（<a href="d3llm.html#n-3">§3</a>）。它还提出把“精度随并行度变化的曲线”压成一个数的 AUP 指标。在 LLaDA 上每次前向约写 9 个 token 而 GSM8K 精度不降。速度对比难得地给了两套口径：双方都用 Hugging Face 时，H100、批大小 1 下比 Qwen2.5-7B-Instruct 快约 5 倍；双方都用 SGLang 时，H100 上仍是 5.0–5.1 倍，A100 上降到 2.6 倍。但测速用的 GSM8K-CoT 恰好是双方最接近的任务（73.1% 对 74.1%），Qwen 在 MATH（41.2% 对 30.4%）、HumanEval（67.7% 对 39.6%）上明显更高（<a href="d3llm.html#n-4-7">§4.7</a>）。</li>
+</ul>
+<p>这三项都说明：并行度能提多少，最终取决于模型本身有多少位置“同时有把握”，而训练可以把这个数推高。但并行度有一个由数据决定的天花板。ParallelBench（本站没有精读页，见<a href="../legacy/tracks/dllm/16-order-limits.html#parallelbench">旧版拆解</a>）证明，一轮同时写的几个位置既然是独立采样的，即使每个位置的分布都完全正确，生成分布与真实分布之间仍有一个误差下界；答案唯一的数独这个下界为 0，答案很多的拉丁方则大于 0。数学和代码这类结构化、低熵的基准恰好是并行最占便宜的场景，开放式写作则不然。</p>
+
+<h4 id="n-6-3">6.3 真实服务里还快吗：批大小决定答案</h4>
+<p>前面几乎所有速度数字都是批大小 1。回到第 1.1 节的那笔账：单个请求时 AR 每一步只为 1 个位置计算，算力大半闲着，扩散模型多算几十个位置几乎不花时间，所以只要 TPF 大于 1 就能赢。同时服务很多请求时，AR 把几十个请求拼成一批，闲置的算力被填满；扩散模型每产出一个 token 要处理的位置数却远多于 AR，DiffusionGemma 粗算约为 256 ÷ 19.74 ≈ 13 个（<a href="diffusiongemma.html#n-6-4">§6.4</a>），这些额外计算此时就变成了真实成本。少数几篇论文测了这个趋势：</p>
+<div class="dia">
+  <div class="dia-title">图表：相对 AR 的速度倍数，随批大小或并发数怎么变</div>
+  <svg class="dg" viewBox="0 0 960 380" role="img" aria-label="四项工作相对自回归的速度倍数随批大小或并发数的变化" style="--dg-min:820px">
+  <line class="grid-ln" x1="80" y1="310.0" x2="660" y2="310.0"/><text x="72" y="310.0" class="t-r t-xs">0×</text>
+  <line class="grid-ln" x1="80" y1="260.9" x2="660" y2="260.9"/><text x="72" y="260.9" class="t-r t-xs">1×</text>
+  <line class="grid-ln" x1="80" y1="211.8" x2="660" y2="211.8"/><text x="72" y="211.8" class="t-r t-xs">2×</text>
+  <line class="grid-ln" x1="80" y1="162.7" x2="660" y2="162.7"/><text x="72" y="162.7" class="t-r t-xs">3×</text>
+  <line class="grid-ln" x1="80" y1="113.6" x2="660" y2="113.6"/><text x="72" y="113.6" class="t-r t-xs">4×</text>
+  <line class="grid-ln" x1="80" y1="64.5" x2="660" y2="64.5"/><text x="72" y="64.5" class="t-r t-xs">5×</text>
+  <line class="axis" x1="80" y1="310" x2="660" y2="310"/><line class="axis" x1="80" y1="310" x2="80" y2="40"/>
+  <text x="80.0" y="328" class="t-c t-xs">1</text>
+  <text x="144.4" y="328" class="t-c t-xs">2</text>
+  <text x="208.9" y="328" class="t-c t-xs">4</text>
+  <text x="273.3" y="328" class="t-c t-xs">8</text>
+  <text x="337.8" y="328" class="t-c t-xs">16</text>
+  <text x="402.2" y="328" class="t-c t-xs">32</text>
+  <text x="466.7" y="328" class="t-c t-xs">64</text>
+  <text x="531.1" y="328" class="t-c t-xs">128</text>
+  <text x="595.6" y="328" class="t-c t-xs">256</text>
+  <text x="660.0" y="328" class="t-c t-xs">512</text>
+  <text x="370" y="350" class="t-c t-sm">批大小 / 并发请求数（对数刻度）</text>
+  <text x="24" y="175" class="t-c t-sm" transform="rotate(-90 24 175)">相对 AR 的速度（倍）</text>
+  <line x1="80" y1="260.9" x2="660" y2="260.9" style="stroke:var(--text-2);stroke-width:1.4;stroke-dasharray:6 4"/>
+  <text x="656" y="252.9" class="t-r t-xs">与 AR 一样快</text>
+  <polyline points="80.0,59.6 208.9,89.1 273.3,89.1 337.8,118.5 402.2,172.5" style="fill:none;stroke:var(--c-enc);stroke-width:2.4"/>
+  <circle cx="80.0" cy="59.6" r="3.4" style="fill:var(--c-enc)"/>
+  <circle cx="208.9" cy="89.1" r="3.4" style="fill:var(--c-enc)"/>
+  <circle cx="273.3" cy="89.1" r="3.4" style="fill:var(--c-enc)"/>
+  <circle cx="337.8" cy="118.5" r="3.4" style="fill:var(--c-enc)"/>
+  <circle cx="402.2" cy="172.5" r="3.4" style="fill:var(--c-enc)"/>
+  <text x="409.2" y="164.5" class="t-xs">2.8×</text>
+  <polyline points="80.0,108.2 144.4,162.2 208.9,198.1 273.3,230.5 337.8,250.1" style="fill:none;stroke:var(--c-tgt);stroke-width:2.4"/>
+  <circle cx="80.0" cy="108.2" r="3.4" style="fill:var(--c-tgt)"/>
+  <circle cx="144.4" cy="162.2" r="3.4" style="fill:var(--c-tgt)"/>
+  <circle cx="208.9" cy="198.1" r="3.4" style="fill:var(--c-tgt)"/>
+  <circle cx="273.3" cy="230.5" r="3.4" style="fill:var(--c-tgt)"/>
+  <circle cx="337.8" cy="250.1" r="3.4" style="fill:var(--c-tgt)"/>
+  <text x="344.8" y="242.1" class="t-xs">1.22×</text>
+  <polyline points="80.0,203.5 208.9,198.6 273.3,211.3 337.8,226.1 402.2,249.1 466.7,270.2 531.1,281.0 595.6,288.9 660.0,290.4" style="fill:none;stroke:var(--c-reg);stroke-width:2.4"/>
+  <circle cx="80.0" cy="203.5" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="208.9" cy="198.6" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="273.3" cy="211.3" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="337.8" cy="226.1" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="402.2" cy="249.1" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="466.7" cy="270.2" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="531.1" cy="281.0" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="595.6" cy="288.9" r="3.4" style="fill:var(--c-reg)"/>
+  <circle cx="660.0" cy="290.4" r="3.4" style="fill:var(--c-reg)"/>
+  <text x="667.0" y="282.4" class="t-xs">0.4×</text>
+  <polyline points="80.0,187.3 208.9,216.7 466.7,236.4" style="fill:none;stroke:var(--c-pred);stroke-width:2.4;stroke-dasharray:2 4"/>
+  <circle cx="80.0" cy="187.3" r="3.4" style="fill:var(--c-pred)"/>
+  <circle cx="208.9" cy="216.7" r="3.4" style="fill:var(--c-pred)"/>
+  <circle cx="466.7" cy="236.4" r="3.4" style="fill:var(--c-pred)"/>
+  <text x="473.7" y="228.4" class="t-xs">1.5×</text>
+  <line x1="690" y1="64" x2="720" y2="64" style="stroke:var(--c-enc);stroke-width:2.4"/><text x="728" y="64" class="t-xs">DFlash（投机解码草稿器，无损）</text>
+  <line x1="690" y1="86" x2="720" y2="86" style="stroke:var(--c-tgt);stroke-width:2.4"/><text x="728" y="86" class="t-xs">DiffusionGemma（对 Gemma 4 + MTP）</text>
+  <line x1="690" y1="108" x2="720" y2="108" style="stroke:var(--c-reg);stroke-width:2.4"/><text x="728" y="108" class="t-xs">SDAR-8B 块长 16（对同引擎 AR）</text>
+  <line x1="690" y1="130" x2="720" y2="130" style="stroke:var(--c-pred);stroke-width:2.4;stroke-dasharray:2 4"/><text x="728" y="130" class="t-xs">Fast-dLLM v2 7B（对 Qwen2.5-7B）</text>
+  <text x="690" y="158" class="t-xs">DFlash：Qwen3-8B · MATH-500 · SGLang · 单张 B200</text>
+  <text x="690" y="176" class="t-xs">DiffusionGemma：每用户速度 · H100 FP8 · PG-19</text>
+  <text x="690" y="194" class="t-xs">SDAR：总吞吐 · H200 · LMDeploy · Math-500</text>
+  <text x="690" y="212" class="t-xs">Fast-dLLM v2：A100 · GSM8K（中间批大小未画）</text>
+  <text x="690" y="230" class="t-xs">四条线的 AR 基线、硬件、任务都不同，</text>
+  <text x="690" y="248" class="t-xs">只能比较趋势，不能横向比较高低。</text>
+</svg>
+  <div class="dia-note">本站用各精读页整理的报告数字重画：<a href="dflash.html#n-7">DFlash §7.1</a>（表 3）、<a href="diffusiongemma.html#n-6-4">DiffusionGemma §6.4</a>（原文图 12b 标注的倍数）、<a href="sdar.html#n-6-4">SDAR §5.2.4</a>（读自原文图 7、图 8 后推算）、<a href="fast-dllm-v2.html#n-8">Fast-dLLM v2 §4.2</a>（读自原文图 5 后推算）。<b>怎么看：</b>横轴是同时处理的请求数，纵轴是相对 AR 的速度，虚线以下表示比 AR 慢。四条线都随并发下降：SDAR 在批大小 64 左右跌到 AR 以下；DiffusionGemma 只测到 16 个并发，按趋势在 32 附近降到 1 以下（报告原话是“约 32 个并发请求时 AR 开始占优”）；DFlash 是严格验证的投机解码，在 32 个并发时仍有 2.8 倍，更高并发没有测；Fast-dLLM v2 在批大小 64 时仍有 1.5 倍，但它的 AR 基线实现没有说明。四条线的基线、硬件、任务都不同，只能比较趋势。</div>
+</div>
+<p>这张图是本页主线问题在速度一侧的答案：扩散模型确实能把单个用户的等待时间缩短几倍，这一点在“同一模型、同一张卡”的最干净对照（DiffusionGemma 对 Gemma 4）和“同一引擎”的对照（SDAR 对 LMDeploy 上的 AR）里都成立；但这个优势是用本来闲着的算力换来的，并发越高，可换的就越少。对按 token 计费、追求单卡总吞吐的云服务，AR 仍然更划算：DiffusionGemma 报告里 AR 在 128 个并发时单卡总吞吐约 4,950 token/秒，而扩散模式的最高点约 2,900（读自原图）。所以扩散模型最合适的位置，是延迟敏感、并发不高的场景：本地部署、单用户交互、代码补全。</p>
+<div class="note-warn"><b>读速度数字时的五个问题：</b>分母是谁（原版扩散、未优化的 AR，还是 vLLM / SGLang 上的 AR）？批大小或并发是多少？TPS 统计的是不是答案之后的结束符？质量数字和速度数字是不是同一个解码设置？硬件和精度是否相同（例如 FP8 对 BF16）？第 11 节会把这些问题对应到具体论文上。</div>
+</section>
+
+<section class="note">
+<h3 id="n-7">7 后训练与生成顺序：没有精确似然怎么做 RL</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>强化学习让 AR 模型的推理能力大幅提升，扩散模型做 RL 卡在哪一步？d1、VRPO、coupled-GRPO、TraceRL、JustGRPO 各自怎样估计那个算不出来的对数概率？与此同时，“扩散模型可以按任意顺序生成”到底是优点还是缺点：数独上它赢了按正确顺序训练的 AR，为什么在数学和代码的 RL 里反而吃亏？</div>
+<div class="note-pre"><b>先补一点背景：RL 和偏好优化为什么需要 \(\log\pi\)。</b>
+<p>GRPO 这类策略梯度方法让模型对每道题采样一组回答，用规则判对错给奖励，再按“新策略与旧策略生成这段回答的概率之比”加权更新，比值要在一个范围内裁剪。DPO 则直接比较模型在“更好的回答”和“更差的回答”上的对数概率之差。两者都要用到“模型生成这整段回答的对数概率” \(\log\pi(y\mid x)\)。AR 模型一次前向就能精确算出：把每个位置“下一个词”的对数概率相加即可。扩散模型生成一段回答要走很多轮、顺序不固定，精确值算不动，只能用 ELBO 估计，而 LLaDA 论文里的估计要做上百次前向。</p>
+</div>
+
+<h4 id="n-7-1">7.1 五种估计 \(\log\pi\) 的办法</h4>
+<p>难点不只是贵，还在于估计里的随机误差会被 RL 和 DPO 的非线性变换放大成系统性偏差（<a href="llada-1-5.html#n-3">LLaDA 1.5 精读 §3</a>）。2025–2026 年的方法依次给出了五种答案：</p>
+<div class="dia">
+  <div class="dia-title">示意图：给一段 6 个 token 的回答打 \(\log\pi\)，各方法喂给网络的是什么</div>
+  <div class="dia-row"><span class="lbl">AR（精确）</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell c">r1</span><span class="cell c">r2</span><span class="cell c">r3</span><span class="cell c">r4</span><span class="cell c">r5</span><span class="cell c">r6</span></div></div>
+  <div class="dia-out">一次前向，因果注意力，每个位置读“下一个词”的概率，相加就是精确值。</div>
+  <div class="dia-row"><span class="lbl">d1 · diffu-GRPO</span><div class="cells"><span class="cell b">P1</span><span class="cell">M</span><span class="cell b">P3</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">回答全遮、题目随机遮 15%，一次前向，读每个位置猜中原词的概率并直接相加（均场近似，有偏）。</div>
+  <div class="dia-row"><span class="lbl">VRPO（LLaDA 1.5）</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell b">r1</span><span class="cell c">M</span><span class="cell b">r3</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell b">r6</span></div></div>
+  <div class="dia-out">用 ELBO 估计：每次 8 个遮法样本、分到不同时间步；当前模型和参考模型用完全相同的遮法，误差大半互相抵消。</div>
+  <div class="dia-row"><span class="lbl">coupled-GRPO 遮法 A</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell c">M</span><span class="cell b">r2</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell b">r5</span><span class="cell b">r6</span></div></div>
+  <div class="dia-row"><span class="lbl">coupled-GRPO 遮法 B</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell b">r1</span><span class="cell c">M</span><span class="cell b">r3</span><span class="cell b">r4</span><span class="cell c">M</span><span class="cell c">M</span></div></div>
+  <div class="dia-out">一对互补遮法（DiffuCoder）：每个回答 token 恰好在其中一次被遮、被打分，方差比两次独立随机遮更小。</div>
+  <div class="dia-row"><span class="lbl">TraceRL（第 2 步）</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell b">r1</span><span class="cell b">r2</span><span class="cell c">M</span><span class="cell c">M</span><span class="cell">M</span><span class="cell">M</span></div></div>
+  <div class="dia-out">回放采样时的真实轨迹：在模型当时真正看到的状态下，只给这一步实际揭开的 token（这里是 r3、r4）打概率。</div>
+  <div class="dia-row"><span class="lbl">JustGRPO</span><div class="cells"><span class="cell b">P1</span><span class="cell b">P2</span><span class="cell b">P3</span><span class="cell b">r1</span><span class="cell b">r2</span><span class="cell c">M</span><span class="cell">M</span><span class="cell">M</span><span class="cell">M</span></div></div>
+  <div class="dia-out">把扩散模型当成从左到右的策略：前文可见、后文全遮，只读紧接着的那个位置；对这个从左到右的策略来说概率是精确的。</div>
+  <div class="dia-note">本站示意图，遮哪些位置是虚构的。绿色是网络能看到的已知 token，橙色是这一次要读取其概率的位置，灰色 M 是被遮但不打分的位置。<b>怎么看：</b>从上往下，估计从“一次前向、偏差大”（d1）走向“与实际解码一致”（TraceRL），最后回到“放弃任意顺序、换来精确值”（JustGRPO）。</div>
+</div>
+<ul>
+  <li><a href="d1.html">d1</a>（2025-04）先用 1000 道难题做掩码 SFT，再用上图那种一次前向的估计做 GRPO（<a href="d1.html#n-3-1">§3.1</a>），这是策略梯度 RL 第一次在 8B 掩码扩散模型上跑通：LLaDA-8B-Instruct 在 GSM8K、MATH500 上提高约 4 个点，Countdown、Sudoku 接近翻倍。但 RL 模型是在测试集上从几十个检查点里挑的，GSM8K 的提升约为两次评测差值标准误的 2.5–3 倍，一部分可能来自挑选；Countdown 的十几到二十几个点则远大于噪声（<a href="d1.html#n-4-5">§4.5</a>）。</li>
+  <li><a href="llada-1-5.html">LLaDA 1.5</a>（2025-05）证明 DPO 损失的偏差和方差都由“偏好分数估计值”的方差控制，并给出三个不引入偏差的降方差办法（VRPO）。在 35 万个内部偏好对上，GSM8K 提高 4.7 分且三次训练都稳定；HumanEval 只有 164 题，+3.0 约等于多做对 5 题，证据偏弱。最干净的对照是“朴素 DPO 对 VRPO”（只差估计器），朴素 DPO 在几项上反而下降；换成公开的 1 万条数学偏好数据，VRPO 相对 SFT 只提升零点几个点（<a href="llada-1-5.html#n-4-5">§4.5</a>）。</li>
+  <li><a href="diffucoder.html">DiffuCoder</a>（2025-06）的 coupled-GRPO 只用 2.1 万道题把 EvalPlus 从 63.6 提到 67.9；同一批题上做 GRPO 的 AR 模型提升幅度相近，但绝对分数仍高约 6 分（约 73.9 对 67.9，推算，<a href="diffucoder.html#n-5-6">§5.6</a>）。</li>
+  <li><a href="tracerl.html">TraceRL</a>（2025-09）指出随机遮法让模型在训练中面对推理时几乎不会出现的状态，改为按真实轨迹打分，并配一个扩散价值模型（<a href="tracerl.html#n-4">§4</a>）。在 SDAR 块扩散底座上训出的 TraDo-4B/8B，MATH500 比 RL 前高 4–5 分。但它与 AR 模型的比较没有对齐底座的代差：SDAR 来自 2025 年的 Qwen3，对照的却是 2024 年的 Qwen2.5-7B-Instruct；同一代的 AR 底座在 RL 之前就已经和 TraDo-8B 差不多。而且最高的 75.6 和 78.5 是每步只写 1 个 token 的静态解码，换成每步约 2.5 个的动态解码就降到 71.8 和 75.5（<a href="tracerl.html#n-5-11">§5.11</a>）。</li>
+  <li><a href="flexibility-trap.html">灵活性陷阱</a>（2026-01，ICML 2026 杰出论文）的 JustGRPO 走了最直接的一步：训练时干脆把扩散模型当作从左到右的策略，用标准 GRPO 精确优化（<a href="flexibility-trap.html#n-4">§4</a>）。LLaDA-8B-Instruct 的 GSM8K 达到 89.1%，比原模型高 10.5 分，推理时仍可以并行解码。它为什么要放弃任意顺序，见下一小节。</li>
+</ul>
+
+<h4 id="n-7-2">7.2 生成顺序：资产还是陷阱</h4>
+<p>“扩散模型能按任意顺序生成”常被当作它推理能力可能超过 AR 的理由：AR 只能走从左到右一条路，扩散能走任何路，其中也包括从左到右。三篇精读给出了一个更细的图景。</p>
+<p><b>在答案唯一、约束全局的任务上，是资产。</b><a href="token-ordering.html">Token Ordering</a>（2025-02，ICML 2025 杰出论文）证明，掩码扩散训练时要同时学会指数多个填空题，其中一部分在计算上学不会；但推理时可以按模型的把握程度（尤其是前两名候选的概率差）挑选先揭开的位置，绕开这些难题（<a href="token-ordering.html#n-4">§4</a>）。600 万参数的模型在数独上的解题率从随机顺序的 6.88% 升到 89.49%，超过训练时学过正确求解顺序、贪心解码的 4200 万参数 AR（87.18%）。不过 AR 用宽 5 的束搜索能到 94.21%；数独答案唯一，“先填有把握的格子”几乎不损失什么；到了 LLaDA 8B 的语言任务上，收益缩小到代码填空和数学的 3–5 个点，MMLU 上反而下降（<a href="token-ordering.html#n-4-8">§4.8</a>）。</p>
+<p><b>实际解码时，扩散模型并不那么“任意”。</b><a href="diffucoder.html">DiffuCoder</a> 定义了衡量解码顺序有多接近从左到右的指标，发现了“熵汇”：第一步时紧挨提示的几个位置置信度明显更高，按置信度挑位置就会一步步往右推，形成很强的从左到右趋势；从零训练的 LLaDA 相当“不 AR”，而从 AR 改造、经过 SFT 的 DiffuCoder 几乎就是从左到右（<a href="diffucoder.html#n-4">§4</a>）。dParallel 观察到的“确定性从左到右依次收敛”是同一现象的另一面。</p>
+<p><b>在开放式推理的 RL 里，是陷阱。</b><a href="flexibility-trap.html">灵活性陷阱</a>只改“每步写哪个位置”、其余全部相同，比较按置信度挑位置的任意顺序和严格从左到右（<a href="flexibility-trap.html#n-3">§3</a>）。衡量指标是 Pass@\(k\)：每道题采 \(k\) 次、至少做对一次的比例。LLaDA-Instruct 在 HumanEval 上，Pass@1 是 40.5% 对 34.5%，任意顺序领先；Pass@128 是 67.1% 对 83.0%，反过来落后近 16 个点。采 1024 次时，只有任意顺序能解出的题占 0.6%，只有从左到右能解出的占 21.3%。机制是：按置信度挑位置的解码器总是先写有把握的部分，把 “Therefore”“Since” 这类决定推理走向的高熵分叉词推迟到最后；等它回来补时后文已经写定，原本的多种可能被压成一种，多次采样覆盖的解法因此变少。而 Pass@\(k\) 随 \(k\) 增长的速度，正是 RL 能学到多远的上限。附录里换用基于负熵的挑选规则，差距从 16 个点缩到 3 个点，说明结论对采样规则有一定依赖（<a href="flexibility-trap.html#n-5-6">§5.6</a>）。</p>
+<div class="note-warn"><b>把三篇放在一起：</b>任意顺序的价值取决于任务。答案唯一、约束全局（数独、斑马谜题、按格式填空）时，先填有把握的位置几乎是免费的好处；答案很多、需要探索（数学推导、写代码）时，同样的规则会过早地锁定一条路。这也解释了为什么做 RL 的工作从“保住任意顺序”（d1、VRPO、coupled-GRPO）逐渐转向“对齐实际轨迹”（TraceRL）再到“训练时干脆从左到右”（JustGRPO）。还要注意，这些 RL 工作没有一篇和“同样大小、做同样 RL 的 AR 模型”比过（DiffuCoder 是唯一的例外），所以“扩散模型做 RL 后与 AR 谁强”目前没有答案。</div>
+</section>
+
+<section class="note">
+<h3 id="n-8">8 代码与多模态：扩散的“主场”检验</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>代码和图文任务常被认为最适合扩散：代码要先定结构、经常填中间；图文要满足格式、可以并行。和同底座的 AR 模型比，扩散版本的代码模型和多模态模型到底处在什么水平？优势落在哪类任务上？</div>
+
+<h4 id="n-8-1">8.1 代码：同底座比，标准基准上大多略低，编辑与填空占优</h4>
+<p>四篇代码精读都从 AR 代码模型出发，所以都有一个天然的对照：改造前的那个 AR 模型。</p>
+<ul>
+  <li><a href="diffucoder.html">DiffuCoder</a>（2025-06）从 Qwen2.5-Coder-7B 出发，用 130B 代码 token 改造成扩散模型。基座模型与出发点“打平甚至略好”，但它多吃了 65B 高质量退火数据；最干净的对照是同数据、同流程的 SFT：扩散版本只涨 3.0 分，AR 版本涨 14.3 分（<a href="diffucoder.html#n-5-6">§5.6</a>）。所有分数都在每步写 1 个 token 下测得，论文没有测速度。</li>
+  <li><a href="dream-coder.html">Dream-Coder 7B</a>（2025-09）用 3220 亿个公开 token 做同样的改造，再做 SFT 和带互补掩码的 GRPO。指令版在 LiveCodeBench 上 pass@1 21.4%，略高于同底座的 Qwen2.5-Coder-7B-Instruct（19.3%），这是它唯一领先的一项，HumanEval、MBPP、BigCodeBench 仍更低（<a href="dream-coder.html#n-6-5">§6.5</a>）。</li>
+  <li><a href="stable-diffcoder.html">Stable-DiffCoder</a>（2026-01）在字节 Seed-Coder 的流水线里，从退火前的检查点出发，用块长为 4 的块扩散继续预训练 1.3T token，再复用 Seed-Coder 的 SFT 数据。指令模型 14 项指标里 9 项超过 AR 版本，是本类里唯一在代码上整体胜过同源 AR 的结果。但最后一段的训练量（1.3T 对约 1T）、上下文长度（8K 对 32K）和 DPO 都不一致，AR 数字是照抄的，作者自己在 2.5B 规模的实验里看到的方向还相反；论文也没有报告扩散最擅长的“填中间”评测和任何速度（<a href="stable-diffcoder.html#n-8-6">§8.6</a>）。</li>
+  <li><a href="dreamon.html">DreamOn</a>（2026-02）解决了掩码扩散做代码填空时“必须先猜中间写几个 token”的问题：在词表里加入 [expand]（一个 [MASK] 裂成两个）和 [delete]（删掉这一格）。Dream-Coder 在给定真实长度时 HumanEval-Infilling 单行题是 93.3，五种固定长度平均只有 55.3；加 DreamOn 后，初始 4 到 64 个掩码都在 88.7–92.1 之间，与 Qwen2.5-Coder-7B 的 92.6 相当。但 AR 基线没有用同一份数据微调，扩散模型每步只写 1 个 token（<a href="dreamon.html#n-4-4">§4.4</a>）。</li>
+</ul>
+<p>加上第 4 节的 Seed Diffusion（8 项里 7 项低于同管线的 Seed-Coder，代码编辑 CanItEdit 更高），代码方向的图景比较一致：和自己的 AR 出发点比，扩散版本在常规生成基准上大多略低；优势集中在编辑、填空这类需要同时看前后文的任务。而这些代码模型几乎都没有报告在自己的质量设置下能快多少。</p>
+
+<h4 id="n-8-2">8.2 多模态：同一档次，长在知识题和格式约束，短在读图中文字</h4>
+<p>2025 年 5 月下旬，三篇把 LLaDA 扩展到视觉的工作几乎同时出现，走了两条路。</p>
+<ul>
+  <li><a href="mmada.html">MMaDA</a> 把图像用 VQ 量化器变成离散码，和文字共用同一个掩码预测目标，于是一个模型能同时做文本推理、看图回答和文生图，再用长思维链微调和 UniGRPO 强化学习。它最站得住的结论是“一个 8B 掩码扩散模型可以只用一个训练目标同时具备这三种基本能力”；“三类任务都优于专门模型”在同条件下大多不成立：统一模型对手多是 1–2B 的小模型、文本对手是基座模型，两项生成指标同时就是 RL 的奖励，经过 RL 的最终权重至今没有公开，第三方测得它在图表、文档类问答上几乎不会做（<a href="mmada.html#n-7-4">§7.4</a>）。</li>
+  <li><a href="llada-v.html">LLaDA-V</a> 沿用 LLaVA 的视觉指令微调配方，只把语言塔换成 LLaDA-8B。它有一个难得的对照：LLaMA3-V 用同样的视觉部分、同样的数据和训练流程，只把语言塔换回 LLaMA3-8B。18 个基准里 LLaDA-V 赢 11 个，多学科知识题更强（MMMU 48.6 对 45.4），图表、文档、真实场景照片较弱。但语言塔的预训练量（2.3T 对 15T 以上）没有对齐，18 个分数里有 13 个只让模型生成 2 个 token，基本没有检验扩散式的长文本生成（<a href="llada-v.html#n-4-5">§4.5</a>）。</li>
+  <li><a href="lavida.html">LaViDa</a> 同样接视觉编码器，重点在工程：互补掩码让每个回答 token 都参与训练；推理时让图像和问题部分只看自己，从而能缓存它们的 key/value，COCO 描述的延迟从 7.65 秒降到 1.93 秒。在相同图文数据规模下，它和 AR 的 Open-LLaVA-Next-8B 在 14 个理解基准上七胜七负，OCR 明显落后；受约束写诗的约束满足率 100%，靠的是把指定的字直接固定在画布上，而 AR 基线没有用约束解码（<a href="lavida.html#n-4-7">§4.7</a>）。</li>
+</ul>
+<p>多模态这一组的结论和代码相似：对齐了多模态那一层时，扩散语言塔和 AR 语言塔处在同一档次；扩散在需要满足格式和全局约束的任务上有结构性优势；在需要精细读图（OCR、图表、文档）的任务上落后。语言塔本身的训练量差距始终没有对齐。</p>
+</section>
+
+<section class="note">
+<h3 id="n-9">9 循环 × 扩散：在一步之内多想几遍</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>扩散模型本来就在一轮轮地反复计算，为什么还要再加“循环”？五篇同时属于“循环 Transformer”分类的工作各在哪里循环、换来了什么？它们的收益是在推理算力对齐的条件下得到的吗？</div>
+<div class="note-pre"><b>先补一点背景：循环 Transformer。</b>
+<p>循环 Transformer 让同一组层被反复使用好几遍：参数量不变，网络在计算上变“深”了，代价是每次前向多算几遍。它在这里有两种用法。一种是推理时循环，用更多的计算换质量，这时公平的比较是“推理算力相同”；另一种是只在训练时循环，把多算几遍的效果蒸馏回普通的单次前向，推理成本不变。</p>
+</div>
+<p>扩散模型已经有一种“反复计算”：去噪的一轮轮迭代。但每一轮结束时，网络算出的丰富信息（每个位置的分布、最后一层的隐状态）在采样处被压成一个个具体的词，下一轮又从画布重新算起。五篇工作分别从不同位置补这个缺口：</p>
+<ul>
+  <li><a href="loopholing.html">Loopholing</a>（2025-10）把这个现象称为“采样墙”：网络最后一层的隐状态直接传给下一轮，和下一轮的词嵌入相加，用两遍前向的自条件化来训练（<a href="loopholing.html#n-3">§3</a>）。1.69 亿参数时，1024 步的生成困惑度从 108.94 降到 49.13；但似然上界（≤ 21.90）仍明显高于 AR 的 17.27，训练计算多约 30%，没有速度数据（<a href="loopholing.html#n-6-7">§6.7</a>）。</li>
+  <li><a href="loopmdm.html">LoopMDM</a>（2026-05）在 12 层的掩码扩散模型里只把靠前的两层反复过 1 到 12 遍。1.7 亿参数、总训练算力相同时，达到基线最终测试 NLL 所需的训练 FLOPs 少 2.34–3.34 倍；但评测时每个去噪步的计算是基线的 1.8 到 4.8 倍，本站按推理算力重新对齐后，它和基线大致打平，甚至不如让基线多走几步去噪（<a href="loopmdm.html#n-5-w">§5.1</a>）。</li>
+  <li><a href="recursive-mdm.html">R-MDM</a>（2026-06）在每个去噪步里把同一块网络反复用 \(L\) 遍，并把并行解码的误差拆成两块：循环能降的“保真误差”（每个位置的预测不够准）和只有少写才能降的“依赖误差”（就是第 1.3 节的因子分解误差），据此用熵同时决定每步循环几遍、写哪些 token（<a href="recursive-mdm.html#n-5">§5</a>）。实验都是数独、Countdown 这类小型结构化任务，没有 AR 基线（<a href="recursive-mdm.html#n-8-2">§8.2</a>）。</li>
+  <li><a href="loop-distill.html">Loop-Distill</a>（2026-09，ICLR 2027 匿名投稿，审稿中）发现从 AR 改造来的块扩散模型里，[MASK] 位置的表示在第 1 层被大幅改写后就几乎不动了。它在训练时用同一套权重让 2–3 个浅层各多算几遍当教师，只在教师更好时把单次前向往它靠；推理结构完全不变。在两个 30B-A3B 的 MoE 模型、13 个评测上平均高约 2 分，批大小 1 时吞吐高约 11%（<a href="loop-distill.html#n-10">§10</a>）。</li>
+  <li><a href="alodlm.html">ALoDLM</a>（2026-10）把 Qwen3 中间几层做成循环核心：每一轮去噪内部再套一个内循环，有把握的位置先提交，没把握的保留隐状态多算几遍，退出时机当作隐变量来训练。只用 5B token 微调，1.7B 和 8B 两个规模在 11 项基准上的平均分比对应的 Qwen3 高 1.7–1.8 分，GSM8K 单请求吞吐约为 vLLM 上 Qwen3-8B 的 2.7 倍。但质量表用的是逐个 token 从左到右的解码，1.7–1.8 分落在评测流程的摆动范围内，速度工作点是从 94 组设置里挑出的，最关键的“同数据、不循环”的对照缺失（<a href="alodlm.html#n-5-6">§5.6</a>）。</li>
+</ul>
+<p>放回本页主线：推理时循环的三篇（LoopMDM、R-MDM、ALoDLM）都是用更多的推理计算换质量，按推理算力对齐时收益明显变小；只在训练时循环的 Loop-Distill 推理成本完全不变，是这一组里比较最干净的收益；除了 ALoDLM 的单请求测速，没有一篇在对齐算力的条件下和 AR 比较过。</p>
+</section>
+
+<section class="note">
+<h3 id="n-10">10 方法对比</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>把前面各节的方法放在一起，它们沿哪些维度不同？每一类改动了什么、付出了什么、擅长什么，它们的头条数字各自对齐了什么？四张表分别对应四个选择：用哪种噪声、怎样得到一个大模型、怎样加速解码、怎样做强化学习。</div>
+
+<h4 id="n-10-1">10.1 噪声族：掩码、均匀、连续</h4>
+<div class="table-wrap"><table>
+<tr><th></th><th>掩码（吸收态）</th><th>均匀替换</th><th>连续（嵌入或 one-hot 上加高斯噪声）</th></tr>
+<tr><td>加噪方式</td><td>把词换成 [MASK]</td><td>把词换成词表里随机的词</td><td>在向量上加高斯噪声，最后取最近的词</td></tr>
+<tr><td>写下的词能改吗</td><td>默认不能；LLaDA2.1 另加了“改字”</td><td>能，任何一轮都可能改</td><td>整段连续地变</td></tr>
+<tr><td>似然</td><td>扩散族里最好，仍是上界；同算力要达到 AR 的损失约需 14–16 倍算力</td><td>比掩码差；Duo 约需 23 倍</td><td>过去明显落后；LangFlow 修正后仍落后于掩码；FLM、ELF 不报告似然</td></tr>
+<tr><td>少步生成</td><td>步数少时因子分解误差大，靠阈值、蒸馏缓解</td><td>可沿高斯一侧的确定性轨迹蒸馏到 8–16 步</td><td>确定性轨迹可蒸馏到 1 步（FLM）；ELF 32 步</td></tr>
+<tr><td>规模（截至 2026-10）</td><td>8B 从零（LLaDA、iLLaDA），100B 改造（LLaDA2.x）</td><td>26B MoE 改造（DiffusionGemma）</td><td>只有 1–2 亿参数</td></tr>
+<tr><td>代表精读</td><td><a href="d3pm.html">D3PM</a>、<a href="sedd.html">SEDD</a>、<a href="mdlm.html">MDLM</a>、<a href="llada.html">LLaDA</a>、<a href="dream.html">Dream</a></td><td><a href="duo.html">Duo</a>、<a href="scaling-beyond-masked.html">Beyond-Masked</a>、<a href="diffusiongemma.html">DiffusionGemma</a></td><td><a href="diffusion-lm.html">Diffusion-LM</a>、<a href="flow-map-lm.html">FLM</a>、<a href="langflow.html">LangFlow</a>、<a href="elf.html">ELF</a></td></tr>
+</table></div>
+<p>三族的取舍可以概括为：掩码扩散用“不能改字”换来了最简单的目标和最好的似然，所以最先被放大；均匀态扩散能改字、适合少步，但似然更难学；连续扩散能走确定性轨迹、一步生成最好，但还停留在小模型、没有可比的似然。三族各自报告的指标彼此不可比，这本身就是第 12 节的一个开放问题。</p>
+
+<h4 id="n-10-2">10.2 怎样得到一个大扩散模型</h4>
+<div class="table-wrap"><table>
+<tr><th>路线</th><th>代表</th><th>扩散阶段训练量</th><th>KV 缓存</th><th>质量（和最该比的对象比）</th><th>速度证据</th><th>主要代价</th></tr>
+<tr><td>从零训练，全注意力</td><td><a href="llada.html">LLaDA</a>、<a href="illada.html">iLLaDA</a></td><td>2.3T、12T</td><td>没有</td><td>iLLaDA 基座与 Qwen2.5 7B 同档（约七成算力），指令版低约 10 分</td><td>几乎没有，质量数字都在每步 1 个 token 下测得</td><td>训练最贵；最能回答“扩散本身学到了什么”</td></tr>
+<tr><td>AR 初始化，全注意力</td><td><a href="dream.html">Dream</a>、<a href="diffucoder.html">DiffuCoder</a>、<a href="dream-coder.html">Dream-Coder</a></td><td>0.13T–0.58T</td><td>没有</td><td>和出发点比常规任务略降（Dream 13 项里 8 项更低），规划任务大涨</td><td>几乎没有</td><td>丢掉了 AR 的缓存，继承了从左到右的偏置</td></tr>
+<tr><td>AR 改成块扩散</td><td><a href="fast-dllm-v2.html">Fast-dLLM v2</a>、<a href="sdar.html">SDAR</a>、<a href="llada2.html">LLaDA2.0</a>、<a href="stable-diffcoder.html">Stable-DiffCoder</a>、<a href="diffusiongemma.html">DiffusionGemma</a></td><td>约 1.3B token 到 1.3T（DiffusionGemma 不到原训练量 10%）</td><td>块与块之间精确</td><td>平均大体保住，个别能力掉分（Fast-dLLM v2 MATH −10.4；DiffusionGemma AIME 88.3 → 69.1）</td><td>单请求快 2–7 倍；并发升高后缩小，几十个并发时被 AR 追上</td><td>最便宜；离双向、任意顺序更远</td></tr>
+<tr><td>与 AR 合为一体</td><td><a href="tidar.html">TiDAR</a>、<a href="dflash.html">DFlash</a>、<a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a></td><td>继续训练 50B–150B（TiDAR）；草稿器另训（DFlash）；联合训练 300B（Nemotron）</td><td>精确</td><td>DFlash 与目标模型输出一致；TiDAR 8B 低约 2.8 分；Nemotron 的 AR 模式基本不受影响</td><td>DFlash 单请求 4.9 倍，并发 32 时 2.8 倍；Nemotron 自推测 3.3 倍（并发 1）</td><td>扩散只当草稿器，输出由 AR 决定</td></tr>
+</table></div>
+<p>从上往下，训练越来越便宜，质量越来越接近 AR，部署越来越容易，而扩散“双向、任意顺序、可修改”的特性越来越少。没有一条路线在四个维度上同时占优：如果目标是研究扩散本身，从零训练是唯一干净的路；如果目标是今天就在服务里用上并行解码，后两行更现实。</p>
+
+<h4 id="n-10-3">10.3 解码加速：改了什么，和谁比</h4>
+<div class="table-wrap"><table>
+<tr><th>方法</th><th>训练？</th><th>改了什么</th><th>头条数字</th><th>分母是谁</th><th>测量条件</th></tr>
+<tr><td><a href="fast-dllm.html">Fast-dLLM</a></td><td>否</td><td>块级近似缓存 + 置信度阈值</td><td>27.6 倍</td><td>原版 LLaDA（每轮 1 个、无缓存）</td><td>A100、批 1、生成长度 1024</td></tr>
+<tr><td><a href="dkv-cache.html">dKV-Cache</a></td><td>否</td><td>延迟缓存已写定的 token</td><td>2–10 倍</td><td>原版 LLaDA / Dream</td><td>批大小未写明，没有测 AR</td></tr>
+<tr><td><a href="d2f.html">D2F</a></td><td>LoRA 蒸馏</td><td>块因果学生 + 流水线</td><td>约 2.5 倍于 LLaMA3-8B</td><td>AR 实现未说明（约为带宽上限一半）</td><td>A100、批 1</td></tr>
+<tr><td><a href="dparallel.html">dParallel</a></td><td>自蒸馏</td><td>让更多位置提前确定</td><td>256 步 → 30 步，8.5 倍</td><td>原版（不开缓存）</td><td>RTX 6000 Ada、批 1</td></tr>
+<tr><td><a href="d3llm.html">d3LLM</a></td><td>蒸馏</td><td>伪轨迹 + 多块并行 + 缓存</td><td>约 5 倍于 Qwen2.5-7B</td><td>HF 与 SGLang 两套都测</td><td>H100、批 1；A100 上 2.6 倍</td></tr>
+<tr><td><a href="fast-dllm-v2.html">Fast-dLLM v2</a></td><td>AR 改造</td><td>块级精确缓存 + 子块</td><td>2.5 倍（批 1）、1.5–1.8 倍（批 64）</td><td>Qwen2.5-7B-Instruct（实现未说明）</td><td>A100 / H100</td></tr>
+<tr><td><a href="sdar.html">SDAR</a></td><td>AR 改造</td><td>块扩散</td><td>约 2.3 倍（批 4）</td><td>同一引擎上的 AR</td><td>H200、LMDeploy；批 64 起慢于 AR</td></tr>
+<tr><td><a href="wedlm.html">WeDLM</a></td><td>继续训练</td><td>因果注意力 + 流式提交</td><td>约 2 倍；激进设置 3.2 倍但掉约 10 分</td><td>vLLM 上的 Qwen3-8B</td><td>硬件、并发未写明</td></tr>
+<tr><td><a href="dflash.html">DFlash</a></td><td>训草稿器</td><td>块扩散起草 + 严格验证</td><td>4.9 倍（批 1）、2.8 倍（并发 32）</td><td>同一目标模型逐词解码</td><td>B200、SGLang</td></tr>
+<tr><td><a href="diffusiongemma.html">DiffusionGemma</a></td><td>改造 + SD·RL</td><td>均匀噪声、256 画布、少步化</td><td>约 7.3 倍于 Gemma 4、约 4.9 倍于 Gemma 4 + MTP（推算）</td><td>同一个 Gemma 4</td><td>H100 FP8、批 1；约 32 并发后 AR 反超</td></tr>
+</table></div>
+<p>这张表最值得看的是“分母”一列。分母是原版扩散模型的倍数（Fast-dLLM、dKV-Cache、dParallel）回答的是“扩散模型自己能快多少”，不能换算成和 AR 的比较；分母是未优化 AR 实现的倍数（D2F、Fast-dLLM v2）会高估相对 AR 的优势；分母是同引擎 AR 或 vLLM / SGLang 上的 AR 的倍数（SDAR、WeDLM、d3LLM 的 SGLang 口径、DFlash）最接近真实部署，而这几项也恰好给出了最小、最依赖批大小的倍数。</p>
+
+<h4 id="n-10-4">10.4 强化学习：\(\log\pi\) 怎么来</h4>
+<div class="table-wrap"><table>
+<tr><th>方法</th><th>\(\log\pi\) 怎么估</th><th>与实际解码一致吗</th><th>底座</th><th>头条结果</th><th>有没有同样 RL 的 AR 对照</th></tr>
+<tr><td><a href="d1.html">d1</a>（diffu-GRPO）</td><td>回答全遮一次前向，逐位置相加</td><td>否</td><td>LLaDA-8B-Instruct</td><td>GSM8K、MATH500 约 +4；Countdown、Sudoku 近翻倍</td><td>没有</td></tr>
+<tr><td><a href="llada-1-5.html">LLaDA 1.5</a>（VRPO）</td><td>ELBO，多样本 + 对偶采样</td><td>否（随机遮）</td><td>LLaDA-8B-Instruct</td><td>GSM8K +4.7（稳），HumanEval +3.0（弱）</td><td>没有</td></tr>
+<tr><td><a href="diffucoder.html">DiffuCoder</a>（coupled-GRPO）</td><td>一对互补遮法</td><td>否</td><td>DiffuCoder-7B</td><td>EvalPlus 63.6 → 67.9</td><td>有：同题 GRPO 的 AR 仍高约 6 分</td></tr>
+<tr><td><a href="tracerl.html">TraceRL</a></td><td>回放真实解码轨迹</td><td>是</td><td>SDAR 4B / 8B</td><td>MATH500 +4–5</td><td>没有（AR 对照的底座代差未对齐）</td></tr>
+<tr><td><a href="flexibility-trap.html">JustGRPO</a></td><td>从左到右，精确</td><td>训练时从左到右，推理仍可并行</td><td>LLaDA-8B-Instruct</td><td>GSM8K 89.1%</td><td>没有</td></tr>
+</table></div>
+<p>估计器从“便宜但有偏”走向“与解码一致”，最后走向“放弃任意顺序换精确值”。最后一列几乎全是“没有”，这意味着目前所有“扩散模型做 RL 后能力提升了多少”的结论，都是扩散模型和它自己 RL 之前比；它和 AR 在同样 RL 预算下谁更强，只有 DiffuCoder 一组证据，而那一组是 AR 更强。</p>
+</section>
+
+<section class="note">
+<h3 id="n-11">11 结果的份量（跨论文）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>48 篇精读的“结果的份量”里，有哪些问题反复出现？“扩散与 AR 相当”“比 AR 快”这些头条，哪些建立在对齐得比较好的比较上，哪些建立在弱基线、不对等条件或自报数字上？读一篇新的扩散 LLM 论文时，应该先检查什么？</div>
+
+<h4 id="n-11-1">11.1 主线问题：和 AR 的头条比较，各自对齐了什么</h4>
+<div class="table-wrap"><table>
+<tr><th>比较</th><th>参数</th><th>训练 token</th><th>训练算力</th><th>解码 / 测速</th><th>该怎么读</th></tr>
+<tr><td><a href="mdlm.html#n-5-8">MDLM</a> 对 AR（110M）</td><td>对齐</td><td>按计入损失的 token 对齐</td><td>扩散约 2 倍</td><td>似然，无关</td><td>小规模上差距在缩小，但上界对精确值</td></tr>
+<tr><td><a href="block-diffusion.html#n-7-5">BD3-LM</a> 对 AR</td><td>对齐</td><td>对齐</td><td>基本对齐</td><td>生成时每次前向 1 个</td><td>扩散类最好，仍不如 AR</td></tr>
+<tr><td><a href="scaling-beyond-masked.html#n-3-4">Beyond-Masked</a> 扩展律与 1.7B</td><td>对齐（或计算最优）</td><td>对齐</td><td>对齐</td><td>都从左到右逐个生成</td><td>全类最干净：同算力 AR 明显更好</td></tr>
+<tr><td><a href="sdar.html#n-4-3">SDAR</a> 2B 受控实验</td><td>对齐</td><td>对齐</td><td>块扩散约 2 倍</td><td>每次前向 1 个</td><td>AR 强于从零扩散；AR 转块扩散保住分数</td></tr>
+<tr><td><a href="fast-dllm-v2.html#n-10">Fast-dLLM v2</a> 对 Nemo-FT</td><td>对齐</td><td>对齐</td><td>扩散约 4 倍（推算）</td><td>质量在不并行时测</td><td>平均相当，代码升、数学和指令遵循降</td></tr>
+<tr><td><a href="diffusiongemma.html#n-7-3">DiffusionGemma</a> 对 Gemma 4</td><td>同一模型</td><td>多了 SFT + SD·RL（不到 10%）</td><td>扩散多一轮训练</td><td>同卡同精度、批 1</td><td>单用户快几倍，质量明显降</td></tr>
+<tr><td><a href="llada.html#n-weight">LLaDA</a> 对 LLaMA3 8B</td><td>对齐</td><td>2.3T 对 15T</td><td>约 1/6.5</td><td>质量在每步 1 个下测</td><td>存在性证明，不是同条件比较</td></tr>
+<tr><td><a href="illada.html#n-weight">iLLaDA</a> 对 Qwen2.5 7B</td><td>接近</td><td>12T 对 18T</td><td>约七成</td><td>每步 1 个，无速度</td><td>同一档次；“略强”取决于评测协议</td></tr>
+<tr><td><a href="diffusion-data-constrained.html#n-weight">数据受限</a></td><td>最佳点不同</td><td>独特数据对齐</td><td>扩散约 29 倍</td><td>只比验证损失</td><td>数据稀缺、算力充足时扩散上限更高</td></tr>
+<tr><td><a href="dream.html#n-5-8">Dream</a> 对 Qwen2.5 7B</td><td>对齐</td><td>18T + 0.58T 对 18T</td><td>扩散多一段</td><td>步数等于长度</td><td>改造代价小，常规任务略降</td></tr>
+<tr><td><a href="tracerl.html#n-5-11">TraDo</a> 对 Qwen2.5-7B-Instruct</td><td>4B / 8B 对 7B</td><td>底座差一代</td><td>未对齐</td><td>最好分数在静态解码</td><td>主要反映底座换代</td></tr>
+<tr><td><a href="d3llm.html#n-4-7">d3LLM</a> 测速对 Qwen2.5-7B</td><td>接近</td><td>2.3T 对 18T（LLaDA 版）</td><td>未对齐</td><td>HF 与 SGLang、批 1</td><td>GSM8K 上快且接近；其他任务 Qwen 明显更高</td></tr>
+</table></div>
+<p>表里前六行是“至少有一个维度被认真对齐”的比较，它们的方向相当一致：同样的算力或同样的起点下，扩散模型的质量不如 AR 或最多持平，换来的是单用户场景下更快的生成或改造的便宜。后六行是常被引用的头条，它们都在至少一个关键维度上不对等。</p>
+
+<h4 id="n-11-2">11.2 反复出现的十个问题</h4>
+<p><b>一、上界对精确值，跨族上界也不能比。</b>扩散模型的困惑度是负 ELBO 换算的上界，AR 是精确值，所以“扩散在某个零样本数据集上低于 AR”只能说明上界更低。<a href="mdlm.html#n-5-8">MDLM</a> 和 <a href="duo.html#n-6-5">Duo</a> 赢过 AR 的那几个零样本数据集，恰好也是 SEDD 赢过的那几个，更像这组扩散模型在该评测设置下的共同特点。不同噪声族的上界松紧不同，<a href="scaling-beyond-masked.html#n-3-4">Scaling Beyond Masked</a> 专门强调不能横比；<a href="langflow.html#n-5-6">LangFlow</a> 的似然界更是漏算了一项，24.6 修正后约 33。</p>
+<p><b>二、生成困惑度要和熵、数值精度一起看。</b>用 GPT-2 给样本打的生成困惑度会被低熵（重复、保守）的样本压低。32 位浮点的类别采样等于悄悄降温：<a href="sedd.html#n-5-4">SEDD</a> 的 4096 步样本在 64 位下是 81、32 位下是 22；<a href="discrete-flow-matching.html#n-4-8">DFM</a> 换成双精度后从优于 AR 变成明显差于 AR。<a href="duo.html#n-6-5">Duo</a> 的 Greedy-Tail、<a href="elf.html#n-4-5">ELF</a>（熵约 5.15）、<a href="langflow.html#n-5-6">LangFlow</a>（熵 5.25）的低生成困惑度都伴随着低于数据的熵；<a href="flow-map-lm.html#n-5-7">FLM</a> 的学生甚至比老师分更低。做得规范的论文会用 64 位采样并同时报告熵。</p>
+<p><b>三、“同 token”不等于“同算力”。</b>扩散模型每看一个 token 往往算得更多：<a href="mdlm.html#n-5-8">MDLM</a> 按计入损失的 token 对齐，扩散多做一倍梯度步；块扩散训练要送入干净与加噪两份序列（<a href="sdar.html#n-4-3">SDAR</a> 约 2 倍、<a href="nemotron-diffusion.html#n-6-6">Nemotron</a> 约 2 倍），<a href="fast-dllm-v2.html#n-10">Fast-dLLM v2</a> 的双视图约 4 倍；<a href="loopholing.html#n-6-7">Loopholing</a> 多约 30%；<a href="diffusion-data-constrained.html#n-weight">数据受限</a>的最佳点相差约 29 倍。推理算力同理：<a href="loopmdm.html#n-5-w">LoopMDM</a> 每个去噪步是基线的 1.8–4.8 倍，按推理算力对齐后优势消失。</p>
+<p><b>四、改造模型的真正对照是自己的出发点。</b>“与 Qwen3 相当”“超过 Llama3.1”这类比较混进了底座的代差和训练量。和自己的出发点比：<a href="dream.html#n-5-8">Dream</a> 13 项里 8 项更低；<a href="fast-dllm-v2.html#n-7">Fast-dLLM v2</a> MATH −10.4、IFEval −8.1；<a href="llada2.html#n-11-3">LLaDA2.0</a> flash +1.03、mini −1.43；<a href="diffusiongemma.html#n-7-3">DiffusionGemma</a> AIME −19.2；<a href="seed-diffusion.html#n-7-5">Seed Diffusion</a> 8 项里 7 项更低；<a href="tidar.html#n-9-5">TiDAR</a> 8B 低约 2.8 分。<a href="tracerl.html#n-5-11">TraceRL</a> 的“4B 扩散超过 7B AR”主要是 Qwen3 对 Qwen2.5 的代差。</p>
+<p><b>五、质量数字和速度数字常常不在同一个解码设置下。</b><a href="llada.html#n-weight">LLaDA</a>、<a href="dream.html#n-5-8">Dream</a>、<a href="diffucoder.html#n-5-6">DiffuCoder</a>、<a href="dream-coder.html#n-6-5">Dream-Coder</a>、<a href="illada.html#n-weight">iLLaDA</a>、<a href="dreamon.html#n-4-4">DreamOn</a> 的质量数字都在每步 1 个 token、无缓存的最慢设置下测得，这时它们比带缓存的 AR 慢。<a href="fast-dllm-v2.html#n-10">Fast-dLLM v2</a> 的质量在阈值 1 下测、速度在阈值 0.9 下测；<a href="tracerl.html#n-5-11">TraceRL</a> 的最高分来自静态解码，动态解码时降 3–4 分；<a href="wedlm.html#n-6-7">WeDLM</a> 的 3.2 倍伴随约 10 分的掉点；<a href="llada2.html#n-11-3">LLaDA2.0</a> 最快的 CAP 版本平均低 1.72 分。“又快又好”要在同一个设置下同时成立才算数。</p>
+<p><b>六、倍数的分母。</b>以原版扩散模型为分母的倍数（<a href="fast-dllm.html#n-5-5">Fast-dLLM</a> 27.6 倍、<a href="d2f.html#n-5-6">D2F</a> 50 倍、<a href="dparallel.html#n-6-7">dParallel</a> 8.5 倍）里，有相当一部分是在省“答案之后那些结束符”的步数：生成长度设得越长，原版要白填的位置越多，倍数越大。以 AR 为分母时要看 AR 跑在什么实现上：<a href="d2f.html#n-5-6">D2F</a> 的 AR 基线约为带宽上限的一半，<a href="fast-dllm-v2.html#n-10">Fast-dLLM v2</a> 的约为三分之一，<a href="d3llm.html#n-4-7">d3LLM</a> 测到同一个 Qwen 在 Hugging Face 上 57.3、在 SGLang 上 108.6 token/秒。</p>
+<p><b>七、批大小 1 是对扩散最有利的条件。</b>第 6.3 节的图已经说明，倍数随并发稳定下降。<a href="llada.html#n-weight">LLaDA</a>、<a href="tidar.html#n-9-5">TiDAR</a>、<a href="d2f.html#n-5-6">D2F</a>、<a href="dparallel.html#n-6-7">dParallel</a> 只测了批大小 1；<a href="llada2.html#n-11-3">LLaDA2.0</a> 和 <a href="llada2-1.html#n-6-6">LLaDA2.1</a> 没有公开批大小；测了批大小扫描的 <a href="sdar.html#n-6-5">SDAR</a>、<a href="diffusiongemma.html#n-6-4">DiffusionGemma</a>、<a href="dflash.html#n-7">DFlash</a>、<a href="fast-dllm-v2.html#n-8">Fast-dLLM v2</a> 都看到了优势缩小。</p>
+<p><b>八、谁测的。</b><a href="mercury.html#n-5-6">Mercury</a> 的速度和两项基准来自第三方 Artificial Analysis，但测的是厂商自己运营的端点；<a href="seed-diffusion.html#n-7-5">Seed Diffusion</a> 的全部数字都是自测、权重不公开；<a href="diffusiongemma.html#n-7-3">DiffusionGemma</a> 的数字也是自测，但权重和 vLLM 实现公开，任何人都能复测。在开放权重和自报 API 之间，前者的数字更容易被检验。</p>
+<p><b>九、评测协议的摆动常常大于方法差距；测试集上挑设置。</b>同一个 Qwen2.5 7B，在 Dream 的协议和 Qwen 官方协议下平均分相差 6.3 分，比 <a href="illada.html#n-weight">iLLaDA</a> 要证明的 0.6 分大一个数量级；<a href="llada.html#n-weight">LLaDA</a> 的 v1 与 v3 因为采样器和打分方式不同，同一模型的分数差好几分；同一个 LLaDA2.0-flash 在三处、按三组不同的基准给出 73.18、72.43、79.32 三个平均分（<a href="llada2.html#n-11-3">LLaDA2.0 精读</a>）。<a href="d1.html#n-4-5">d1</a> 在测试集上从几十个检查点里挑最好的，<a href="llada-1-5.html#n-4-5">LLaDA 1.5</a> 在测试集上挑回答长度和块长。HumanEval 只有 164 题，单次评测的标准误约 3.9 分，几分以内的差距不足以排出高低。</p>
+<p><b>十、任务选择。</b>数独、斑马谜题、反向古诗、代码填空、受约束写诗，本来就是为暴露 AR 的方向性弱点而选的任务。<a href="token-ordering.html#n-4-8">Token Ordering</a> 的数独答案唯一，先填有把握的格子几乎没有代价；<a href="llada.html#n-weight">LLaDA</a> 的反向古诗在正向上反而大幅落后；<a href="lavida.html#n-4-7">LaViDa</a> 的 100% 约束满足是把字直接钉在画布上得到的。这些结果说明生成顺序在这类问题上的价值，但不能推广成“扩散更会推理”；在标准的从左到右任务（MMLU、GSM8K、HumanEval）上，同条件比较里扩散至今没有稳定地胜过 AR。</p>
+
+<h4 id="n-11-3">11.3 哪些结论站得住</h4>
+<ul>
+  <li><b>掩码扩散是一个可以放大的、合理的语言建模目标。</b>它在理论上就是加权的完形填空（MDLM、MD4），从零训练到 8B 后具备上下文学习和指令遵循（LLaDA），这已经被多篇独立工作复用。</li>
+  <li><b>同算力、数据充足时，AR 明显更省。</b>SMDM 和 Scaling Beyond Masked 两组独立实验都得到掩码扩散约需 14–16 倍算力；SDAR 的 2B 受控实验方向相同。</li>
+  <li><b>数据反复使用时，扩散退化得更慢。</b>数据受限扩展律和 Super Data Learners 用不同的数据和规模独立得到同一方向；但 AR 的正则化没有调到最好，交叉点的位置还不确定。</li>
+  <li><b>把 AR 改造成块扩散很便宜，平均分大体保得住。</b>SDAR 的受控实验和 Fast-dLLM v2 的同数据对照都支持；代价是数学、指令遵循等个别能力掉分。</li>
+  <li><b>单用户延迟的优势是真的，但会随并发消失。</b>DiffusionGemma 对自己的 AR 起点、SDAR 对同引擎 AR、DFlash 对同一目标模型，都在批大小 1 时快几倍；在测过的设置里，几十个并发后 AR 追平或反超。DFlash 的加速不以质量为代价，是速度一侧最稳的结果。</li>
+  <li><b>任意顺序在唯一答案的约束任务上有用，在开放式推理的 RL 里有害。</b>Token Ordering 与灵活性陷阱给出了两个方向的受控证据。</li>
+</ul>
+</section>
+
+<section class="note">
+<h3 id="n-12">12 还没解决的问题（截至 2026-10）</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>到 2026 年 10 月，扩散语言模型还有哪些根本问题没有答案？各条分支接下来可能往哪里走？下面每一条都对应前面某一节留下的缺口。</div>
+<ol>
+  <li><b>训练效率的差距是本质的，还是上界松？</b>14–32 倍的算力差距是拿各族的上界和 AR 的精确损失比出来的，其中多少来自“模型真的更差”、多少来自“上界不紧”，目前分不开（<a href="scaling-beyond-masked.html#n-3-4">Beyond-Masked §3.4</a>）。<a href="block-diffusion.html#n-5">BD3-LM</a> 的诊断说明，至少有一部分来自梯度方差。据<a href="diffusion-data-constrained.html#n-11">数据受限精读 §11</a> 的时间线，2026-10-13 又有一篇重新审视“16 倍”的论文（arXiv 2610.17590），本站尚未精读。</li>
+  <li><b>高并发下的服务成本。</b>扩散模型的测速几乎都停在 32 个并发以内，没有一篇在真实的高并发流量下做过系统的成本分析；内核、调度、采样在大批量时都还没优化（DiffusionGemma 报告自己也这样说）。扩散模型能否在服务端站住，取决于能不能把“每产出一个 token 要处理十几个位置”这笔额外计算降下来。</li>
+  <li><b>扩散是独立的范式，还是 AR 的加速器？</b>DFlash 已进入 vLLM 和 SGLang，Nemotron 的自推测模式让同一套权重在 AR 与扩散之间切换；DiffusionGemma、LLaDA2.1、Mercury 则坚持纯扩散生成。前者保证质量但放弃了扩散的大部分特性，后者保留特性但要付质量和高并发成本。</li>
+  <li><b>生成顺序该怎么用。</b>灵活性陷阱说明 RL 训练时从左到右更好，ICML 官方的获奖说明也把“RL 采样该用哪种解码顺序”列为开放问题；同时，按置信度挑位置的解码在实践中往往退化成近似从左到右（熵汇、确定性顺序收敛）。如何在需要时真正利用任意顺序，而不是让它锁死探索，还没有答案。</li>
+  <li><b>噪声族之争。</b>掩码、均匀、连续三族各占一个评价维度，DiffusionGemma 把均匀噪声做到了 26B，连续扩散还停在 1–2 亿参数。缺的是一把共同的尺子：能跨族比较的似然，或者把质量、多样性、步数放在一起的生成指标。</li>
+  <li><b>可变长度与编辑。</b>定长画布是掩码扩散的老问题，DreamOn 用 [expand] / [delete]、iLLaDA 用按块变长、LLaDA2.1 和 Seed Diffusion 用编辑操作各解决一部分，但还没有一个通用、可证明不破坏分布的方案。</li>
+  <li><b>评测口径。</b>TPF 与 TPS、熵与生成困惑度、AUP（d3LLM 提出）这类把精度和并行度合在一起的指标，以及专门暴露并行解码弱点的 ParallelBench，都还没有成为公认的标准。没有统一口径，跨论文的速度比较几乎不可能。</li>
+</ol>
+</section>
+
+<section class="note">
+<h3 id="n-13">13 阅读路线</h3>
+<div class="note-ask"><b>这一节要回答的问题：</b>48 篇精读太多，按什么顺序读最有效？下面给三条路线，每条都按“先打基础、再看演化、最后看最新进展”排好；链接里带 § 的，是建议重点读的小节。</div>
+<p><b>入门：先懂原理，再看它怎么变成大模型</b></p>
+<ol>
+  <li><a href="d3pm.html#n-4">D3PM §4</a>：四种转移矩阵，为什么吸收态胜出。</li>
+  <li><a href="mdlm.html#n-3">MDLM §3</a>：掩码扩散目标怎样化简成加权完形填空。</li>
+  <li><a href="llada.html">LLaDA</a>：8B 从零训练，连同“结果的份量”一起读。</li>
+  <li><a href="fast-dllm.html">Fast-dLLM</a>：为什么开源扩散模型慢，缓存和阈值并行怎么补。</li>
+  <li><a href="block-diffusion.html">BD3-LM</a>：块长这个旋钮。</li>
+  <li><a href="sdar.html">SDAR</a>：AR 改造成块扩散，以及全类最完整的测速。</li>
+  <li><a href="flexibility-trap.html">灵活性陷阱</a>：任意顺序的代价。</li>
+</ol>
+<p><b>偏系统：速度到底快不快</b></p>
+<ol>
+  <li><a href="fast-dllm.html#n-5-5">Fast-dLLM §5.5</a> 与 <a href="dkv-cache.html#n-weight">dKV-Cache §10</a>：免训练加速的两种近似，以及倍数的分母。</li>
+  <li><a href="d2f.html">D2F</a> → <a href="dparallel.html">dParallel</a> → <a href="d3llm.html">d3LLM</a>：训练式加速，注意 AR 基线用的什么实现。</li>
+  <li><a href="fast-dllm-v2.html#n-8">Fast-dLLM v2 §4.2</a> 与 <a href="sdar.html#n-6-4">SDAR §5.2.4</a>：批大小扫描。</li>
+  <li><a href="wedlm.html">WeDLM</a>：直接对 vLLM 上的 AR。</li>
+  <li><a href="dflash.html">DFlash</a> → <a href="nemotron-diffusion.html">Nemotron-Labs-Diffusion</a>：扩散当草稿器。</li>
+  <li><a href="diffusiongemma.html#n-6">DiffusionGemma §6</a>：同一模型两种生成方式的速度账，以及 32 个并发的交叉点。</li>
+  <li><a href="mercury.html#n-5-6">Mercury §5.6</a> 与 <a href="seed-diffusion.html#n-7-5">Seed Diffusion §7.5</a>：读工业报告时分清谁测的。</li>
+</ol>
+<p><b>偏训练与前沿：目标、扩展律与 2026 年的新方向</b></p>
+<ol>
+  <li><a href="sedd.html">SEDD</a> → <a href="discrete-flow-matching.html">离散流匹配</a>：两种更一般的离散扩散框架。</li>
+  <li><a href="duo.html">Duo</a> → <a href="scaling-beyond-masked.html">Scaling Beyond Masked</a>：均匀态扩散，以及同算力下四族的扩展律。</li>
+  <li><a href="diffusion-data-constrained.html">数据受限扩展律</a>：扩散什么时候更划算。</li>
+  <li><a href="dream.html">Dream</a> → <a href="illada.html">iLLaDA</a> → <a href="llada2.html">LLaDA2.0</a> → <a href="llada2-1.html">LLaDA2.1</a>：AR 初始化、从零重训与 100B 改造。</li>
+  <li><a href="d1.html">d1</a> → <a href="llada-1-5.html">LLaDA 1.5</a> → <a href="tracerl.html">TraceRL</a>：扩散 RL 的似然估计。</li>
+  <li><a href="flow-map-lm.html">FLM</a> → <a href="langflow.html">LangFlow</a> → <a href="elf.html">ELF</a>：连续扩散的回归。</li>
+  <li><a href="loopholing.html">Loopholing</a> → <a href="loopmdm.html">LoopMDM</a> → <a href="alodlm.html">ALoDLM</a>：循环与扩散的结合。</li>
+</ol>
+</section>
+
+</div>
+
+<h2 id="papers">本类全部精读</h2>
+<p class="notes-intro">下面的列表由书架数据自动生成，按首版时间排列，新加的精读页会自动出现在这里。</p>
+<div data-paper-list></div>
+
+<h2 id="more">延伸阅读</h2>
+<ul>
+  <li><a href="../legacy/tracks/dllm/index.html">旧版扩散 LLM 路线总览</a>：可交互的演化图（<a href="../legacy/tracks/dllm/index.html#lineage">演化图</a>）、时间线、逐篇对比表与简答题汇总；其中的<a href="../legacy/tracks/dllm/index.html#eval">“读速度与分数时的检查清单”</a>和本页第 11 节互为补充。</li>
+  <li>本类没有单独精读页、但本页提到的几项工作，见旧版拆解：<a href="../legacy/tracks/dllm/06-llada.html#smdm">SMDM（掩码扩散的第一条扩展律）</a>、<a href="../legacy/tracks/dllm/02-sedd.html#radd">RADD</a>、<a href="../legacy/tracks/dllm/07-dream.html#diffullama">DiffuLLaMA</a>、<a href="../legacy/tracks/dllm/08-data-constrained.html#super-data">Super Data Learners</a>、<a href="../legacy/tracks/dllm/09-llada2.html#llada-moe">LLaDA-MoE</a>、<a href="../legacy/tracks/dllm/11-block-diffusion.html#eso-lm">Eso-LM</a>、<a href="../legacy/tracks/dllm/16-order-limits.html#parallelbench">ParallelBench</a>。</li>
+  <li>第 9 节的五篇同时属于“循环 Transformer”分类；在书架上选择该分类，可以看到它们和其他循环模型放在一起的总览。</li>
+  <li>理解批大小与速度关系的背景：<a href="vllm.html#n-1">vLLM 精读 §1</a>（为什么批处理能提高吞吐）。</li>
+  <li><a href="../index.html">论文书架</a></li>
+</ul>
+
+<p class="license-note">本页是本站对这条研究路线的综述，正文为本站撰写；各论文的数字与结论以原文和对应精读页为准。本页的图都是本站自己画的示意图，或用各精读页整理的报告数字重画的简图，没有复制任何原文图。</p>
+</main>
+</div>
+<footer class="site-footer">Research Atlas · 路线总览</footer>
+</body>
+</html>

@@ -94,8 +94,8 @@
       <a class="brand" href="${href("index.html")}" aria-label="${Atlas.esc(R.site.title || "Atlas")}"><span class="dot"></span><span class="brand-text">${Atlas.esc(R.site.title || "Atlas")}</span></a>
       <nav class="crumbs" aria-label="breadcrumb">${crumbHTML}</nav>
       <span class="spacer"></span>
-      <a class="nav-link${["library", "reading"].includes(body().dataset.pageKind) ? " on" : ""}" href="${href("index.html")}">论文书架</a>
-      <a class="nav-link${body().dataset.pageKind === "legacy" || (body().dataset.track && !["library", "reading"].includes(body().dataset.pageKind)) ? " on" : ""}" href="${href("legacy/index.html")}">旧版路线</a>
+      <a class="nav-link${["library", "reading", "overview"].includes(body().dataset.pageKind) ? " on" : ""}" href="${href("index.html")}">论文书架</a>
+      <a class="nav-link${body().dataset.pageKind === "legacy" || (body().dataset.track && !["library", "reading", "overview"].includes(body().dataset.pageKind)) ? " on" : ""}" href="${href("legacy/index.html")}">旧版路线</a>
       <button class="icon-btn" id="theme-btn" type="button" title="切换主题"></button>
     </div>`;
     const btn = host.querySelector("#theme-btn");

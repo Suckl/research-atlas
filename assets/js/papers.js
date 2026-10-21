@@ -7,6 +7,7 @@
  *           A node with `reading: "papers/<x>.html"` has a full reading page (粗读 + 全文翻译); cards link there,
  *           otherwise to the node's structure page.
  * Reading   <body data-page-kind="reading" data-node="<id>">  ([data-stats] is filled from metrics + registry)
+ * Overview  <body data-page-kind="overview" data-track="<track>">  ([data-paper-list] lists the track's reading pages)
  *           [data-status] / [data-fav] controls, .read-progress bar, scroll progress through #fulltext (stored),
  *           bilingual blocks (.bi with .zh / .en; .bi-toggle per block; [data-mode="zh|bi"] global; [data-expand]).
  * Per-viewer state lives in localStorage under "atlas-paper:<node id>" = { status, fav, progress, pos, at }.
@@ -46,6 +47,7 @@
       <aside class="lib-side">
         <div class="lib-sec"><div class="lib-h">书架</div><div data-list="shelf"></div></div>
         <div class="lib-sec"><div class="lib-h">分类（研究路线）</div><div data-list="cat"></div></div>
+        <div class="lib-sec" data-ov-sec hidden><div class="lib-h">路线总览</div><div data-list="ov"></div></div>
         <div class="lib-sec"><div class="lib-h">跳到年份</div><div class="lib-years" data-list="year"></div></div>
         <div class="lib-sec"><div class="lib-h">内容</div><label class="lib-check"><input type="checkbox" data-k="full"> 只看有精读页的</label></div>
         <p class="lib-note">被引次数来自 Semantic Scholar${fetched ? `，截至 ${esc(fetched)}` : ""}；阅读进度与收藏只保存在你的浏览器里。</p>
@@ -53,6 +55,7 @@
       <div class="lib-main">
         <div class="lib-search"><input type="search" placeholder="搜索标题、机构、标签或摘要" data-k="q" aria-label="搜索"><kbd>/</kbd></div>
         <div class="lib-continue" hidden></div>
+        <a class="lib-ovbanner" hidden></a>
         <div class="lib-bar"><span class="lib-count"></span><span class="spacer"></span>
           <label>排序 <select data-k="sort"><option value="date-desc">发布时间（新→旧）</option><option value="date-asc">发布时间（旧→新）</option><option value="cites">被引次数（高→低）</option></select></label>
           <label>分组 <select data-k="group"><option value="year">按年份</option><option value="track">按路线</option><option value="none">不分组</option></select></label>
@@ -108,6 +111,13 @@
       $('[data-list="year"]').innerHTML = Object.keys(years).sort().reverse()
         .map((y) => `<button type="button" class="lib-year" data-year="${y}">${y} <span>${years[y]}</span></button>`).join("");
       $(".lib-count").textContent = `共 ${base.length} 篇${ui.full ? "精读" : ""} · 显示 ${list.length} 篇`;
+      // route overviews (track.overview): listed in the sidebar; a banner when that category is selected
+      const ovs = (R.tracks || []).filter((t) => t.overview);
+      $("[data-ov-sec]").hidden = !ovs.length;
+      $('[data-list="ov"]').innerHTML = ovs.map((t) => `<a class="lib-item" href="${esc(href(t.overview))}">${esc(t.short)} 总览<span>→</span></a>`).join("");
+      const ovt = ovs.find((t) => t.id === ui.cat), ban = $(".lib-ovbanner");
+      ban.hidden = !ovt;
+      if (ovt) { ban.href = href(ovt.overview); ban.innerHTML = `<b>先读路线总览：</b>${esc(ovt.title)}——这条路线要解决什么、方法怎么演化、各家怎么比 <span>→</span>`; }
       // continue reading
       const cont = all.filter((p) => statusOf(p.st) === "reading").sort((a, b) => (b.st.at || 0) - (a.st.at || 0)).slice(0, 3);
       const cbox = $(".lib-continue");
@@ -226,10 +236,26 @@
     paint();
   }
 
+  /* ------------------------------------------------------------------ route overview page */
+  // <div data-paper-list></div> on papers/overview-<track>.html: every reading page of body[data-track] (incl. nodes
+  // that list the track in `also`), oldest first, so the list stays current as pages are added
+  function renderPaperList() {
+    const tid = document.body.dataset.track;
+    document.querySelectorAll("[data-paper-list]").forEach((host) => {
+      const ps = papers().filter((p) => p.n.reading && (p.n.track === tid || (p.n.also || []).includes(tid)))
+        .sort((a, b) => String(a.n.date).localeCompare(String(b.n.date)));
+      host.classList.add("ov-list");
+      host.innerHTML = ps.map((p) => `<a class="ov-item" href="${esc(href(p.n.reading))}"><span class="ov-date">${esc(p.n.date || "")}</span>
+        <b>${esc(p.n.title)}</b>${p.cites != null ? `<span class="ov-cites">被引 ${fmtN(p.cites)}</span>` : ""}
+        <span class="ov-tldr">${esc(p.n.tldr && p.n.tldr !== "（占位）" ? p.n.tldr : "")}</span></a>`).join("");
+    });
+  }
+
   function boot() {
     const kind = document.body.dataset.pageKind;
     if (kind === "library") { const h = document.getElementById("library"); if (h) renderLibrary(h); }
     if (kind === "reading") initReading();
+    if (kind === "overview") renderPaperList();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();

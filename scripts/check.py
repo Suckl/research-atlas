@@ -73,6 +73,8 @@ def check_registry(reg: dict) -> tuple[set[str], set[str]]:
                 err(f"node '{n['id']}': reading page not found: {n['reading']}")
         if not (ROOT / t.get("page", "")).exists():
             err(f"track '{t.get('id')}': page not found: {t.get('page')}")
+        if t.get("overview") and not (ROOT / t["overview"]).exists():
+            err(f"track '{t.get('id')}': overview page not found: {t['overview']}")
         for nid in t.get("reading_order", []):
             if nid not in nset:
                 err(f"track '{t['id']}': reading_order references unknown node '{nid}'")
@@ -113,6 +115,9 @@ def check_registry(reg: dict) -> tuple[set[str], set[str]]:
                 err(f"node '{n.get('id')}': missing '{k}'")
         if n.get("track") not in tset:
             err(f"node '{n.get('id')}': unknown track '{n.get('track')}'")
+        for k in n.get("also", []):
+            if k not in tset:
+                err(f"node '{n.get('id')}': unknown track '{k}' in also")
         if n.get("kind") not in ("model", "concept", "bridge", "paper"):
             err(f"node '{n.get('id')}': kind must be model|concept|bridge|paper")
         if not re.fullmatch(r"\d{4}-\d{2}", str(n.get("date", ""))):

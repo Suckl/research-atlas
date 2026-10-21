@@ -76,6 +76,25 @@ No full translation**: the vLLM page keeps the translation it already has, but n
 Reading notes are commentary in our own words, not a translation: do not reproduce paragraphs of the paper. Short
 technical terms, formulas and individual numbers are fine.
 
+
+## 路线总览页（固定做法）
+
+Each library category with reading pages has one overview page, `papers/overview-<track>.html`, linked from the
+track's `overview` field in `registry.js` (the library lists it in the sidebar and shows a banner when that category is
+selected). Copy `templates/overview-page.html`. Body: `data-page-kind="overview" data-track="<track>"` (no
+`data-node`; no reading-progress controls).
+
+- Purpose: explain the field to a newcomer — what problem it solves, how the methods evolved and why, and how they
+  compare. Plain, patient Chinese in full cause-and-effect sentences (same tone as the reading pages); explain
+  prerequisites before using them.
+- Build on the site's reading pages: link every paper you mention to its reading page (with `#n-…` anchors where it
+  helps); facts and numbers must agree with those pages / the papers. Papers without a reading page may be mentioned
+  with an external link when needed for context.
+- Content: 导读; the field's core problem and the axes along which methods differ; evolution in phases (each phase: the
+  problem, the idea, the papers, what changed); comparison tables (what each method trades off, what is matched in its
+  headline claims); a cross-paper "结果的份量" section (which conclusions hold up, which rest on weak baselines);
+  open questions; suggested reading paths. Own diagrams (timeline, taxonomy, comparison charts), at least 6.
+- `<div data-paper-list></div>` (already in the template) lists every reading page of the category automatically.
 ## Legacy tracks: adding a node (paper / concept) to an existing track
 
 1. **Register it** in `registry.js` → `nodes[]`. Required: `id`, `track`, `kind`
